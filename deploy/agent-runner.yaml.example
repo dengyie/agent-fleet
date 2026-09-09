@@ -1,0 +1,44 @@
+# agent-fleet runner 配置样例
+# 部署到 ~/.config/agent-fleet/runner.yaml（不进 git）
+hub: https://hub.example.com
+machine: worker-a             # 必须与 hosts.yaml / ingest 名一致
+runner_id: worker-a-1         # 可选；同机多 runner 时区分
+credential_file: ~/.config/agent-fleet/runner-credential  # 0600；对应 hub credentials/runner-credentials.json 的本机键
+
+projects:                     # 项目白名单：页面只能创建这些项目的任务
+  agent-fleet:
+    path: /opt/agent-fleet
+
+# agents 段可省略：未列出的可执行家族（codex/claude_code）自动回退到
+# agent_profiles.py 的内置默认 command。hermes 无统一 CLI，必须按本机自供。
+#   若只想运行 hermes，需显式写 codex: {command: null} 与 claude_code: {command: null}
+agents:
+  codex:
+    # --approve-for-me 自带 workspace-write sandbox，与显式 --sandbox 互斥
+    command: ["codex", "exec", "--approve-for-me", "--ephemeral", "--ignore-user-config", "--json", "{instruction}"]
+    timeout_s: 1800
+  claude_code:
+    command: ["claude", "-p", "{instruction}"]
+    timeout_s: 1800
+  hermes:
+    command: null             # hermes 无统一 CLI，必须按本机实际配置
+    timeout_s: 1800
+  # pi：未配置时 runner 侧注册表回退到 PiAdapter.default_command（pi -p）
+  pi:
+    command: ["pi", "-p", "{instruction}"]
+    timeout_s: 1800
+
+poll_interval_s: 15           # 常驻模式轮询间隔
+heartbeat_interval_s: 30      # lease 心跳间隔（TTL 300s）
+# cache_dir: ~/.cache/agent-fleet   # 结果重传缓存
+
+# supervisor：opt-in。enabled 后 runner 走 Supervisor.launch 受管路径；
+# ControlClient CLI（tools/supervisor/control_client_cli.py）另外常驻 poll
+# /api/supervisor/poll，adopt 成功才起 SessionBridge。
+# credential_file 只存 secret（或 machine:secret，加载器会剥与 machine 匹配的前缀）。
+# public_key_file 是 Hub Ed25519 公钥的 base64（32 字节）。两文件 0600、不进 git。
+# supervisor:
+#   enabled: true
+#   manifest_dir: ~/.config/agent-fleet/supervisor-manifests
+#   credential_file: ~/.config/agent-fleet/supervisor-credential
+#   public_key_file: ~/.config/agent-fleet/supervisor-public-key.b64

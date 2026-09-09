@@ -1,0 +1,47 @@
+# agent-fleet — 节点展示清单（示例）
+#
+# transport 统一为 ingest：节点本地运行 tools/agent-self-report.py，
+# 主动 POST /api/ingest；hub 不反向连接节点。
+# hosts.yaml 只保留展示顺序、描述和 stale TTL；未登记节点也会自动上墙。
+#
+# 规则：不在此文件写任何密码/私钥/公网 IP/内网拓扑。
+# 生产机清单不要提交；把本文件复制后按本机改 name/desc。
+
+hosts:
+  - name: hub-host
+    transport: ingest
+    desc: "hub 所在机器（示例）"
+    projects: [agent-fleet]
+    agents:
+      - type: hermes
+        name: hermes-gateway
+        pattern: "hermes_cli.main gateway"
+        log_path: ~/.hermes/logs/
+
+  - name: worker-a
+    transport: ingest
+    desc: "示例 worker"
+    projects: [agent-fleet]
+    agents:
+      - type: generic
+        name: "*"
+        pattern: "claude|codex|agent"
+
+  - name: worker-b
+    transport: ingest
+    desc: "示例 worker"
+    projects: [agent-fleet]
+    agents:
+      - type: generic
+        name: "*"
+        pattern: "claude|codex|agent"
+
+# 采集频率（分钟）
+scan_interval_min: 10
+
+# 异常阈值
+thresholds:
+  agent_down_min: 30        # agent 进程消失超过该分钟数 → 告警
+  no_output_min: 60         # 日志无新增超过该分钟数 → 告警（可能卡住）
+  high_load: 4.0            # 负载均值超过 → 提示
+  disk_high_pct: 90         # 磁盘使用率超过 → 提示

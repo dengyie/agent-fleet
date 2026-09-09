@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}agent-fleet 总览{% endblock %}
+{% block page_id %}fleet{% endblock %}
+{% block content %}
+<div class="fleet-layout">
+  <section>
+    <div class="healthbar">
+      <span class="hb-ok">在线<b id="hb-online">{{ rows | selectattr('online') | list | length }}</b></span>
+      <span class="hb-bad">告警<b id="hb-alerts">{{ rows | rejectattr('online') | list | length }}</b></span>
+      <span>机器<b id="hb-total">{{ rows | length }}</b></span>
+      <span>任务<b id="hb-tasks">0</b></span>
+    </div>
+    <div class="grid" id="machine-grid">
+      {% for r in rows %}
+      <div class="card" id="card-{{ r.machine }}" data-machine="{{ r.machine }}">
+        <h2>
+          <span class="dot {{ 'on' if r.online else 'off' }}"></span>
+          <a href="/machine/{{ r.machine }}">{{ r.machine }}</a>
+          {% if r.has_hermes %}<span class="badge-hermes">Hermes {{ r.hermes_state }}</span>{% endif %}
+        </h2>
+        <div class="meta">{{ r.desc }}</div>
+        {% if not r.online %}
+          <div class="err">⚠️ {{ r.error }}</div>
+        {% else %}
+          {% if r.agent_summaries %}
+            <div class="meta">📦 agent 连接器</div>
+            {% for a in r.agent_summaries %}
+              <div class="agent-row"><span class="k">{{ a.type }}</span>
+                {% if a.status == 'ok' %}<span class="st-ok">● ok</span>
+                {% elif a.status == 'absent' %}<span class="st-absent">○ 未部署</span>
+                {% else %}<span class="st-err">● {{ a.detail }}</span>{% endif %}
+              </div>
+            {% endfor %}
+          {% endif %}
+          <div class="stat">
+            <span>📦 agent: <b>{{ r.agent_count }}</b></span>
+            <span>📈 负载: <b>{{ r.system.get('load', 0) }}</b></span>
+            <span>💾 磁盘: <b>{{ r.system.get('disk_used_pct', 0) }}</b></span>
+            <span>⏱️ 运行: <b>{{ r.system.get('uptime', '?') }}</b></span>
+          </div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+  <aside class="event-stream" id="event-stream">
+    <h3>实时事件</h3>
+    {% for e in events %}
+    <div class="event-item"><div>{{ e.machine or e.event }}</div><div class="t">{{ e.ts }}</div></div>
+    {% endfor %}
+  </aside>
+</div>
+{% endblock %}

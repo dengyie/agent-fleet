@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-fleet</title>
+<link rel="stylesheet" href="./styles/app.css">
+</head>
+<body data-page="fleet">
+<header class="topbar">
+  <a class="brand" href="./index.html">🛰️ agent-fleet</a>
+  <span class="sse-dot" id="sse-dot" title="实时连接状态"></span>
+  <nav>
+    <a href="./index.html" data-route="fleet">Fleet</a>
+    <a href="./api/status" data-route="fleet">API</a>
+  </nav>
+</header>
+<main>
+  <!-- 静态 shell 挂载点：由 views 填充，不内嵌任何观测/任务数据 -->
+  <section id="mount-fleet" class="view-section" data-route-view="fleet"></section>
+  <section id="mount-machine" class="view-section" data-route-view="machine" hidden></section>
+  <section id="mount-task" class="view-section" data-route-view="task" hidden></section>
+  <section id="mount-session" class="view-section" data-route-view="session" hidden></section>
+</main>
+<script src="./config.js"></script>
+<script type="module">
+  /* 静态 shell 组合层（Task 15）：创建单例 store/client/SSE，按 data-page
+     路由挂载对应视图。只写非敏感导航状态；视图内不直接 fetch / EventSource /
+     Flask 模板对象，所有业务渲染由 frontend/views/* 完成。 */
+  import { apiPath, pagePath } from './routes.js';
+  import { mountFleet } from './views/fleet.js';
+  import { mountMachine } from './views/machine.js';
+  import { mountTask } from './views/task.js';
+  import { mountSession } from './views/session.js';
+  import {
+    getStatus, getMachine, getEvents, listTasks, getTask, createTask,
+    cancelTask, retryTask, getSession, getSessionEvents, getSessionSignals,
+    listSessions, listAdoptions, adoptInstance, revokeAdoption, retryAdoption,
+    controlSession, listAgentTypes,
+  } from './api/client.js';
+  import { FleetStore } from './state/store.js';
+  import { SseClient } from './realtime/sse.js';
+
+  window.FleetRoutes = { apiPath: apiPath, pagePath: pagePath };
+
+  /* 路由判定：静态文件服务下按 URL 路径推导当前视图；data-page 仅作显式
+     覆盖（server-render 或测试注入）。<body data-page="fleet"> 是纯静态
+     默认值，不代表真实页面，因此 fleet 显式值不覆盖路径推导。 */
+  function pageFromPath() {
+    var segments = window.location.pathname.split('/');
+    for (var i = 0; i < segments.length; i += 1) {
+      if (segments[i] === 'task') {
+        return 'task';
+      }
+      if (segments[i] === 'machine') {
+        return 'machine';
+      }
+      if (segments[i] === 'session') {
+        return 'session';
+      }
+    }
+    var params = new URLSearchParams(window.location.search);
+    if (params.get('task')) {
+      return 'task';
+    }
+    if (params.get('machine')) {
+      return 'machine';
+    }
+    if (params.get('session')) {
+      return 'session';
+    }
+    return 'fleet';
+  }
+  var page = pageFromPath();
+  var explicitPage = document.body.getAttribute('data-page');
+  if (explicitPage && explicitPage !== 'fleet') {
+    page = explicitPage;
+  }
+
+  /* 非敏感运行时配置：apiBaseUrl 由 config.js 提供（默认同源 /api） */
+  var client = {
+    getStatus: getStatus,
+    getMachine: getMachine,
+    getEvents: getEvents,
+    listTasks: listTasks,
+    getTask: getTask,
+    createTask: createTask,
+    cancelTask: cancelTask,
+    retryTask: retryTask,
+    getSession: getSession,
+    getSessionEvents: getSessionEvents,
+    getSessionSignals: getSessionSignals,
+    listSessions: listSessions,
+    listAdoptions: listAdoptions,
+    adoptInstance: adoptInstance,
+    revokeAdoption: revokeAdoption,
+    retryAdoption: retryAdoption,
+    controlSession: controlSession,
+    listAgentTypes: listAgentTypes,
+  };
+
+  var store = new FleetStore();
+
+  /* 终态任务刷新桥：由 SseClient 注入 client 后统一负责（getTask 回填
+     store）。此处不再另设终态刷新钩子，避免与 SSE 路径重复发 getTask
+     请求。 */
+  var sse = new SseClient(store, { client: client });
+  sse.start();
+
+  /* 导航状态：data-page 记录当前视图，仅切换挂载区可见性 */
+  var target = document.getElementById('mount-' + page);
+  document.querySelectorAll('.view-section').forEach(function (el) {
+    el.hidden = el !== target;
+  });
+
+  /* 实时连接指示点：来自 store 的 connection 状态（非业务数据） */
+  store.subscribe(function () {
+    var dot = document.getElementById('sse-dot');
+    if (!dot) return;
+    var live = store.getState().connection === 'open';
+    dot.setAttribute('class', 'sse-dot' + (live ? ' live' : ''));
+  });
+
+  /* 当前路由参数（仅从纯路径/查询解析，不内嵌业务数据） */
+  function resolveMachine() {
+    if (page !== 'machine') return null;
+    var segments = window.location.pathname.split('/');
+    for (var i = 0; i < segments.length; i += 1) {
+      if (segments[i] === 'machine' && segments[i + 1]) {
+        try {
+          return decodeURIComponent(segments[i + 1]);
+        } catch (e) {
+          return null;
+        }
+      }
+    }
+    var params = new URLSearchParams(window.location.search);
+    return params.get('machine') || null;
+  }
+
+  function resolveTask() {
+    if (page !== 'task') return null;
+    var segments = window.location.pathname.split('/');
+    for (var i = 0; i < segments.length; i += 1) {
+      if (segments[i] === 'task' && segments[i + 1]) {
+        try {
+          return decodeURIComponent(segments[i + 1]);
+        } catch (e) {
+          return null;
+        }
+      }
+    }
+    var params = new URLSearchParams(window.location.search);
+    return params.get('task') || null;
+  }
+
+  function resolveSession() {
+    if (page !== 'session') return null;
+    var segments = window.location.pathname.split('/');
+    for (var i = 0; i < segments.length; i += 1) {
+      if (segments[i] === 'session' && segments[i + 1]) {
+        try {
+          return decodeURIComponent(segments[i + 1]);
+        } catch (e) {
+          return null;
+        }
+      }
+    }
+    var params = new URLSearchParams(window.location.search);
+    return params.get('session') || null;
+  }
+
+  if (page === 'fleet') {
+    mountFleet(target, store, client);
+  } else if (page === 'machine') {
+    var machine = resolveMachine();
+    if (machine) {
+      mountMachine(target, machine, store, client);
+    } else {
+      /* 未指定机器：显式错误文本（textContent），不渲染任何业务数据 */
+      target.textContent = '未指定机器';
+    }
+  } else if (page === 'task') {
+    var taskId = resolveTask();
+    if (taskId) {
+      mountTask(target, taskId, store, client);
+    } else {
+      /* 未指定任务：显式文本（textContent），不渲染任何业务数据 */
+      target.textContent = '未指定任务';
+    }
+  } else if (page === 'session') {
+    var sessionId = resolveSession();
+    if (sessionId) {
+      mountSession(target, sessionId, store, client);
+    } else {
+      /* 未指定会话：显式文本（textContent），不渲染任何业务数据 */
+      target.textContent = '未指定会话';
+    }
+  }
+</script>
+</body>
+</html>

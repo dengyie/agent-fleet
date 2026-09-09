@@ -1,0 +1,137 @@
+diff --git a/deploy/agent-runner.yaml.example b/deploy/agent-runner.yaml.example
+index 298164f..d049205 100644
+--- a/deploy/agent-runner.yaml.example
++++ b/deploy/agent-runner.yaml.example
+@@ -2,20 +2,22 @@
+ # 部署到 ~/.config/agent-fleet/runner.yaml（不进 git）
+ hub: https://hub.example.com
+ machine: mac-local            # 必须与 hosts.yaml / ingest 名一致
+ runner_id: mac-local-1        # 可选；同机多 runner 时区分
+ credential_file: ~/.config/agent-fleet/runner-credential  # 0600；对应 hub credentials/runner-credentials.json 的本机键
+ 
+ projects:                     # 项目白名单：页面只能创建这些项目的任务
+   agent-fleet:
+     path: /opt/agent-fleet
+ 
++# agents 段可省略：未列出的可执行家族（codex/claude_code）自动回退到
++# agent_profiles.py 的内置默认 command。hermes 无统一 CLI，必须按本机自供。
+ agents:
+   codex:
+     command: ["codex", "exec", "--full-auto", "{instruction}"]
+     timeout_s: 1800
+   claude_code:
+     command: ["claude", "-p", "{instruction}"]
+     timeout_s: 1800
+   hermes:
+     command: null             # hermes 无统一 CLI，必须按本机实际配置
+     timeout_s: 1800
+diff --git a/tests/test_runner_config.py b/tests/test_runner_config.py
+new file mode 100644
+index 0000000..5043c63
+--- /dev/null
++++ b/tests/test_runner_config.py
+@@ -0,0 +1,45 @@
++from pathlib import Path
++
++from tools.runner_config import load_config
++
++
++def _write(tmp: Path, agents_block: str = "") -> Path:
++    cred = tmp / "runner-credential"
++    cred.write_text("secret-token")
++    body = (
++        "hub: https://example.com\n"
++        "machine: m1\n"
++        f"credential_file: {cred}\n"
++        "projects:\n"
++        f'  p1:\n    path: "{tmp}"\n'
++        + agents_block
++    )
++    p = tmp / "runner.yaml"
++    p.write_text(body)
++    return p
++
++
++def test_missing_agents_falls_back_to_registry(tmp_path):
++    cfg = load_config(_write(tmp_path))
++    assert cfg.agents["codex"]["command"] == ["codex", "exec", "--full-auto", "{instruction}"]
++    assert cfg.agents["claude_code"]["command"] == ["claude", "-p", "{instruction}"]
++    assert cfg.agents["hermes"]["command"] is None
++    assert cfg.agents["codex"]["timeout_s"] == 1800
++
++
++def test_explicit_override_wins(tmp_path):
++    p = _write(tmp_path, (
++        "agents:\n"
++        "  codex:\n"
++        '    command: ["/opt/bin/codex", "run", "{instruction}"]\n'
++        "    timeout_s: 3600\n"
++    ))
++    cfg = load_config(p)
++    assert cfg.agents["codex"]["command"] == ["/opt/bin/codex", "run", "{instruction}"]
++    assert cfg.agents["codex"]["timeout_s"] == 3600
++
++
++def test_explicit_null_command_not_overridden(tmp_path):
++    p = _write(tmp_path, "agents:\n  hermes:\n    command: null\n")
++    cfg = load_config(p)
++    assert cfg.agents["hermes"]["command"] is None
+diff --git a/tools/runner_config.py b/tools/runner_config.py
+index 61498c1..af7565d 100644
+--- a/tools/runner_config.py
++++ b/tools/runner_config.py
+@@ -1,20 +1,22 @@
+ """tools/runner_config.py — agent-runner 配置加载与校验
+ 
+ 配置位于 ~/.config/agent-fleet/runner.yaml（不进 git）。
+ 项目白名单 + adapter 命令模板都在这里定义，页面无法越权。
+ """
+ from dataclasses import dataclass, field
+ from pathlib import Path
+ 
+ import yaml
+ 
++from agent_profiles import PROFILES
++
+ DEFAULT_CONFIG_PATH = Path.home() / ".config" / "agent-fleet" / "runner.yaml"
+ DEFAULT_CACHE_DIR = Path.home() / ".cache" / "agent-fleet"
+ 
+ 
+ class ConfigError(Exception):
+     pass
+ 
+ 
+ @dataclass
+ class RunnerConfig:
+@@ -104,20 +106,31 @@ def load_config(path=DEFAULT_CONFIG_PATH):
+         entry = entry or {}
+         command = entry.get("command")
+         if command is not None and not (
+                 isinstance(command, list) and all(isinstance(c, str) for c in command)):
+             _err(f"agents.{agent_type}.command 必须是字符串数组")
+         agents[str(agent_type)] = {
+             "command": command,
+             "timeout_s": _to_int(entry.get("timeout_s"), 1800, f"agents.{agent_type}.timeout_s"),
+         }
+ 
++    # 注册表默认回退:runner.yaml 完全缺省的可执行家族用内置默认值补齐。
++    # 部分指定(含显式 command: null)的家族保持原样,尊重操作者意图。
++    for family, profile in PROFILES.items():
++        if not profile.executable or family in agents:
++            continue
++        agents[family] = {
++            "command": (list(profile.default_command)
++                        if profile.default_command else None),
++            "timeout_s": profile.default_timeout_s,
++        }
++
+     supervisor = data.get("supervisor") or {}
+     if not isinstance(supervisor, dict):
+         _err("supervisor 配置必须是 mapping")
+     supervisor_enabled = bool(supervisor.get("enabled"))
+     supervisor_manifest_dir = None
+     if supervisor_enabled:
+         sdir = str(supervisor.get("manifest_dir") or "").strip()
+         if not sdir:
+             _err("supervisor.enabled=true 必须配置 supervisor.manifest_dir")
+         supervisor_manifest_dir = Path(sdir).expanduser()

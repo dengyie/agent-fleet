@@ -1,0 +1,101 @@
+diff --git a/agent_profiles.py b/agent_profiles.py
+new file mode 100644
+index 0000000..e28fe9a
+--- /dev/null
++++ b/agent_profiles.py
+@@ -0,0 +1,55 @@
++"""Fleet-level agent profile registry — single source of truth for agent families.
++
++Mirrors report_schema.py / session_schema.py: stdlib-only, importable by both
++hub/ and tools/ without Flask or CLI dependencies.  The runner falls back to
++these defaults when a machine's runner.yaml omits a family; the hub and probe
++derive their canonical agent-type lists from here.
++"""
++from dataclasses import dataclass
++
++DEFAULT_TIMEOUT_S = 1800
++
++
++@dataclass(frozen=True)
++class Profile:
++    family: str                              # canonical family id (adapter/connector key)
++    default_command: tuple[str, ...] | None  # argv template with {instruction}
++    default_timeout_s: int = DEFAULT_TIMEOUT_S
++    executable: bool = True                  # has a runner adapter (tools/adapters)
++    observable: bool = True                  # probe/connector knows it (report_schema)
++    pattern: str | None = None               # generic process match (generic only)
++
++
++PROFILES: dict[str, Profile] = {
++    "codex": Profile("codex", ("codex", "exec", "--full-auto", "{instruction}")),
++    "claude_code": Profile("claude_code", ("claude", "-p", "{instruction}")),
++    "hermes": Profile("hermes", None),       # no unified CLI; node must supply
++    "generic": Profile(
++        "generic", None, executable=False,
++        pattern="claude|codex|astrbot|openclaw|opencode|aider",
++    ),
++}
++
++EXECUTABLE_AGENT_TYPES = tuple(k for k, p in PROFILES.items() if p.executable)
++OBSERVABLE_AGENT_TYPES = tuple(PROFILES)
++
++
++def is_executable(agent_type: str) -> bool:
++    profile = PROFILES.get(agent_type)
++    return bool(profile and profile.executable)
++
++
++def default_command(agent_type: str) -> tuple[str, ...] | None:
++    profile = PROFILES.get(agent_type)
++    return profile.default_command if profile else None
++
++
++__all__ = [
++    "DEFAULT_TIMEOUT_S",
++    "EXECUTABLE_AGENT_TYPES",
++    "OBSERVABLE_AGENT_TYPES",
++    "PROFILES",
++    "Profile",
++    "default_command",
++    "is_executable",
++]
+\ No newline at end of file
+diff --git a/tests/test_agent_profiles.py b/tests/test_agent_profiles.py
+new file mode 100644
+index 0000000..ccf9896
+--- /dev/null
++++ b/tests/test_agent_profiles.py
+@@ -0,0 +1,32 @@
++# tests/test_agent_profiles.py
++from agent_profiles import (
++    DEFAULT_TIMEOUT_S, EXECUTABLE_AGENT_TYPES, OBSERVABLE_AGENT_TYPES,
++    PROFILES, default_command, is_executable,
++)
++
++
++def test_executable_types_exactly_three():
++    assert EXECUTABLE_AGENT_TYPES == ("codex", "claude_code", "hermes")
++
++
++def test_observable_types_four_including_generic():
++    assert OBSERVABLE_AGENT_TYPES == ("codex", "claude_code", "hermes", "generic")
++    assert set(OBSERVABLE_AGENT_TYPES) == set(PROFILES)
++
++
++def test_codex_default_command_has_instruction_placeholder():
++    cmd = default_command("codex")
++    assert cmd is not None and "{instruction}" in cmd
++
++
++def test_hermes_has_no_default_command():
++    assert default_command("hermes") is None
++
++
++def test_generic_not_executable_but_observable():
++    assert not is_executable("generic")
++    assert PROFILES["generic"].pattern == "claude|codex|astrbot|openclaw|opencode|aider"
++
++
++def test_default_timeout_applies():
++    assert all(p.default_timeout_s == DEFAULT_TIMEOUT_S for p in PROFILES.values())
+\ No newline at end of file

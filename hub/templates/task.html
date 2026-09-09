@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}{{ task.task_id }} · agent-fleet{% endblock %}
+{% block page_id %}task{% endblock %}
+{% block body_attrs %} data-task-id="{{ task.task_id }}"{% endblock %}
+{% block content %}
+<h1 style="font-size:20px;margin:0 0 4px;">任务 {{ task.task_id }}</h1>
+<div class="meta">
+  <a href="/machine/{{ task.machine }}">{{ task.machine }}</a> · {{ task.agent_type }} ·
+  {{ task.project }} · {{ task.requested_by }} · {{ task.created_at }}
+</div>
+<div class="panel" style="margin-bottom:16px;">
+  <div class="stateflow" id="stateflow">
+    {% for s in ['queued', 'leased', 'running', 'succeeded'] %}
+    <span class="state-node{{ ' current' if task.state == s }}" data-state="{{ s }}">{{ s }}</span>{% if not loop.last %}<span class="state-arrow">→</span>{% endif %}
+    {% endfor %}
+    {% if task.state in ['failed', 'cancelled', 'expired'] %}
+    <span class="state-arrow">→</span>
+    <span class="state-node terminal-{{ task.state }} current" data-state="{{ task.state }}">{{ task.state }}</span>
+    {% endif %}
+  </div>
+</div>
+<div class="detail-grid">
+  <div class="panel">
+    <h3>指令</h3>
+    <pre class="instruction">{{ task.instruction }}</pre>
+    <div class="actions">
+      {% if task.state in ['queued', 'leased', 'running'] %}
+      <button data-action="cancel" data-task-id="{{ task.task_id }}">取消</button>
+      {% endif %}
+      {% if task.state in ['succeeded', 'failed', 'cancelled', 'expired'] %}
+      <button data-action="retry" data-task-id="{{ task.task_id }}">重试</button>
+      {% endif %}
+    </div>
+    <div class="err" id="task-action-error"></div>
+  </div>
+  <div class="panel">
+    <h3>结果</h3>
+    {% if task.result %}
+    <div class="metric"><span>退出码</span><b id="result-exit">{% if task.result.exit_code is not none %}{{ task.result.exit_code }}{% else %}n/a{% endif %}</b></div>
+    <div class="metric"><span>耗时</span><b id="result-duration">{% if task.result.duration_s is not none %}{{ '%.1f' % task.result.duration_s }}s{% else %}n/a{% endif %}</b></div>
+    <h3 style="margin-top:12px;">diff 摘要</h3>
+    <pre class="diffstat" id="result-diff">{{ task.result.diff_stat or '（无）' }}</pre>
+    {% else %}
+    <div class="meta" id="result-pending">任务尚未完成</div>
+    {% endif %}
+  </div>
+</div>
+<div class="panel">
+  <h3>实时日志</h3>
+  <div class="log-area" id="task-log">{% if task.result %}{{ task.result.log_summary }}{% endif %}</div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  // 取消/重试按钮：data-action/data-task-id 绑定，避免内联 onclick 引号注入
+  document.querySelectorAll('[data-action]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.getAttribute('data-task-id');
+      if (btn.getAttribute('data-action') === 'cancel') {
+        FleetApp.cancelTask(id);
+      } else {
+        FleetApp.retryTask(id);
+      }
+    });
+  });
+})();
+</script>
+{% endblock %}

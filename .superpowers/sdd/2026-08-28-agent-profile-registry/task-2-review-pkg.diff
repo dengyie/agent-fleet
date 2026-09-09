@@ -1,0 +1,92 @@
+diff --git a/hub/domain/task.py b/hub/domain/task.py
+index ed77bee..5d6e386 100644
+--- a/hub/domain/task.py
++++ b/hub/domain/task.py
+@@ -3,24 +3,26 @@
+ This module deliberately contains no HTTP, persistence, or process concerns.
+ The dictionaries accepted and returned here are ordinary Python values so the
+ same rules can be used by Flask adapters, application services, and static API
+ contracts without importing a web framework.
+ """
+ 
+ import re
+ from dataclasses import dataclass
+ from typing import Any, Mapping
+ 
++from agent_profiles import EXECUTABLE_AGENT_TYPES
++
+ 
+ MACHINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+ PROJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+-DEFAULT_AGENT_TYPES = ("codex", "claude_code", "hermes")
++DEFAULT_AGENT_TYPES = EXECUTABLE_AGENT_TYPES
+ 
+ TASK_FIELDS = (
+     "task_id",
+     "machine",
+     "agent_type",
+     "project",
+     "state",
+     "requested_by",
+     "created_at",
+     "expires_at",
+diff --git a/tests/test_agent_profiles.py b/tests/test_agent_profiles.py
+index a46946e..b711167 100644
+--- a/tests/test_agent_profiles.py
++++ b/tests/test_agent_profiles.py
+@@ -23,10 +23,26 @@ def test_hermes_has_no_default_command():
+     assert default_command("hermes") is None
+ 
+ 
+ def test_generic_not_executable_but_observable():
+     assert not is_executable("generic")
+     assert PROFILES["generic"].pattern == "claude|codex|astrbot|openclaw|opencode|aider"
+ 
+ 
+ def test_default_timeout_applies():
+     assert all(p.default_timeout_s == DEFAULT_TIMEOUT_S for p in PROFILES.values())
++
++
++from hub.domain.task import DEFAULT_AGENT_TYPES as HUB_TYPES
++from tools.probe_collectors import DEFAULT_AGENT_TYPES as PROBE_TYPES
++
++
++def test_hub_default_agent_types_derived_from_registry():
++    # 身份断言:必须与注册表同一个 tuple 对象(派生),而非字面量副本
++    assert HUB_TYPES is EXECUTABLE_AGENT_TYPES
++    assert HUB_TYPES == ("codex", "claude_code", "hermes")
++
++
++def test_probe_default_agent_types_derived_from_registry():
++    assert PROBE_TYPES is OBSERVABLE_AGENT_TYPES
++    assert set(PROBE_TYPES) == set(OBSERVABLE_AGENT_TYPES)
++    assert len(PROBE_TYPES) == 4
+diff --git a/tools/probe_collectors.py b/tools/probe_collectors.py
+index 9e491d3..2aaca9f 100644
+--- a/tools/probe_collectors.py
++++ b/tools/probe_collectors.py
+@@ -3,22 +3,23 @@
+ import json
+ import os
+ import platform
+ import shutil
+ import subprocess
+ import time
+ 
+ from connectors import create
+ from connectors.probe import ProbeContext
+ from report_schema import sanitize_agent_state
++from agent_profiles import OBSERVABLE_AGENT_TYPES
+ 
+-DEFAULT_AGENT_TYPES = ("hermes", "claude_code", "codex", "generic")
++DEFAULT_AGENT_TYPES = OBSERVABLE_AGENT_TYPES
+ 
+ 
+ def collect_system():
+     out = {"platform": platform.system().lower()}
+     try:
+         out["load"] = f"{os.getloadavg()[0]:.2f}"
+     except (AttributeError, OSError):
+         out["load"] = "0"
+ 
+     total_bytes = used_bytes = 0

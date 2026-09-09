@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "event_id": "evt_f1_tool_result",
+  "stream_id": "stream_golden_1",
+  "machine_id": "host-golden-1",
+  "session_id": "sess_golden_1",
+  "attempt_id": "att_golden_1",
+  "process_group_id": "grp_golden_1",
+  "sequence": 15,
+  "kind": "tool_result",
+  "capture_quality": "structured",
+  "source": "structured_stream",
+  "emitted_at": "2026-08-26T00:02:23+00:00",
+  "payload": {
+    "tool_name": "code_call_search",
+    "call_id": "call_golden_1",
+    "status": "completed",
+    "result": "found 3 matches",
+    "digest": "sha256:bb"
+  },
+  "redaction": {
+    "state": "redacted",
+    "uncertain": false,
+    "rules": ["credential_pattern"]
+  }
+}

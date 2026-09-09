@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}{{ name }} · agent-fleet{% endblock %}
+{% block page_id %}machine{% endblock %}
+{% block body_attrs %} data-machine="{{ name }}"{% endblock %}
+{% block content %}
+<h1 style="font-size:20px;margin:0 0 4px;">
+  <span class="dot {{ 'on' if reachable else 'off' }}"></span> {{ name }}
+</h1>
+<div class="meta">{{ desc }} · <span id="machine-reach" class="{{ 'st-ok' if reachable else 'st-err' }}">{{ '在线' if reachable else '离线 — ' ~ (error or '') }}</span></div>
+<div class="detail-grid">
+  <div class="panel">
+    <h3>系统指标</h3>
+    <div class="metric"><span>平台</span><b>{{ system.get('platform', '?') }}</b></div>
+    <div class="metric"><span>负载</span><b>{{ system.get('load', '?') }}</b></div>
+    <div class="metric"><span>内存</span><b>{{ system.get('mem_used_mb', '?') }} / {{ system.get('mem_total_mb', '?') }} MB</b></div>
+    <div class="metric"><span>磁盘</span><b>{{ system.get('disk_used_pct', '?') }}</b></div>
+    <div class="metric"><span>运行时间</span><b>{{ system.get('uptime', '?') }}</b></div>
+  </div>
+  <div class="panel">
+    <h3>Agent 状态</h3>
+    <table class="agent-table">
+      <tr><th>类型</th><th>状态</th><th>会话</th><th>进程</th></tr>
+      {% for atype, a in agents.items() %}
+      <tr>
+        <td>{{ atype }}</td>
+        <td>{% if a.error %}<span class="st-err">{{ a.error }}</span>
+            {% elif a.installed is sameas false %}<span class="st-absent">未部署</span>
+            {% elif a.gateway_state %}{{ a.gateway_state }}{% else %}<span class="st-ok">ok</span>{% endif %}</td>
+        <td>{{ a.session_count if a.session_count is defined else '—' }}</td>
+        <td>{{ a.process_count if a.process_count is defined else '—' }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+</div>
+<div class="panel" style="margin-bottom:16px;">
+  <h3>任务 <button style="float:right" type="button" data-open-modal="task-modal">＋ 新建任务</button></h3>
+  <div id="task-list">
+    {% for t in tasks %}
+    <div class="task-row" data-task-id="{{ t.task_id }}">
+      <a href="/task/{{ t.task_id }}">{{ t.task_id }}</a>
+      <span class="task-state st-{{ t.state }}">{{ t.state }}</span>
+      <span class="meta">{{ t.agent_type }} · {{ t.project }} · {{ t.instruction[:60] }} · {{ t.created_at }}</span>
+    </div>
+    {% else %}
+    <div class="meta">暂无任务</div>
+    {% endfor %}
+  </div>
+</div>
+<div class="modal" id="task-modal">
+  <div class="modal-box">
+    <h3>新建任务 · {{ name }}</h3>
+    <label>agent 类型
+      <select id="nt-agent">
+        <option value="codex">codex</option>
+        <option value="claude_code">claude_code</option>
+        <option value="hermes">hermes</option>
+      </select></label>
+    <label>项目（须在白名单）<input id="nt-project" placeholder="agent-fleet"></label>
+    <label>指令（≤2000 字符）<textarea id="nt-instruction" rows="5" maxlength="2000"></textarea></label>
+    <div class="actions">
+      <button type="button" data-create-task="{{ name }}">创建</button>
+      <button type="button" data-close-modal="task-modal">取消</button>
+    </div>
+    <div class="err" id="nt-error"></div>
+  </div>
+</div>
+<div class="panel">
+  <h3>24h 在线时间线</h3>
+  <div id="uptime-timeline"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+fetch('/api/machines/' + encodeURIComponent(document.body.getAttribute('data-machine')))
+  .then(function (r) { return r.json(); })
+  .then(function (d) { if (d.ok) FleetApp.timeline(document.getElementById('uptime-timeline'), d.history); });
+</script>
+{% endblock %}

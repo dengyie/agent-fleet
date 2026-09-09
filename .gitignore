@@ -1,0 +1,30 @@
+# 凭证目录 — 绝不入库
+credentials/
+*.pem
+*.key
+id_ed25519
+id_rsa
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 采集状态（本地）
+state/
+var/
+*.db-wal
+*.db-shm
+# frontend/state 是静态源码模块，不是运行时状态
+!frontend/state/
+!frontend/state/**
+
+# 临时
+*.tmp
+*.log
+.DS_Store
+.playwright-mcp/
+agent-fleet-release/
+frontend-dist/
+frontend-v2/
+.claude/worktrees/
