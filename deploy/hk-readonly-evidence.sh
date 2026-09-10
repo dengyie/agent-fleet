@@ -1,32 +1,49 @@
 #!/usr/bin/env bash
-# Bounded HK production evidence for recovery-plan Task 1.
+# Bounded hub production evidence.
 # Status codes, listener ownership, process class, symlink targets, file
 # existence, and a truncated <title>. Never dumps bodies, environ, argv
 # secrets, credential files, or tokens.
 #
-# Run ON the HK host (or inside the production container) after an
+# Run ON the hub host (or inside the production container) after an
 # authorized login. Do not treat a laptop run as production fact.
-# This workstation is not the hub host: no ${FLEET_HOME}/agent-fleet.
-# Set FLEET_HOME and optionally HUB_PUBLIC_URL before running on the host.
+# Set FLEET_HOME and HUB_PUBLIC_URL before running on the host.
 set -Eeuo pipefail
 
-if [[ -z "${FLEET_HOME:-}" ]]; then
-    echo "set FLEET_HOME to the hub owner's home; laptop HOME is not production fact" >&2
+here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=fleet-identity.sh
+. "$here/fleet-identity.sh"
+require_fleet_home
+
+[[ -n "${HUB_PUBLIC_URL:-}" ]] || {
+    echo "set HUB_PUBLIC_URL to the public hub origin, e.g. https://hub.example.com" >&2
     exit 2
-fi
-hub_public_url=${HUB_PUBLIC_URL:-https://hub.example.com}
+}
+case "$HUB_PUBLIC_URL" in
+    https://*|http://*) ;;
+    *)
+        echo "HUB_PUBLIC_URL must be an http(s) origin with no path" >&2
+        exit 2
+        ;;
+esac
+hub_host=${HUB_PUBLIC_URL#https://}
+hub_host=${hub_host#http://}
+hub_host=${hub_host%%/*}
+[[ "$hub_host" == "$HUB_PUBLIC_URL" || -z "$hub_host" ]] && {
+    echo "HUB_PUBLIC_URL host could not be parsed" >&2
+    exit 2
+}
 
 redact() {
     sed -E 's/(token|password|secret|credential|passwd|authorization)[=:][^[:space:]]*/\1=REDACTED/Ig'
 }
 
 printf '=== status codes (no bodies) ===\n'
-curl -sS -o /dev/null -w 'public=%{http_code}\n' "${hub_public_url}/api/status" || printf 'public=000\n'
+curl -sS -o /dev/null -w 'public=%{http_code}\n' "${HUB_PUBLIC_URL}/api/status" || printf 'public=000\n'
 curl -sS -o /dev/null -w 'loopback=%{http_code}\n' --connect-timeout 3 http://127.0.0.1:8790/api/status || printf 'loopback=000\n'
 
 printf '=== nginx upstream (server_name from HUB_PUBLIC_URL host) ===\n'
 if command -v nginx >/dev/null 2>&1; then
-    nginx -T 2>/dev/null | grep -A8 -B2 "server_name ${hub_public_url#https://}" | redact || true
+    nginx -T 2>/dev/null | grep -A8 -B2 "server_name ${hub_host}" | redact || true
 else
     printf 'nginx=absent\n'
 fi
@@ -72,9 +89,9 @@ else
 fi
 
 for marker in \
-    ${FLEET_HOME}/.hermes/.f-diag-run \
-    ${FLEET_HOME}/.hermes/guardian.sh.bak \
-    ${FLEET_HOME}/agent-fleet/fleet-gates.conf
+    "${FLEET_HOME}/.hermes/.f-diag-run" \
+    "${FLEET_HOME}/.hermes/guardian.sh.bak" \
+    "${FLEET_HOME}/agent-fleet/fleet-gates.conf"
 do
     if [[ -e "$marker" ]]; then
         printf 'exists=%s\n' "$marker"
@@ -84,7 +101,7 @@ do
 done
 
 printf '=== frontend title (bounded) ===\n'
-curl -sS --connect-timeout 5 "${hub_public_url}/" \
+curl -sS --connect-timeout 5 "${HUB_PUBLIC_URL}/" \
     | tr '\n' ' ' \
     | grep -o '<title>[^<]*</title>' \
     | cut -c1-120 \

@@ -193,27 +193,74 @@ class ReconciliationBoundaryTests(unittest.TestCase):
 
 
 class DeployScriptHygieneTests(unittest.TestCase):
+    root = Path(__file__).resolve().parents[1]
+
+    def _run(self, relative, extra_env=None, args=("unused-release-id",)):
+        env = {k: v for k, v in os.environ.items()
+               if k not in {"FLEET_USER", "FLEET_HOME", "FLEET_LIVE_MODE", "HUB_PUBLIC_URL"}}
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            ["bash", str(self.root / relative), *args],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
     def test_install_and_adopt_require_fleet_identity(self):
-        root = Path(__file__).resolve().parents[1]
         for relative in (
             "deploy/hk-container-install.sh",
             "deploy/hk-container-adopt-release.sh",
             "deploy/hk-container-inspect.sh",
             "deploy/hk-readonly-evidence.sh",
+            "deploy/hk-self-report-loop.sh",
         ):
-            source = (root / relative).read_text()
+            source = (self.root / relative).read_text()
             self.assertNotIn("${FLEET_USER:-fleet}", source, relative)
             self.assertNotIn("${HOME}/agent-fleet", source, relative)
             self.assertNotIn("/home/mango", source, relative)
-            env = {k: v for k, v in os.environ.items() if k not in {"FLEET_USER", "FLEET_HOME"}}
-            proc = subprocess.run(
-                ["bash", str(root / relative), "unused-release-id"],
-                capture_output=True,
-                text=True,
-                env=env,
-            )
+            proc = self._run(relative)
             self.assertEqual(proc.returncode, 2, relative)
-            self.assertIn("FLEET_", proc.stderr)
+            self.assertRegex(proc.stderr, r"FLEET_")
+
+    def test_identity_rejects_metacharacters_and_unknown_user(self):
+        proc = self._run(
+            "deploy/hk-container-inspect.sh",
+            extra_env={"FLEET_HOME": "/tmp/fleet'oops"},
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("metacharacters", proc.stderr)
+
+        proc = self._run(
+            "deploy/hk-container-install.sh",
+            extra_env={
+                "FLEET_HOME": "/tmp/fleet-home",
+                "FLEET_USER": "definitely-not-a-local-user-xyz",
+                "FLEET_LIVE_MODE": "symlink",
+            },
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertRegex(proc.stderr, r"not a local account|plain unix username")
+
+    def test_install_requires_live_mode_before_mutating(self):
+        import getpass
+        proc = self._run(
+            "deploy/hk-container-install.sh",
+            extra_env={
+                "FLEET_HOME": "/tmp/fleet-home",
+                "FLEET_USER": getpass.getuser(),
+            },
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("FLEET_LIVE_MODE", proc.stderr)
+
+    def test_evidence_requires_public_url(self):
+        proc = self._run(
+            "deploy/hk-readonly-evidence.sh",
+            extra_env={"FLEET_HOME": str(self.root)},
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("HUB_PUBLIC_URL", proc.stderr)
 
 
 if __name__ == "__main__":

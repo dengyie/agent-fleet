@@ -6,7 +6,7 @@
 ## 已知演练源
 
 - 2026-09-09 bak：`agent-fleet.bak-20260909-pre-182e034`（files API overlay 前）
-- LIVE 根：容器内 `${HOME}/agent-fleet`（bind-mount，**禁止 `ln -sfn`**）
+- LIVE 根：容器内 `${FLEET_HOME}/agent-fleet`（bind-mount 时 `FLEET_LIVE_MODE=overlay`，**禁止 `ln -sfn`**）
 - 任务库 / 审计：`state/fleet.db`（随 bak 走；无单独 TTL purge）
 
 ## 0. 只读核对（本轮默认可做）

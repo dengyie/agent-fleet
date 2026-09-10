@@ -41,7 +41,7 @@ export AGENT_FLEET_INGEST_TOKEN='generate-a-long-random-secret'
 
 hub 未配置 token 时会拒绝生产启动。token 不进 git、不写文档。
 
-示例部署：hub 跑在容器内 `0.0.0.0:8790`，由宿主 Nginx 反代；release 目录 `$HOME/.hermes/agent-fleet-releases/<TS>`，LIVE 为 `$HOME/agent-fleet`。容器镜像若自带 `site-packages/tools` 正规包，release 必须含 `tools/__init__.py` 锚定，否则 `tools.session` 会变成 PEP 420 namespace。只读探针：`deploy/hk-readonly-evidence.sh`（把脚本里的占位路径换成你的 LIVE）。生产拓扑不要写进 git。
+示例部署：hub 默认听 `0.0.0.0:8790`（可用 `AGENT_FLEET_WEB_HOST=127.0.0.1` 只听 loopback），由宿主 Nginx 反代。路径用操作员提供的 `FLEET_HOME` / `FLEET_USER`，不要默认调用者 HOME。LIVE 切换：`FLEET_LIVE_MODE=symlink` 或 bind-mount 场景的 `overlay`（禁止对 bind-mount 做 `ln -s`）。容器镜像若自带 `site-packages/tools` 正规包，release 必须含 `tools/__init__.py`。只读探针：`deploy/hk-readonly-evidence.sh`。GitHub public `main` 不是现网 overlay。
 
 ## 机器 probe 部署
 

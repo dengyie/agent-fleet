@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-if [[ -z "${FLEET_HOME:-}" ]]; then
-    echo "set FLEET_HOME to the hub owner's home; do not default to the caller's HOME" >&2
-    exit 2
-fi
+here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=fleet-identity.sh
+. "$here/fleet-identity.sh"
+require_fleet_home
 
 live=${FLEET_HOME}/agent-fleet
-stat -c 'LIVE path=%n type=%F mode=%A owner=%U:%G' "$live"
+stat -c 'LIVE path=%n type=%F mode=%A owner=%U:%G' "$live" \
+    || stat -f 'LIVE path=%N type=%HT mode=%Sp owner=%Su:%Sg' "$live"
 printf 'LIVE_REAL=%s\n' "$(readlink -f "$live")"
 
 for proc_dir in /proc/[0-9]*; do

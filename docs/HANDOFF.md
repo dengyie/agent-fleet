@@ -41,7 +41,7 @@ AI agent 舰队观测系统：每台机器运行本地 probe，向 hub `/api/ing
 
 1. 公网面板走 Cloudflare Access 保护的 operator 域；probe/runner 走 Bypass + hub 自身凭据。具体域名、容器名、内网地址只写在私有运维笔记，不进本仓库。
 2. 发布产物来源（2026-09-02 起）：main 的 release tgz 一律由 CI 产出（`.github/workflows/ci.yml`：test = 全量 pytest 门禁 → package = `deploy/package-release.sh` + artifact `agent-fleet-release`）。package 仅在 main push/手动触发时运行（PR run 不产部署用 artifact）；tarball 内嵌 `RELEASE_ORIGIN`。无 secrets、无 SSH、不触宿主/容器（不复制 `arch-v2-primary` 的 `deploy.yml`）。部署仍手工：`gh run download` 取 artifact → 私有部署笔记 §0 staging SOP。
-3. 生产拓扑（模式）：边缘 → 宿主 Nginx → 容器内 hub `:8790`。LIVE 为 `$HOME/agent-fleet`（bind-mount 场景禁止 `ln -sfn`）。容器镜像若自带 `site-packages/tools` 正规包，release 必须含 `tools/__init__.py`。
+3. 生产拓扑（模式）：边缘 → 宿主 Nginx → 容器内 hub（默认 `0.0.0.0:8790`，可用 `AGENT_FLEET_WEB_HOST=127.0.0.1` 只听 loopback）。LIVE 为 `${FLEET_HOME}/agent-fleet`。bind-mount 场景必须 `FLEET_LIVE_MODE=overlay`（禁止 `ln -s`）；仅非 bind-mount 才允许 `FLEET_LIVE_MODE=symlink`。容器镜像若自带 `site-packages/tools` 正规包，release 必须含 `tools/__init__.py`。GitHub public `main` 是脱敏孤儿快照，**不是**现网 overlay；现网 SHA 只写在私有运维笔记。
 4. 每台 agent 机器把 ingest token 放在 `~/.config/agent-fleet/ingest-token`（权限 0600）；macOS 可用 LaunchAgent，Linux 用 cron。
 5. 节点清单以运行中的 `/api/status` 为准；`hosts.yaml` 仓库副本只是示例，生产机名不要提交。
 
@@ -74,9 +74,11 @@ python3 tools/agent-self-report.py --endpoint https://hub.example.com --name <ma
 
 ## 六、能力清单（2026-09-09 重开 v4 初始目标）
 
+公开 GitHub `main` 是脱敏孤儿快照，**不是**现网 LIVE。下表里的生产 SHA 只描述当时 overlay，权威现状在私有运维笔记。
+
 2026-09-08 收口把「能延期的」标成了 `deferred-with-condition`，也把 **v4 原文尚未兑现的产品面** 误标成 done。2026-09-09 起清单分两栏：
 
-- **已落地**：现网 LIVE `182e034` 已具备。
+- **已落地**：现网 LIVE 以私有运维笔记为准（公开仓 orphan `main` 不是 overlay）。
 - **v4 初始目标未完成（本轮必做）**：见 `docs/superpowers/specs/2026-09-09-v4-initial-goal-completion-design.md` 与 plan `docs/superpowers/plans/2026-09-09-v4-initial-goal-completion.md`。
 - **条件触发延期**：仍不是待办（WebSocket / frontend-v2 / 自动部署 / 密钥下发等）。
 

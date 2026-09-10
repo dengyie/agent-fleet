@@ -7,11 +7,16 @@
 # - curl http://127.0.0.1:8790/ connects to host localhost, not container localhost
 # - python3 hub/web.py cannot import container modules from host namespace
 #
-# Correct usage:
-#   docker exec agent-fleet-hk-production bash /path/to/this/script
-#   OR run directly inside the container
+# Correct usage: run inside the hub container as FLEET_USER with
+# FLEET_HOME set to that account's home. Do not default to the caller's HOME.
 #
 set -Eeuo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=fleet-identity.sh
+. "$here/fleet-identity.sh"
+require_fleet_home
+export HOME=$FLEET_HOME
 
 # Configuration
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
@@ -21,13 +26,15 @@ failure_threshold=${AGENT_FLEET_FAILURE_THRESHOLD:-3}
 max_restart_failures=${AGENT_FLEET_MAX_RESTART_FAILURES:-5}
 web_port=${AGENT_FLEET_WEB_PORT:-8790}
 web_host=${AGENT_FLEET_WEB_HOST:-0.0.0.0}
+machine_name=${AGENT_FLEET_MACHINE_NAME:-hub-host}
 
-# Files
-pid_file=${HOME}/.hermes/agent-fleet-probe.pid
-web_pid_file=${HOME}/.hermes/agent-fleet-web.pid
-guardian_log=${HOME}/.hermes/logs/agent-fleet-guardian.log
-web_log=${HOME}/.hermes/logs/agent-fleet-web.log
-web_error_log=${HOME}/.hermes/logs/agent-fleet-web-errors.log
+# Files — always FLEET_HOME, never a different caller's HOME
+pid_file=${FLEET_HOME}/.hermes/agent-fleet-probe.pid
+web_pid_file=${FLEET_HOME}/.hermes/agent-fleet-web.pid
+guardian_log=${FLEET_HOME}/.hermes/logs/agent-fleet-guardian.log
+web_log=${FLEET_HOME}/.hermes/logs/agent-fleet-web.log
+web_error_log=${FLEET_HOME}/.hermes/logs/agent-fleet-web-errors.log
+mkdir -p "${FLEET_HOME}/.hermes/logs"
 
 # State
 printf '%s\n' "$$" > "$pid_file"
@@ -148,7 +155,7 @@ while true; do
   if (( time_since_report >= report_interval )); then
     if python3 "$repo_root/tools/agent-self-report.py" \
         --endpoint "http://127.0.0.1:${web_port}" \
-        --name hk \
+        --name "$machine_name" \
         --token-file "$repo_root/credentials/ingest-token" >> "$guardian_log" 2>&1; then
       log INFO "Report sent successfully"
     else

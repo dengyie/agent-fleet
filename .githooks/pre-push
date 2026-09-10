@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Refuse pushing the private clone's long history (or production identity)
+# to GitHub. Public origin is an orphan snapshot of a few commits.
+set -euo pipefail
+url="${2:-}"
+case "$url" in
+    *github.com/dengyie/agent-fleet*|*github.com:dengyie/agent-fleet*)
+        ;;
+    *)
+        exit 0
+        ;;
+esac
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [[ "$local_sha" =~ ^0+$ ]] && continue
+    count=$(git rev-list --count "$local_sha")
+    if (( count > 20 )); then
+        echo "refusing to push $count commits on $local_ref to public origin (looks like private history)" >&2
+        echo "use a clone of the public orphan snapshot instead" >&2
+        exit 1
+    fi
+    if git grep -I -n -e 'agent.mangoqwq.com' -e '/home/mango' "$local_sha" -- ':!tests/' ':!.superpowers/' >/dev/null 2>&1; then
+        echo "refusing to push $local_ref: tree still contains production identity" >&2
+        exit 1
+    fi
+done
+exit 0

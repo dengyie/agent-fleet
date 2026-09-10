@@ -185,7 +185,7 @@ class TestAgentFleetGuardian(unittest.TestCase):
         self.assertEqual(guardian.failure_count, 0)
         self.assertEqual(guardian.restart_failure_count, 0)
         self.assertEqual(
-            self.guardian.web_pid_file,
+            guardian.web_pid_file,
             self.home / ".hermes" / "agent-fleet-web.pid",
         )
         source = (
