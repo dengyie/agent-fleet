@@ -184,6 +184,14 @@ class TestAgentFleetGuardian(unittest.TestCase):
         self.assertEqual(guardian.max_restart_failures, 10)
         self.assertEqual(guardian.failure_count, 0)
         self.assertEqual(guardian.restart_failure_count, 0)
+        self.assertEqual(
+            self.guardian.web_pid_file,
+            self.home / ".hermes" / "agent-fleet-web.pid",
+        )
+        source = (
+            Path(__file__).resolve().parents[1] / "hub" / "agent_fleet_guardian.py"
+        ).read_text()
+        self.assertNotIn("/home/mango", source)
 
 
 class TestAgentFleetGuardianWatcher(unittest.TestCase):

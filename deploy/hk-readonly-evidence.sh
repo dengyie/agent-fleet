@@ -6,21 +6,27 @@
 #
 # Run ON the HK host (or inside the production container) after an
 # authorized login. Do not treat a laptop run as production fact.
-# This workstation is not HK: no ${HOME}/agent-fleet, no hermes-gateway.
+# This workstation is not the hub host: no ${FLEET_HOME}/agent-fleet.
+# Set FLEET_HOME and optionally HUB_PUBLIC_URL before running on the host.
 set -Eeuo pipefail
+
+if [[ -z "${FLEET_HOME:-}" ]]; then
+    echo "set FLEET_HOME to the hub owner's home; laptop HOME is not production fact" >&2
+    exit 2
+fi
+hub_public_url=${HUB_PUBLIC_URL:-https://hub.example.com}
 
 redact() {
     sed -E 's/(token|password|secret|credential|passwd|authorization)[=:][^[:space:]]*/\1=REDACTED/Ig'
 }
 
 printf '=== status codes (no bodies) ===\n'
-curl -sS -o /dev/null -w 'public=%{http_code}\n' https://hub.example.com/api/status || printf 'public=000\n'
-curl -sS -o /dev/null -w 'container=%{http_code}\n' --connect-timeout 3 http://127.0.0.1:8790/api/status || printf 'container=000\n'
-curl -sS -o /dev/null -w 'host=%{http_code}\n' --connect-timeout 3 http://127.0.0.1:8790/api/status || printf 'host=000\n'
+curl -sS -o /dev/null -w 'public=%{http_code}\n' "${hub_public_url}/api/status" || printf 'public=000\n'
+curl -sS -o /dev/null -w 'loopback=%{http_code}\n' --connect-timeout 3 http://127.0.0.1:8790/api/status || printf 'loopback=000\n'
 
-printf '=== nginx upstream (hub.example.com only) ===\n'
+printf '=== nginx upstream (server_name from HUB_PUBLIC_URL host) ===\n'
 if command -v nginx >/dev/null 2>&1; then
-    nginx -T 2>/dev/null | grep -A8 -B2 'server_name hub.example.com' | redact || true
+    nginx -T 2>/dev/null | grep -A8 -B2 "server_name ${hub_public_url#https://}" | redact || true
 else
     printf 'nginx=absent\n'
 fi
@@ -46,7 +52,7 @@ for proc_dir in /proc/[0-9]*; do
 done
 
 printf '=== LIVE / releases (existence + symlink, no contents) ===\n'
-live=${HOME}/agent-fleet
+live=${FLEET_HOME}/agent-fleet
 if [[ -e "$live" || -L "$live" ]]; then
     if command -v stat >/dev/null 2>&1; then
         stat -c 'LIVE path=%n type=%F mode=%A owner=%U:%G' "$live" 2>/dev/null \
@@ -57,7 +63,7 @@ else
     printf 'LIVE=absent\n'
 fi
 
-releases=${HOME}/.hermes/agent-fleet-releases
+releases=${FLEET_HOME}/.hermes/agent-fleet-releases
 if [[ -d "$releases" ]]; then
     printf 'releases_dir=present\n'
     find "$releases" -maxdepth 2 -type f -name 'web.py' -print 2>/dev/null | sort || true
@@ -66,9 +72,9 @@ else
 fi
 
 for marker in \
-    ${HOME}/.hermes/.f-diag-run \
-    ${HOME}/.hermes/guardian.sh.bak \
-    ${HOME}/agent-fleet/fleet-gates.conf
+    ${FLEET_HOME}/.hermes/.f-diag-run \
+    ${FLEET_HOME}/.hermes/guardian.sh.bak \
+    ${FLEET_HOME}/agent-fleet/fleet-gates.conf
 do
     if [[ -e "$marker" ]]; then
         printf 'exists=%s\n' "$marker"
@@ -78,7 +84,7 @@ do
 done
 
 printf '=== frontend title (bounded) ===\n'
-curl -sS --connect-timeout 5 https://hub.example.com/ \
+curl -sS --connect-timeout 5 "${hub_public_url}/" \
     | tr '\n' ' ' \
     | grep -o '<title>[^<]*</title>' \
     | cut -c1-120 \

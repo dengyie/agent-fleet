@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+if [[ -z "${FLEET_USER:-}" || -z "${FLEET_HOME:-}" ]]; then
+    echo "set FLEET_USER and FLEET_HOME to the account that owns hub; do not default to a placeholder user or the caller's HOME" >&2
+    exit 2
+fi
+
 release_id=${1:?release id required}
-release=${HOME}/.hermes/agent-fleet-releases/$release_id
-live=${HOME}/agent-fleet
-backup=${HOME}/agent-fleet.previous-$release_id
-pid_file=${HOME}/.hermes/agent-fleet-web.pid
+release=${FLEET_HOME}/.hermes/agent-fleet-releases/$release_id
+live=${FLEET_HOME}/agent-fleet
+backup=${FLEET_HOME}/agent-fleet.previous-$release_id
+pid_file=${FLEET_HOME}/.hermes/agent-fleet-web.pid
 
 [[ -d "$release" && -f "$release/hub/web.py" ]] || {
     echo "release missing: $release" >&2
@@ -28,7 +33,7 @@ pid=$(su -s /bin/bash -c '
         exit 0
     done
     exit 1
-' "${FLEET_USER:-fleet}")
+' "$FLEET_USER")
 
 [[ -n "$pid" ]] || { echo "release process not found" >&2; exit 2; }
 python3 -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8790/api/status", timeout=3).read()'
@@ -36,10 +41,10 @@ python3 -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8790
 mv "$live" "$backup"
 ln -s "$release" "$live"
 printf '%s\n' "$pid" > "$pid_file"
-chown -h "${FLEET_USER:-fleet}:${FLEET_USER:-fleet}" "$live"
-chown "${FLEET_USER:-fleet}:${FLEET_USER:-fleet}" "$pid_file"
+chown -h "$FLEET_USER:$FLEET_USER" "$live"
+chown "$FLEET_USER:$FLEET_USER" "$pid_file"
 rm -f \
-    ${HOME}/.hermes/agent-fleet-ingest-token.new \
-    ${HOME}/.hermes/agent-fleet-release.tgz
+    ${FLEET_HOME}/.hermes/agent-fleet-ingest-token.new \
+    ${FLEET_HOME}/.hermes/agent-fleet-release.tgz
 
 echo "ADOPT_OK release=$release_id pid=$pid backup=$backup"

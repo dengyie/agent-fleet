@@ -13,10 +13,9 @@ hosts:
     desc: "hub 所在机器（示例）"
     projects: [agent-fleet]
     agents:
-      - type: hermes
-        name: hermes-gateway
-        pattern: "hermes_cli.main gateway"
-        log_path: ~/.hermes/logs/
+      - type: generic
+        name: hub
+        pattern: "python.*hub/web.py"
 
   - name: worker-a
     transport: ingest

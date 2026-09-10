@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-archive=${1:-${HOME}/.hermes/agent-fleet-release.tgz}
-token_source=${2:-${HOME}/.hermes/agent-fleet-ingest-token.new}
+if [[ -z "${FLEET_USER:-}" || -z "${FLEET_HOME:-}" ]]; then
+    echo "set FLEET_USER and FLEET_HOME to the account that owns hub; do not default to a placeholder user or the caller's HOME" >&2
+    exit 2
+fi
+
+archive=${1:-${FLEET_HOME}/.hermes/agent-fleet-release.tgz}
+token_source=${2:-${FLEET_HOME}/.hermes/agent-fleet-ingest-token.new}
 release_id=${3:-$(date -u +%Y%m%dT%H%M%SZ)}
-live=${HOME}/agent-fleet
-release_root=${HOME}/.hermes/agent-fleet-releases
+live=${FLEET_HOME}/agent-fleet
+release_root=${FLEET_HOME}/.hermes/agent-fleet-releases
 release=$release_root/$release_id
-backup=${HOME}/agent-fleet.previous-$release_id
-log_dir=${HOME}/.hermes/logs
+backup=${FLEET_HOME}/agent-fleet.previous-$release_id
+log_dir=${FLEET_HOME}/.hermes/logs
 log_file=$log_dir/agent-fleet-web.log
-pid_file=${HOME}/.hermes/agent-fleet-web.pid
-probe_pid_file=${HOME}/.hermes/agent-fleet-probe.pid
+pid_file=${FLEET_HOME}/.hermes/agent-fleet-web.pid
+probe_pid_file=${FLEET_HOME}/.hermes/agent-fleet-probe.pid
 probe_log_file=$log_dir/agent-fleet-probe.log
 
 old_pid=""
@@ -29,7 +34,7 @@ hub_pid_for_cwd() {
             exit 0
         done
         exit 1
-    ' "${FLEET_USER:-fleet}"
+    ' "$FLEET_USER"
 }
 
 live_hub_pid() {
@@ -40,7 +45,7 @@ start_hub() {
     local target=$1
     su -s /bin/bash -c \
         "cd '$target' && nohup python3 hub/web.py --host 0.0.0.0 --port 8790 >> '$log_file' 2>&1 < /dev/null &" \
-        "${FLEET_USER:-fleet}"
+        "$FLEET_USER"
     for _ in $(seq 1 20); do
         new_pid=$(hub_pid_for_cwd "$target" 2>/dev/null || true)
         [[ -n "$new_pid" ]] && break
@@ -48,7 +53,7 @@ start_hub() {
     done
     [[ -n "$new_pid" ]] || return 1
     printf '%s\n' "$new_pid" > "$pid_file"
-    chown "${FLEET_USER:-fleet}:${FLEET_USER:-fleet}" "$pid_file"
+    chown "$FLEET_USER:$FLEET_USER" "$pid_file"
 }
 
 stop_probe_loop() {
@@ -69,7 +74,7 @@ start_probe_loop() {
     local target=$1
     su -s /bin/bash -c \
         "cd '$target' && nohup bash deploy/hk-self-report-loop.sh >> '$probe_log_file' 2>&1 < /dev/null &" \
-        "${FLEET_USER:-fleet}"
+        "$FLEET_USER"
     for _ in $(seq 1 20); do
         [[ -s "$probe_pid_file" ]] && return 0
         sleep 0.25
@@ -102,7 +107,7 @@ rollback() {
     if (( switched == 1 )); then
         rm -f "$live"
         mv "$backup" "$live"
-        chown -R "${FLEET_USER:-fleet}:${FLEET_USER:-fleet}" "$live"
+        chown -R "$FLEET_USER:$FLEET_USER" "$live"
         start_hub "$live"
         wait_for_status || true
         start_probe_loop "$live" || true
@@ -128,11 +133,11 @@ if [[ -d "$live/state" ]]; then
 else
     mkdir -p "$release/state"
 fi
-chown -R "${FLEET_USER:-fleet}:${FLEET_USER:-fleet}" "$release" "$log_dir"
+chown -R "$FLEET_USER:$FLEET_USER" "$release" "$log_dir"
 
 su -s /bin/bash -c \
     "cd '$release' && python3 -m compileall -q connectors hub tools report_schema.py && python3 -c 'import flask, yaml; from hub import web; web.make_app(require_token=True)'" \
-    "${FLEET_USER:-fleet}"
+    "$FLEET_USER"
 
 old_pid=$(live_hub_pid || true)
 [[ -n "$old_pid" ]] || { echo "no Python hub process with cwd $live" >&2; exit 2; }

@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-live=${HOME}/agent-fleet
+if [[ -z "${FLEET_HOME:-}" ]]; then
+    echo "set FLEET_HOME to the hub owner's home; do not default to the caller's HOME" >&2
+    exit 2
+fi
+
+live=${FLEET_HOME}/agent-fleet
 stat -c 'LIVE path=%n type=%F mode=%A owner=%U:%G' "$live"
 printf 'LIVE_REAL=%s\n' "$(readlink -f "$live")"
 

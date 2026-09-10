@@ -44,8 +44,9 @@ operator 身份。该头由 Cloudflare Access 边缘注入；nginx/容器不改�
 
 ## 安全注意
 
-- Access 头只在经 CF 边缘的请求上可信。**源站必须只接受 CF IP**（现有 nginx 已仅监听
-  容器内网 127.0.0.1，公网入口只有 CF 代理 ✅，保持现状）。
+- Access 头只在经 CF 边缘的请求上可信。**源站必须只接受 Cloudflare IP**；公网入口只有
+  CF 代理。hub 进程听本机 loopback（示例 `127.0.0.1:8790`），Nginx `proxy_pass` 指向它。
+  不要把真实 Docker 桥接 IP 或公网地址写进 git。
 - 不要把 `--dev-operator` 带到生产启动参数。
 - 吊销 operator：从 Policy B 移除邮箱即可，无需动 hub。
 - runner credential 吊销：编辑 HK 容器 `credentials/runner-credentials.json` 删对应机器键，

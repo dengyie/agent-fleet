@@ -192,6 +192,29 @@ class ReconciliationBoundaryTests(unittest.TestCase):
         self.assertTrue(callable(start_lease_reconciler))
 
 
+class DeployScriptHygieneTests(unittest.TestCase):
+    def test_install_and_adopt_require_fleet_identity(self):
+        root = Path(__file__).resolve().parents[1]
+        for relative in (
+            "deploy/hk-container-install.sh",
+            "deploy/hk-container-adopt-release.sh",
+            "deploy/hk-container-inspect.sh",
+            "deploy/hk-readonly-evidence.sh",
+        ):
+            source = (root / relative).read_text()
+            self.assertNotIn("${FLEET_USER:-fleet}", source, relative)
+            self.assertNotIn("${HOME}/agent-fleet", source, relative)
+            self.assertNotIn("/home/mango", source, relative)
+            env = {k: v for k, v in os.environ.items() if k not in {"FLEET_USER", "FLEET_HOME"}}
+            proc = subprocess.run(
+                ["bash", str(root / relative), "unused-release-id"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(proc.returncode, 2, relative)
+            self.assertIn("FLEET_", proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
