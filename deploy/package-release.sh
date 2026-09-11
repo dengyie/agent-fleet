@@ -9,9 +9,12 @@ cd "$repo_root"
 # Pack tracked files only. A working-tree tar would ship local leftovers
 # such as tests/__tmp_app_context/state/. git archive never includes
 # gitignored runtime stores, credentials, or untracked junk.
+# hosts.yaml stays tracked as a local example, but MUST NOT ship in the
+# CI artifact: overlaying it onto LIVE bind-mount clobbers the production
+# inventory. §0 restores LIVE hosts.yaml from bak; tests assert absence.
 git archive --format=tar HEAD \
     agent_profiles.py \
-    README.md requirements.txt hosts.yaml report_schema.py session_schema.py \
+    README.md requirements.txt report_schema.py session_schema.py \
     fleet-gates.conf \
     frontend connectors hub tools deploy docs tests \
     > "$repo_root/.package-release.tmp.tar"

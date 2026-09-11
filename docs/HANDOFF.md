@@ -87,17 +87,17 @@ python3 tools/agent-self-report.py --endpoint https://hub.example.com --name <ma
 | 项 | 状态 | owner | 证据 / 触发 | 回滚 |
 |---|---|---|---|---|
 | Session / Supervisor / Adoption | **done（2026-09-01）** | ops | LIVE gates 全 1；sessions/adoptions 无 operator=401；poll 无凭据=403。隔离 `var/sessions`、`var/adoptions`。 | 删 conf 对应行 + TERM web |
-| 路线 A 薄客户端 Phase 1–5 接线 | **done（2026-09-08）** | ops | LIVE `182e034`；`append_user_turn=true` / `apply_local_profile=true`；**未向座位实发**（实发属本轮可选 Task 7 另批）。native resume 无身份拒 sibling。 | conf 删 Phase 4/5 两行 + TERM web |
+| 路线 A 薄客户端 Phase 1–5 接线 | **done（2026-09-11 实发）** | ops | LIVE `da54e48`；gates 双 true。mac-local adopted 座位已发 Phase 5（幂等 applied）+ Phase 4 入队。native resume 无身份拒 sibling。 | conf 删 Phase 4/5 两行 + TERM web |
 | Release 打包含 `frontend/` | **done（2026-09-02）** | eng | `cc8fdc2` + `tests/test_release_layout`。`frontend/` 为发布真相源；`frontend-v2/` 未上 main。 | 回上一 CI artifact |
 | Session Bridge / Supervisor / Adoption 代码 | **done** | eng | `tools/session/*`、`tools/supervisor/*`、hub session/supervisor/adoption 路由与测试已合 main。 | 关对应 gate |
 | Profile SSOT P0/P1 | **done** | eng | `agent_profiles.py` + session `agent_family` DTO。 | 无运行时开关 |
-| `GET /api/tasks/<id>/files/<path>` | **done（2026-09-09 LIVE `182e034`）** | eng | Hub-local 有界快照；无 operator=401。任务详情 DTO 仍不含 file body。 | 停 ingest files 字段 + 关读路由；回滚 `bak-20260909-pre-182e034` |
-| 脱敏 patch review | **in-progress（代码已合本工作树；LIVE 仍 `182e034`）** | eng | result 可空 `diff_patch` ≤100KB；详情 DTO 只暴露 `has_diff_patch`；`GET /api/tasks/<id>/diff`；任务页折叠后拉取。 | 停收 patch 字段 |
-| 测试结果面板 | **in-progress（代码已合本工作树；LIVE 仍 `182e034`）** | eng | 可空 `test_summary` allowlist。无测试=空态，不造跑。 | 停收 test_summary |
-| 任务暂停 / 继续 | **in-progress（代码已合本工作树；LIVE 仍 `182e034`）** | eng | `POST /pause` `/continue`，paused 不派发，continue 新 attempt_id。不复用 `pause_session`。 | 忽略 paused 行 |
-| 人工确认闸 | **in-progress（代码已合本工作树；LIVE 仍 `182e034`）** | eng | 创建可选 `confirm=true`；未确认 poll 不可见；`/confirm` `/reject`。旧任务无 gate=现行为。 | 不写 gate 行 |
-| runner credential 轮换/吊销 | **in-progress（SOP 已入库；未对 LIVE 执行）** | ops | `deploy/rotate-runner-credential.sh` 默认只打印步骤；`--apply` 写本地 JSON。吊销=删 JSON 键 → poll 403。 | 保留旧 secret |
-| 备份恢复演练清单 | **in-progress（清单已入库；未真切回）** | ops | `deploy/hk-backup-drill.md`。默认识别 bak，禁止未批准覆盖 LIVE。 | 不执行 drill |
+| `GET /api/tasks/<id>/files/<path>` | **done（LIVE `da54e48`）** | eng | Hub-local 有界快照；无 operator=401。任务详情 DTO 仍不含 file body。 | 停 ingest files 字段 + 关读路由；回滚 `bak-20260911-pre-da54e48` |
+| 脱敏 patch review | **done（2026-09-11 LIVE `da54e48`）** | eng | result 可空 `diff_patch` ≤100KB；详情 DTO 只暴露 `has_diff_patch`；`GET /api/tasks/<id>/diff`；任务页折叠后拉取。 | 停收 patch 字段 |
+| 测试结果面板 | **done（2026-09-11 LIVE `da54e48`）** | eng | 可空 `test_summary` allowlist。无测试=空态，不造跑。 | 停收 test_summary |
+| 任务暂停 / 继续 | **done（2026-09-11 LIVE `da54e48`）** | eng | `POST /pause` `/continue`，paused 不派发，continue 新 attempt_id。不复用 `pause_session`。 | 忽略 paused 行 |
+| 人工确认闸 | **done（2026-09-11 LIVE `da54e48`）** | eng | 创建可选 `confirm=true`；未确认 poll 不可见；`/confirm` `/reject`。旧任务无 gate=现行为。 | 不写 gate 行 |
+| runner credential 轮换/吊销 | **done（2026-09-11 LIVE mac-local）** | ops | `deploy/rotate-runner-credential.sh`。LIVE 轮换后旧 secret poll=403，新 secret poll=200 空任务，无凭据=403。 | bak `runner-credentials.json.bak-20260911-pre-rotate` |
+| 备份恢复演练清单 | **done（2026-09-11 真切回再切回 `da54e48`）** | ops | 先 `cp -a` LIVE → `bak-20260911-pre-rollback-drill`，tar 覆盖 `bak-20260911-pre-da54e48`（`182e034`），拨测 `/diff`=404；再覆盖回 `da54e48`，`/diff` 无 operator=401。禁止 `ln -sfn`。 | pre-rollback bak |
 | WebSocket | **deferred-with-condition** | eng | 触发=实测 SSE+10s 轮询不够。需单独 spec（auth/proxy/reconnect/origin/downgrade）。无替换计划。 | 保持 SSE |
 | 更多 agent 专用采集器 | **deferred-with-condition** | eng | 触发=具体机器/家族需求。须有界 metadata + 隔离失败 + fixture。不预做。 | 删 collector |
 | Exact capture 生产升级 | **deferred-with-condition** | ops | 路由已接；默认 `best_effort`。触发=加密/配额/留存/审计核查通过后 operator 显式 `capture-exact`。不随 gate 自动开。 | 不调用 upgrade |
@@ -123,7 +123,7 @@ python3 tools/agent-self-report.py --endpoint https://hub.example.com --name <ma
 任务队列、runner pull、worktree 隔离与三种 adapter（codex/claude_code/hermes）已落地；
 runner 侧配置见 `deploy/agent-runner.yaml.example`（部署到 `~/.config/agent-fleet/runner.yaml`，不进 git）。
 按需读文件（`GET /api/tasks/<id>/files` 与 `/files/<path>`）已落地：Hub 只读结果时附带的有界快照，不反向连 runner。
-**本工作树已实现、LIVE 未 overlay（v4 初始）**：脱敏 patch、测试摘要、任务 pause/continue、人工确认闸、轮换 SOP、备份演练清单。发布仍走 Task 7 / 部署笔记 §0，不自动部署。计划见 `docs/superpowers/plans/2026-09-09-v4-initial-goal-completion.md`。
+**v4 初始目标代码已 overlay LIVE `da54e48`（2026-09-11）**：脱敏 patch、测试摘要、任务 pause/continue、人工确认闸、files API。2026-09-11 已对 LIVE 做 runner 轮换、备份真切回再切回、Phase 5 幂等 applied、Phase 4 拉取后原生 `resume_unverified`（recovered 席无 cwd/env/token/exe，拒 sibling）。计划见 `docs/superpowers/plans/2026-09-09-v4-initial-goal-completion.md`。
 
 详细对象、状态、接口和分阶段实现见
 [`docs/architecture-v4-control-plane.md`](architecture-v4-control-plane.md)。
@@ -300,6 +300,6 @@ deploy/package-frontend-release.sh /tmp/agent-fleet-frontend 99.0.0
 
 2026-09-07 产品决策：走路线 A（薄客户端 + 远程机器继续干活）。设计见
 [`docs/superpowers/specs/2026-09-07-thin-client-remote-control-design.md`](superpowers/specs/2026-09-07-thin-client-remote-control-design.md)。
-Phase 1–5 已接线：Fleet 会话条、机器页显式纳管/撤销、会话页对 adopted 座位发五动作、task↔session 可选深链（仅当已有 `attempt_id` 绑定，不造列）；热路径会话 I/O 透传。Phase 4 composer / Phase 5 本机 profile 切换已进枚举；代码缺省仍关。**2026-09-08 LIVE 已开** `AGENT_FLEET_APPEND_USER_TURN_ENABLED` / `AGENT_FLEET_APPLY_LOCAL_PROFILE_ENABLED`（诱导发签，本次未向座位下发控制命令）。节点 `append_user_turn` 无身份禁止 sibling spawn，有 cwd/env/token/exe 才 native `--resume`。Phase 5 只翻本机 `is_current`，不热切正在跑的进程。
+Phase 1–5 已接线：Fleet 会话条、机器页显式纳管/撤销、会话页对 adopted 座位发五动作、task↔session 可选深链（仅当已有 `attempt_id` 绑定，不造列）；热路径会话 I/O 透传。Phase 4 composer / Phase 5 本机 profile 切换已进枚举。**2026-09-08 LIVE 已开** gates；**2026-09-11 已向 mac-local adopted 座位实发** Phase 5（幂等 applied）与 Phase 4（节点 `resume_unverified`，recovered 席无 native identity，拒 sibling）。Phase 5 只翻本机 `is_current`，不热切正在跑的进程。
 
 *架构或部署变化必须同步更新本文件、`docs/architecture-v3.md`、适用的 v4 control-plane 文档，以及已批准的后续 spec。*

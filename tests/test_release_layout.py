@@ -393,6 +393,9 @@ class RuntimeStoreHygieneTests(unittest.TestCase):
             self.assertNotIn("__tmp", leaked)
             self.assertNotIn("credentials/", leaked)
             self.assertFalse(leaked.endswith(".pem") or leaked.endswith(".key"))
+            self.assertFalse(
+                leaked == "hosts.yaml" or leaked.endswith("/hosts.yaml"),
+                "example hosts.yaml must not ship in the CI artifact")
         # The hub's runtime ``state/`` observation tree must never ship;
         # ``frontend/state/`` (the DOM-agnostic store module) is tracked
         # frontend source and is the ONLY permitted ``/state/`` entry.
