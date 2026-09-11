@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -506,11 +507,51 @@ class AgentRunnerTests(unittest.TestCase):
         self.assertEqual(captured["ua"], "agent-fleet-runner/1.0")
 
     def test_post_json_network_error_returns_zero_status(self):
-        with mock.patch.object(self.runner.urllib.request, "urlopen",
+        with mock.patch.object(self.runner, "_HTTP_RETRY_SLEEP_S", 0), \
+             mock.patch.object(self.runner.urllib.request, "urlopen",
                                side_effect=OSError("network down")):
             status, data = self.runner.post_json(self.cfg, "/api/commands/poll", {})
         self.assertEqual(status, 0)
         self.assertIn("error", data)
+
+    def test_post_json_retries_timeout_then_succeeds(self):
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise TimeoutError("handshake")
+            return FakeResponse(200, {"ok": True})
+
+        with mock.patch.object(self.runner, "_HTTP_RETRY_SLEEP_S", 0), \
+             mock.patch.object(self.runner.urllib.request, "urlopen",
+                               side_effect=fake_urlopen):
+            status, data = self.runner.post_json(self.cfg, "/api/commands/poll", {})
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(status, 200)
+        self.assertTrue(data.get("ok"))
+
+    def test_post_json_does_not_retry_http_error(self):
+        calls = {"n": 0}
+
+        class _Fp:
+            def read(self):
+                return b'{"ok": false, "error": "forbidden"}'
+
+            def close(self):
+                return None
+
+        def fake_urlopen(req, timeout):
+            calls["n"] += 1
+            raise urllib.error.HTTPError(
+                "https://hub.test/api/commands/poll", 403, "Forbidden",
+                hdrs=None, fp=_Fp())
+
+        with mock.patch.object(self.runner.urllib.request, "urlopen",
+                               side_effect=fake_urlopen):
+            status, data = self.runner.post_json(self.cfg, "/api/commands/poll", {})
+        self.assertEqual(calls["n"], 1)
+        self.assertEqual(status, 403)
 
     def test_run_task_success_flow(self):
         posts = []
@@ -539,7 +580,8 @@ class AgentRunnerTests(unittest.TestCase):
             raise OSError("network down")
 
         fake_result = adapters.AdapterResult(exit_code=0, log_tail="done")
-        with mock.patch.object(self.runner.urllib.request, "urlopen",
+        with mock.patch.object(self.runner, "_HTTP_RETRY_SLEEP_S", 0), \
+             mock.patch.object(self.runner.urllib.request, "urlopen",
                                side_effect=fail_urlopen), \
              mock.patch.object(self.runner.adapters, "create",
                                return_value=mock.Mock(run=mock.Mock(return_value=fake_result))):
@@ -583,11 +625,12 @@ class AgentRunnerTests(unittest.TestCase):
             calls["n"] += 1
             raise OSError("network down")
 
-        with mock.patch.object(self.runner.urllib.request, "urlopen",
+        with mock.patch.object(self.runner, "_HTTP_RETRY_SLEEP_S", 0), \
+             mock.patch.object(self.runner.urllib.request, "urlopen",
                                side_effect=fail_urlopen):
             with self.assertRaises(self.runner.RunnerPollError):
                 self.runner.poll_once(self.cfg)
-        self.assertEqual(calls["n"], 1)  # flush_pending 无缓存，只 poll 一次
+        self.assertEqual(calls["n"], 3)
 
     def test_poll_network_failure_main_backoff_stays_5s_on_success(self):
         # 对照：一轮成功 poll（无任务）后 backoff 不会残留，仍从 MIN 起。
@@ -648,6 +691,7 @@ class AgentRunnerTests(unittest.TestCase):
 
         with mock.patch.object(self.runner.runner_config, "load_config",
                                return_value=self.cfg), \
+             mock.patch.object(self.runner, "_HTTP_ATTEMPTS", 1), \
              mock.patch.object(self.runner.urllib.request, "urlopen",
                                side_effect=fake_urlopen), \
              mock.patch.object(self.runner.time, "sleep", side_effect=lambda s: sleeps.append(s)):

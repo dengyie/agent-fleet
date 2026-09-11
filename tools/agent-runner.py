@@ -50,6 +50,12 @@ from tools import adapters, result_files, runner_config, worktree
 USER_AGENT = "agent-fleet-runner/1.0"
 MAX_BACKOFF_S = 60
 MIN_BACKOFF_S = 5
+#: Instant TLS/read timeouts (same class as ControlClient KeepAlive) retry
+#: a few times before the outer 5s→60s backoff. HTTP 4xx/5xx are not retried.
+_HTTP_ATTEMPTS = 3
+_HTTP_RETRY_SLEEP_S = 0.4
+_TRANSIENT_TRANSPORT = (TimeoutError, urllib.error.URLError, OSError,
+                        ConnectionError, BrokenPipeError)
 # heartbeat 日志上传约束：≤MAX_LOG_LINES 行 × ≤MAX_LOG_LINE_CHARS 字符（与 hub 一致）
 MAX_LOG_LINES = 50
 MAX_LOG_LINE_CHARS = 500
@@ -112,16 +118,24 @@ def post_json(cfg, path, body, timeout=15):
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, json.loads(resp.read().decode() or "{}")
-    except urllib.error.HTTPError as exc:
+    last_exc = None
+    for attempt in range(_HTTP_ATTEMPTS):
         try:
-            return exc.code, json.loads(exc.read().decode() or "{}")
-        except Exception:
-            return exc.code, {"error": "http_error"}
-    except Exception as exc:
-        return 0, {"error": f"{type(exc).__name__}: {exc}"}
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status, json.loads(resp.read().decode() or "{}")
+        except urllib.error.HTTPError as extra:
+            try:
+                return extra.code, json.loads(extra.read().decode() or "{}")
+            except Exception:
+                return extra.code, {"error": "http_error"}
+        except _TRANSIENT_TRANSPORT as extra:
+            last_exc = extra
+            if attempt + 1 < _HTTP_ATTEMPTS:
+                time.sleep(_HTTP_RETRY_SLEEP_S)
+            continue
+        except Exception as extra:
+            return 0, {"error": f"{type(extra).__name__}: {extra}"}
+    return 0, {"error": f"{type(last_exc).__name__}: {last_exc}"}
 
 
 def _pending_dir(cfg):

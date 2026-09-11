@@ -65,8 +65,10 @@ import sqlite3
 import struct
 import tempfile
 import unittest
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from session_schema import validate_event
 
@@ -309,6 +311,88 @@ class HubUnreachableTests(unittest.TestCase):
         self.assertEqual(result["error"], "poll_transport_error")
         # the degraded surface is exactly these keys — nothing else leaks.
         self.assertEqual(set(result), {"ok", "commands", "error"})
+
+    def test_http_transport_retries_transient_timeout_then_succeeds(self):
+        from tools.supervisor import control_client as cc
+        from tools.supervisor.control_client import ControlClient, NonceStore
+
+        class _Resp:
+            status = 200
+
+            def read(self):
+                return b'{"ok": true, "commands": []}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        calls = {"n": 0}
+
+        def fake_open(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise TimeoutError("handshake")
+            return _Resp()
+
+        with tempfile.TemporaryDirectory() as td:
+            client = ControlClient(
+                hub_url="https://weigh.invalid",
+                machine_id=MACHINE,
+                credential="operator-secret",
+                hub_public_key=b"\x00" * 32,
+                public_supervisor=None,
+                nonce_store=NonceStore(path=Path(td) / "used"),
+            )
+            fake_opener = mock.Mock()
+            fake_opener.open.side_effect = fake_open
+            with mock.patch.object(cc.urllib.request, "build_opener",
+                                   return_value=fake_opener):
+                with mock.patch.object(cc, "_HTTP_RETRY_SLEEP_S", 0):
+                    status, body = client._http_transport(
+                        "/api/supervisor/poll", None, client._headers())
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(status, 200)
+        self.assertTrue(body.get("ok"))
+
+    def test_http_transport_does_not_retry_http_error(self):
+        from tools.supervisor import control_client as cc
+        from tools.supervisor.control_client import ControlClient, NonceStore
+
+        class _Fp:
+            def read(self):
+                return b'{"ok": false, "error": "forbidden"}'
+
+            def close(self):
+                return None
+
+        calls = {"n": 0}
+
+        def fake_open(req, timeout=None):
+            calls["n"] += 1
+            raise urllib.error.HTTPError(
+                "https://weigh.invalid/api/supervisor/poll",
+                403, "Forbidden", hdrs=None, fp=_Fp())
+
+        with tempfile.TemporaryDirectory() as td:
+            client = ControlClient(
+                hub_url="https://weigh.invalid",
+                machine_id=MACHINE,
+                credential="operator-secret",
+                hub_public_key=b"\x00" * 32,
+                public_supervisor=None,
+                nonce_store=NonceStore(path=Path(td) / "used"),
+            )
+            fake_opener = mock.Mock()
+            fake_opener.open.side_effect = fake_open
+            with mock.patch.object(cc.urllib.request, "build_opener",
+                                   return_value=fake_opener):
+                status, body = client._http_transport(
+                    "/api/supervisor/poll", None, client._headers())
+        self.assertEqual(calls["n"], 1)
+        self.assertEqual(status, 403)
+        self.assertEqual(body.get("error"), "forbidden")
 
     def test_hub_serves_terminate_and_durable_receipt(self):
         svc = SupervisorService(signing_key=_keypair()[0])

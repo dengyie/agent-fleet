@@ -46,6 +46,15 @@ from typing import Any, Callable, Mapping
 
 USER_AGENT = "agent-fleet-control-client/1.0"
 
+#: KeepAlive loops used to surface ``poll_transport_error`` on a single
+#: TLS handshake timeout (same class as the task-runner SSL timeout).
+#: HTTP 4xx/5xx are still returned, never retried.
+_HTTP_TIMEOUT_S = 10.0
+_HTTP_ATTEMPTS = 3
+_HTTP_RETRY_SLEEP_S = 0.4
+_TRANSIENT_TRANSPORT = (TimeoutError, urllib.error.URLError, OSError,
+                        ConnectionError, BrokenPipeError)
+
 from hub.domain import control as ctrl
 
 #: The only actions the client may dispatch — mirror of both the Hub's fixed
@@ -653,18 +662,31 @@ class ControlClient:
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(
             url, data=data, headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                raw = resp.read().decode("utf-8")
-                payload = json.loads(raw) if raw else {}
-                return int(resp.status), payload
-        except urllib.error.HTTPError as exc:
+        last_exc: Exception | None = None
+        for attempt in range(_HTTP_ATTEMPTS):
             try:
-                raw = exc.read().decode("utf-8")
-                payload = json.loads(raw) if raw else {}
-            except Exception:
-                payload = {}
-            return int(exc.code), payload if isinstance(payload, dict) else {}
+                # Fresh opener per attempt: a KeepAlive loop that reused the
+                # global urlopen pool surfaced ``poll_transport_error`` after a
+                # TLS handshake timeout, while a new ``--once`` process still
+                # got 200.
+                opener = urllib.request.build_opener()
+                with opener.open(req, timeout=_HTTP_TIMEOUT_S) as resp:
+                    raw = resp.read().decode("utf-8")
+                    payload = json.loads(raw) if raw else {}
+                    return int(resp.status), payload
+            except urllib.error.HTTPError as exc:
+                try:
+                    raw = exc.read().decode("utf-8")
+                    payload = json.loads(raw) if raw else {}
+                except Exception:
+                    payload = {}
+                return int(exc.code), payload if isinstance(payload, dict) else {}
+            except _TRANSIENT_TRANSPORT as exc:
+                last_exc = exc
+                if attempt + 1 < _HTTP_ATTEMPTS:
+                    time.sleep(_HTTP_RETRY_SLEEP_S)
+                continue
+        raise last_exc if last_exc is not None else OSError("poll_transport_error")
 
 
 def _now() -> float:
