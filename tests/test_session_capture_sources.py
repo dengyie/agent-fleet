@@ -93,6 +93,18 @@ class NativeJsonlByteOffsetTests(unittest.TestCase):
         # the byte offset is at the end of the file (all consumed)
         self.assertEqual(tailer.offset, path.stat().st_size)
 
+    def test_missing_checkpoint_starts_at_eof_not_replay(self):
+        path = self._path()
+        self._write_lines(path, ['{"n": 1}', '{"n": 2}', '{"n": 3}'])
+        cp = self.dir / "cp.json"
+        self.assertFalse(cp.exists())
+        tailer = native_jsonl.tailer(str(path), checkpoint_path=str(cp))
+        self.assertEqual(tailer.offset, path.stat().st_size)
+        self.assertEqual(tailer.read(), [])
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write('{"n": 4}\n')
+        self.assertEqual([e["n"] for e in tailer.read()], [4])
+
     def test_restart_with_checkpoint_does_not_replay(self):
         path = self._path()
         self._write_lines(path, ['{"n": 1}', '{"n": 2}'])
