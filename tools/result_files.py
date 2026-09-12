@@ -13,7 +13,7 @@ Rules (fail closed):
 - symlink / NUL / non-UTF8 skipped at collection time;
 - per-file byte + line caps, per-result file-count cap;
 - content redacted with the session redactor (passthrough off);
-- operator read is rate-limited by the Hub service (see ``MAX_READS_PER_WINDOW``).
+- operator read is rate-limited by the Hub service (see ``MAX_BYTES_PER_WINDOW``).
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ MAX_FILE_BYTES = 16384
 MAX_FILE_LINES = 400
 MAX_DEPTH = 4
 MAX_NAME = 64
-MAX_READS_PER_WINDOW = 20
+MAX_BYTES_PER_WINDOW = 1048576  # 1MB
 READ_WINDOW_S = 60.0
 MAX_DIFF_PATCH = 102400
 TEST_SUMMARY_KEYS = (
@@ -310,7 +310,7 @@ __all__ = [
     "MAX_FILE_BYTES",
     "MAX_FILE_LINES",
     "MAX_FILES",
-    "MAX_READS_PER_WINDOW",
+    "MAX_BYTES_PER_WINDOW",
     "PathRejected",
     "READ_WINDOW_S",
     "bound_content",

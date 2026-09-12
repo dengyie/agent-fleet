@@ -19,7 +19,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         echo "use a clone of the public orphan snapshot instead" >&2
         exit 1
     fi
-    if git grep -I -n -e 'agent.mangoqwq.com' -e '/home/mango' "$local_sha" -- ':!tests/' ':!.superpowers/' >/dev/null 2>&1; then
+    if git grep -I -n -e 'agent.mangoqwq.com' -e '/home/mango' "$local_sha" -- ':!tests/' ':!.superpowers/' ':!.githooks/' >/dev/null 2>&1; then
         echo "refusing to push $local_ref: tree still contains production identity" >&2
         exit 1
     fi

@@ -286,23 +286,38 @@ class TaskFileApiTests(unittest.TestCase):
 
     def test_read_is_rate_limited_and_audited(self):
         task, leased = self._create_and_lease()
-        self._complete_with_files(leased, [
-            {"path": "a.py", "content": "x = 1\n"},
-        ])
-        path = f"/api/tasks/{task['task_id']}/files/a.py"
-        last = None
-        for _ in range(result_files.MAX_READS_PER_WINDOW + 2):
-            last = self.client.get(path)
-        self.assertEqual(last.status_code, 429)
-        self.assertEqual(last.get_json()["error"], "rate_limited")
-        conn = task_store._connect()
-        try:
-            rows = conn.execute(
-                "SELECT action FROM audit WHERE task_id=? AND action=?",
-                (task["task_id"], "read_task_file")).fetchall()
-        finally:
-            conn.close()
-        self.assertGreaterEqual(len(rows), 1)
+        # MAX_FILES = 16, so we can only attach 16 files max
+        # Create files that will exceed 1MB rate limit when read sequentially
+        # Each file is MAX_FILE_BYTES - 100 = ~16KB
+        # Need to read enough to exceed 1MB: 1MB / 16KB = ~64 reads
+        # But we can only create 16 files, so we read each file multiple times
+        small_content = "x" * (result_files.MAX_FILE_BYTES - 100)
+        files = [{"path": f"file{i}.txt", "content": small_content}
+                 for i in range(16)]
+        self._complete_with_files(leased, files)
+
+        # Read files repeatedly until rate limit is hit
+        # Need 64+ reads to exceed 1MB (16 files * 4 times = 64 reads)
+        last_status = None
+        for round in range(5):
+            for i in range(16):
+                path = f"/api/tasks/{task['task_id']}/files/file{i}.txt"
+                resp = self.client.get(path)
+                last_status = resp.status_code
+                if resp.status_code == 429:
+                    self.assertEqual(resp.get_json()["error"], "rate_limited")
+                    # Verify audit trail
+                    conn = task_store._connect()
+                    try:
+                        rows = conn.execute(
+                            "SELECT action FROM audit WHERE task_id=? AND action=?",
+                            (task["task_id"], "read_task_file")).fetchall()
+                    finally:
+                        conn.close()
+                    self.assertGreaterEqual(len(rows), 1)
+                    return
+
+        self.fail(f"Should hit rate limit, last status: {last_status}")
 
     def test_idempotent_result_does_not_replace_files(self):
         task, leased = self._create_and_lease()
