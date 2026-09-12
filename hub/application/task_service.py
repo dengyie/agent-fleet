@@ -32,7 +32,7 @@ from hub.domain.task import (
 )
 from session_schema import is_valid_session_id
 from tools.result_files import (
-    MAX_READS_PER_WINDOW,
+    MAX_BYTES_PER_WINDOW,
     PathRejected,
     READ_WINDOW_S,
     normalize_path,
@@ -104,7 +104,7 @@ class TaskService:
         # Optional Phase 3 projection only. None = omit session_id (byte-identical
         # to the pre-Phase-3 public task DTO). Never creates bindings.
         self.session_repo = session_repo
-        self._file_reads: dict[str, list[float]] = {}
+        self._file_bytes: dict[str, list[tuple[float, int]]] = {}
         self._file_read_lock = threading.Lock()
 
     # -- helpers ------------------------------------------------------------
@@ -117,7 +117,7 @@ class TaskService:
     def _emit(self, event: str, machine=None, task_id=None, state=None) -> None:
         try:
             self.publisher.emit(event, machine=machine, task_id=task_id, state=state)
-        except Exception:
+        except (TypeError, ValueError, RuntimeError):
             pass
 
     def _task_op(self, fn, *args, **kwargs):
@@ -210,29 +210,30 @@ class TaskService:
         task = self._task_op(self.task_repo.get_task, task_id)
         if not task:
             raise ApplicationError("not_found", "任务不存在", 404)
-        self._enforce_file_rate(actor or "operator")
         row = self._task_op(self.task_repo.get_result_file, task_id, path)
         if not row:
             raise ApplicationError("not_found", "文件不存在", 404)
+        self._enforce_file_rate(actor or "operator", int(row.get("bytes") or 0))
         try:
             self.task_repo.audit_action(
                 actor or "operator", "read_task_file", task_id,
                 {"path": path, "bytes": int(row.get("bytes") or 0)})
-        except Exception:
+        except (TypeError, ValueError, RuntimeError):
             logger.debug("read_task_file audit skipped", exc_info=True)
         return {"ok": True, **public_file(row)}
 
-    def _enforce_file_rate(self, actor: str) -> None:
+    def _enforce_file_rate(self, actor: str, file_bytes: int) -> None:
         now = time.time()
         key = str(actor or "operator")[:128]
         with self._file_read_lock:
-            stamps = [ts for ts in self._file_reads.get(key, [])
+            entries = [(ts, sz) for ts, sz in self._file_bytes.get(key, [])
                       if now - ts < READ_WINDOW_S]
-            if len(stamps) >= MAX_READS_PER_WINDOW:
-                self._file_reads[key] = stamps
-                raise ApplicationError("rate_limited", "读取过频，请稍后重试", 429)
-            stamps.append(now)
-            self._file_reads[key] = stamps
+            total_bytes = sum(sz for _, sz in entries)
+            if total_bytes + file_bytes > MAX_BYTES_PER_WINDOW:
+                self._file_bytes[key] = entries
+                raise ApplicationError("rate_limited", "读取流量超限，请稍后重试", 429)
+            entries.append((now, file_bytes))
+            self._file_bytes[key] = entries
 
     # -- lifecycle mutations --------------------------------------------------
 
@@ -259,7 +260,7 @@ class TaskService:
                         attempt_id=row.get("attempt_id") or "",
                         operator=actor,
                         reason_code="operator_requested")
-                except Exception:
+                except (TypeError, ValueError, RuntimeError):
                     # The router records its own bounded audit; the committed
                     # cancel transition is never rolled back or re-driven here.
                     logger.debug("cancel control enqueue skipped", exc_info=True)
@@ -323,7 +324,7 @@ class TaskService:
             self.task_repo.audit_action(
                 actor or "operator", "read_task_diff", task_id,
                 {"bytes": len(body.encode("utf-8"))})
-        except Exception:
+        except (TypeError, ValueError, RuntimeError):
             logger.debug("read_task_diff audit skipped", exc_info=True)
         return {
             "ok": True,
@@ -397,7 +398,7 @@ class TaskService:
             try:
                 rows = self.session_repo.list_sessions(
                     machine_id=machine, limit=_SESSION_SCAN)
-            except Exception:
+            except (TypeError, ValueError, RuntimeError):
                 continue
             if not isinstance(rows, list):
                 continue
