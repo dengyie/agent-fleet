@@ -669,7 +669,11 @@ class ControlClient:
                 # global urlopen pool surfaced ``poll_transport_error`` after a
                 # TLS handshake timeout, while a new ``--once`` process still
                 # got 200.
-                opener = urllib.request.build_opener()
+                # Empty ProxyHandler: macOS urllib honors scutil HTTP(S)Proxy
+                # (Clash :7897) even with no env vars. KeepAlive then blocks
+                # on a tunneled TLS handshake and never polls again.
+                opener = urllib.request.build_opener(
+                    urllib.request.ProxyHandler({}))
                 with opener.open(req, timeout=_HTTP_TIMEOUT_S) as resp:
                     raw = resp.read().decode("utf-8")
                     payload = json.loads(raw) if raw else {}

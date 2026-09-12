@@ -121,6 +121,8 @@ def post_json(cfg, path, body, timeout=15):
     last_exc = None
     for attempt in range(_HTTP_ATTEMPTS):
         try:
+            urllib.request.install_opener(
+                urllib.request.build_opener(urllib.request.ProxyHandler({})))
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.status, json.loads(resp.read().decode() or "{}")
         except urllib.error.HTTPError as extra:

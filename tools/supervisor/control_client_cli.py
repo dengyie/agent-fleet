@@ -120,6 +120,8 @@ def _make_session_events_post(hub_url: str, ingest_token: str):
             method="POST",
         )
         try:
+            urllib.request.install_opener(
+                urllib.request.build_opener(urllib.request.ProxyHandler({})))
             with urllib.request.urlopen(req, timeout=30) as resp:
                 raw = resp.read().decode("utf-8")
                 return json.loads(raw) if raw else {}
