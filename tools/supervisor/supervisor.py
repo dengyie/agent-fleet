@@ -1370,9 +1370,13 @@ def _live_process_cwd(pid: int) -> str | None:
             return path
     except OSError:
         pass
+    lsof = next((p for p in ("/usr/sbin/lsof", "/usr/bin/lsof", "/bin/lsof")
+                 if os.path.isfile(p)), None)
+    if lsof is None:
+        return None
     try:
         completed = subprocess.run(
-            ["lsof", "-a", "-p", str(pid_i), "-d", "cwd", "-Fn"],
+            [lsof, "-a", "-p", str(pid_i), "-d", "cwd", "-Fn"],
             capture_output=True, text=True, timeout=2,
             stdin=subprocess.DEVNULL, check=False,
         )

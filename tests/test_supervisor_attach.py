@@ -457,6 +457,18 @@ class AttachTests(unittest.TestCase):
         self.assertNotIn("--resume", resume["argv"])
         self.assertNotIn("--ephemeral", resume["argv"])
 
+    def test_live_process_cwd_finds_lsof_when_path_has_no_sbin(self):
+        lsof = mock.Mock(returncode=0, stdout="p123\nfcwd\nn/Users/mango\n")
+        with mock.patch.object(os, "readlink", side_effect=OSError("no /proc")), \
+             mock.patch.dict(os.environ, {"PATH": "/bin"}, clear=False), \
+             mock.patch.object(sup_mod.os.path, "isdir", return_value=True), \
+             mock.patch.object(sup_mod.subprocess, "run", return_value=lsof) as run:
+            cwd = sup_mod._live_process_cwd(123)
+        self.assertEqual(cwd, "/Users/mango")
+        argv = run.call_args[0][0]
+        self.assertTrue(os.path.isabs(argv[0]))
+        self.assertTrue(argv[0].endswith("/lsof"))
+
 
 class AttachSessionIdTests(unittest.TestCase):
     def test_empty_session_id_gets_opaque_adopt_key(self):
