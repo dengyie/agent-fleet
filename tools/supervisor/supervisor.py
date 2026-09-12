@@ -666,14 +666,27 @@ class Supervisor:
         # the default reader (`self._default_attach_probe`).
         # Native path/token/exe stay on the private entry (never the manifest)
         # so a later native resume does not have to re-read the live process.
+        family = str(agent_family)[:32]
+        token = _resume_token_from_native_path(native_file_path)
+        if family == "pi" and isinstance(native_file_path, str) and native_file_path:
+            # pi --resume is an interactive picker. Deterministic follow-up
+            # uses --session <path>.
+            token = native_file_path
+        live_cwd = _live_process_cwd(pid_int)
+        live_env = _bounded_spawn_env({})
         entry = _ManagedEntry(
             manifest, handle,
             probe if probe is not None else None,
+            cwd=live_cwd,
+            env=live_env,
             native_file_path=native_file_path,
-            resume_token=_resume_token_from_native_path(native_file_path),
+            resume_token=token,
             exe_path=str(exe_path) if exe_path else None,
         )
         _stamp_private_identity(handle, entry)
+        if (isinstance(native_file_path, str) and native_file_path
+                and family in ("codex", "claude_code", "pi")):
+            manifest.capability_manifest = {"resume": True}
         self._entries[sid] = entry
         self._persist(manifest)
         return "adopted"
@@ -913,7 +926,9 @@ class Supervisor:
 
         An explicit ``capability_manifest['resume']`` wins.  Otherwise a
         verifiable family (codex / claude_code) may be probed from the
-        attached exe; pi / Hermes / missing exe stay False.
+        attached exe; Hermes / missing exe stay False.  ``pi`` is claimed
+        only when attach already stamped a native session file (see
+        ``attach_to_existing``).
         """
         caps = getattr(m, "capability_manifest", None)
         if not isinstance(caps, Mapping):
@@ -1337,6 +1352,41 @@ _SAFE_ENV_KEYS = (
 )
 
 
+def _live_process_cwd(pid: int) -> str | None:
+    """Best-effort live cwd for an attached pid.  Never opens files.
+
+    Linux uses ``/proc/<pid>/cwd``; macOS falls back to ``lsof -Fn``.
+    ``/tmp`` is not resume identity.  Fail closed on any error.
+    """
+    try:
+        pid_i = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid_i <= 0:
+        return None
+    try:
+        path = os.readlink(f"/proc/{pid_i}/cwd")
+        if isinstance(path, str) and path and path != "/tmp" and os.path.isdir(path):
+            return path
+    except OSError:
+        pass
+    try:
+        completed = subprocess.run(
+            ["lsof", "-a", "-p", str(pid_i), "-d", "cwd", "-Fn"],
+            capture_output=True, text=True, timeout=2,
+            stdin=subprocess.DEVNULL, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in (completed.stdout or "").splitlines():
+        if not line.startswith("n"):
+            continue
+        path = line[1:].strip()
+        if path and path != "/tmp" and os.path.isdir(path):
+            return path
+    return None
+
+
 def _bounded_spawn_env(env):
     """Return the exact allowlist, or a bounded base env when empty."""
     if env:
@@ -1468,8 +1518,11 @@ def _native_resume_argv(family: str, exe: str, token: str, text: str) -> list[st
         return []
     if family == "codex":
         argv = [exe, "exec", "--resume", token, text]
-    elif family in ("claude_code", "pi"):
+    elif family == "claude_code":
         argv = [exe, "--resume", token, text]
+    elif family == "pi":
+        # --resume is an interactive picker; --session takes path or id.
+        argv = [exe, "--session", token, text]
     else:
         return []
     if any(flag in argv for flag in _RESUME_FORBIDDEN_FLAGS):

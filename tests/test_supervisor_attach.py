@@ -29,6 +29,7 @@ import signal
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tools.supervisor import supervisor as sup_mod
 
@@ -405,6 +406,56 @@ class AttachTests(unittest.TestCase):
         self.assertIn("adoptTok", resume["argv"])
         self.assertNotIn("--ephemeral", resume["argv"])
         self.assertEqual(handle.signals, [])
+
+    def test_attach_stamps_live_cwd_and_bounded_env_privately(self):
+        native = self.dir / "2026-09-06T19-20-24-489Z_01a0782a-2aa9-75a7-a47b-4d3e0b7225a5.jsonl"
+        native.write_text("{}")
+        os.chmod(native, 0o600)
+
+        def fake_cwd(pid):
+            self.assertEqual(int(pid), int(self.proc.pid))
+            return "/Users/mango"
+
+        with mock.patch.object(
+                sup_mod, "_live_process_cwd", side_effect=fake_cwd):
+            self.assertEqual(
+                self._attach(native_file_path=str(native),
+                             agent_family="pi"),
+                "adopted")
+        entry = self.sup._entries[self.sid]
+        handle = self.sup._handle_of(self.sid)
+        self.assertEqual(entry.cwd, "/Users/mango")
+        self.assertEqual(getattr(handle, "cwd", None), "/Users/mango")
+        self.assertIsInstance(entry.env, dict)
+        self.assertTrue(entry.env)
+        self.assertNotEqual(entry.cwd, "/tmp")
+        public = json.dumps(self.sup.status(self.sid))
+        raw = (self.dir / "sup" / f"{self.sid}.json").read_text()
+        self.assertNotIn("/Users/mango", public)
+        self.assertNotIn("/Users/mango", raw)
+
+    def test_pi_attached_native_resume_appends_via_session_file(self):
+        native = self.dir / "2026-09-06T19-20-24-489Z_01a0782a-2aa9-75a7-a47b-4d3e0b7225a5.jsonl"
+        native.write_text("{}")
+        os.chmod(native, 0o600)
+        with mock.patch.object(
+                sup_mod, "_live_process_cwd", return_value="/Users/mango"):
+            self.assertEqual(
+                self._attach(native_file_path=str(native),
+                             agent_family="pi"),
+                "adopted")
+        before = list(self.ops.create_calls)
+        outcome = self.sup.append_user_turn(self.sid, "phase4 ping")
+        self.assertEqual(outcome, "appended")
+        self.assertEqual(len(self.ops.create_calls), len(before) + 1)
+        resume = self.ops.create_calls[-1]
+        self.assertEqual(resume["cwd"], "/Users/mango")
+        self.assertNotEqual(resume["cwd"], "/tmp")
+        self.assertIn("--session", resume["argv"])
+        self.assertIn(str(native), resume["argv"])
+        self.assertIn("phase4 ping", resume["argv"])
+        self.assertNotIn("--resume", resume["argv"])
+        self.assertNotIn("--ephemeral", resume["argv"])
 
 
 class AttachSessionIdTests(unittest.TestCase):
