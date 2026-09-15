@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Callable
@@ -67,7 +68,7 @@ class Transport:
         self._timeout = float(timeout)
         self._attempts = max(1, int(attempts))
         self._retry_sleep_s = float(retry_sleep_s)
-        self._sleeper: Callable[[float], None] = lambda s: None
+        self._sleeper: Callable[[float], None] = time.sleep
         #: sticky: None=未定向; "direct"/"proxy"=上次成功路径（仅 auto 模式使用）
         self._preferred: str | None = None
 
@@ -82,7 +83,8 @@ class Transport:
 
     # -- 单路径一轮 --------------------------------------------------------
 
-    def _one(self, req: urllib.request.Request, use_proxy: bool):
+    def _one(self, req: urllib.request.Request, use_proxy: bool,
+             timeout: float):
         """单路径一次尝试。返回 (status, payload)；CF 拦截外型抛 _CFBlock。
 
         沿用 install_opener + 模块级 urlopen 的旧模式（128a52c 语义）：
@@ -90,7 +92,7 @@ class Transport:
         """
         try:
             urllib.request.install_opener(self._opener(use_proxy))
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read().decode("utf-8") if resp.read else ""
                 payload = json.loads(raw) if raw else {}
                 if not isinstance(payload, dict):
@@ -113,7 +115,7 @@ class Transport:
 
     # -- 多跳调度 -----------------------------------------------------------
 
-    def _post(self, req: urllib.request.Request):
+    def _post(self, req: urllib.request.Request, timeout: float):
         """按模式调度路径；auto 模式下 CF 拦截/传输失败可在两路径间切换。
 
         返回 (status, payload, last_error_str)。status=0 表示两路径均传输失败。
@@ -130,7 +132,7 @@ class Transport:
             use_proxy = path == "proxy"
             for attempt in range(self._attempts):
                 try:
-                    status, payload = self._one(req, use_proxy)
+                    status, payload = self._one(req, use_proxy, timeout)
                     if self._mode == "auto":
                         self._preferred = path
                     return status, payload, ""
@@ -155,18 +157,12 @@ class Transport:
         """POST JSON（body=None 时无请求体）。返回 (status, payload)。
 
         网络层完全失败返回 (0, {"error": ...})；hub 业务 4xx/5xx 原样透传。
+        timeout 作为参数透传到每次尝试——不落实例状态（调用方可能跨线程复用）。
         """
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, headers=headers,
                                      method="POST")
-        if timeout is not None and timeout != self._timeout:
-            saved = self._timeout
-            self._timeout = float(timeout)
-            try:
-                return self._post(req)[:2]
-            finally:
-                self._timeout = saved
-        status, payload, _ = self._post(req)
+        status, payload, _ = self._post(req, float(timeout or self._timeout))
         return status, payload
 
 

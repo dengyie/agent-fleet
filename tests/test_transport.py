@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import time
 import unittest
 import urllib.error
 from unittest import mock
@@ -277,13 +278,103 @@ class ValidationTests(unittest.TestCase):
 
 
 class CFBlockSignalTests(unittest.TestCase):
-    def test_cf_block_exception_carries_status(self):
-        exc = _http_error(403, b"error code: 1010\n")
-        with self.assertRaises(_CFBlock):
-            body = exc.read()
-            if not transport_mod._is_cf_block(exc.code, body):
-                raise AssertionError("should match")
-            raise _CFBlock(str(exc.code))
+    def test_cf_block_via_real_dispatch_path(self):
+        """403+1010 经 _post 真实调度路径识别（非手动 raise 的同义反复）。"""
+        t = _make()
+        openers = _FakeOpeners(
+            direct_open=lambda req, timeout: (_ for _ in ()).throw(
+                _http_error(403, b"error code: 1010\n")),
+            proxy_open=lambda req, timeout: (_ for _ in ()).throw(
+                _http_error(403, b"error code: 1010\n")),
+        )
+        openers.install(t, _MODULE_PATCHER)
+        status, payload = t.post_json(
+            "https://hub.test/api/supervisor/poll", None, {})
+        # 两路径都被 CF 拦截 → 不重试打满，直接 status=0 + cf_blocked
+        self.assertEqual(status, 0)
+        self.assertEqual(payload["error"], "cf_blocked")
+        self.assertEqual(openers.direct_calls, 1)
+        self.assertEqual(openers.proxy_calls, 1)
+
+    def test_default_sleeper_is_time_sleep(self):
+        """防回退：生产默认构造必须绑真实 sleep（重试节奏存在）。"""
+        t = Transport(mode="auto")
+        self.assertIs(t._sleeper, time.sleep)
+
+
+class TimeoutOverrideTests(unittest.TestCase):
+    """post_json(timeout=) 必须参数透传，不改实例状态（跨线程安全）。"""
+
+    def test_timeout_kwarg_reaches_attempt_without_mutating_instance(self):
+        t = _make()
+        seen = []
+        openers = _FakeOpeners(
+            direct_open=lambda req, timeout: (seen.append(timeout),
+                                              _Resp(200, {"ok": True}))[1],
+            proxy_open=lambda req, timeout: _Resp(200, {"ok": True}),
+        )
+        openers.install(t, _MODULE_PATCHER)
+        status, _ = t.post_json(
+            "https://hub.test/api/poll", None, {}, timeout=30)
+        self.assertEqual(status, 200)
+        self.assertEqual(seen, [30])
+        self.assertEqual(t._timeout, _make()._timeout)  # 实例态未被污染
+
+    def test_timeout_default_uses_instance_value(self):
+        t = _make(timeout=7)
+        seen = []
+        openers = _FakeOpeners(
+            direct_open=lambda req, timeout: (seen.append(timeout),
+                                              _Resp(200, {"ok": True}))[1],
+            proxy_open=lambda req, timeout: _Resp(200, {"ok": True}),
+        )
+        openers.install(t, _MODULE_PATCHER)
+        t.post_json("https://hub.test/api/poll", None, {})
+        self.assertEqual(seen, [7])
+
+
+class Hub5xxPassthroughTests(unittest.TestCase):
+    """hub 业务 5xx JSON（非 CF 外型）必须原样透传，绝不触发路径回退。"""
+
+    def test_503_json_not_retried_across_paths(self):
+        t = _make()
+        openers = _FakeOpeners(
+            direct_open=lambda req, timeout: (_ for _ in ()).throw(
+                _http_error(503, b'{"error": "unavailable"}')),
+            proxy_open=lambda req, timeout: _Resp(200, {"ok": True}),
+        )
+        openers.install(t, _MODULE_PATCHER)
+        status, payload = t.post_json(
+            "https://hub.test/api/supervisor/poll", None, {})
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["error"], "unavailable")
+        self.assertEqual(openers.proxy_calls, 0)  # 不回退
+
+
+class OpenerProxyHandlerTests(unittest.TestCase):
+    """_opener(use_proxy=True) 安装的 handler 必须携带系统代理。"""
+
+    def test_proxy_opener_uses_getproxies(self):
+        t = Transport(mode="auto")
+        with mock.patch.object(transport_mod.urllib.request, "getproxies",
+                               return_value={"https": "http://127.0.0.1:7897"},
+                               create=True):
+            opener = t._opener(use_proxy=True)
+        handlers = [h for h in opener.handlers
+                    if isinstance(h, urllib.request.ProxyHandler)]
+        self.assertEqual(len(handlers), 1)
+        self.assertEqual(handlers[0].proxies.get("https"),
+                         "http://127.0.0.1:7897")
+
+    def test_direct_opener_has_empty_proxies(self):
+        # urllib.build_opener 会丢弃空 proxies 的 ProxyHandler（无代理可设），
+        # 因此「直连」的正确断言是：不出现任何带代理值的 ProxyHandler。
+        t = Transport(mode="auto")
+        opener = t._opener(use_proxy=False)
+        handlers = [h for h in opener.handlers
+                    if isinstance(h, urllib.request.ProxyHandler)]
+        empty = all(not h.proxies for h in handlers)
+        self.assertTrue(empty)
 
 
 if __name__ == "__main__":

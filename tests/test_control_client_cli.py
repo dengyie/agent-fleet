@@ -23,6 +23,8 @@ from pathlib import Path
 from unittest import mock
 
 from tools import runner_config
+from tools import transport as transport_mod
+from tools.transport import Transport
 from tools.supervisor import control_client_cli as cli
 
 
@@ -76,6 +78,47 @@ class SessionEventsTransportTests(unittest.TestCase):
         # header names are canonicalized by urllib
         header_vals = {k.lower(): v for k, v in captured["headers"].items()}
         self.assertEqual(header_vals.get("x-agent-fleet-token"), "ingest-secret")
+
+    def test_transport_failure_returns_empty_mapping(self):
+        """传输完全失败（transport status=0）→ 空 Mapping（uploader 重试 sentinel）。"""
+        post = cli._make_session_events_post(
+            "https://agent.example.com", "ingest-secret")
+        with mock.patch.object(cli, "_OutboundTransport", Transport), \
+             mock.patch.object(transport_mod.urllib.request, "urlopen",
+                               side_effect=OSError("cf blocked both paths")), \
+             mock.patch.object(transport_mod.urllib.request, "getproxies",
+                               return_value={}, create=True):
+            result = post({"events": [{"kind": "user_message", "sequence": 1}]})
+        self.assertEqual(result, {})
+
+    def test_cf_block_falls_back_to_proxy_and_posts_list(self):
+        """直连被 CF 拦截 → 走代理路径仍以 JSON list 送达。"""
+        captured = {}
+
+        class _Resp:
+            def read(self):
+                return json.dumps({"ok": True, "accepted_through": 1}).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(req, timeout):
+            captured["body"] = json.loads(req.data.decode())
+            return _Resp()
+
+        post = cli._make_session_events_post(
+            "https://agent.example.com", "ingest-secret")
+        with mock.patch.object(cli, "_OutboundTransport", Transport), \
+             mock.patch.object(transport_mod.urllib.request, "urlopen",
+                               fake_urlopen), \
+             mock.patch.object(transport_mod.urllib.request, "getproxies",
+                               return_value={}, create=True):
+            result = post({"events": [{"kind": "user_message", "sequence": 1}]})
+        self.assertTrue(result["ok"])
+        self.assertIsInstance(captured["body"], list)
 
 
 class BridgeFactoryTests(unittest.TestCase):

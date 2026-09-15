@@ -126,6 +126,8 @@ def _make_session_events_post(hub_url: str, ingest_token: str):
         )
         # uploader 合同（tools/session/uploader.py）：返回响应 Mapping；
         # 传输失败（status=0）返回空 Mapping（记录重试 sentinel）。
+        if status == 0:
+            return {}
         return body if isinstance(body, dict) else {}
 
     return post_json

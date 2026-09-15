@@ -508,8 +508,9 @@ class AgentRunnerTests(unittest.TestCase):
         self.assertEqual(captured["ua"], "agent-fleet-runner/1.0")
 
     def test_post_json_network_error_returns_zero_status(self):
-        with mock.patch.object(self.runner, "_HTTP_RETRY_SLEEP_S", 0), \
-             mock.patch.object(self.runner.urllib.request, "urlopen",
+        self.cfg.transport = transport_mod.Transport(
+            mode="direct", attempts=3, retry_sleep_s=0)
+        with mock.patch.object(self.runner.urllib.request, "urlopen",
                                side_effect=OSError("network down")):
             status, data = self.runner.post_json(self.cfg, "/api/commands/poll", {})
         self.assertEqual(status, 0)
@@ -524,8 +525,9 @@ class AgentRunnerTests(unittest.TestCase):
                 raise TimeoutError("handshake")
             return FakeResponse(200, {"ok": True})
 
-        with mock.patch.object(self.runner, "_HTTP_RETRY_SLEEP_S", 0), \
-             mock.patch.object(self.runner.urllib.request, "urlopen",
+        self.cfg.transport = transport_mod.Transport(
+            mode="direct", attempts=3, retry_sleep_s=0)
+        with mock.patch.object(self.runner.urllib.request, "urlopen",
                                side_effect=fake_urlopen):
             status, data = self.runner.post_json(self.cfg, "/api/commands/poll", {})
         self.assertEqual(calls["n"], 2)
@@ -581,8 +583,9 @@ class AgentRunnerTests(unittest.TestCase):
             raise OSError("network down")
 
         fake_result = adapters.AdapterResult(exit_code=0, log_tail="done")
-        with mock.patch.object(self.runner, "_HTTP_RETRY_SLEEP_S", 0), \
-             mock.patch.object(self.runner.urllib.request, "urlopen",
+        self.cfg.transport = transport_mod.Transport(
+            mode="direct", attempts=3, retry_sleep_s=0)
+        with mock.patch.object(self.runner.urllib.request, "urlopen",
                                side_effect=fail_urlopen), \
              mock.patch.object(self.runner.adapters, "create",
                                return_value=mock.Mock(run=mock.Mock(return_value=fake_result))):
