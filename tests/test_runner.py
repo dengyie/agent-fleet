@@ -14,6 +14,7 @@ from unittest import mock
 from tools import adapters
 from tools import runner_config
 from tools import worktree
+from tools import transport as transport_mod
 
 
 def load_agent_runner():
@@ -619,14 +620,17 @@ class AgentRunnerTests(unittest.TestCase):
     def test_poll_once_raises_on_poll_network_failure(self):
         # 网络失败（post_json status 0）须抛 RunnerPollError，由 main 转退避；
         # 不得静默返回 False（那会同等于空 poll 并重置 backoff）。
+        # 2026-09-15 起出站走 proxy-aware Transport（auto 模式直连失败回退
+        # 系统代理）；本测试钉 direct 单路径保持原 3 次重试语义。
         calls = {"n": 0}
 
         def fail_urlopen(req, timeout):
             calls["n"] += 1
             raise OSError("network down")
 
-        with mock.patch.object(self.runner, "_HTTP_RETRY_SLEEP_S", 0), \
-             mock.patch.object(self.runner.urllib.request, "urlopen",
+        self.cfg.transport = transport_mod.Transport(
+            mode="direct", attempts=3, retry_sleep_s=0)
+        with mock.patch.object(self.runner.urllib.request, "urlopen",
                                side_effect=fail_urlopen):
             with self.assertRaises(self.runner.RunnerPollError):
                 self.runner.poll_once(self.cfg)
@@ -679,6 +683,8 @@ class AgentRunnerTests(unittest.TestCase):
 
         生产 main() 仍走 load_config 校验（此处注入 cfg 仅为了测循环；配置校验
         由 runner_config.load_config 自身测试覆盖）。
+        2026-09-15 起出站走 proxy-aware Transport：钉 direct 单路径 + 关闭
+        路径内 sleep，保持「每轮 poll 一次 urlopen 失败序列」的原断言语义。
         """
         sleeps = []
         calls = {"n": 0}
@@ -689,9 +695,10 @@ class AgentRunnerTests(unittest.TestCase):
                 raise KeyboardInterrupt  # 终止循环
             raise OSError("network down")
 
+        self.cfg.transport = transport_mod.Transport(
+            mode="direct", attempts=1, retry_sleep_s=0)
         with mock.patch.object(self.runner.runner_config, "load_config",
                                return_value=self.cfg), \
-             mock.patch.object(self.runner, "_HTTP_ATTEMPTS", 1), \
              mock.patch.object(self.runner.urllib.request, "urlopen",
                                side_effect=fake_urlopen), \
              mock.patch.object(self.runner.time, "sleep", side_effect=lambda s: sleeps.append(s)):

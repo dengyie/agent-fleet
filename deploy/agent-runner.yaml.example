@@ -32,6 +32,13 @@ poll_interval_s: 15           # 常驻模式轮询间隔
 heartbeat_interval_s: 30      # lease 心跳间隔（TTL 300s）
 # cache_dir: ~/.cache/agent-fleet   # 结果重传缓存
 
+# transport：出站策略（2026-09-15 起）。默认 auto —— 直连优先，直连被 Cloudflare
+# 边缘拦截（403 "error code: 101x"）或传输失败时自动回退系统代理（macOS scutil
+# 配置的 HTTP(S)Proxy），成功后进程内 sticky。历史强制直连补丁（128a52c）已由
+# tools/transport.py 的 proxy-aware 回退取代。直连/代理二者必通其一即可。
+# transport:
+#   mode: auto                 # auto（默认）| direct（钉死直连）| proxy（钉死系统代理）
+
 # supervisor：opt-in。enabled 后 runner 走 Supervisor.launch 受管路径；
 # ControlClient CLI（tools/supervisor/control_client_cli.py）另外常驻 poll
 # /api/supervisor/poll，adopt 成功才起 SessionBridge。

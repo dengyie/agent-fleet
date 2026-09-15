@@ -263,6 +263,7 @@ class ControlClient:
         self._public_key = hub_public_key
         self._supervisor = public_supervisor
         self._transport = transport or self._http_transport
+        self._outbound: Any | None = None  # lazy tools.transport.Transport
         self._nonces = nonce_store or NonceStore()
         self._skew = float(max_clock_skew_s or 300.0)
         self._terminate_grace_s = float(terminate_grace_s)
@@ -662,35 +663,20 @@ class ControlClient:
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(
             url, data=data, headers=headers, method="POST")
-        last_exc: Exception | None = None
-        for attempt in range(_HTTP_ATTEMPTS):
-            try:
-                # Fresh opener per attempt: a KeepAlive loop that reused the
-                # global urlopen pool surfaced ``poll_transport_error`` after a
-                # TLS handshake timeout, while a new ``--once`` process still
-                # got 200.
-                # Empty ProxyHandler: macOS urllib honors scutil HTTP(S)Proxy
-                # (Clash :7897) even with no env vars. KeepAlive then blocks
-                # on a tunneled TLS handshake and never polls again.
-                opener = urllib.request.build_opener(
-                    urllib.request.ProxyHandler({}))
-                with opener.open(req, timeout=_HTTP_TIMEOUT_S) as resp:
-                    raw = resp.read().decode("utf-8")
-                    payload = json.loads(raw) if raw else {}
-                    return int(resp.status), payload
-            except urllib.error.HTTPError as exc:
-                try:
-                    raw = exc.read().decode("utf-8")
-                    payload = json.loads(raw) if raw else {}
-                except Exception:
-                    payload = {}
-                return int(exc.code), payload if isinstance(payload, dict) else {}
-            except _TRANSIENT_TRANSPORT as exc:
-                last_exc = exc
-                if attempt + 1 < _HTTP_ATTEMPTS:
-                    time.sleep(_HTTP_RETRY_SLEEP_S)
-                continue
-        raise last_exc if last_exc is not None else OSError("poll_transport_error")
+        # Proxy-aware outbound (2026-09-15): direct first; a Cloudflare edge
+        # block (403 "error code: 101x") or transport failure falls back to
+        # the system proxy.  Fresh opener per attempt — a KeepAlive loop that
+        # reused the global urlopen pool surfaced ``poll_transport_error``
+        # after a TLS handshake timeout, while a new ``--once`` process still
+        # got 200 (128a52c lesson, now inside tools/transport.Transport).
+        if self._outbound is None:
+            from tools.transport import Transport
+            self._outbound = Transport(timeout=_HTTP_TIMEOUT_S,
+                                       attempts=_HTTP_ATTEMPTS,
+                                       retry_sleep_s=_HTTP_RETRY_SLEEP_S)
+        status, payload = self._outbound.post_json(
+            req.full_url, body, dict(req.headers), timeout=_HTTP_TIMEOUT_S)
+        return status, payload
 
 
 def _now() -> float:

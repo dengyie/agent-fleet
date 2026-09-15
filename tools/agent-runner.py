@@ -46,6 +46,7 @@ def _bootstrap_direct_imports():
 _bootstrap_direct_imports()
 
 from tools import adapters, result_files, runner_config, worktree
+from tools.transport import Transport
 
 USER_AGENT = "agent-fleet-runner/1.0"
 MAX_BACKOFF_S = 60
@@ -107,7 +108,11 @@ class _LogBuffer:
 
 
 def post_json(cfg, path, body, timeout=15):
-    """POST JSON 到 hub；网络异常返回 (0, {...}) 不抛。"""
+    """POST JSON 到 hub；网络异常返回 (0, {...}) 不抛。
+
+    出站策略由 cfg.transport（tools/transport.Transport，auto 模式）承载：
+    直连被 CF 边缘拦截（403 error code: 101x）或传输失败时回退系统代理。
+    """
     req = urllib.request.Request(
         cfg.hub + path,
         data=json.dumps(body).encode(),
@@ -118,26 +123,10 @@ def post_json(cfg, path, body, timeout=15):
         },
         method="POST",
     )
-    last_exc = None
-    for attempt in range(_HTTP_ATTEMPTS):
-        try:
-            urllib.request.install_opener(
-                urllib.request.build_opener(urllib.request.ProxyHandler({})))
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.status, json.loads(resp.read().decode() or "{}")
-        except urllib.error.HTTPError as extra:
-            try:
-                return extra.code, json.loads(extra.read().decode() or "{}")
-            except Exception:
-                return extra.code, {"error": "http_error"}
-        except _TRANSIENT_TRANSPORT as extra:
-            last_exc = extra
-            if attempt + 1 < _HTTP_ATTEMPTS:
-                time.sleep(_HTTP_RETRY_SLEEP_S)
-            continue
-        except Exception as extra:
-            return 0, {"error": f"{type(extra).__name__}: {extra}"}
-    return 0, {"error": f"{type(last_exc).__name__}: {last_exc}"}
+    if cfg.transport is None:
+        cfg.transport = Transport()
+    return cfg.transport.post_json(req.full_url, body, dict(req.headers),
+                                   timeout=timeout)
 
 
 def _pending_dir(cfg):

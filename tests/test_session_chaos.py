@@ -313,8 +313,12 @@ class HubUnreachableTests(unittest.TestCase):
         self.assertEqual(set(result), {"ok", "commands", "error"})
 
     def test_http_transport_retries_transient_timeout_then_succeeds(self):
+        # 2026-09-15 起出站走 tools.transport.Transport（proxy-aware auto）；
+        # _http_transport 经 Transport._one 走模块级 urlopen（install_opener）。
+        # 本测试钉 direct 单路径，保持「同路径内重试后成功」的语义。
         from tools.supervisor import control_client as cc
         from tools.supervisor.control_client import ControlClient, NonceStore
+        from tools import transport as transport_mod
 
         class _Resp:
             status = 200
@@ -345,20 +349,23 @@ class HubUnreachableTests(unittest.TestCase):
                 public_supervisor=None,
                 nonce_store=NonceStore(path=Path(td) / "used"),
             )
-            fake_opener = mock.Mock()
-            fake_opener.open.side_effect = fake_open
-            with mock.patch.object(cc.urllib.request, "build_opener",
-                                   return_value=fake_opener):
-                with mock.patch.object(cc, "_HTTP_RETRY_SLEEP_S", 0):
-                    status, body = client._http_transport(
-                        "/api/supervisor/poll", None, client._headers())
+            client._outbound = transport_mod.Transport(
+                mode="direct", attempts=3, retry_sleep_s=0)
+            with mock.patch.object(transport_mod.urllib.request, "urlopen",
+                                   side_effect=fake_open):
+                status, body = client._http_transport(
+                    "/api/supervisor/poll", None, client._headers())
         self.assertEqual(calls["n"], 2)
         self.assertEqual(status, 200)
         self.assertTrue(body.get("ok"))
 
     def test_http_transport_does_not_retry_http_error(self):
+        # 2026-09-15 起出站走 tools.transport.Transport；HTTPError（4xx/5xx）
+        # 是终态响应（非传输失败）——不重试、不降级，直接返回 (code, body)。
+        # 本测试钉 direct 单路径验证「1 次调用即终态」。
         from tools.supervisor import control_client as cc
         from tools.supervisor.control_client import ControlClient, NonceStore
+        from tools import transport as transport_mod
 
         class _Fp:
             def read(self):
@@ -384,10 +391,10 @@ class HubUnreachableTests(unittest.TestCase):
                 public_supervisor=None,
                 nonce_store=NonceStore(path=Path(td) / "used"),
             )
-            fake_opener = mock.Mock()
-            fake_opener.open.side_effect = fake_open
-            with mock.patch.object(cc.urllib.request, "build_opener",
-                                   return_value=fake_opener):
+            client._outbound = transport_mod.Transport(
+                mode="direct", attempts=3, retry_sleep_s=0)
+            with mock.patch.object(transport_mod.urllib.request, "urlopen",
+                                   side_effect=fake_open):
                 status, body = client._http_transport(
                     "/api/supervisor/poll", None, client._headers())
         self.assertEqual(calls["n"], 1)

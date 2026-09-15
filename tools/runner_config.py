@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -40,6 +41,10 @@ class RunnerConfig:
     supervisor_manifest_dir: Path | None = None
     supervisor_credential: str | None = None
     supervisor_public_key: bytes | None = None
+    # ---- outbound transport (2026-09-15 proxy-aware fallback) -----------
+    # ``transport`` 是 tools/transport.Transport 实例（对象装配后注入；
+    # YAML 只承载 mode 字符串，见 load_config 的 transport: 节）。
+    transport: Any = None
 
     @property
     def managed_enabled(self) -> bool:
@@ -154,6 +159,10 @@ def load_config(path=DEFAULT_CONFIG_PATH):
     supervisor_credential = _load_supervisor_credential(supervisor, machine)
     supervisor_public_key = _load_supervisor_public_key(supervisor)
 
+    transport_cfg = data.get("transport") or {}
+    if not isinstance(transport_cfg, dict):
+        _err("transport 配置必须是 mapping")
+
     return RunnerConfig(
         hub=hub,
         machine=machine,
@@ -168,7 +177,19 @@ def load_config(path=DEFAULT_CONFIG_PATH):
         poll_interval_s=_to_int(data.get("poll_interval_s"), 15, "poll_interval_s", allow_zero=True),
         heartbeat_interval_s=_to_int(data.get("heartbeat_interval_s"), 30, "heartbeat_interval_s", allow_zero=True),
         cache_dir=Path(str(data.get("cache_dir") or DEFAULT_CACHE_DIR)).expanduser(),
+        transport=_build_transport(transport_cfg),
     )
+
+
+def _build_transport(transport_cfg: dict) -> Any:
+    """从 YAML ``transport: {mode: auto|direct|proxy}`` 节装配出站传输。
+
+    默认 auto：直连优先，CF 边缘拦截（403 error code: 101x）或传输失败时
+    回退系统代理（见 tools/transport.py 模块文档）。
+    """
+    from tools.transport import Transport
+
+    return Transport(mode=str(transport_cfg.get("mode") or "auto"))
 
 
 def _load_supervisor_credential(supervisor, machine):

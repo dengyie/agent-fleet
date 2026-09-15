@@ -54,6 +54,7 @@ def _bootstrap_direct_imports():
 _bootstrap_direct_imports()
 
 from tools import runner_config  # noqa: E402
+from tools.transport import Transport as _OutboundTransport
 
 
 DEFAULT_INTERVAL_S = 15
@@ -105,36 +106,27 @@ def _read_token_file(path: Path, what: str) -> str:
 def _make_session_events_post(hub_url: str, ingest_token: str):
     """Uploader transport: unwrap ``{\"events\": [...]}`` and POST a JSON list."""
 
+    # Proxy-aware outbound (2026-09-15): 与 poll/result 同一策略 —— 直连被
+    # CF 边缘拦截或传输失败时回退系统代理（tools/transport.Transport auto）。
+    transport = _OutboundTransport()
+
     def post_json(payload):
         events = payload.get("events") if isinstance(payload, dict) else payload
         if not isinstance(events, list):
             raise TypeError("events list required")
-        req = urllib.request.Request(
+        status, body = transport.post_json(
             hub_url.rstrip("/") + "/api/session-events",
-            data=json.dumps(events).encode("utf-8"),
-            headers={
+            events,
+            {
                 "Content-Type": "application/json",
                 "X-Agent-Fleet-Token": ingest_token,
                 "User-Agent": USER_AGENT,
             },
-            method="POST",
+            timeout=30,
         )
-        try:
-            urllib.request.install_opener(
-                urllib.request.build_opener(urllib.request.ProxyHandler({})))
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                raw = resp.read().decode("utf-8")
-                return json.loads(raw) if raw else {}
-        except urllib.error.HTTPError as exc:
-            try:
-                body = json.loads(exc.read().decode() or "{}")
-            except Exception:
-                body = {}
-            if isinstance(body, dict):
-                return body
-            return {}
-        except Exception:
-            return {}
+        # uploader 合同（tools/session/uploader.py）：返回响应 Mapping；
+        # 传输失败（status=0）返回空 Mapping（记录重试 sentinel）。
+        return body if isinstance(body, dict) else {}
 
     return post_json
 
