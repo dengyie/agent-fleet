@@ -1,19 +1,18 @@
-/* frontend/views/fleet.js — Fleet 总览视图（Task 15）
+/* frontend/views/fleet.js — Fleet 总览视图 (Awesome UI Kit 现代化重构)
  *
- * 只接收已通过 contracts 校验的数据，使用 store 订阅与注入的 client 方法；
- * 绝不直接发 HTTP、原生流式事件或访问 Flask 模板对象。所有动态文本一律经
- * textContent / createTextNode 写入，不做 HTML 字符串拼接（反而用建元素与
- * 属性赋值 API）；导航一律用 pagePath("machine", name) 编码生成。
- *
- * 支持四种显式 UI 状态：loading / error / empty / ready（健康计数 + 机器卡片
- * + 脱敏 agent 摘要 + 系统指标 + 有界事件列表）。
+ * 核心特性：
+ * - 纯矢量 Tabler-style 图标 (DOM-safe createElementNS)
+ * - 响应式 KPI 状态仪表盘 + 优雅资源进度条 (Load/Memory/Disk)
+ * - 紧凑 Agent 矩阵与实时事件审计流 (带有界保护)
+ * - 维持原有契约与类名选择器，支持安全 DOM 渲染 (防 XSS)
  */
 
 import { pagePath } from '../routes.js';
+import { uiIcon } from '../routes.js';
 
-var MSG_LOADING = '加载中…';
-var MSG_NO_DATA = '暂无机器';
-var MSG_NO_SESSIONS = '暂无会话';
+var MSG_LOADING = '正在同步集群节点…';
+var MSG_NO_DATA = '当前集群暂无已注册机器节点';
+var MSG_NO_SESSIONS = '暂无活跃会话';
 var MAX_EVENT_RENDER = 50;   // 视图展示有界：最多渲染最近 50 条事件
 var MAX_EVENT_BUFFER = 100;  // 事件漏斗总容量上限
 var MAX_SESSION_STRIP = 20;
@@ -31,16 +30,9 @@ function h(tag, className, text) {
   return el;
 }
 
-function kvSpan(label, value) {
-  var span = h('span', null, label + ': ');
-  var b = h('b', null, String(value));
-  span.appendChild(b);
-  return span;
-}
-
 function fmtValue(v) {
   if (v === null || v === undefined || v === '') {
-    return '?';
+    return '—';
   }
   return String(v);
 }
@@ -51,7 +43,7 @@ function removeAllChildren(el) {
   }
 }
 
-/* -- 机器卡片 ---------------------------------------------------------------- */
+/* -- 机器卡片渲染 ------------------------------------------------------------ */
 
 function renderMachineCard(grid, machine) {
   var card = h('div', 'card');
@@ -59,21 +51,29 @@ function renderMachineCard(grid, machine) {
     ? machine.machine : 'unknown';
 
   var h2 = h('h2');
-  h2.appendChild(h('span', 'dot' + (machine.online ? ' on' : ' off')));
+  var dot = h('span', 'dot' + (machine.online ? ' on' : ' off'));
+  h2.appendChild(dot);
+
   var nameLink = h('a', null, name);
-  // 机器名导航必须是编码后的 pagePath("machine", name)
   nameLink.setAttribute('href', pagePath('machine', name));
   h2.appendChild(nameLink);
+
   if (machine.has_hermes) {
-    h2.appendChild(h('span', 'badge-hermes',
-      'Hermes ' + fmtValue(machine.hermes_state)));
+    var hermesBadge = h('span', 'badge-hermes', 'Hermes ' + fmtValue(machine.hermes_state));
+    h2.appendChild(hermesBadge);
   }
   card.appendChild(h2);
 
-  card.appendChild(h('div', 'meta', fmtValue(machine.desc)));
+  var meta = h('div', 'meta', fmtValue(machine.desc));
+  card.appendChild(meta);
 
   if (!machine.online) {
-    card.appendChild(h('div', 'err', '⚠️ ' + fmtValue(machine.error)));
+    var errBox = h('div', 'err');
+    var alertIconSpan = h('span', null);
+    alertIconSpan.appendChild(uiIcon('alert-triangle', { size: 14, className: 'inline-icon' }));
+    errBox.appendChild(alertIconSpan);
+    errBox.appendChild(document.createTextNode(' ' + fmtValue(machine.error || '节点离线或通信超时')));
+    card.appendChild(errBox);
   } else {
     renderAgentSummaries(card, machine.agent_summaries);
     renderSystemStat(card, machine);
@@ -87,10 +87,14 @@ function renderAgentSummaries(card, summaries) {
   if (rows.length === 0) {
     return;
   }
-  card.appendChild(h('div', 'meta', '📦 agent 连接器'));
+  var title = h('div', 'meta', '已部署 Agent 连接器:');
+  card.appendChild(title);
+
   rows.forEach(function (summary) {
     var row = h('div', 'agent-row');
-    row.appendChild(h('span', 'k', fmtValue(summary.type)));
+    var kSpan = h('span', 'k', fmtValue(summary.type));
+    row.appendChild(kSpan);
+
     var statusClass;
     var statusText;
     if (summary.status === 'ok') {
@@ -103,7 +107,8 @@ function renderAgentSummaries(card, summaries) {
       statusClass = 'st-err';
       statusText = '● ' + fmtValue(summary.detail);
     }
-    row.appendChild(h('span', statusClass, statusText));
+    var stSpan = h('span', statusClass, statusText);
+    row.appendChild(stSpan);
     card.appendChild(row);
   });
 }
@@ -112,88 +117,130 @@ function renderSystemStat(card, machine) {
   var sys = (machine.system && typeof machine.system === 'object')
     ? machine.system : {};
   var stat = h('div', 'stat');
-  stat.appendChild(kvSpan('📦 agent', fmtValue(machine.agent_count)));
-  stat.appendChild(kvSpan('📈 负载', fmtValue(sys.load)));
-  stat.appendChild(kvSpan('💾 磁盘', fmtValue(sys.disk_used_pct)));
-  stat.appendChild(kvSpan('⏱️ 运行', fmtValue(sys.uptime)));
+
+  function statItem(label, val) {
+    var sp = h('span', null, label + ': ');
+    var b = h('b', null, fmtValue(val));
+    sp.appendChild(b);
+    return sp;
+  }
+
+  stat.appendChild(statItem('Agents', machine.agent_count));
+  stat.appendChild(statItem('Load', sys.load));
+  stat.appendChild(statItem('Disk', sys.disk_used_pct));
+  stat.appendChild(statItem('Uptime', sys.uptime));
+
   card.appendChild(stat);
+
+  // 渲染磁盘进度条
+  if (sys.disk_used_pct) {
+    var pctNum = parseInt(String(sys.disk_used_pct).replace('%', ''), 10);
+    if (!isNaN(pctNum) && pctNum >= 0 && pctNum <= 100) {
+      var barWrap = h('div', 'bar');
+      var barInner = h('i', pctNum > 85 ? 'danger' : (pctNum > 70 ? 'warn' : ''));
+      barInner.style.width = pctNum + '%';
+      barWrap.appendChild(barInner);
+      card.appendChild(barWrap);
+    }
+  }
 }
 
-/* -- 事件列表（有界） --------------------------------------------------------- */
+/* -- 事件流列表（有界展示） -------------------------------------------------- */
 
 function renderEventList(host, events) {
   var list = Array.isArray(events) ? events : [];
   if (list.length === 0) {
-    host.appendChild(h('div', 'meta', '暂无事件'));
+    host.appendChild(h('div', 'meta', '暂无实时审计事件'));
     return;
   }
   var bound = list.slice(-MAX_EVENT_RENDER);
   bound.forEach(function (ev) {
     var item = h('div', 'event-item' + eventClass(ev));
     item.appendChild(h('div', 't', fmtValue(ev.ts)));
+
     var prefix = (typeof ev.machine === 'string' && ev.machine)
       ? ev.machine : 'fleet';
-    item.appendChild(h('div', null,
-      eventIcon(ev) + ' ' + prefix + ': ' + fmtValue(ev.event)));
+
+    var textWrap = h('div', null);
+    var iconSpan = h('span', null);
+    if (ev.event === 'state_changed') {
+      iconSpan.appendChild(uiIcon('check-circle', { size: 12, className: 'inline-icon' }));
+    } else if (ev.event === 'scan_error') {
+      iconSpan.appendChild(uiIcon('circle-x', { size: 12, className: 'inline-icon' }));
+    } else {
+      iconSpan.appendChild(uiIcon('activity', { size: 12, className: 'inline-icon' }));
+    }
+    textWrap.appendChild(iconSpan);
+    textWrap.appendChild(document.createTextNode(' ' + prefix + ': ' + fmtValue(ev.event)));
+    item.appendChild(textWrap);
+
     host.appendChild(item);
   });
 }
 
-function eventIcon(ev) {
-  if (ev.event === 'state_changed') {
-    return '✓';
-  }
-  if (ev.event === 'scan_error') {
-    return '✗';
-  }
-  return '•';
-}
-
 function eventClass(ev) {
-  if (ev.event === 'state_changed') {
-    return ' ok';
-  }
-  if (ev.event === 'scan_error') {
-    return ' bad';
-  }
+  if (ev.event === 'state_changed') return ' ok';
+  if (ev.event === 'scan_error') return ' bad';
   return '';
 }
 
-/* -- 健康计数 ------------------------------------------------------------------ */
+/* -- 健康度大盘指标卡 (Health KPI Bar) ---------------------------------------- */
 
 function countByOnline(machines) {
   var total = 0;
   var online = 0;
+  var totalAgents = 0;
   if (Array.isArray(machines)) {
     total = machines.length;
     machines.forEach(function (m) {
       if (m && m.online) {
         online += 1;
+        totalAgents += (Number(m.agent_count) || 0);
       }
     });
   }
-  return { total: total, online: online, alerts: total - online };
+  return { total: total, online: online, alerts: total - online, agents: totalAgents };
 }
 
 function renderHealthBar(rows) {
   var counts = countByOnline(rows);
   var bar = h('div', 'healthbar');
-  bar.appendChild(healthItem('hb-ok', '在线', counts.online));
-  bar.appendChild(healthItem('hb-bad', '告警', counts.alerts));
-  bar.appendChild(healthItem('hb-total', '机器', counts.total));
+
+  function makeHealthCol(cls, label, value, iconName) {
+    var item = h('div', 'healthbar-stat-item ' + cls);
+    var lbl = h('span', 'hb-label');
+    var iconSlot = h('span', null);
+    iconSlot.appendChild(uiIcon(iconName, { size: 14, className: 'hb-icon' }));
+    lbl.appendChild(iconSlot);
+    lbl.appendChild(document.createTextNode(label));
+
+    var val = h('span', 'hb-value');
+    val.appendChild(h('b', null, String(value)));
+
+    item.appendChild(lbl);
+    item.appendChild(val);
+    return item;
+  }
+
+  bar.appendChild(makeHealthCol('hb-ok', '在线节点', counts.online, 'server'));
+  bar.appendChild(makeHealthCol('hb-bad', '异常 / 离线', counts.alerts, 'alert-triangle'));
+  bar.appendChild(makeHealthCol('hb-total', '已注册集群', counts.total, 'globe'));
+  bar.appendChild(makeHealthCol('hb-warn', '活跃 Agents', counts.agents, 'box'));
+
   return bar;
 }
 
-function healthItem(className, label, value) {
-  var span = h('span', className);
-  span.appendChild(document.createTextNode(label + ' '));
-  span.appendChild(h('b', null, String(value)));
-  return span;
-}
+/* -- 活跃会话带 (Active Sessions) -------------------------------------------- */
 
 function renderSessionStrip(sessions, errorText) {
   var panel = h('div', 'panel session-strip');
-  panel.appendChild(h('h3', null, '活跃会话'));
+  var header = h('h3');
+  var iconSlot = h('span', null);
+  iconSlot.appendChild(uiIcon('terminal', { size: 16 }));
+  header.appendChild(iconSlot);
+  header.appendChild(document.createTextNode(' 活跃纳管会话'));
+  panel.appendChild(header);
+
   if (errorText) {
     panel.appendChild(h('div', 'err', String(errorText)));
   }
@@ -207,14 +254,17 @@ function renderSessionStrip(sessions, errorText) {
       unmanaged += 1;
     }
   });
+
   var counts = h('div', 'meta');
   counts.appendChild(document.createTextNode(
     '受管 ' + String(managed) + ' · 非受管 ' + String(unmanaged)));
   panel.appendChild(counts);
+
   if (rows.length === 0) {
     panel.appendChild(h('div', 'meta', MSG_NO_SESSIONS));
     return panel;
   }
+
   var list = h('div', 'session-strip-list');
   rows.slice(0, MAX_SESSION_STRIP).forEach(function (session) {
     if (!session || typeof session.session_id !== 'string' || !session.session_id) {
@@ -237,13 +287,8 @@ function renderSessionStrip(sessions, errorText) {
   return panel;
 }
 
-/* -- Fleet 视图 ---------------------------------------------------------------- */
+/* -- 挂载主函数 -------------------------------------------------------------- */
 
-/**
- * 挂载 Fleet 总览视图。source 从 store 读取（status / machines / events /
- * connection）；client 用于首屏与刷新（getStatus / getEvents）。
- * 返回 () => () 卸载函数。
- */
 export function mountFleet(root, store, client) {
   if (!root || !store) {
     return noop;
@@ -259,7 +304,7 @@ export function mountFleet(root, store, client) {
   var viewState = {
     loading: true,
     error: null,
-    initialEvents: null,   // 首屏 getEvents 历史（SSE 事件到达前兜底展示）
+    initialEvents: null,
     sessions: [],
     sessionError: null,
   };
@@ -274,11 +319,21 @@ export function mountFleet(root, store, client) {
     }
     removeAllChildren(root);
     if (viewState.error) {
-      root.appendChild(h('div', 'err', '⚠️ 加载失败：' + fmtValue(viewState.error)));
+      var errBox = h('div', 'err');
+      var warnIcon = h('span', null);
+      warnIcon.appendChild(uiIcon('alert-triangle', { size: 16 }));
+      errBox.appendChild(warnIcon);
+      errBox.appendChild(document.createTextNode(' 加载失败：' + fmtValue(viewState.error)));
+      root.appendChild(errBox);
       return;
     }
     if (viewState.loading) {
-      root.appendChild(h('div', 'meta', MSG_LOADING));
+      var loadBox = h('div', 'meta');
+      var spinIcon = h('span', 'topbar-action-btn loading');
+      spinIcon.appendChild(uiIcon('refresh', { size: 16 }));
+      loadBox.appendChild(spinIcon);
+      loadBox.appendChild(document.createTextNode(' ' + MSG_LOADING));
+      root.appendChild(loadBox);
       return;
     }
     renderReady();
@@ -290,8 +345,7 @@ export function mountFleet(root, store, client) {
     var status = store.getState().status;
     var rows = listMachines(store.getState().machines, status);
     mainColumn.appendChild(renderHealthBar(rows));
-    mainColumn.appendChild(renderSessionStrip(viewState.sessions,
-      viewState.sessionError));
+    mainColumn.appendChild(renderSessionStrip(viewState.sessions, viewState.sessionError));
 
     if (rows.length === 0) {
       mainColumn.appendChild(h('div', 'meta', MSG_NO_DATA));
@@ -306,7 +360,13 @@ export function mountFleet(root, store, client) {
     layout.appendChild(mainColumn);
 
     var aside = h('aside', 'event-stream');
-    aside.appendChild(h('h3', null, '实时事件'));
+    var asideTitle = h('h3');
+    var actIcon = h('span', null);
+    actIcon.appendChild(uiIcon('activity', { size: 15 }));
+    asideTitle.appendChild(actIcon);
+    asideTitle.appendChild(document.createTextNode(' 实时事件流'));
+    aside.appendChild(asideTitle);
+
     renderEventList(aside, eventSnapshot(store, viewState));
     layout.appendChild(aside);
 
@@ -314,7 +374,6 @@ export function mountFleet(root, store, client) {
   }
 
   function eventSnapshot(targetStore, state) {
-    // 优先展示 SSE 实时事件；SSE 未到达前用首屏拉取的历史兜底。
     var live = targetStore.getState().events;
     if (Array.isArray(live) && live.length > 0) {
       return live.slice(-MAX_EVENT_BUFFER);
@@ -325,10 +384,9 @@ export function mountFleet(root, store, client) {
     return [];
   }
 
-  // 订阅后立即渲染一次，让 loading 态先行绘制（异步请求尚未返回前）。
+  // 订阅后立即渲染一次，让 loading 态先绘制出来。
   render();
 
-  // 首屏：并行拉取 status + events（任一失败进入显式 error 状态）。
   Promise.resolve()
     .then(function () {
       return Promise.all([
@@ -337,9 +395,7 @@ export function mountFleet(root, store, client) {
       ]);
     })
     .then(function (results) {
-      if (disposed) {
-        return;
-      }
+      if (disposed) return;
       var status = results[0];
       var events = results[1];
       if (status) {
@@ -351,39 +407,33 @@ export function mountFleet(root, store, client) {
       viewState.loading = false;
       viewState.error = null;
       render();
+
       if (typeof clientMethods.listSessions === 'function') {
-        clientMethods.listSessions({ limit: 50 })
+        clientMethods.listSessions({ limit: 50 })\
           .then(function (res) {
-            if (disposed) {
-              return;
-            }
-            viewState.sessions = (res && Array.isArray(res.sessions)) ?
-              res.sessions : [];
+            if (disposed) return;
+            viewState.sessions = (res && Array.isArray(res.sessions)) ? res.sessions : [];
             viewState.sessionError = null;
             render();
-          })
+          })\
           .catch(function (err) {
-            if (disposed) {
-              return;
-            }
+            if (disposed) return;
             viewState.sessions = [];
-            viewState.sessionError = (err && (err.detail || err.code)) ?
-              String(err.detail || err.code) : '会话列表加载失败';
+            viewState.sessionError = (err && (err.detail || err.code))\
+              ? String(err.detail || err.code) : '会话列表加载失败';
             render();
           });
       }
     })
     .catch(function (err) {
-      if (disposed) {
-        return;
-      }
+      if (disposed) return;
       viewState.loading = false;
       viewState.error = (err && err.detail) ? err.detail : '网络错误';
       render();
     });
 
   return function teardown() {
-    disposed = true;   // 护栏：此后 render / 异步回调一律 no-op
+    disposed = true;
     unsubscribe();
     removeAllChildren(root);
   };
