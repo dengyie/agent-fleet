@@ -37,6 +37,19 @@ def _bootstrap_direct_imports():
         module = importlib.util.module_from_spec(spec)
         sys.modules["agent_profiles"] = module
         spec.loader.exec_module(module)
+    # ``tools.supervisor.supervisor`` imports the repository-root
+    # ``report_schema`` (INSTANCE_FAMILIES) at top level. Without
+    # registration a LaunchAgent run (no WorkingDirectory, repo root not on
+    # sys.path) raises ModuleNotFoundError *after* the task was leased —
+    # the hub sees leased-but-never-reported until the lease expires and
+    # re-dispatches, looping forever (2026-09-16 卡点 B root cause).
+    if "report_schema" not in sys.modules:
+        schema_path = root / "report_schema.py"
+        spec = importlib.util.spec_from_file_location(
+            "report_schema", schema_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["report_schema"] = module
+        spec.loader.exec_module(module)
     tools_package = types.ModuleType("tools")
     tools_package.__path__ = [str(root / "tools")]
     sys.modules.setdefault("tools", tools_package)

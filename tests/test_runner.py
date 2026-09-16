@@ -806,6 +806,44 @@ class AgentRunnerHeartbeatBoundingTests(unittest.TestCase):
                 "lease_ttl_s": 300, "lease_expires_at": "..."}
 
 
+class BootstrapImportTests(unittest.TestCase):
+    """LaunchAgent 环境回归（2026-09-16 卡点 B root cause）。
+
+    plist 无 WorkingDirectory、repo root 不在 sys.path。直接执行
+    agent-runner.py 时 bootstrap 必须注册 repo-root 模块（agent_profiles、
+    report_schema），否则 managed 路径 ``_bf_supervisor()`` 在任务认领
+    *之后* 才炸 ModuleNotFoundError —— hub 侧表现为 leased 永无 result、
+    lease 过期重派、循环认领。
+    """
+
+    def test_bootstrap_registers_report_schema_without_repo_on_sys_path(self):
+        saved_path = sys.path[:]
+        saved_modules = {k: sys.modules.get(k)
+                         for k in ("agent_profiles", "report_schema", "tools",
+                                   "tools.supervisor", "tools.supervisor.supervisor")}
+        try:
+            # 移除一切能让 repo root 可导入的路径（含 cwd 与 PYTHONPATH 残留）
+            repo = str(Path(__file__).resolve().parents[1])
+            sys.path = [p for p in sys.path
+                        if not p or Path(p).resolve() != Path(repo)]
+            for k in ("agent_profiles", "report_schema", "tools",
+                      "tools.supervisor", "tools.supervisor.supervisor"):
+                sys.modules.pop(k, None)
+            runner = load_agent_runner()
+            # bootstrap 必须已注册 report_schema，且 managed import 链可达
+            self.assertIn("report_schema", sys.modules)
+            from tools.supervisor import supervisor as _s
+            self.assertTrue(len(_s.INSTANCE_FAMILIES) > 0)
+            self.assertTrue(hasattr(runner, "poll_once"))
+        finally:
+            sys.path[:] = saved_path
+            for k, m in saved_modules.items():
+                if m is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = m
+
+
 class ManagedRunnerTests(unittest.TestCase):
     """Opt-in managed runner path (Task 8)."""
 
