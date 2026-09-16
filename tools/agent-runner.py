@@ -25,6 +25,8 @@ def _bootstrap_direct_imports():
     import types
 
     root = Path(__file__).resolve().parent.parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
     # ``tools.runner_config`` imports the repository-root ``agent_profiles``
     # module by name. Without registration a direct run resolves it against
     # the ambient interpreter paths and fails with ModuleNotFoundError —

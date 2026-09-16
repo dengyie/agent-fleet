@@ -22,6 +22,8 @@ def _bootstrap_direct_imports():
     import types
 
     root = Path(__file__).resolve().parent.parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
     # ``agent_profiles`` 必须先于 report_schema 注册：report_schema 顶层
     # ``from agent_profiles import ...``（注册表派生），先加载 schema 会因
     # ambient 路径解析不到而 ModuleNotFoundError。

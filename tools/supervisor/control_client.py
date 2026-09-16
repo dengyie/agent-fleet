@@ -52,8 +52,6 @@ USER_AGENT = "agent-fleet-control-client/1.0"
 _HTTP_TIMEOUT_S = 10.0
 _HTTP_ATTEMPTS = 3
 _HTTP_RETRY_SLEEP_S = 0.4
-_TRANSIENT_TRANSPORT = (TimeoutError, urllib.error.URLError, OSError,
-                        ConnectionError, BrokenPipeError)
 
 from hub.domain import control as ctrl
 

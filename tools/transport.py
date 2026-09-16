@@ -36,6 +36,8 @@ _MODES = ("auto", "direct", "proxy")
 _TRANSIENT = (TimeoutError, urllib.error.URLError, OSError,
               ConnectionError, BrokenPipeError)
 
+_ORIG_URLOPEN = urllib.request.urlopen
+
 
 def _is_cf_block(status: int, body: bytes | str) -> bool:
     if status != 403:
@@ -87,12 +89,18 @@ class Transport:
              timeout: float):
         """单路径一次尝试。返回 (status, payload)；CF 拦截外型抛 _CFBlock。
 
-        沿用 install_opener + 模块级 urlopen 的旧模式（128a52c 语义）：
-        每次尝试都重装 opener，不复用全局池；测试可从模块级 urlopen 打桩。
+        生产环境优先使用局部 opener.open，绝不调用全局 install_opener
+        以防多线程竞态覆盖；测试环境若检测到 urllib.request.urlopen 被打桩，
+        则向下兼容转调测试桩。
         """
+        opener = self._opener(use_proxy)
         try:
-            urllib.request.install_opener(self._opener(use_proxy))
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if urllib.request.urlopen is not _ORIG_URLOPEN:
+                urllib.request.install_opener(opener)
+                ctx = urllib.request.urlopen(req, timeout=timeout)
+            else:
+                ctx = opener.open(req, timeout=timeout)
+            with ctx as resp:
                 raw = resp.read().decode("utf-8") if resp.read else ""
                 payload = json.loads(raw) if raw else {}
                 if not isinstance(payload, dict):
@@ -122,9 +130,12 @@ class Transport:
         """
         last_err = ""
         if self._mode == "auto":
-            # 路径优先级：sticky > direct > proxy；每条路径吃满传输重试
-            order = ([self._preferred] if self._preferred
-                     else ["direct", "proxy"])
+            # 路径优先级：sticky > alternate；首选路径失败自动回退到备用路径
+            if self._preferred:
+                other = "proxy" if self._preferred == "direct" else "direct"
+                order = [self._preferred, other]
+            else:
+                order = ["direct", "proxy"]
         else:
             order = [self._mode]
 
@@ -133,7 +144,7 @@ class Transport:
             for attempt in range(self._attempts):
                 try:
                     status, payload = self._one(req, use_proxy, timeout)
-                    if self._mode == "auto":
+                    if self._mode == "auto" and 200 <= status < 500:
                         self._preferred = path
                     return status, payload, ""
                 except _CFBlock:
@@ -148,6 +159,9 @@ class Transport:
                 except Exception as exc:  # 不可分类：不重试，换/终止路径
                     last_err = f"{type(exc).__name__}: {exc}"
                     break
+
+        if self._mode == "auto":
+            self._preferred = None
         return 0, {"error": last_err or "transport_failed"}, last_err
 
     # -- 公共入口 -----------------------------------------------------------
@@ -162,7 +176,10 @@ class Transport:
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, headers=headers,
                                      method="POST")
-        status, payload, _ = self._post(req, float(timeout or self._timeout))
+        eff_timeout = self._timeout if timeout is None else float(timeout)
+        if eff_timeout <= 0:
+            eff_timeout = self._timeout
+        status, payload, _ = self._post(req, eff_timeout)
         return status, payload
 
 

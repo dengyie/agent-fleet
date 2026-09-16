@@ -377,5 +377,84 @@ class OpenerProxyHandlerTests(unittest.TestCase):
         self.assertTrue(empty)
 
 
+class FailoverRecoveryTests(unittest.TestCase):
+    """验证 auto 模式下的双向容灾回退与失败重置（2026-09-16 审查修复）。"""
+
+    def test_auto_mode_preferred_path_fails_falls_back_to_alternate(self):
+        """首选路径失效时，必须能自动回退到备选路径，并更新 preferred 状态。"""
+        t = _make()
+        # 阶段 1：首跳 direct 成功，确立 preferred="direct"
+        direct_ok = True
+
+        def direct_fn(req, timeout):
+            if direct_ok:
+                return _Resp(200, {"phase": 1})
+            raise OSError("direct network dead")
+
+        openers = _FakeOpeners(
+            direct_open=direct_fn,
+            proxy_open=lambda req, timeout: _Resp(200, {"phase": 2}),
+        )
+        openers.install(t, _MODULE_PATCHER)
+
+        status, payload = t.post_json("https://hub.test/api/poll", None, {})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["phase"], 1)
+        self.assertEqual(t._preferred, "direct")
+
+        # 阶段 2：direct 挂掉，此时 auto 必须自动容灾回退到 proxy 并更新 preferred
+        direct_ok = False
+        status, payload = t.post_json("https://hub.test/api/poll", None, {})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["phase"], 2)
+        self.assertEqual(t._preferred, "proxy")
+
+    def test_auto_mode_all_paths_fail_clears_preferred(self):
+        """主备路径均失败后，必须重置 preferred 为 None，以便后续重新探测。"""
+        t = _make()
+        t._preferred = "direct"
+        openers = _FakeOpeners(
+            direct_open=lambda req, timeout: (_ for _ in ()).throw(OSError("d fail")),
+            proxy_open=lambda req, timeout: (_ for _ in ()).throw(OSError("p fail")),
+        )
+        openers.install(t, _MODULE_PATCHER)
+
+        status, _ = t.post_json("https://hub.test/api/poll", None, {})
+        self.assertEqual(status, 0)
+        self.assertIsNone(t._preferred)
+
+    def test_server_5xx_does_not_set_preferred(self):
+        """5xx 服务端故障必须原样透传，但不得将其记录为 preferred 路径。"""
+        t = _make()
+        openers = _FakeOpeners(
+            direct_open=lambda req, timeout: (_ for _ in ()).throw(
+                _http_error(502, b'{"error": "bad_gateway"}')),
+            proxy_open=lambda req, timeout: _Resp(200, {"ok": True}),
+        )
+        openers.install(t, _MODULE_PATCHER)
+
+        status, payload = t.post_json("https://hub.test/api/poll", None, {})
+        self.assertEqual(status, 502)
+        self.assertEqual(payload["error"], "bad_gateway")
+        self.assertIsNone(t._preferred)
+
+
+class TimeoutBoundaryTests(unittest.TestCase):
+    """timeout 边界值校验（0 与负值安全回退到默认超时）。"""
+
+    def test_timeout_zero_or_negative_uses_instance_timeout(self):
+        t = _make(timeout=12.0)
+        seen = []
+        openers = _FakeOpeners(
+            direct_open=lambda req, timeout: (seen.append(timeout), _Resp(200, {}))[1],
+            proxy_open=lambda req, timeout: _Resp(200, {}),
+        )
+        openers.install(t, _MODULE_PATCHER)
+
+        t.post_json("https://hub.test/api/poll", None, {}, timeout=0)
+        t.post_json("https://hub.test/api/poll", None, {}, timeout=-5)
+        self.assertEqual(seen, [12.0, 12.0])
+
+
 if __name__ == "__main__":
     unittest.main()

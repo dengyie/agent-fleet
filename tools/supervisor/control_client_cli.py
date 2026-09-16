@@ -46,6 +46,13 @@ def _bootstrap_direct_imports():
         module = importlib.util.module_from_spec(spec)
         sys.modules["agent_profiles"] = module
         spec.loader.exec_module(module)
+    if "report_schema" not in sys.modules:
+        schema_path = root / "report_schema.py"
+        spec = importlib.util.spec_from_file_location(
+            "report_schema", schema_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["report_schema"] = module
+        spec.loader.exec_module(module)
     tools_package = types.ModuleType("tools")
     tools_package.__path__ = [str(root / "tools")]
     sys.modules.setdefault("tools", tools_package)
