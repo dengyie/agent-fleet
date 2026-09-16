@@ -18,7 +18,12 @@
           <span class="brand-sub">AI Mesh Console</span>
         </div>
       </a>
-      <div class="sidebar-status-wrap" id="sidebar-status-slot"></div>
+      <div class="sidebar-status-wrap" id="sidebar-status-slot">
+        <div class="sidebar-status-indicator status-pill-warn" id="sidebar-indicator-pill">
+          <span class="indicator-dot-wrap"><span class="indicator-ping"></span><span class="indicator-dot"></span></span>
+          <span class="indicator-label" id="sidebar-indicator-text">Connecting...</span>
+        </div>
+      </div>
     </div>
 
     <nav class="sidebar-nav">
@@ -63,7 +68,7 @@
         </button>
       </div>
       <div class="sidebar-meta-row">
-        <span class="version-tag">c73f6be • LIVE</span>
+        <span class="version-tag" id="app-version-tag">LIVE</span>
         <span class="sse-status-badge" id="sidebar-sse-status">Connecting</span>
       </div>
     </div>
@@ -128,34 +133,47 @@
 
   window.FleetRoutes = { apiPath: apiPath, pagePath: pagePath };
 
+  /* 动态挂载 SVG 节点（DOM-Safe，防止 DOM 节点被 stringify 破坏） */
+  function mountIcon(target, iconName, opts) {
+    if (!target) return;
+    var node = uiIcon(iconName, opts);
+    if (!node) return;
+    if (typeof target.replaceChildren === 'function') {
+      target.replaceChildren(node);
+    } else {
+      while (target.firstChild) {
+        target.removeChild(target.firstChild);
+      }
+      target.appendChild(node);
+    }
+  }
+
   /* 注入通用 SVG 图标 */
   function injectStaticIcons() {
-    var brandSlot = document.getElementById('brand-logo-slot');
-    if (brandSlot) brandSlot.innerHTML = uiIcon('activity', { size: 20, className: 'brand-svg' });
-    var navFleet = document.getElementById('icon-nav-fleet');
-    if (navFleet) navFleet.innerHTML = uiIcon('server', { size: 16 });
-    var navStatus = document.getElementById('icon-nav-status');
-    if (navStatus) navStatus.innerHTML = uiIcon('activity', { size: 16 });
-    var extStatus = document.getElementById('icon-ext-status');
-    if (extStatus) extStatus.innerHTML = uiIcon('external-link', { size: 12 });
-    var navTasks = document.getElementById('icon-nav-tasks');
-    if (navTasks) navTasks.innerHTML = uiIcon('terminal', { size: 16 });
-    var extTasks = document.getElementById('icon-ext-tasks');
-    if (extTasks) extTasks.innerHTML = uiIcon('external-link', { size: 12 });
+    mountIcon(document.getElementById('brand-logo-slot'), 'activity', { size: 20, className: 'brand-svg' });
+    mountIcon(document.getElementById('icon-nav-fleet'), 'server', { size: 16 });
+    mountIcon(document.getElementById('icon-nav-status'), 'activity', { size: 16 });
+    mountIcon(document.getElementById('icon-ext-status'), 'external-link', { size: 12 });
+    mountIcon(document.getElementById('icon-nav-tasks'), 'terminal', { size: 16 });
+    mountIcon(document.getElementById('icon-ext-tasks'), 'external-link', { size: 12 });
 
-    var themeAuto = document.getElementById('icon-theme-auto');
-    if (themeAuto) themeAuto.innerHTML = uiIcon('monitor', { size: 13 });
-    var themeLight = document.getElementById('icon-theme-light');
-    if (themeLight) themeLight.innerHTML = uiIcon('sun', { size: 13 });
-    var themeDark = document.getElementById('icon-theme-dark');
-    if (themeDark) themeDark.innerHTML = uiIcon('moon', { size: 13 });
+    mountIcon(document.getElementById('icon-theme-auto'), 'monitor', { size: 13 });
+    mountIcon(document.getElementById('icon-theme-light'), 'sun', { size: 13 });
+    mountIcon(document.getElementById('icon-theme-dark'), 'moon', { size: 13 });
 
-    var mobileMenu = document.getElementById('icon-mobile-menu');
-    if (mobileMenu) mobileMenu.innerHTML = uiIcon('menu', { size: 18 });
-    var btnRefresh = document.getElementById('icon-btn-refresh');
-    if (btnRefresh) btnRefresh.innerHTML = uiIcon('refresh', { size: 14 });
+    mountIcon(document.getElementById('icon-mobile-menu'), 'menu', { size: 18 });
+    mountIcon(document.getElementById('icon-btn-refresh'), 'refresh', { size: 14 });
   }
   injectStaticIcons();
+
+  /* 动态注入构建与运行版本标识 */
+  var versionSlot = document.getElementById('app-version-tag');
+  if (versionSlot) {
+    var v = (window.FleetConfig && window.FleetConfig.version) ||
+            (window.AGENT_FLEET_CONFIG && window.AGENT_FLEET_CONFIG.version) ||
+            'LIVE';
+    versionSlot.textContent = v;
+  }
 
   /* -- 主题管理 (ThemeToggle 规范实现) --------------------------------------- */
   var THEME_KEY = 'agent-fleet-theme';
@@ -303,9 +321,11 @@
     btnRefresh.addEventListener('click', function () {
       btnRefresh.classList.add('loading');
       client.getStatus().then(function (res) {
-        if (res && res.data) {
-          store.updateStatus(res.data);
+        if (res && res.ok) {
+          store.setStatus(res);
         }
+      }).catch(function (err) {
+        console.error('Failed to refresh status:', err);
       }).finally(function () {
         setTimeout(function () {
           btnRefresh.classList.remove('loading');
@@ -320,7 +340,8 @@
   var sidebarSseStatus = document.getElementById('sidebar-sse-status');
   var connectionPill = document.getElementById('connection-pill');
   var connectionLabel = document.getElementById('connection-label');
-  var sidebarStatusSlot = document.getElementById('sidebar-status-slot');
+  var sidebarIndicatorPill = document.getElementById('sidebar-indicator-pill');
+  var sidebarIndicatorText = document.getElementById('sidebar-indicator-text');
 
   function resolveCurrentMachineName() {
     var segments = window.location.pathname.split('/');
@@ -349,8 +370,8 @@
       connectionLabel.textContent = live ? 'Live' : (st.connection === 'reconnecting' ? 'Reconnecting' : 'Offline');
     }
 
-    /* 侧边栏整体健康指示胶囊 (StatusIndicator) */
-    if (sidebarStatusSlot) {
+    /* 侧边栏整体健康指示胶囊 (StatusIndicator - 纯 DOM 属性操作，无 innerHTML 拼接) */
+    if (sidebarIndicatorPill && sidebarIndicatorText) {
       var statusData = st.status || {};
       var machines = statusData.machines || [];
       var onlineCount = 0;
@@ -366,10 +387,8 @@
       var indicatorLabel = live ? (onlineCount + '/' + totalCount + ' Nodes Online') : 'SSE Offline';
       var badgeCls = indicatorStatus === 'online' ? 'status-pill-ok' : (indicatorStatus === 'busy' ? 'status-pill-warn' : 'status-pill-bad');
 
-      sidebarStatusSlot.innerHTML = '<div class="sidebar-status-indicator ' + badgeCls + '">' +
-        '<span class="indicator-dot-wrap"><span class="indicator-ping"></span><span class="indicator-dot"></span></span>' +
-        '<span class="indicator-label">' + indicatorLabel + '</span>' +
-        '</div>';
+      sidebarIndicatorPill.className = 'sidebar-status-indicator ' + badgeCls;
+      sidebarIndicatorText.textContent = indicatorLabel;
     }
 
     /* 动态更新侧边栏中的机器计算节点列表 */

@@ -978,14 +978,144 @@ table.agent-table td {
   word-break: break-all;
 }
 
+/* -- Awesome UI Kit 任务创建与详情组件扩展 --------------------------------- */
+
+.task-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.task-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.task-form input, .task-form select, .task-form textarea {
+  display: block;
+  width: 100%;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  font-size: 13.5px;
+  font-family: inherit;
+  transition: all .15s ease;
+  box-sizing: border-box;
+}
+.task-form input:focus, .task-form select:focus, .task-form textarea:focus {
+  border-color: var(--link);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--link-bg);
+}
+.task-form textarea {
+  min-height: 90px;
+  resize: vertical;
+  line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.task-form button[type="submit"] {
+  align-self: flex-start;
+  margin-top: 6px;
+  background: var(--link);
+  color: #0b1120;
+  font-weight: 600;
+  border-color: transparent;
+  padding: 8px 20px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+.task-form button[type="submit"]:hover {
+  background: #93c5fd;
+  transform: translateY(-1px);
+}
+
+/* 发现 Agent 实例表与源控制 */
+table.instance-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  margin-top: 10px;
+}
+table.instance-table th {
+  text-align: left;
+  color: var(--text-3);
+  font-weight: 600;
+  font-size: 11.5px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+table.instance-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-2);
+}
+table.instance-table tr:hover td {
+  background: var(--panel-hover);
+  color: var(--text);
+}
+table.instance-table td:nth-child(2),
+table.instance-table td:nth-child(3),
+table.instance-table td:nth-child(6),
+table.instance-table td:nth-child(7) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+table.instance-table button {
+  padding: 3px 9px;
+  font-size: 11.5px;
+  font-weight: 500;
+  border-radius: var(--radius-sm);
+}
+
+.source-control-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.source-control-actions button {
+  font-size: 12px;
+  padding: 5px 12px;
+}
+
+/* 任务列表行现代化 */
 .task-row {
   display: flex;
   gap: 12px;
   align-items: center;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border-subtle);
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  border: 1px solid var(--border-subtle);
+  margin-bottom: 6px;
   font-size: 13px;
+  transition: all .15s ease;
 }
+.task-row:hover {
+  background: var(--panel);
+  border-color: var(--border);
+}
+.task-row a {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+  color: var(--link);
+}
+.task-row .session-link {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+
+/* -- 响应式断点契约 (Responsive Breakpoints Contract) ----------------------- */
 .task-state {
   font-size: 11px;
   font-weight: 600;
