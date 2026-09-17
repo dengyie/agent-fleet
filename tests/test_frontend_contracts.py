@@ -1573,5 +1573,45 @@ class TaskViewBoundaryTests(unittest.TestCase):
             self.assertIn(token, source, f'task.js missing {token}')
 
 
+class FrontendEsModuleSyntaxTests(unittest.TestCase):
+    """Ensure all frontend JavaScript modules pass static compilation and import cleanly.
+
+    Guards against fatal browser SyntaxError (e.g. invalid line-continuations or unescaped tokens)
+    that halt the native ES module graph and freeze the SPA on 'Connecting...'.
+    """
+
+    NODE = shutil.which('node')
+
+    @unittest.skipUnless(shutil.which('node'), 'node unavailable; skipping syntax check')
+    def test_all_frontend_js_modules_compile_and_import_without_syntax_errors(self):
+        js_files = sorted(FRONTEND_DIR.glob('**/*.js'))
+        self.assertGreater(len(js_files), 0, 'No frontend JS files found')
+
+        for path in js_files:
+            # 1. Static syntax check via node --check
+            proc = subprocess.run(
+                [self.NODE, '--check', str(path)],
+                capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(
+                proc.returncode, 0,
+                f"Syntax check failed for {path}:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+            )
+
+            # 2. ES module import evaluation (config.js defines window global in browser, skip in pure Node)
+            if path.name == 'config.js':
+                continue
+
+            file_url = path.resolve().as_uri()
+            proc_import = subprocess.run(
+                [self.NODE, '--input-type=module', '-e', f'import("{file_url}");'],
+                capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(
+                proc_import.returncode, 0,
+                f"ES module import evaluation failed for {path}:\nSTDOUT:\n{proc_import.stdout}\nSTDERR:\n{proc_import.stderr}"
+            )
+
+
 if __name__ == '__main__':
     unittest.main()

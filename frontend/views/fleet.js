@@ -409,17 +409,17 @@ export function mountFleet(root, store, client) {
       render();
 
       if (typeof clientMethods.listSessions === 'function') {
-        clientMethods.listSessions({ limit: 50 })\
+        clientMethods.listSessions({ limit: 50 })
           .then(function (res) {
             if (disposed) return;
             viewState.sessions = (res && Array.isArray(res.sessions)) ? res.sessions : [];
             viewState.sessionError = null;
             render();
-          })\
+          })
           .catch(function (err) {
             if (disposed) return;
             viewState.sessions = [];
-            viewState.sessionError = (err && (err.detail || err.code))\
+            viewState.sessionError = (err && (err.detail || err.code))
               ? String(err.detail || err.code) : '会话列表加载失败';
             render();
           });
