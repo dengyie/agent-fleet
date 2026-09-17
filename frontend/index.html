@@ -209,6 +209,7 @@
   function updateAuthUI() {
     var token = getAccessToken();
     if (token) {
+      document.body.classList.remove('gatekeeper-locked');
       mountIcon(document.getElementById('icon-btn-auth'), 'unlock', { size: 14 });
       if (authBtnLabel) authBtnLabel.textContent = 'Admin';
       if (btnAuth) {
@@ -216,12 +217,14 @@
         btnAuth.title = '操作员已鉴权 (已配置 Token)';
       }
     } else {
+      document.body.classList.add('gatekeeper-locked');
       mountIcon(document.getElementById('icon-btn-auth'), 'lock', { size: 14 });
       if (authBtnLabel) authBtnLabel.textContent = 'Auth';
       if (btnAuth) {
         btnAuth.classList.remove('is-authed');
         btnAuth.title = '未配置操作员 Token (点击配置)';
       }
+      openAuthModal();
     }
   }
 
@@ -241,6 +244,9 @@
   window.openAuthModal = openAuthModal;
 
   function closeAuthModal() {
+    if (document.body.classList.contains('gatekeeper-locked')) {
+      return; // 强制门禁模式下禁止关闭弹窗
+    }
     if (!authModal) return;
     authModal.classList.remove('open');
   }
@@ -263,10 +269,11 @@
     if (!authInput) return;
     var val = authInput.value.trim();
     if (!val) {
-      setAccessToken('');
-      updateAuthUI();
-      closeAuthModal();
-      window.location.reload();
+      if (authStatus) {
+        authStatus.style.display = 'block';
+        authStatus.className = 'auth-modal-status err';
+        authStatus.textContent = '请输入有效操作员口令！';
+      }
       return;
     }
     setAccessToken(val);
@@ -274,10 +281,10 @@
     if (authStatus) {
       authStatus.style.display = 'block';
       authStatus.className = 'auth-modal-status ok';
-      authStatus.textContent = '口令已保存，正在重新加载...';
+      authStatus.textContent = '口令已保存，正在验证并加载...';
     }
     setTimeout(function () {
-      closeAuthModal();
+      if (authModal) authModal.classList.remove('open');
       window.location.reload();
     }, 400);
   }

@@ -1372,6 +1372,24 @@ button[disabled] {
   gap: 6px;
 }
 
+/* 强制登录门禁遮罩 (Gatekeeper Overlay) */
+body.gatekeeper-locked .fleet-layout-root {
+  filter: blur(8px) grayscale(40%);
+  pointer-events: none;
+  user-select: none;
+}
+body.gatekeeper-locked #auth-modal {
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  background: rgba(8, 12, 20, 0.88);
+}
+body.gatekeeper-locked #auth-modal-close {
+  display: none !important;
+}
+body.gatekeeper-locked #auth-modal-clear {
+  display: none !important;
+}
+
 /* -- 响应式断点契约 (Responsive Breakpoints Contract) ----------------------- */
 
 @media (max-width: 1439px) {
