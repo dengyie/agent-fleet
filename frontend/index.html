@@ -91,6 +91,10 @@
         </div>
       </div>
       <div class="topbar-right">
+        <button type="button" class="topbar-action-btn" id="btn-auth" title="操作员鉴权 (Web Token)">
+          <span class="btn-icon" id="icon-btn-auth"></span>
+          <span id="auth-btn-label">Auth</span>
+        </button>
         <button type="button" class="topbar-action-btn" id="btn-global-refresh" title="刷新数据">
           <span class="btn-icon" id="icon-btn-refresh"></span>
           <span>Refresh</span>
@@ -112,6 +116,31 @@
   </div>
 </div>
 
+<!-- 操作员身份鉴权模态弹窗 (Operator Auth Modal) -->
+<div class="modal" id="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title">
+  <div class="modal-box auth-modal-dialog">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+      <h3 id="auth-modal-title" style="margin:0; font-size:16px; display:flex; align-items:center; gap:8px;">
+        <span id="icon-modal-shield"></span>
+        <span>操作员身份鉴权</span>
+      </h3>
+      <button type="button" class="btn-link-action" id="auth-modal-close" aria-label="关闭" style="font-size:18px;">✕</button>
+    </div>
+    <p class="auth-modal-desc">
+      集群受控会话（Sessions）、任务派发及核心控制通道要求操作员凭证。输入操作员口令或访问令牌（Token）以解锁完整控制权限。
+    </p>
+    <div>
+      <label for="auth-token-input">操作员口令 / 令牌 (Token)</label>
+      <input type="password" id="auth-token-input" placeholder="输入口令（例如 2625451001）" autocomplete="current-password" />
+    </div>
+    <div class="auth-modal-status" id="auth-modal-status" style="display:none;"></div>
+    <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:18px;">
+      <button type="button" id="auth-modal-clear">清除口令</button>
+      <button type="button" id="auth-modal-submit" style="background:var(--link); color:#fff; border-color:var(--link);">保存凭据</button>
+    </div>
+  </div>
+</div>
+
 <script src="./config.js"></script>
 <script type="module">
   /* 静态 shell 组合层（基于 awesome-ui-kit 原生控制台规范）：
@@ -126,7 +155,7 @@
     getStatus, getMachine, getEvents, listTasks, getTask, createTask,
     cancelTask, retryTask, getSession, getSessionEvents, getSessionSignals,
     listSessions, listAdoptions, adoptInstance, revokeAdoption, retryAdoption,
-    controlSession, listAgentTypes,
+    controlSession, listAgentTypes, getAccessToken, setAccessToken,
   } from './api/client.js';
   import { FleetStore } from './state/store.js';
   import { SseClient } from './realtime/sse.js';
@@ -163,8 +192,127 @@
 
     mountIcon(document.getElementById('icon-mobile-menu'), 'menu', { size: 18 });
     mountIcon(document.getElementById('icon-btn-refresh'), 'refresh', { size: 14 });
+    mountIcon(document.getElementById('icon-modal-shield'), 'shield', { size: 18 });
   }
   injectStaticIcons();
+
+  /* -- 操作员身份鉴权管理 (Operator Auth Modal & Web Token) ------------------ */
+  var btnAuth = document.getElementById('btn-auth');
+  var authBtnLabel = document.getElementById('auth-btn-label');
+  var authModal = document.getElementById('auth-modal');
+  var authCloseBtn = document.getElementById('auth-modal-close');
+  var authInput = document.getElementById('auth-token-input');
+  var authSubmitBtn = document.getElementById('auth-modal-submit');
+  var authClearBtn = document.getElementById('auth-modal-clear');
+  var authStatus = document.getElementById('auth-modal-status');
+
+  function updateAuthUI() {
+    var token = getAccessToken();
+    if (token) {
+      mountIcon(document.getElementById('icon-btn-auth'), 'unlock', { size: 14 });
+      if (authBtnLabel) authBtnLabel.textContent = 'Admin';
+      if (btnAuth) {
+        btnAuth.classList.add('is-authed');
+        btnAuth.title = '操作员已鉴权 (已配置 Token)';
+      }
+    } else {
+      mountIcon(document.getElementById('icon-btn-auth'), 'lock', { size: 14 });
+      if (authBtnLabel) authBtnLabel.textContent = 'Auth';
+      if (btnAuth) {
+        btnAuth.classList.remove('is-authed');
+        btnAuth.title = '未配置操作员 Token (点击配置)';
+      }
+    }
+  }
+
+  function openAuthModal() {
+    if (!authModal) return;
+    authModal.classList.add('open');
+    if (authInput) {
+      authInput.value = getAccessToken() || '';
+      setTimeout(function () { authInput.focus(); }, 50);
+    }
+    if (authStatus) {
+      authStatus.style.display = 'none';
+      authStatus.textContent = '';
+      authStatus.className = 'auth-modal-status';
+    }
+  }
+  window.openAuthModal = openAuthModal;
+
+  function closeAuthModal() {
+    if (!authModal) return;
+    authModal.classList.remove('open');
+  }
+
+  if (btnAuth) {
+    btnAuth.addEventListener('click', openAuthModal);
+  }
+  if (authCloseBtn) {
+    authCloseBtn.addEventListener('click', closeAuthModal);
+  }
+  if (authModal) {
+    authModal.addEventListener('click', function (e) {
+      if (e.target === authModal) {
+        closeAuthModal();
+      }
+    });
+  }
+
+  function handleSaveToken() {
+    if (!authInput) return;
+    var val = authInput.value.trim();
+    if (!val) {
+      setAccessToken('');
+      updateAuthUI();
+      closeAuthModal();
+      window.location.reload();
+      return;
+    }
+    setAccessToken(val);
+    updateAuthUI();
+    if (authStatus) {
+      authStatus.style.display = 'block';
+      authStatus.className = 'auth-modal-status ok';
+      authStatus.textContent = '口令已保存，正在重新加载...';
+    }
+    setTimeout(function () {
+      closeAuthModal();
+      window.location.reload();
+    }, 400);
+  }
+
+  if (authSubmitBtn) {
+    authSubmitBtn.addEventListener('click', handleSaveToken);
+  }
+  if (authInput) {
+    authInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleSaveToken();
+      } else if (e.key === 'Escape') {
+        closeAuthModal();
+      }
+    });
+  }
+  if (authClearBtn) {
+    authClearBtn.addEventListener('click', function () {
+      setAccessToken('');
+      if (authInput) authInput.value = '';
+      updateAuthUI();
+      if (authStatus) {
+        authStatus.style.display = 'block';
+        authStatus.className = 'auth-modal-status ok';
+        authStatus.textContent = '口令已清除，正在重新加载...';
+      }
+      setTimeout(function () {
+        closeAuthModal();
+        window.location.reload();
+      }, 400);
+    });
+  }
+
+  updateAuthUI();
 
   /* 动态注入构建与运行版本标识 */
   var versionSlot = document.getElementById('app-version-tag');

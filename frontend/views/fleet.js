@@ -242,7 +242,22 @@ function renderSessionStrip(sessions, errorText) {
   panel.appendChild(header);
 
   if (errorText) {
-    panel.appendChild(h('div', 'err', String(errorText)));
+    var errStr = String(errorText);
+    if (errStr.indexOf('operator identity required') !== -1) {
+      var authNotice = h('div', 'err auth-err-notice');
+      authNotice.appendChild(document.createTextNode('需要操作员鉴权：' + errStr + ' '));
+      var unlockBtn = h('button', 'btn-link-action', '点击输入口令');
+      unlockBtn.type = 'button';
+      unlockBtn.addEventListener('click', function () {
+        if (typeof window !== 'undefined' && typeof window.openAuthModal === 'function') {
+          window.openAuthModal();
+        }
+      });
+      authNotice.appendChild(unlockBtn);
+      panel.appendChild(authNotice);
+    } else {
+      panel.appendChild(h('div', 'err', errStr));
+    }
   }
   var rows = Array.isArray(sessions) ? sessions : [];
   var managed = 0;

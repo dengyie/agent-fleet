@@ -112,6 +112,31 @@ function makeClientToken() {
     Math.random().toString(36).slice(2, 12);
 }
 
+var TOKEN_STORAGE_KEY = 'fleet_access_token';
+
+export function getAccessToken() {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      return window.localStorage.getItem(TOKEN_STORAGE_KEY) || '';
+    } catch (e) {
+      return '';
+    }
+  }
+  return '';
+}
+
+export function setAccessToken(token) {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      if (token) {
+        window.localStorage.setItem(TOKEN_STORAGE_KEY, String(token).trim());
+      } else {
+        window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+      }
+    } catch (e) {}
+  }
+}
+
 /**
  * 唯一 request 通道：解析 apiBaseUrl、编码路径、no-store、JSON 解析一次、
  * 非 2xx / 网络 / 超时统一 ApiError。options.body 会被 JSON.stringify；
@@ -124,11 +149,17 @@ async function request(path, options) {
     controller.abort();
   }, boundedTimeout(options.timeoutMs));
 
+  var headers = Object.assign({}, options.headers || {});
+  var token = getAccessToken();
+  if (token && !headers['X-Access-Token']) {
+    headers['X-Access-Token'] = token;
+  }
+
   var response;
   try {
     response = await fetch(resolveApiBaseUrl() + path, {
       method: options.method || 'GET',
-      headers: options.headers || {},
+      headers: headers,
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
       cache: 'no-store',
       signal: controller.signal,
