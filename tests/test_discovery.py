@@ -96,9 +96,11 @@ def test_family_classification_is_bounded_to_observable_types():
 
 def test_zcode_script_cli_classified_via_second_argv_token():
     # 桌面版跑法：exe 是 node，家族身份只在 argv[1] 的 basename（zcode.cjs）。
+    # 路径分隔符与被探测机器一致（discovery 跑在 agent 本机）；
+    # 测试用 / 保证跨平台 basename 语义一致。
     assert discovery.classify_family(
         "/usr/bin/node",
-        "node F:\programe\ZCode\resources\glm\zcode.cjs -p hi",
+        "node F:/programe/ZCode/resources/glm/zcode.cjs -p hi",
     ) == "zcode"
     assert discovery.classify_family(
         "/usr/local/bin/node", "node /opt/cli/zcode.cjs --version") == "zcode"
