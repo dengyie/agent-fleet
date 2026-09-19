@@ -9,10 +9,12 @@ runner 主动出站 HTTPS；hub 不反向连接。崩溃安全：lease 过期由
                                 [--once] [--interval 15]
 """
 import json
+import logging
 import sys
 import threading
 import time
 from collections import deque
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
@@ -45,6 +47,30 @@ MIN_BACKOFF_S = 5
 # heartbeat 日志上传约束：≤MAX_LOG_LINES 行 × ≤MAX_LOG_LINE_CHARS 字符（与 hub 一致）
 MAX_LOG_LINES = 50
 MAX_LOG_LINE_CHARS = 500
+
+#: 诊断日志：常驻模式写 cache_dir/runner.log（RotatingFileHandler 512KB×2），
+#: --once 模式写 stderr。文件 IO 一律 UTF-8（Windows GBK locale 教训）。
+log = logging.getLogger("agent-fleet.runner")
+log.addHandler(logging.NullHandler())
+
+
+def _setup_logging(cfg, resident: bool) -> None:
+    """装配诊断日志输出目标（main 在 load_config 之后调用一次）。"""
+    for handler in list(log.handlers):
+        log.removeHandler(handler)
+        handler.close()
+    log.setLevel(logging.INFO)
+    if resident:
+        cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(cfg.cache_dir / "runner.log",
+                                      maxBytes=512 * 1024, backupCount=2,
+                                      encoding="utf-8")
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(message)s"))
+    else:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    log.addHandler(handler)
 
 
 class RunnerPollError(RuntimeError):
@@ -125,21 +151,19 @@ def flush_pending(cfg):
         try:
             body = json.loads(f.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            print(f"[runner] pending 结果损坏，丢弃 {f.name}: {exc}",
-                  file=sys.stderr)
+            log.warning("pending 结果损坏，丢弃 %s: %s", f.name, exc)
             try:
                 f.unlink()
             except OSError as exc2:
-                print(f"[runner] pending 文件删除失败 {f.name}: {exc2}",
-                      file=sys.stderr)
+                log.error("pending 文件删除失败 %s: %s", f.name, exc2)
             continue
         try:
             status, _ = post_json(cfg, f"/api/commands/{body['attempt_id']}/result", body)
             if status in (200, 409):  # 409 = lease 已失效但结果已记录/任务已重派
                 f.unlink()
         except Exception as exc:
-            print(f"[runner] pending 重传失败 {f.name}: "
-                  f"{type(exc).__name__}: {exc}", file=sys.stderr)
+            log.warning("pending 重传失败 %s: %s: %s",
+                        f.name, type(exc).__name__, exc)
 
 
 def _submit_result(cfg, attempt_id, nonce, result, diff_stat, duration_s,
@@ -391,11 +415,14 @@ def main(argv=None):
     cfg = runner_config.load_config(args.config)
     interval = args.interval or cfg.poll_interval_s
 
+    resident = not args.once
+    _setup_logging(cfg, resident=resident)
+
     if args.once:
         try:
             poll_once(cfg)
         except RunnerPollError as exc:
-            print(f"[runner] hub 不可达: {exc}", file=sys.stderr)
+            log.error("hub 不可达: %s", exc)
         return 0
 
     backoff = MIN_BACKOFF_S
@@ -407,13 +434,13 @@ def main(argv=None):
                 time.sleep(interval)
         except RunnerPollError as exc:
             # 网络失败：保留/递增 backoff，5s→60s 上限
-            print(f"[runner] hub 不可达，{backoff}s 后重试: {exc}", file=sys.stderr)
+            log.warning("hub 不可达，%ds 后重试: %s", backoff, exc)
             time.sleep(backoff)
             backoff = min(backoff * 2, MAX_BACKOFF_S)
         except KeyboardInterrupt:
             return 0
-        except Exception as exc:
-            print(f"[runner] 轮询异常: {type(exc).__name__}: {exc}", file=sys.stderr)
+        except Exception:
+            log.exception("轮询异常")
             time.sleep(backoff)
             backoff = min(backoff * 2, MAX_BACKOFF_S)
 

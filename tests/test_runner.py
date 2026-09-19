@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -630,6 +631,21 @@ class AgentRunnerTests(unittest.TestCase):
             self.runner.flush_pending(self.cfg)
         self.assertEqual(list(pending_dir.glob("*.json")), [])  # 已丢弃
         self.assertEqual(posts, [])  # 未发起任何上传
+
+    def test_setup_logging_resident_attaches_rotating_file_handler(self):
+        """常驻诊断日志必须落 RotatingFileHandler（外部重定向不可轮转）。"""
+        log_path = (self.cfg.cache_dir / "runner.log").resolve()
+        try:
+            self.runner._setup_logging(self.cfg, resident=True)
+            rotating = [h for h in self.runner.log.handlers
+                        if type(h).__name__ == "RotatingFileHandler"]
+            self.assertEqual(len(rotating), 1)
+            self.assertEqual(Path(rotating[0].baseFilename), log_path)
+        finally:
+            # 恢复 NullHandler 兜底，避免污染其它用例
+            for h in list(self.runner.log.handlers):
+                self.runner.log.removeHandler(h)
+            self.runner.log.addHandler(logging.NullHandler())
 
     def test_flush_pending_roundtrip_chinese_payload_is_utf8(self):
         """pending 文件含中文（ensure_ascii=False 落盘）必须按 UTF-8 往返：

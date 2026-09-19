@@ -196,6 +196,16 @@ def _argv1(args: str) -> str:
     return parts[1].strip() if len(parts) > 1 else ""
 
 
+def _token_basename(token: str) -> str:
+    """跨平台 argv token 的 basename：剥引号后同时按 / 与 \ 切分。
+
+    ps/WMI 采集的 cmdline 可能带引号且分隔符与采集机相关（Windows 反斜杠
+    + 引号包裹的含空格路径）；本函数不依赖运行平台语义，保证分类结果
+    只由 token 内容决定。
+    """
+    return token.strip('"').replace("\\", "/").rsplit("/", 1)[-1].strip()
+
+
 def _exe_path_for(pid: int, comm: str | None, args: str) -> str:
     argv0 = _argv0(args)
     # 1) /proc/<pid>/exe (Linux) — always canonical when available.
@@ -298,7 +308,7 @@ def classify_family(exe_path: str, cmdline: str) -> str | None:
     # basename 仍可精确命中家族别名（如 npm/桌面版跑法
     # ``node .../resources/glm/zcode.cjs``）。只检查这一个 token，
     # 不做全命令行扫描——``grep codex`` 之类的 helper 永不误分类。
-    script_base = os.path.basename(_argv1(cmdline or "")).strip().lower()
+    script_base = _token_basename(_argv1(cmdline or "")).lower()
     if script_base:
         for family, aliases in _FAMILY_BASENAMES.items():
             if script_base in aliases:

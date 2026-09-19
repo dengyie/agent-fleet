@@ -104,6 +104,16 @@ def test_zcode_script_cli_classified_via_second_argv_token():
     ) == "zcode"
     assert discovery.classify_family(
         "/usr/local/bin/node", "node /opt/cli/zcode.cjs --version") == "zcode"
+    # WMI/引号保留的含空格路径（Windows 桌面版安装位）：剥引号后仍可分类
+    assert discovery.classify_family(
+        "/usr/bin/node",
+        'node "F:/programe/ZCode/resources/glm/zcode.cjs" -p hi',
+    ) == "zcode"
+    # 反斜杠分隔符同样命中（跨平台 basename 语义）
+    assert discovery.classify_family(
+        "/usr/bin/node",
+        'node "F:\programe\ZCode\resources\glm\zcode.cjs" -p hi',
+    ) == "zcode"
     # node 跑非家族脚本绝不误分类
     assert discovery.classify_family(
         "/usr/bin/node", "node /opt/server/app.cjs serve") is None
