@@ -77,6 +77,12 @@ def resolve_token(cli_token, token_file):
 
 
 def main(argv=None):
+    # pythonw / 无控制台环境下 stdout/stderr 为 None：print 会 AttributeError。
+    # 定向 devnull，保证上报本身不受输出能力影响。
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--endpoint",

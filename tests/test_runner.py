@@ -632,11 +632,35 @@ class AgentRunnerTests(unittest.TestCase):
         self.assertEqual(list(pending_dir.glob("*.json")), [])  # 已丢弃
         self.assertEqual(posts, [])  # 未发起任何上传
 
+    def test_main_config_failure_logs_to_default_dir_and_returns_2(self):
+        """配置加载失败必须留痕（默认 cache 目录）并以 2 退出——
+        pythonw/无控制台会话下 stderr 为 None，不留痕即静默消失。
+        monkeypatch Path.home：默认目录落在临时区，不污染真实文件。"""
+        bad_cfg = self.temp / "bad.yaml"
+        bad_cfg.write_text("projects: [broken", encoding="utf-8")
+        fake_home = self.temp / "fakehome"
+        log_path = fake_home / ".cache" / "agent-fleet" / "runner.log"
+        with mock.patch("pathlib.Path.home", return_value=fake_home):
+            try:
+                rc = self.runner.main(["--config", str(bad_cfg)])
+                self.assertEqual(rc, 2)
+                rotating = [h for h in self.runner.log.handlers
+                            if type(h).__name__ == "RotatingFileHandler"]
+                self.assertEqual(len(rotating), 1)
+                self.assertEqual(Path(rotating[0].baseFilename), log_path)
+                self.assertTrue(log_path.exists())
+            finally:
+                for h in list(self.runner.log.handlers):
+                    self.runner.log.removeHandler(h)
+                    h.close()
+                self.runner.log.addHandler(logging.NullHandler())
+
     def test_setup_logging_resident_attaches_rotating_file_handler(self):
         """常驻诊断日志必须落 RotatingFileHandler（外部重定向不可轮转）。"""
         log_path = (self.cfg.cache_dir / "runner.log").resolve()
         try:
-            self.runner._setup_logging(self.cfg, resident=True)
+            self.runner._setup_logging(resident=True,
+                                       log_dir=self.cfg.cache_dir)
             rotating = [h for h in self.runner.log.handlers
                         if type(h).__name__ == "RotatingFileHandler"]
             self.assertEqual(len(rotating), 1)

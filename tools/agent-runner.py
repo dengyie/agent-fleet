@@ -54,15 +54,18 @@ log = logging.getLogger("agent-fleet.runner")
 log.addHandler(logging.NullHandler())
 
 
-def _setup_logging(cfg, resident: bool) -> None:
-    """装配诊断日志输出目标（main 在 load_config 之后调用一次）。"""
+def _setup_logging(resident: bool, log_dir: Path) -> None:
+    """装配诊断日志输出目标（main 在解析配置后调用一次）。
+
+    log_dir 独立于 cfg 传入：配置本身加载失败时也能按默认目录留痕。
+    """
     for handler in list(log.handlers):
         log.removeHandler(handler)
         handler.close()
     log.setLevel(logging.INFO)
     if resident:
-        cfg.cache_dir.mkdir(parents=True, exist_ok=True)
-        handler = RotatingFileHandler(cfg.cache_dir / "runner.log",
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(log_dir / "runner.log",
                                       maxBytes=512 * 1024, backupCount=2,
                                       encoding="utf-8")
         handler.setFormatter(logging.Formatter(
@@ -412,11 +415,18 @@ def main(argv=None):
     parser.add_argument("--interval", type=int, default=None, help="常驻轮询间隔秒")
     args = parser.parse_args(argv)
 
-    cfg = runner_config.load_config(args.config)
-    interval = args.interval or cfg.poll_interval_s
-
     resident = not args.once
-    _setup_logging(cfg, resident=resident)
+    # pythonw / 无控制台环境下 stderr 为 None：traceback 会静默丢失，
+    # 配置失败也必须留痕（默认 cache 目录），再以非零码退出。
+    # 注意：这是唯一的 load_config 调用点——先于诊断日志装配。
+    try:
+        cfg = runner_config.load_config(args.config)
+    except Exception as exc:
+        _setup_logging(resident, Path.home() / ".cache" / "agent-fleet")
+        log.error("配置加载失败: %s", exc)
+        return 2
+    interval = args.interval or cfg.poll_interval_s
+    _setup_logging(resident, cfg.cache_dir)
 
     if args.once:
         try:
