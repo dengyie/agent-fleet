@@ -4,10 +4,16 @@ The hub never executes commands on another machine. Every probe runs on the
 machine where this context is created and only returns bounded stdout.
 """
 
+import os
 import subprocess
 from pathlib import Path
 
 FLEET_HOME = Path(__file__).resolve().parent.parent
+
+# pythonw（无控制台）spawn 控制台子进程（bash/python3/ps）时会新建一个
+# 可见 conhost 窗口——每轮 self-report 闪窗的根因。CREATE_NO_WINDOW 让
+# 子进程仍有 console 可继承但窗口不显示；POSIX 下为 0（无此语义）。
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 
 class ProbeContext:
@@ -27,6 +33,7 @@ class ProbeContext:
                 text=True,
                 timeout=self.timeout,
                 cwd=str(FLEET_HOME),
+                creationflags=_NO_WINDOW,
             )
             return result.stdout.strip()
         except (subprocess.TimeoutExpired, OSError):
@@ -41,6 +48,7 @@ class ProbeContext:
                 text=True,
                 timeout=self.timeout + 5,
                 cwd=str(FLEET_HOME),
+                creationflags=_NO_WINDOW,
             )
             return result.stdout
         except (subprocess.TimeoutExpired, OSError):

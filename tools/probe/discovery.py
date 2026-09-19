@@ -134,6 +134,11 @@ _last_enumerate_failed: bool = False
 # bounded local subprocess helpers
 # ---------------------------------------------------------------------------
 
+# Windows: pythonw（无控制台）spawn ``ps`` 会新建可见 conhost 闪窗；隐藏之。
+# POSIX 无此语义，置 0。
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+
 def _run_ps(argv: list[str], timeout: float = PS_TIMEOUT_S) -> str:
     """Run one bounded local ``ps``; returns stdout, or ``""`` on any failure."""
     try:
@@ -145,6 +150,7 @@ def _run_ps(argv: list[str], timeout: float = PS_TIMEOUT_S) -> str:
             timeout=timeout,
             cwd=tempfile.gettempdir(),
             env=_PS_ENV,
+            creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError, ValueError, UnicodeDecodeError):
         return ""
