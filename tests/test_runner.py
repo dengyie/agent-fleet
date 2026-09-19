@@ -631,6 +631,33 @@ class AgentRunnerTests(unittest.TestCase):
         self.assertEqual(list(pending_dir.glob("*.json")), [])  # 已丢弃
         self.assertEqual(posts, [])  # 未发起任何上传
 
+    def test_flush_pending_roundtrip_chinese_payload_is_utf8(self):
+        """pending 文件含中文（ensure_ascii=False 落盘）必须按 UTF-8 往返：
+        写入侧与读回侧都不依赖进程 locale——GBK 机器上曾因 locale 解码
+        把合法 pending 结果当损坏文件删除（2026-09-19 回归钉）。"""
+        pending_dir = self.temp / "cache" / "pending"
+        pending_dir.mkdir(parents=True)
+        posts = []
+
+        def fail_then_capture(opener, req, timeout):
+            posts.append(json.loads(req.data.decode("utf-8")))
+            if len(posts) == 1:
+                return FakeResponse(500, {"error": "server down"})
+            return FakeResponse(200, {"ok": True})
+
+        fake_result = adapters.AdapterResult(exit_code=0,
+                                             log_tail="中文日志摘要 ✓")
+        self.cfg.transport = transport_mod.Transport(
+            mode="direct", attempts=1, retry_sleep_s=0)
+        with mock.patch.object(transport_mod.Transport, "_open",
+                               side_effect=fail_then_capture):
+            self.runner._submit_result(self.cfg, "a1", "n1", fake_result,
+                                       "", 1.0)
+            self.runner.flush_pending(self.cfg)
+        self.assertEqual(len(posts), 2)
+        self.assertEqual(posts[1]["log_summary"], "中文日志摘要 ✓")
+        self.assertEqual(list(pending_dir.glob("*.json")), [])
+
     def test_flush_pending_keeps_file_on_transport_failure(self):
         """重传失败（status 0）保留文件待下轮重试，不静默吞掉。"""
         pending_dir = self.temp / "cache" / "pending"
@@ -639,7 +666,7 @@ class AgentRunnerTests(unittest.TestCase):
             "attempt_id": "a1", "nonce": "n1", "exit_code": 0,
             "log_summary": "done", "diff_stat": "", "duration_s": 1}))
 
-        def fail_open(req, timeout):
+        def fail_open(opener, req, timeout):
             raise OSError("network down")
 
         with mock.patch.object(transport_mod.Transport, "_open",

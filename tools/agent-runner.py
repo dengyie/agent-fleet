@@ -123,7 +123,7 @@ def flush_pending(cfg):
     """
     for f in sorted(_pending_dir(cfg).glob("*.json")):
         try:
-            body = json.loads(f.read_text())
+            body = json.loads(f.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             print(f"[runner] pending 结果损坏，丢弃 {f.name}: {exc}",
                   file=sys.stderr)
@@ -158,7 +158,7 @@ def _submit_result(cfg, attempt_id, nonce, result, diff_stat, duration_s,
     status, _ = post_json(cfg, f"/api/commands/{attempt_id}/result", body)
     if status != 200:
         (_pending_dir(cfg) / f"{attempt_id}.json").write_text(
-            json.dumps(body, ensure_ascii=False))
+            json.dumps(body, ensure_ascii=False), encoding="utf-8")
     return status
 
 

@@ -204,7 +204,7 @@ def _load_supervisor_credential(supervisor, machine):
         return None
     path = Path(raw_path).expanduser()
     try:
-        raw = path.read_text().strip()
+        raw = path.read_text(encoding="utf-8").strip()
     except OSError:
         _err(f"无法读取 supervisor credential 文件 {path}")
     if not raw:
@@ -224,7 +224,7 @@ def _load_supervisor_public_key(supervisor):
         return None
     path = Path(raw_path).expanduser()
     try:
-        text = path.read_text().strip()
+        text = path.read_text(encoding="utf-8").strip()
     except OSError:
         _err(f"无法读取 supervisor public_key 文件 {path}")
     if not text:
