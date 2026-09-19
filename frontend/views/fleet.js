@@ -232,7 +232,7 @@ function renderHealthBar(rows) {
 
 /* -- 活跃会话带 (Active Sessions) -------------------------------------------- */
 
-function renderSessionStrip(sessions, errorText) {
+function renderSessionStrip(sessions, sessionError) {
   var panel = h('div', 'panel session-strip');
   var header = h('h3');
   var iconSlot = h('span', null);
@@ -241,23 +241,18 @@ function renderSessionStrip(sessions, errorText) {
   header.appendChild(document.createTextNode(' 活跃纳管会话'));
   panel.appendChild(header);
 
-  if (errorText) {
-    var errStr = String(errorText);
-    if (errStr.indexOf('operator identity required') !== -1) {
-      var authNotice = h('div', 'err auth-err-notice');
-      authNotice.appendChild(document.createTextNode('需要操作员鉴权：' + errStr + ' '));
-      var unlockBtn = h('button', 'btn-link-action', '点击输入口令');
-      unlockBtn.type = 'button';
-      unlockBtn.addEventListener('click', function () {
-        if (typeof window !== 'undefined' && typeof window.openAuthModal === 'function') {
-          window.openAuthModal();
-        }
-      });
-      authNotice.appendChild(unlockBtn);
-      panel.appendChild(authNotice);
+  if (sessionError) {
+    var errBox = h('div', 'err');
+    if (sessionError.status === 401) {
+      // 诚实契约：operator 身份由部署边缘（CF Access 头）与 hub 配置授予，
+      // 前端无凭据可补救 —— 只陈述事实，不提供假解锁入口。
+      errBox.appendChild(document.createTextNode(
+        '会话控制面需要 operator 身份（CF Access / hub 配置），当前请求未获授权。'));
     } else {
-      panel.appendChild(h('div', 'err', errStr));
+      errBox.appendChild(document.createTextNode('会话列表加载失败：' +
+        fmtValue(sessionError.detail || sessionError.code || sessionError.message)));
     }
+    panel.appendChild(errBox);
   }
   var rows = Array.isArray(sessions) ? sessions : [];
   var managed = 0;
@@ -434,8 +429,8 @@ export function mountFleet(root, store, client) {
           .catch(function (err) {
             if (disposed) return;
             viewState.sessions = [];
-            viewState.sessionError = (err && (err.detail || err.code))
-              ? String(err.detail || err.code) : '会话列表加载失败';
+            // 保留完整 ApiError：status / code / detail 供渲染层判定
+            viewState.sessionError = err || new Error('会话列表加载失败');
             render();
           });
       }

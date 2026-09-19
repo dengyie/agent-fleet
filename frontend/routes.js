@@ -72,12 +72,6 @@ var ICONS = {
   'globe': '<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>'
 };
 
-function escapeAttr(v) {
-  return String(v).replace(/[&<>'"]/g, function (c) {
-    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c];
-  });
-}
-
 export function uiIcon(name, options) {
   var opt = options || {};
   var size = opt.size || 16;

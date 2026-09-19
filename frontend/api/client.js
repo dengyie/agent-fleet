@@ -6,7 +6,8 @@
  *   - cache: "no-store"，mutation 请求带 JSON Content-Type；
  *   - JSON 只解析一次；非 2xx 与网络/超时失败统一转 ApiError；
  *   - 响应经过 api/contracts.js 的公开 DTO 校验；
- *   - 不添加任何 ingest / runner 认证 header（浏览器只依赖 operator 会话）；
+ *   - 不携带任何凭据 header（operator 身份由部署边缘的 Cloudflare Access
+ *     与 hub 侧配置授予；本模块绝不自行发明/存储凭据）；
  *   - 请求超时使用有界默认值（AbortController）。
  *
  * client_token 仅在创建任务时作为浏览器幂等值生成；它绝不是凭据，也不会被
@@ -112,31 +113,6 @@ function makeClientToken() {
     Math.random().toString(36).slice(2, 12);
 }
 
-var TOKEN_STORAGE_KEY = 'fleet_access_token';
-
-export function getAccessToken() {
-  if (typeof window !== 'undefined' && window.localStorage) {
-    try {
-      return window.localStorage.getItem(TOKEN_STORAGE_KEY) || '';
-    } catch (e) {
-      return '';
-    }
-  }
-  return '';
-}
-
-export function setAccessToken(token) {
-  if (typeof window !== 'undefined' && window.localStorage) {
-    try {
-      if (token) {
-        window.localStorage.setItem(TOKEN_STORAGE_KEY, String(token).trim());
-      } else {
-        window.localStorage.removeItem(TOKEN_STORAGE_KEY);
-      }
-    } catch (e) {}
-  }
-}
-
 /**
  * 唯一 request 通道：解析 apiBaseUrl、编码路径、no-store、JSON 解析一次、
  * 非 2xx / 网络 / 超时统一 ApiError。options.body 会被 JSON.stringify；
@@ -150,10 +126,6 @@ async function request(path, options) {
   }, boundedTimeout(options.timeoutMs));
 
   var headers = Object.assign({}, options.headers || {});
-  var token = getAccessToken();
-  if (token && !headers['X-Access-Token']) {
-    headers['X-Access-Token'] = token;
-  }
 
   var response;
   try {

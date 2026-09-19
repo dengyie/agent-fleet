@@ -1429,8 +1429,10 @@ class Task16ShellContractTests(unittest.TestCase):
     def test_index_resolves_task_id_from_path_or_query(self):
         source = INDEX_HTML.read_text()
         self.assertIn('function resolveTask', source)
-        self.assertIn("if (segments[i] === 'task' && segments[i + 1])", source)
-        self.assertIn("params.get('task')", source)
+        # 实体名统一由 resolveEntity(name) 从 pathname 段或 query 解析
+        self.assertIn("function resolveEntity(name)", source)
+        self.assertIn("if (segments[i] === name && segments[i + 1])", source)
+        self.assertIn("params.get(name)", source)
         # 路径段必须解码（URL 编码的任务 id）
         self.assertIn('decodeURIComponent', source)
 
@@ -1438,7 +1440,7 @@ class Task16ShellContractTests(unittest.TestCase):
         source = INDEX_HTML.read_text()
         self.assertIn('mountFleet(target, store, client)', source)
         self.assertIn('mountMachine(target, machine, store, client)', source)
-        self.assertIn("params.get('machine')", source)
+        self.assertIn("page === 'machine' ? resolveEntity('machine') : null", source)
 
     def test_index_preserves_single_terminal_refresh_owner(self):
         source = INDEX_HTML.read_text()
@@ -1611,6 +1613,52 @@ class FrontendEsModuleSyntaxTests(unittest.TestCase):
                 proc_import.returncode, 0,
                 f"ES module import evaluation failed for {path}:\nSTDOUT:\n{proc_import.stdout}\nSTDERR:\n{proc_import.stderr}"
             )
+
+
+class FrontendAuthRemovalContractTests(unittest.TestCase):
+    """2026-09-19 审查修复：client-side-only web-token 门禁整体下线。
+
+    hub 侧从未校验 ``X-Access-Token``（operator 域只有 CF Access 头 /
+    DEV fallback；runner、supervisor 域各自有凭据），前端口令弹窗是
+    安全剧场，且 blur+pointer-events 把公开看板一并锁死。以下契约钉住
+    「假认证不回流」；未来真正落地服务端 token 校验时，应以新契约
+    替换本组断言，而不是复活这些客户端假门禁。
+    """
+
+    def test_entry_has_no_auth_modal_or_gatekeeper(self):
+        source = INDEX_HTML.read_text()
+        for banned in ('auth-modal', 'gatekeeper', 'openAuthModal',
+                       'btn-auth', 'Auth Modal'):
+            self.assertNotIn(banned, source)
+
+    def test_entry_placeholder_leaks_no_credential_like_value(self):
+        # README 红线：token、口令、凭据样例不进 git、不写文档。
+        source = INDEX_HTML.read_text()
+        for value in re.findall(r'placeholder="([^"]*)"', source):
+            self.assertIsNone(re.search(r'\d{5,}', value),
+                              f'placeholder 含长数字串: {value}')
+
+    def test_client_stores_no_token_and_sends_no_auth_header(self):
+        source = CLIENT_JS.read_text()
+        for banned in ('localStorage', 'X-Access-Token',
+                       'fleet_access_token', 'getAccessToken'):
+            self.assertNotIn(banned, source)
+
+    def test_fleet_view_keys_auth_error_on_status_not_message_text(self):
+        # 401 判定必须走结构化字段（ApiError.status），不得匹配错误文案
+        source = (FRONTEND_DIR / 'views' / 'fleet.js').read_text()
+        self.assertIn('.status === 401', source)
+        self.assertNotIn('operator identity required', source)
+        self.assertNotIn('openAuthModal', source)
+
+    def test_styles_have_no_gatekeeper_or_auth_modal_rules(self):
+        source = (FRONTEND_DIR / 'styles' / 'app.css').read_text()
+        for banned in ('gatekeeper', 'auth-modal', 'is-authed'):
+            self.assertNotIn(banned, source)
+
+    def test_routes_helper_has_no_dead_escape_attr(self):
+        source = ROUTES_JS.read_text()
+        self.assertNotIn('escapeAttr', source)
 
 
 if __name__ == '__main__':
