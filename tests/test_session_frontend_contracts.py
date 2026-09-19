@@ -416,7 +416,8 @@ class SessionFrontendModuleTests(unittest.TestCase):
         self.assertIn('data-route-view="session"', source)
         self.assertIn("import { mountSession } from './views/session.js'", source)
         self.assertIn("function resolveSession", source)
-        self.assertIn("if (segments[i] === 'session'", source)
+        # 会话 id 统一由 resolveEntity('session') 从 pathname 段或 query 解析
+        self.assertIn("page === 'session' ? resolveEntity('session') : null", source)
         self.assertIn("mountSession(target", source)
         # 不内嵌会话业务数据
         for token in ('data-session="', 'session_id', 'capture_quality'):
