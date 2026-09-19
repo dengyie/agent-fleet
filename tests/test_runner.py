@@ -17,6 +17,19 @@ from tools import worktree
 from tools import transport as transport_mod
 
 
+def _patch_open(fake):
+    """(req, timeout) 替身 → 出站接缝 ``Transport._open`` 适配器。
+
+    runner 内部按需构造 Transport（cfg.transport 或默认 auto 实例），
+    实例级打桩不可达；类级替换 ``_open`` 覆盖所有实例。生产 ``_one``
+    以 ``self._open(opener, req, timeout)`` 发出唯一真实请求，替换体是
+    普通函数（走描述符协议，首参绑定实例）。
+    """
+    return mock.patch.object(
+        transport_mod.Transport, "_open",
+        lambda _self, _opener, req, timeout: fake(req, timeout))
+
+
 def load_agent_runner():
     path = Path(__file__).resolve().parents[1] / "tools" / "agent-runner.py"
     spec = importlib.util.spec_from_file_location("agent_runner", path)
@@ -500,8 +513,7 @@ class AgentRunnerTests(unittest.TestCase):
             captured["ua"] = req.headers.get("User-agent")
             return FakeResponse(200, {"ok": True})
 
-        with mock.patch.object(self.runner.urllib.request, "urlopen",
-                               side_effect=fake_urlopen):
+        with _patch_open(fake_urlopen):
             status, data = self.runner.post_json(self.cfg, "/api/commands/poll", {})
         self.assertEqual(status, 200)
         self.assertEqual(captured["cred"], "mac-local:s3")
@@ -510,8 +522,7 @@ class AgentRunnerTests(unittest.TestCase):
     def test_post_json_network_error_returns_zero_status(self):
         self.cfg.transport = transport_mod.Transport(
             mode="direct", attempts=3, retry_sleep_s=0)
-        with mock.patch.object(self.runner.urllib.request, "urlopen",
-                               side_effect=OSError("network down")):
+        with mock.patch.object(transport_mod.Transport, "_open", side_effect=OSError("network down")):
             status, data = self.runner.post_json(self.cfg, "/api/commands/poll", {})
         self.assertEqual(status, 0)
         self.assertIn("error", data)
@@ -527,8 +538,7 @@ class AgentRunnerTests(unittest.TestCase):
 
         self.cfg.transport = transport_mod.Transport(
             mode="direct", attempts=3, retry_sleep_s=0)
-        with mock.patch.object(self.runner.urllib.request, "urlopen",
-                               side_effect=fake_urlopen):
+        with _patch_open(fake_urlopen):
             status, data = self.runner.post_json(self.cfg, "/api/commands/poll", {})
         self.assertEqual(calls["n"], 2)
         self.assertEqual(status, 200)
@@ -550,8 +560,7 @@ class AgentRunnerTests(unittest.TestCase):
                 "https://hub.test/api/commands/poll", 403, "Forbidden",
                 hdrs=None, fp=_Fp())
 
-        with mock.patch.object(self.runner.urllib.request, "urlopen",
-                               side_effect=fake_urlopen):
+        with _patch_open(fake_urlopen):
             status, data = self.runner.post_json(self.cfg, "/api/commands/poll", {})
         self.assertEqual(calls["n"], 1)
         self.assertEqual(status, 403)
@@ -565,8 +574,7 @@ class AgentRunnerTests(unittest.TestCase):
                                       "lease_expires_at": "..."})
 
         fake_result = adapters.AdapterResult(exit_code=0, log_tail="done")
-        with mock.patch.object(self.runner.urllib.request, "urlopen",
-                               side_effect=fake_urlopen), \
+        with _patch_open(fake_urlopen), \
              mock.patch.object(self.runner.adapters, "create",
                                return_value=mock.Mock(run=mock.Mock(return_value=fake_result))):
             out = self.runner.run_task(self.cfg, self._task())
@@ -585,8 +593,7 @@ class AgentRunnerTests(unittest.TestCase):
         fake_result = adapters.AdapterResult(exit_code=0, log_tail="done")
         self.cfg.transport = transport_mod.Transport(
             mode="direct", attempts=3, retry_sleep_s=0)
-        with mock.patch.object(self.runner.urllib.request, "urlopen",
-                               side_effect=fail_urlopen), \
+        with _patch_open(fail_urlopen), \
              mock.patch.object(self.runner.adapters, "create",
                                return_value=mock.Mock(run=mock.Mock(return_value=fake_result))):
             self.runner.run_task(self.cfg, self._task())
@@ -602,19 +609,46 @@ class AgentRunnerTests(unittest.TestCase):
             "attempt_id": "a1", "nonce": "n1", "exit_code": 0,
             "log_summary": "done", "diff_stat": "", "duration_s": 1}))
         posts = []
-        with mock.patch.object(self.runner.urllib.request, "urlopen",
-                               side_effect=lambda req, timeout: (
-                                   posts.append(req.full_url),
-                                   FakeResponse(200, {"ok": True}))[1]):
+        with _patch_open(lambda req, timeout: (
+                posts.append(req.full_url),
+                FakeResponse(200, {"ok": True}))[1]):
             self.runner.flush_pending(self.cfg)
         self.assertEqual(len(posts), 1)
         self.assertEqual(list(pending_dir.glob("*.json")), [])
 
+    def test_flush_pending_discards_corrupt_file(self):
+        """半写/截断的 pending 文件无法重放：丢弃 + stderr 留痕，不无限重试。"""
+        pending_dir = self.temp / "cache" / "pending"
+        pending_dir.mkdir(parents=True)
+        (pending_dir / "bad.json").write_text('{"attempt_id": "a1", "non')
+        posts = []
+        with _patch_open(lambda req, timeout: (
+                posts.append(req.full_url),
+                FakeResponse(200, {"ok": True}))[1]):
+            self.runner.flush_pending(self.cfg)
+        self.assertEqual(list(pending_dir.glob("*.json")), [])  # 已丢弃
+        self.assertEqual(posts, [])  # 未发起任何上传
+
+    def test_flush_pending_keeps_file_on_transport_failure(self):
+        """重传失败（status 0）保留文件待下轮重试，不静默吞掉。"""
+        pending_dir = self.temp / "cache" / "pending"
+        pending_dir.mkdir(parents=True)
+        (pending_dir / "a1.json").write_text(json.dumps({
+            "attempt_id": "a1", "nonce": "n1", "exit_code": 0,
+            "log_summary": "done", "diff_stat": "", "duration_s": 1}))
+
+        def fail_open(req, timeout):
+            raise OSError("network down")
+
+        with mock.patch.object(transport_mod.Transport, "_open",
+                               side_effect=fail_open):
+            self.runner.flush_pending(self.cfg)  # 不抛
+        self.assertEqual(len(list(pending_dir.glob("*.json"))), 1)  # 保留
+
     def test_project_not_in_whitelist_refused(self):
         task = self._task()
         task["project"] = "evil"
-        with mock.patch.object(self.runner.urllib.request, "urlopen",
-                               return_value=FakeResponse(200, {"ok": True})) as uo, \
+        with mock.patch.object(transport_mod.Transport, "_open", return_value=FakeResponse(200, {"ok": True})) as uo, \
              mock.patch.object(self.runner.adapters, "create") as create:
             out = self.runner.run_task(self.cfg, task)
         self.assertNotEqual(out["exit_code"], 0)
@@ -633,8 +667,7 @@ class AgentRunnerTests(unittest.TestCase):
 
         self.cfg.transport = transport_mod.Transport(
             mode="direct", attempts=3, retry_sleep_s=0)
-        with mock.patch.object(self.runner.urllib.request, "urlopen",
-                               side_effect=fail_urlopen):
+        with _patch_open(fail_urlopen):
             with self.assertRaises(self.runner.RunnerPollError):
                 self.runner.poll_once(self.cfg)
         self.assertEqual(calls["n"], 3)
@@ -652,8 +685,7 @@ class AgentRunnerTests(unittest.TestCase):
 
         with mock.patch.object(self.runner.runner_config, "load_config",
                                return_value=self.cfg), \
-             mock.patch.object(self.runner.urllib.request, "urlopen",
-                               side_effect=fake_urlopen), \
+             _patch_open(fake_urlopen), \
              mock.patch.object(self.runner.time, "sleep", side_effect=lambda s: sleeps.append(s)):
             rc = self.runner.main(["--config", str(self.temp / "nope.yaml"),
                                    "--interval", str(7)])
@@ -672,8 +704,7 @@ class AgentRunnerTests(unittest.TestCase):
             return FakeResponse(200, {"ok": True, "task_id": "t-1"})
 
         fake_result = adapters.AdapterResult(exit_code=0, log_tail="polled")
-        with mock.patch.object(self.runner.urllib.request, "urlopen",
-                               side_effect=fake_urlopen), \
+        with _patch_open(fake_urlopen), \
              mock.patch.object(self.runner.adapters, "create",
                                return_value=mock.Mock(run=mock.Mock(return_value=fake_result))):
             got = self.runner.poll_once(self.cfg)
@@ -702,8 +733,7 @@ class AgentRunnerTests(unittest.TestCase):
             mode="direct", attempts=1, retry_sleep_s=0)
         with mock.patch.object(self.runner.runner_config, "load_config",
                                return_value=self.cfg), \
-             mock.patch.object(self.runner.urllib.request, "urlopen",
-                               side_effect=fake_urlopen), \
+             _patch_open(fake_urlopen), \
              mock.patch.object(self.runner.time, "sleep", side_effect=lambda s: sleeps.append(s)):
             rc = self.runner.main(["--config", str(self.temp / "nope.yaml"),
                                    "--interval", str(7)])
@@ -784,8 +814,7 @@ class AgentRunnerHeartbeatBoundingTests(unittest.TestCase):
             agents={"codex": {"command": None, "timeout_s": 30}},
             poll_interval_s=1, heartbeat_interval_s=1, cache_dir=self.temp / "cache")
 
-        with mock.patch.object(runner.urllib.request, "urlopen",
-                               side_effect=fake_urlopen), \
+        with _patch_open(fake_urlopen), \
              mock.patch.object(runner.adapters, "create",
                                return_value=mock.Mock(run=mock.Mock(side_effect=fake_run))):
             out = runner.run_task(cfg, self._task())
@@ -816,7 +845,7 @@ class BootstrapImportTests(unittest.TestCase):
     lease 过期重派、循环认领。
     """
 
-    def test_bootstrap_registers_report_schema_without_repo_on_sys_path(self):
+    def test_bootstrap_puts_repo_on_sys_path_without_repo_on_sys_path(self):
         saved_path = sys.path[:]
         saved_modules = {k: sys.modules.get(k)
                          for k in ("agent_profiles", "report_schema", "tools",
@@ -830,10 +859,12 @@ class BootstrapImportTests(unittest.TestCase):
                       "tools.supervisor", "tools.supervisor.supervisor"):
                 sys.modules.pop(k, None)
             runner = load_agent_runner()
-            # bootstrap 必须已注册 report_schema，且 managed import 链可达
-            self.assertIn("report_schema", sys.modules)
+            # bootstrap 把 repo root 挂回 sys.path；managed import 链可达
+            # （tools.supervisor.supervisor 顶层 import report_schema）
+            self.assertIn(repo, sys.path)
             from tools.supervisor import supervisor as _s
             self.assertTrue(len(_s.INSTANCE_FAMILIES) > 0)
+            self.assertIn("report_schema", sys.modules)
             self.assertTrue(hasattr(runner, "poll_once"))
         finally:
             sys.path[:] = saved_path
@@ -877,10 +908,9 @@ class ManagedRunnerTests(unittest.TestCase):
 
     def test_legacy_path_untouched_when_disabled(self):
         posts = []
-        with mock.patch.object(self.runner.urllib.request, "urlopen",
-                               lambda req, timeout: (
-                                   posts.append(req.full_url),
-                                   FakeResponse(200, {"ok": True}))[1]), \
+        with _patch_open(lambda req, timeout: (
+                posts.append(req.full_url),
+                FakeResponse(200, {"ok": True}))[1]), \
              mock.patch.object(self.runner.adapters, "create") as create, \
              mock.patch.object(self.runner, "run_task_managed") as mrun:
             out = self.runner.run_task(self._cfg(managed=False), self._task())
@@ -907,8 +937,7 @@ class ManagedRunnerTests(unittest.TestCase):
             posts.append(req.full_url)
             return FakeResponse(200, {"ok": True})
 
-        with mock.patch.object(self.runner.urllib.request, "urlopen",
-                               side_effect=fake_urlopen):
+        with _patch_open(fake_urlopen):
             out = self.runner.run_task_managed(cfg, self._task(),
                                                supervisor)
         self.assertEqual(out["exit_code"], 0)
@@ -935,8 +964,7 @@ class ManagedRunnerTests(unittest.TestCase):
             posts.append((req.full_url, body))
             return FakeResponse(200, {"ok": True})
 
-        with mock.patch.object(self.runner.urllib.request, "urlopen",
-                               side_effect=fake_urlopen):
+        with _patch_open(fake_urlopen):
             got = self.runner.poll_once(cfg)
         self.assertTrue(got)
         result_posts = [(u, b) for u, b in posts if u.endswith("/result")]

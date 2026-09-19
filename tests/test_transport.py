@@ -59,7 +59,7 @@ class _FakeOpeners:
         self.direct_calls = 0
         self.proxy_calls = 0
 
-    def install(self, instance: Transport, patcher: "ModulePatcher"):
+    def install(self, instance: Transport):
         def fake_opener(use_proxy):
             fn = self.proxy_open if use_proxy else self.direct_open
 
@@ -71,63 +71,12 @@ class _FakeOpeners:
                 return fn(req, timeout)
             return mock.Mock(open=call)
         instance._opener = fake_opener  # noqa: SLF001 - 测试桩
-        patcher.install_opener_target(instance)
-
-
-class ModulePatcher:
-    """把 transport 模块内的 ``urllib.request`` 替换为可控替身。
-
-    _one 通过 ``urllib.request.install_opener`` + ``urllib.request.urlopen``
-    走出站（与旧生产代码语义一致）；替身只保留这两个入口，urlopen 转发给
-    当前已安装的 opener。
-    """
-
-    def __init__(self):
-        self._installed_opener = None
-
-    def install_opener_target(self, instance: Transport):
-        import tools.transport as tm
-
-        class _UR:
-            Request = staticmethod(urllib.request.Request)
-            ProxyHandler = urllib.request.ProxyHandler
-            build_opener = staticmethod(urllib.request.build_opener)
-            URLError = urllib.error.URLError
-
-            @staticmethod
-            def install_opener(opener):
-                ModulePatcher.current._installed_opener = opener
-
-            @staticmethod
-            def urlopen(req, timeout):
-                opener = ModulePatcher.current._installed_opener
-                if opener is None:
-                    raise OSError("no installed opener (test stub)")
-                return opener.open(req, timeout=timeout)
-
-        ModulePatcher.current = self
-        tm.urllib.request = _UR()
-
-    def restore(self):
-        import tools.transport as tm
-        tm.urllib.request = urllib.request
 
 
 def _make(mode="auto", **kw):
     t = Transport(mode=mode, **kw)
     t._sleeper = lambda s: None
     return t
-
-
-_MODULE_PATCHER = ModulePatcher()
-
-
-def setUpModule():
-    _MODULE_PATCHER.install_opener_target(None)
-
-
-def tearDownModule():
-    _MODULE_PATCHER.restore()
 
 
 class CFBlockDetectionTests(unittest.TestCase):
@@ -149,7 +98,7 @@ class AutoFallbackTests(unittest.TestCase):
                 _http_error(403, b"error code: 1010\n")),
             proxy_open=lambda req, timeout: _Resp(200, {"ok": True, "commands": []}),
         )
-        openers.install(t, _MODULE_PATCHER)
+        openers.install(t)
         status, payload = t.post_json(
             "https://hub.test/api/supervisor/poll", None,
             {"X-Supervisor-Credential": "m:s"})
@@ -165,7 +114,7 @@ class AutoFallbackTests(unittest.TestCase):
                 OSError("SSL: UNEXPECTED_EOF_WHILE_READING")),
             proxy_open=lambda req, timeout: _Resp(200, {"ok": True}),
         )
-        openers.install(t, _MODULE_PATCHER)
+        openers.install(t)
         status, payload = t.post_json("https://hub.test/api/commands/poll", {}, {})
         self.assertEqual(status, 200)
         self.assertEqual(openers.proxy_calls, 1)
@@ -180,7 +129,7 @@ class AutoFallbackTests(unittest.TestCase):
             proxy_open=lambda req, timeout: (_ for _ in ()).throw(AssertionError(
                 "must not reach proxy for a hub business 403")),
         )
-        openers.install(t, _MODULE_PATCHER)
+        openers.install(t)
         status, payload = t.post_json("https://hub.test/api/tasks", {}, {})
         self.assertEqual(status, 403)
         self.assertEqual(payload.get("error"), "forbidden")
@@ -194,7 +143,7 @@ class AutoFallbackTests(unittest.TestCase):
             proxy_open=lambda req, timeout: (_ for _ in ()).throw(
                 OSError("no route either")),
         )
-        openers.install(t, _MODULE_PATCHER)
+        openers.install(t)
         status, payload = t.post_json("https://hub.test/x", None, {})
         self.assertEqual(status, 0)
         self.assertIn("error", payload)
@@ -206,7 +155,7 @@ class AutoFallbackTests(unittest.TestCase):
                 _http_error(403, b"error code: 1010\n")),
             proxy_open=lambda req, timeout: _Resp(200, {"ok": True}),
         )
-        openers.install(t, _MODULE_PATCHER)
+        openers.install(t)
         t.post_json("https://hub.test/x", None, {})
         self.assertEqual(t._preferred, "proxy")
         # 第二跳：direct 不应再被尝试
@@ -222,7 +171,7 @@ class AutoFallbackTests(unittest.TestCase):
                 TimeoutError("handshake")),
             proxy_open=lambda req, timeout: _Resp(200, {"ok": True}),
         )
-        openers.install(t, _MODULE_PATCHER)
+        openers.install(t)
         sleeps = []
         t._sleeper = lambda s: sleeps.append(s)
         status, _ = t.post_json("https://hub.test/x", None, {})
@@ -240,7 +189,7 @@ class PinnedModeTests(unittest.TestCase):
             proxy_open=lambda req, timeout: (_ for _ in ()).throw(
                 AssertionError("pinned direct must not fall back")),
         )
-        openers.install(t, _MODULE_PATCHER)
+        openers.install(t)
         status, payload = t.post_json("https://hub.test/x", None, {})
         self.assertEqual(status, 0)
         self.assertEqual(openers.proxy_calls, 0)
@@ -252,7 +201,7 @@ class PinnedModeTests(unittest.TestCase):
                 AssertionError("pinned proxy must not touch direct")),
             proxy_open=lambda req, timeout: _Resp(200, {"ok": True}),
         )
-        openers.install(t, _MODULE_PATCHER)
+        openers.install(t)
         status, payload = t.post_json("https://hub.test/x", None, {})
         self.assertEqual(status, 200)
         self.assertEqual(openers.direct_calls, 0)
@@ -272,7 +221,7 @@ class ValidationTests(unittest.TestCase):
             return _Resp(200, {"ok": True})
 
         openers = _FakeOpeners(open_fn, open_fn)
-        openers.install(t, _MODULE_PATCHER)
+        openers.install(t)
         t.post_json("https://hub.test/x", None, {"X-Test": "1"})
         self.assertIsNone(captured["data"])
 
@@ -287,7 +236,7 @@ class CFBlockSignalTests(unittest.TestCase):
             proxy_open=lambda req, timeout: (_ for _ in ()).throw(
                 _http_error(403, b"error code: 1010\n")),
         )
-        openers.install(t, _MODULE_PATCHER)
+        openers.install(t)
         status, payload = t.post_json(
             "https://hub.test/api/supervisor/poll", None, {})
         # 两路径都被 CF 拦截 → 不重试打满，直接 status=0 + cf_blocked
@@ -313,7 +262,7 @@ class TimeoutOverrideTests(unittest.TestCase):
                                               _Resp(200, {"ok": True}))[1],
             proxy_open=lambda req, timeout: _Resp(200, {"ok": True}),
         )
-        openers.install(t, _MODULE_PATCHER)
+        openers.install(t)
         status, _ = t.post_json(
             "https://hub.test/api/poll", None, {}, timeout=30)
         self.assertEqual(status, 200)
@@ -328,7 +277,7 @@ class TimeoutOverrideTests(unittest.TestCase):
                                               _Resp(200, {"ok": True}))[1],
             proxy_open=lambda req, timeout: _Resp(200, {"ok": True}),
         )
-        openers.install(t, _MODULE_PATCHER)
+        openers.install(t)
         t.post_json("https://hub.test/api/poll", None, {})
         self.assertEqual(seen, [7])
 
@@ -343,7 +292,7 @@ class Hub5xxPassthroughTests(unittest.TestCase):
                 _http_error(503, b'{"error": "unavailable"}')),
             proxy_open=lambda req, timeout: _Resp(200, {"ok": True}),
         )
-        openers.install(t, _MODULE_PATCHER)
+        openers.install(t)
         status, payload = t.post_json(
             "https://hub.test/api/supervisor/poll", None, {})
         self.assertEqual(status, 503)
@@ -395,7 +344,7 @@ class FailoverRecoveryTests(unittest.TestCase):
             direct_open=direct_fn,
             proxy_open=lambda req, timeout: _Resp(200, {"phase": 2}),
         )
-        openers.install(t, _MODULE_PATCHER)
+        openers.install(t)
 
         status, payload = t.post_json("https://hub.test/api/poll", None, {})
         self.assertEqual(status, 200)
@@ -417,7 +366,7 @@ class FailoverRecoveryTests(unittest.TestCase):
             direct_open=lambda req, timeout: (_ for _ in ()).throw(OSError("d fail")),
             proxy_open=lambda req, timeout: (_ for _ in ()).throw(OSError("p fail")),
         )
-        openers.install(t, _MODULE_PATCHER)
+        openers.install(t)
 
         status, _ = t.post_json("https://hub.test/api/poll", None, {})
         self.assertEqual(status, 0)
@@ -431,7 +380,7 @@ class FailoverRecoveryTests(unittest.TestCase):
                 _http_error(502, b'{"error": "bad_gateway"}')),
             proxy_open=lambda req, timeout: _Resp(200, {"ok": True}),
         )
-        openers.install(t, _MODULE_PATCHER)
+        openers.install(t)
 
         status, payload = t.post_json("https://hub.test/api/poll", None, {})
         self.assertEqual(status, 502)
@@ -449,7 +398,7 @@ class TimeoutBoundaryTests(unittest.TestCase):
             direct_open=lambda req, timeout: (seen.append(timeout), _Resp(200, {}))[1],
             proxy_open=lambda req, timeout: _Resp(200, {}),
         )
-        openers.install(t, _MODULE_PATCHER)
+        openers.install(t)
 
         t.post_json("https://hub.test/api/poll", None, {}, timeout=0)
         t.post_json("https://hub.test/api/poll", None, {}, timeout=-5)

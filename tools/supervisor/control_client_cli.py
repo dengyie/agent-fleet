@@ -30,32 +30,18 @@ from pathlib import Path
 
 
 def _bootstrap_direct_imports():
-    """Repo-root sys.path + tools namespace for direct script execution."""
+    """LaunchAgent / cron 直跑：把 repo root 挂到 sys.path[0]。
+
+    ``tools.supervisor.supervisor`` 顶层 import repo root 的
+    ``report_schema``（INSTANCE_FAMILIES），``tools.transport`` /
+    ``hub.domain`` 也按 repo-root 布局解析；无 WorkingDirectory 的环境
+    下 root 置于 sys.path[0] 后全部可达。
+    """
     if __package__ not in (None, ""):
         return
-    import importlib.util
-    import types
-
     root = Path(__file__).resolve().parent.parent.parent
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
-    if "agent_profiles" not in sys.modules:
-        profiles_path = root / "agent_profiles.py"
-        spec = importlib.util.spec_from_file_location(
-            "agent_profiles", profiles_path)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["agent_profiles"] = module
-        spec.loader.exec_module(module)
-    if "report_schema" not in sys.modules:
-        schema_path = root / "report_schema.py"
-        spec = importlib.util.spec_from_file_location(
-            "report_schema", schema_path)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["report_schema"] = module
-        spec.loader.exec_module(module)
-    tools_package = types.ModuleType("tools")
-    tools_package.__path__ = [str(root / "tools")]
-    sys.modules.setdefault("tools", tools_package)
 
 
 _bootstrap_direct_imports()

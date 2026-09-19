@@ -69,7 +69,8 @@ class SessionEventsTransportTests(unittest.TestCase):
 
         post = cli._make_session_events_post(
             "https://agent.example.com", "ingest-secret")
-        with mock.patch.object(cli.urllib.request, "urlopen", fake_urlopen):
+        with mock.patch.object(Transport, "_open",
+                               lambda _self, opener, req, timeout: fake_urlopen(req, timeout)):
             result = post({"events": [{"kind": "user_message", "sequence": 1}]})
         self.assertTrue(result["ok"])
         self.assertIsInstance(captured["body"], list)
@@ -84,7 +85,7 @@ class SessionEventsTransportTests(unittest.TestCase):
         post = cli._make_session_events_post(
             "https://agent.example.com", "ingest-secret")
         with mock.patch.object(cli, "_OutboundTransport", Transport), \
-             mock.patch.object(transport_mod.urllib.request, "urlopen",
+             mock.patch.object(Transport, "_open",
                                side_effect=OSError("cf blocked both paths")), \
              mock.patch.object(transport_mod.urllib.request, "getproxies",
                                return_value={}, create=True):
@@ -112,8 +113,8 @@ class SessionEventsTransportTests(unittest.TestCase):
         post = cli._make_session_events_post(
             "https://agent.example.com", "ingest-secret")
         with mock.patch.object(cli, "_OutboundTransport", Transport), \
-             mock.patch.object(transport_mod.urllib.request, "urlopen",
-                               fake_urlopen), \
+             mock.patch.object(Transport, "_open",
+                               lambda _self, opener, req, timeout: fake_urlopen(req, timeout)), \
              mock.patch.object(transport_mod.urllib.request, "getproxies",
                                return_value={}, create=True):
             result = post({"events": [{"kind": "user_message", "sequence": 1}]})

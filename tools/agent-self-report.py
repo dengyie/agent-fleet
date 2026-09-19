@@ -15,48 +15,17 @@ from pathlib import Path
 
 
 def _bootstrap_direct_imports():
-    """Expose repository namespace packages for direct script execution."""
+    """Probe cron 直跑：把 repo root 挂到 sys.path[0]。
+
+    ``tools.probe_collectors`` 依赖 repo root 上的 ``agent_profiles`` 与
+    ``connectors`` 包；cron 环境无 WorkingDirectory 时常规 import 解析
+    不到，root 置于 sys.path[0] 后全部可达（同 agent-runner 卡点 B）。
+    """
     if __package__ not in (None, ""):
         return
-    import importlib.util
-    import types
-
     root = Path(__file__).resolve().parent.parent
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
-    # ``agent_profiles`` 必须先于 report_schema 注册：report_schema 顶层
-    # ``from agent_profiles import ...``（注册表派生），先加载 schema 会因
-    # ambient 路径解析不到而 ModuleNotFoundError。
-    if "agent_profiles" not in sys.modules:
-        profiles_path = root / "agent_profiles.py"
-        spec = importlib.util.spec_from_file_location(
-            "agent_profiles", profiles_path)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["agent_profiles"] = module
-        spec.loader.exec_module(module)
-    if "report_schema" not in sys.modules:
-        schema_path = root / "report_schema.py"
-        spec = importlib.util.spec_from_file_location("report_schema", schema_path)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["report_schema"] = module
-        spec.loader.exec_module(module)
-    # ``tools.probe_collectors`` imports the repository-root
-    # ``agent_profiles`` module by name. Without registration a direct run
-    # (probe cron) resolves it against the ambient interpreter paths and
-    # fails with ModuleNotFoundError — same class of bug as the
-    # release-root ``tools`` anchor (commit a737839).
-    tools_package = types.ModuleType("tools")
-    tools_package.__path__ = [str(root / "tools")]
-    sys.modules.setdefault("tools", tools_package)
-    if "connectors" not in sys.modules:
-        path = root / "connectors"
-        spec = importlib.util.spec_from_file_location(
-            "connectors", path / "__init__.py",
-            submodule_search_locations=[str(path)],
-        )
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["connectors"] = module
-        spec.loader.exec_module(module)
 
 
 _bootstrap_direct_imports()

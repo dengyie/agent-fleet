@@ -314,7 +314,7 @@ class HubUnreachableTests(unittest.TestCase):
 
     def test_http_transport_retries_transient_timeout_then_succeeds(self):
         # 2026-09-15 起出站走 tools.transport.Transport（proxy-aware auto）；
-        # _http_transport 经 Transport._one 走模块级 urlopen（install_opener）。
+        # _http_transport 经 Transport._one → _open（唯一真实出站出口）。
         # 本测试钉 direct 单路径，保持「同路径内重试后成功」的语义。
         from tools.supervisor import control_client as cc
         from tools.supervisor.control_client import ControlClient, NonceStore
@@ -351,8 +351,8 @@ class HubUnreachableTests(unittest.TestCase):
             )
             client._outbound = transport_mod.Transport(
                 mode="direct", attempts=3, retry_sleep_s=0)
-            with mock.patch.object(transport_mod.urllib.request, "urlopen",
-                                   side_effect=fake_open):
+            with mock.patch.object(transport_mod.Transport, "_open",
+                                   side_effect=lambda opener, req, timeout=None: fake_open(req, timeout)):
                 status, body = client._http_transport(
                     "/api/supervisor/poll", None, client._headers())
         self.assertEqual(calls["n"], 2)
@@ -393,8 +393,8 @@ class HubUnreachableTests(unittest.TestCase):
             )
             client._outbound = transport_mod.Transport(
                 mode="direct", attempts=3, retry_sleep_s=0)
-            with mock.patch.object(transport_mod.urllib.request, "urlopen",
-                                   side_effect=fake_open):
+            with mock.patch.object(transport_mod.Transport, "_open",
+                                   side_effect=lambda opener, req, timeout=None: fake_open(req, timeout)):
                 status, body = client._http_transport(
                     "/api/supervisor/poll", None, client._headers())
         self.assertEqual(calls["n"], 1)

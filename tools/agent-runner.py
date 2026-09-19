@@ -12,49 +12,26 @@ import json
 import sys
 import threading
 import time
-import urllib.request
 from collections import deque
 from pathlib import Path
 
 
 def _bootstrap_direct_imports():
-    """Expose the repository namespace package for direct script execution."""
+    """LaunchAgent / 裸脚本直跑：把 repo root 挂到 sys.path[0]。
+
+    plist 无 WorkingDirectory、repo root 不在 sys.path。repo root 上的
+    ``agent_profiles``（tools.runner_config 依赖）与 ``report_schema``
+    （tools.supervisor.supervisor 顶层 import）若解析不到，后者发生在
+    任务认领 *之后* —— hub 侧表现为 leased 永无 result、lease 过期重派、
+    循环认领（2026-09-16 卡点 B root cause）。root 置于 sys.path[0] 后
+    （常规包优先于 sys.path 后位），上述 import 与 ``from tools import ...``
+    全部可达，无需逐模块手工注册。
+    """
     if __package__ not in (None, ""):
         return
-    import importlib.util
-    import types
-
     root = Path(__file__).resolve().parent.parent
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
-    # ``tools.runner_config`` imports the repository-root ``agent_profiles``
-    # module by name. Without registration a direct run resolves it against
-    # the ambient interpreter paths and fails with ModuleNotFoundError —
-    # same class of bug as the release-root ``tools`` anchor (commit a737839)
-    # and the probe shim (tools/agent-self-report.py).
-    if "agent_profiles" not in sys.modules:
-        profiles_path = root / "agent_profiles.py"
-        spec = importlib.util.spec_from_file_location(
-            "agent_profiles", profiles_path)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["agent_profiles"] = module
-        spec.loader.exec_module(module)
-    # ``tools.supervisor.supervisor`` imports the repository-root
-    # ``report_schema`` (INSTANCE_FAMILIES) at top level. Without
-    # registration a LaunchAgent run (no WorkingDirectory, repo root not on
-    # sys.path) raises ModuleNotFoundError *after* the task was leased —
-    # the hub sees leased-but-never-reported until the lease expires and
-    # re-dispatches, looping forever (2026-09-16 卡点 B root cause).
-    if "report_schema" not in sys.modules:
-        schema_path = root / "report_schema.py"
-        spec = importlib.util.spec_from_file_location(
-            "report_schema", schema_path)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["report_schema"] = module
-        spec.loader.exec_module(module)
-    tools_package = types.ModuleType("tools")
-    tools_package.__path__ = [str(root / "tools")]
-    sys.modules.setdefault("tools", tools_package)
 
 
 _bootstrap_direct_imports()
@@ -120,21 +97,16 @@ def post_json(cfg, path, body, timeout=15):
 
     出站策略由 cfg.transport（tools/transport.Transport，auto 模式）承载：
     直连被 CF 边缘拦截（403 error code: 101x）或传输失败时回退系统代理。
+    body 只在此处经 transport 序列化一次。
     """
-    req = urllib.request.Request(
-        cfg.hub + path,
-        data=json.dumps(body).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "X-Runner-Credential": f"{cfg.machine}:{cfg.credential}",
-            "User-Agent": USER_AGENT,
-        },
-        method="POST",
-    )
     if cfg.transport is None:
         cfg.transport = Transport()
-    return cfg.transport.post_json(req.full_url, body, dict(req.headers),
-                                   timeout=timeout)
+    headers = {
+        "Content-Type": "application/json",
+        "X-Runner-Credential": f"{cfg.machine}:{cfg.credential}",
+        "User-Agent": USER_AGENT,
+    }
+    return cfg.transport.post_json(cfg.hub + path, body, headers, timeout=timeout)
 
 
 def _pending_dir(cfg):
@@ -144,15 +116,30 @@ def _pending_dir(cfg):
 
 
 def flush_pending(cfg):
-    """重传上次失败的结果（attempt_id 幂等，重复提交安全）。"""
+    """重传上次失败的结果（attempt_id 幂等，重复提交安全）。
+
+    损坏的 pending 文件（半写/截断）无法重放，记录后丢弃，避免每轮 poll
+    无声重试；重传失败保留文件并打到 stderr，保证结果送达可观测。
+    """
     for f in sorted(_pending_dir(cfg).glob("*.json")):
         try:
             body = json.loads(f.read_text())
+        except (OSError, ValueError) as exc:
+            print(f"[runner] pending 结果损坏，丢弃 {f.name}: {exc}",
+                  file=sys.stderr)
+            try:
+                f.unlink()
+            except OSError as exc2:
+                print(f"[runner] pending 文件删除失败 {f.name}: {exc2}",
+                      file=sys.stderr)
+            continue
+        try:
             status, _ = post_json(cfg, f"/api/commands/{body['attempt_id']}/result", body)
             if status in (200, 409):  # 409 = lease 已失效但结果已记录/任务已重派
                 f.unlink()
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[runner] pending 重传失败 {f.name}: "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr)
 
 
 def _submit_result(cfg, attempt_id, nonce, result, diff_stat, duration_s,

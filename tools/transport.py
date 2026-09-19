@@ -36,8 +36,6 @@ _MODES = ("auto", "direct", "proxy")
 _TRANSIENT = (TimeoutError, urllib.error.URLError, OSError,
               ConnectionError, BrokenPipeError)
 
-_ORIG_URLOPEN = urllib.request.urlopen
-
 
 def _is_cf_block(status: int, body: bytes | str) -> bool:
     if status != 403:
@@ -85,22 +83,21 @@ class Transport:
 
     # -- 单路径一轮 --------------------------------------------------------
 
+    def _open(self, opener, req, timeout):
+        """唯一的真实出站出口：一次 attempt 的 urlopen。
+
+        永远走局部 ``opener.open``，绝不调用 ``install_opener`` 改写全局
+        状态（128a52c 的多线程竞态教训）。测试替身替换实例的 ``_opener``
+        或类级 ``Transport._open`` 注入，生产代码不含任何测试探测分支。
+        """
+        return opener.open(req, timeout=timeout)
+
     def _one(self, req: urllib.request.Request, use_proxy: bool,
              timeout: float):
-        """单路径一次尝试。返回 (status, payload)；CF 拦截外型抛 _CFBlock。
-
-        生产环境优先使用局部 opener.open，绝不调用全局 install_opener
-        以防多线程竞态覆盖；测试环境若检测到 urllib.request.urlopen 被打桩，
-        则向下兼容转调测试桩。
-        """
+        """单路径一次尝试。返回 (status, payload)；CF 拦截外型抛 _CFBlock。"""
         opener = self._opener(use_proxy)
         try:
-            if urllib.request.urlopen is not _ORIG_URLOPEN:
-                urllib.request.install_opener(opener)
-                ctx = urllib.request.urlopen(req, timeout=timeout)
-            else:
-                ctx = opener.open(req, timeout=timeout)
-            with ctx as resp:
+            with self._open(opener, req, timeout) as resp:
                 raw = resp.read().decode("utf-8") if resp.read else ""
                 payload = json.loads(raw) if raw else {}
                 if not isinstance(payload, dict):
