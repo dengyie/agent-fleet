@@ -1615,46 +1615,71 @@ class FrontendEsModuleSyntaxTests(unittest.TestCase):
             )
 
 
-class FrontendAuthRemovalContractTests(unittest.TestCase):
-    """2026-09-19 审查修复：client-side-only web-token 门禁整体下线。
+class FrontendAuthContractTests(unittest.TestCase):
+    """2026-09-19 二次修订：web-token 是真实认证，恢复登录 UI。
 
-    hub 侧从未校验 ``X-Access-Token``（operator 域只有 CF Access 头 /
-    DEV fallback；runner、supervisor 域各自有凭据），前端口令弹窗是
-    安全剧场，且 blur+pointer-events 把公开看板一并锁死。以下契约钉住
-    「假认证不回流」；未来真正落地服务端 token 校验时，应以新契约
-    替换本组断言，而不是复活这些客户端假门禁。
+    澄清（修正当日早间"假门禁"误判）：hub 应用层确实不读
+    ``X-Access-Token``，但部署边界 nginx 按 ``$http_x_access_token`` map
+    注入 ``Cf-Access-Authenticated-User-Email`` —— 令牌是真实 operator
+    凭据。当日真实的 P0 是该凭据以 placeholder 形式进了公开仓
+    （2625451001，6e07362 引入、9e2ef47 移除正文、git 历史仍可查），
+    已于 2026-09-19 在 nginx 轮换。本组契约钉住恢复后的诚实形态：
+
+    - 有登录（Auth 按钮 + modal + localStorage + X-Access-Token）；
+    - 无强制门禁（绝不 blur/pointer-events 锁公开看板、绝不自动弹窗）；
+    - 任何 placeholder 不得携带凭据样例；
+    - 401 判定走 ApiError.status，不匹配错误文案。
     """
 
-    def test_entry_has_no_auth_modal_or_gatekeeper(self):
+    def test_entry_has_auth_modal_without_forced_gatekeeper(self):
         source = INDEX_HTML.read_text()
-        for banned in ('auth-modal', 'gatekeeper', 'openAuthModal',
-                       'btn-auth', 'Auth Modal'):
+        for required in ('id="auth-modal"', 'id="btn-auth"',
+                         'window.openAuthModal', 'updateAuthUI'):
+            self.assertIn(required, source)
+        for banned in ('gatekeeper-locked', 'pointer-events: none'):
             self.assertNotIn(banned, source)
 
+    def test_entry_never_auto_opens_auth_modal(self):
+        source = INDEX_HTML.read_text()
+        # 无 token 首屏绝不开弹窗/锁界面（公开看板保持匿名可用）：
+        # updateAuthUI 内不得出现无条件 openAuthModal() 调用。
+        self.assertNotIn("openAuthModal();\n    }\n  }\n\n  function closeAuthModal", source)
+        self.assertNotIn("      openAuthModal();\n  }\n\n  function closeAuthModal", source)
+
     def test_entry_placeholder_leaks_no_credential_like_value(self):
-        # README 红线：token、口令、凭据样例不进 git、不写文档。
         source = INDEX_HTML.read_text()
         for value in re.findall(r'placeholder="([^"]*)"', source):
             self.assertIsNone(re.search(r'\d{5,}', value),
                               f'placeholder 含长数字串: {value}')
 
-    def test_client_stores_no_token_and_sends_no_auth_header(self):
+    def test_client_stores_token_and_sends_access_header_only(self):
         source = CLIENT_JS.read_text()
-        for banned in ('localStorage', 'X-Access-Token',
-                       'fleet_access_token', 'getAccessToken'):
+        for required in ("getAccessToken", "setAccessToken",
+                         "X-Access-Token", "TOKEN_STORAGE_KEY"):
+            self.assertIn(required, source)
+        # 认证域互斥：绝不携带 ingest / runner 域凭据
+        for banned in ('X-Agent-Fleet-Token', 'X-Runner-Credential',
+                       'X-Supervisor-Credential'):
             self.assertNotIn(banned, source)
 
     def test_fleet_view_keys_auth_error_on_status_not_message_text(self):
-        # 401 判定必须走结构化字段（ApiError.status），不得匹配错误文案
         source = (FRONTEND_DIR / 'views' / 'fleet.js').read_text()
         self.assertIn('.status === 401', source)
+        self.assertIn('openAuthModal', source)
         self.assertNotIn('operator identity required', source)
-        self.assertNotIn('openAuthModal', source)
 
-    def test_styles_have_no_gatekeeper_or_auth_modal_rules(self):
+    def test_styles_have_auth_modal_but_no_gatekeeper_rules(self):
         source = (FRONTEND_DIR / 'styles' / 'app.css').read_text()
-        for banned in ('gatekeeper', 'auth-modal', 'is-authed'):
-            self.assertNotIn(banned, source)
+        self.assertIn('.auth-modal-dialog', source)
+        self.assertNotIn('gatekeeper', source)
+
+    def test_no_leaked_credential_anywhere_in_frontend(self):
+        # 2625451001 已于 2026-09-19 在 nginx 轮换；公开仓任何前端文件
+        # 不得再出现该值（git 历史清洗另行决策）。
+        for path in (INDEX_HTML, CLIENT_JS, ROUTES_JS,
+                     FRONTEND_DIR / 'views' / 'fleet.js',
+                     FRONTEND_DIR / 'styles' / 'app.css'):
+            self.assertNotIn('2625451001', path.read_text())
 
     def test_routes_helper_has_no_dead_escape_attr(self):
         source = ROUTES_JS.read_text()

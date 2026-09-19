@@ -244,10 +244,15 @@ function renderSessionStrip(sessions, sessionError) {
   if (sessionError) {
     var errBox = h('div', 'err');
     if (sessionError.status === 401) {
-      // 诚实契约：operator 身份由部署边缘（CF Access 头）与 hub 配置授予，
-      // 前端无凭据可补救 —— 只陈述事实，不提供假解锁入口。
-      errBox.appendChild(document.createTextNode(
-        '会话控制面需要 operator 身份（CF Access / hub 配置），当前请求未获授权。'));
+      errBox.appendChild(document.createTextNode('需要操作员令牌。'));
+      var unlockBtn = h('button', 'btn-link-action', '输入令牌');
+      unlockBtn.type = 'button';
+      unlockBtn.addEventListener('click', function () {
+        if (typeof window !== 'undefined' && typeof window.openAuthModal === 'function') {
+          window.openAuthModal();
+        }
+      });
+      errBox.appendChild(unlockBtn);
     } else {
       errBox.appendChild(document.createTextNode('会话列表加载失败：' +
         fmtValue(sessionError.detail || sessionError.code || sessionError.message)));

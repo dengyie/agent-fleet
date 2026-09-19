@@ -91,6 +91,10 @@
         </div>
       </div>
       <div class="topbar-right">
+        <button type="button" class="topbar-action-btn" id="btn-auth" title="操作员令牌（任务派发等 operator 操作）">
+          <span class="btn-icon" id="icon-btn-auth"></span>
+          <span id="auth-btn-label">Auth</span>
+        </button>
         <button type="button" class="topbar-action-btn" id="btn-global-refresh" title="刷新数据">
           <span class="btn-icon" id="icon-btn-refresh"></span>
           <span>Refresh</span>
@@ -112,6 +116,31 @@
   </div>
 </div>
 
+<!-- 操作员令牌（真实凭据：服务端网关按此校验 operator 权限；仅保存在本机 localStorage） -->
+<div class="modal" id="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title">
+  <div class="modal-box auth-modal-dialog">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+      <h3 id="auth-modal-title" style="margin:0; font-size:16px; display:flex; align-items:center; gap:8px;">
+        <span id="icon-modal-shield"></span>
+        <span>操作员令牌</span>
+      </h3>
+      <button type="button" class="btn-link-action" id="auth-modal-close" aria-label="关闭" style="font-size:18px;">✕</button>
+    </div>
+    <p class="auth-modal-desc">
+      任务派发、会话控制等 operator 操作需要令牌。令牌由网关校验，仅保存在本机浏览器（localStorage），不会发给第三方。
+    </p>
+    <div>
+      <label for="auth-token-input">操作员令牌</label>
+      <input type="password" id="auth-token-input" placeholder="输入操作员令牌" autocomplete="current-password" />
+    </div>
+    <div class="auth-modal-status" id="auth-modal-status" style="display:none;"></div>
+    <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:18px;">
+      <button type="button" id="auth-modal-clear">清除令牌</button>
+      <button type="button" id="auth-modal-submit" style="background:var(--link); color:#fff; border-color:var(--link);">保存令牌</button>
+    </div>
+  </div>
+</div>
+
 <script src="./config.js"></script>
 <script type="module">
   /* 静态 shell 组合层（基于 awesome-ui-kit 原生控制台规范）：
@@ -126,7 +155,7 @@
     getStatus, getMachine, getEvents, listTasks, getTask, createTask,
     cancelTask, retryTask, getSession, getSessionEvents, getSessionSignals,
     listSessions, listAdoptions, adoptInstance, revokeAdoption, retryAdoption,
-    controlSession, listAgentTypes,
+    controlSession, listAgentTypes, getAccessToken, setAccessToken,
   } from './api/client.js';
   import { FleetStore } from './state/store.js';
   import { SseClient } from './realtime/sse.js';
@@ -161,8 +190,97 @@
 
     mountIcon(document.getElementById('icon-mobile-menu'), 'menu', { size: 18 });
     mountIcon(document.getElementById('icon-btn-refresh'), 'refresh', { size: 14 });
+    mountIcon(document.getElementById('icon-btn-auth'), 'lock', { size: 14 });
+    mountIcon(document.getElementById('icon-modal-shield'), 'shield', { size: 18 });
   }
   injectStaticIcons();
+
+  /* -- 操作员令牌（真实认证：网关按 X-Access-Token 校验 operator）------ */
+  var btnAuth = document.getElementById('btn-auth');
+  var authBtnLabel = document.getElementById('auth-btn-label');
+  var authModal = document.getElementById('auth-modal');
+  var authCloseBtn = document.getElementById('auth-modal-close');
+  var authInput = document.getElementById('auth-token-input');
+  var authSubmitBtn = document.getElementById('auth-modal-submit');
+  var authClearBtn = document.getElementById('auth-modal-clear');
+  var authStatus = document.getElementById('auth-modal-status');
+
+  function openAuthModal() {
+    if (!authModal) return;
+    authModal.classList.add('open');
+    if (authInput) {
+      authInput.value = getAccessToken() || '';
+      setTimeout(function () { authInput.focus(); }, 50);
+    }
+    if (authStatus) {
+      authStatus.style.display = 'none';
+      authStatus.textContent = '';
+      authStatus.className = 'auth-modal-status';
+    }
+  }
+  window.openAuthModal = openAuthModal;
+
+  function closeAuthModal() {
+    if (!authModal) return;
+    authModal.classList.remove('open');
+  }
+
+  function updateAuthUI() {
+    var token = getAccessToken();
+    if (authBtnLabel) authBtnLabel.textContent = token ? 'Admin' : 'Auth';
+    if (btnAuth) {
+      var icon = token ? 'unlock' : 'lock';
+      mountIcon(document.getElementById('icon-btn-auth'), icon, { size: 14 });
+      btnAuth.classList.toggle('is-authed', !!token);
+      btnAuth.title = token ? '操作员已鉴权（点击更换令牌）' : '未配置操作员令牌（点击配置）';
+    }
+  }
+
+  if (btnAuth) btnAuth.addEventListener('click', openAuthModal);
+  if (authCloseBtn) authCloseBtn.addEventListener('click', closeAuthModal);
+  if (authModal) {
+    authModal.addEventListener('click', function (e) {
+      if (e.target === authModal) closeAuthModal();
+    });
+  }
+  if (authInput) {
+    authInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (authSubmitBtn) authSubmitBtn.click();
+      } else if (e.key === 'Escape') {
+        closeAuthModal();
+      }
+    });
+  }
+  if (authSubmitBtn) {
+    authSubmitBtn.addEventListener('click', function () {
+      if (!authInput) return;
+      var val = authInput.value.trim();
+      if (authStatus) {
+        authStatus.style.display = 'block';
+        if (!val) {
+          authStatus.className = 'auth-modal-status err';
+          authStatus.textContent = '请输入有效操作员令牌。';
+          return;
+        }
+        authStatus.className = 'auth-modal-status ok';
+        authStatus.textContent = '令牌已保存（本地），正在刷新…';
+      }
+      setAccessToken(val);
+      updateAuthUI();
+      setTimeout(function () { window.location.reload(); }, 400);
+    });
+  }
+  if (authClearBtn) {
+    authClearBtn.addEventListener('click', function () {
+      setAccessToken('');
+      updateAuthUI();
+      closeAuthModal();
+    });
+  }
+
+  updateAuthUI();
 
   /* 动态注入构建与运行版本标识 */
   var versionSlot = document.getElementById('app-version-tag');
