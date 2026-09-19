@@ -12,13 +12,15 @@ def register(cls):
 
 register(CodexAdapter)
 
-# claude_code / hermes / pi 按注册表顺序 register
+# claude_code / hermes / pi / zcode 按注册表顺序 register
 from tools.adapters.claude_code import ClaudeCodeAdapter  # noqa: E402
 from tools.adapters.hermes import HermesAdapter  # noqa: E402
 from tools.adapters.pi import PiAdapter  # noqa: E402
+from tools.adapters.zcode import ZcodeAdapter  # noqa: E402
 register(ClaudeCodeAdapter)
 register(HermesAdapter)
 register(PiAdapter)
+register(ZcodeAdapter)
 
 
 def create(agent_type, command=None, timeout_s=1800):

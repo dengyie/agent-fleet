@@ -57,3 +57,28 @@ def test_collect_handles_missing_sessions_key():
     assert result["sessions"] == []
     assert "sessions" in result.get("error", "").lower()
 
+
+
+def test_zcode_connector_registered_and_contract():
+    """zcode connector 进注册表（历史坑：有实现没注册不会被调度）。"""
+    from connectors import available_types, create
+    assert "zcode" in available_types()
+    connector = create("zcode")
+    assert connector.TYPE == "zcode"
+    assert connector.SESSION_BASE == "~/.zcode/cli/rollout"
+
+
+def test_zcode_connector_collect_reports_missing_dir_honestly():
+    """rollout 目录不存在时返回 installed=false，不抛错。"""
+    import json as _json
+
+    from connectors.zcode import ZcodeConnector
+
+    class FakeContext:
+        def run_python(self, script):
+            assert "~/.zcode/cli/rollout" in script
+            return _json.dumps({"installed": False, "sessions": [],
+                                "active_count": 0, "session_count": 0})
+
+    result = ZcodeConnector().collect(FakeContext())
+    assert result["installed"] is False

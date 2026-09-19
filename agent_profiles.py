@@ -44,6 +44,15 @@ PROFILES: dict[str, Profile] = {
         basenames=("pi",),
         native_session_root="~/.pi/agent/sessions",
         native_session_depth=2),
+    # ZCode CLI 非交互 print 模式（-p/--print）。桌面版内嵌 zcode.cjs 的机器
+    # 没有 `zcode` shim，runner.yaml 需按本机覆盖 command（如
+    # ["node", "<...>/resources/glm/zcode.cjs", "-p", "{instruction}"]）；
+    # basenames 覆盖 shim（zcode）与脚本直跑（zcode.cjs）两种进程形态，
+    # 会话元数据在 ~/.zcode/cli/rollout（平铺 model-io-sess_*.jsonl）。
+    "zcode": Profile("zcode", ("zcode", "-p", "{instruction}"),
+        basenames=("zcode", "zcode.cjs"),
+        native_session_root="~/.zcode/cli/rollout",
+        native_session_depth=1),
     "generic": Profile(
         "generic", None, executable=False,
         pattern="claude|codex|astrbot|openclaw|opencode|aider",

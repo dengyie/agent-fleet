@@ -5,13 +5,14 @@ from agent_profiles import (
 )
 
 
-def test_executable_types_exactly_four():
-    assert EXECUTABLE_AGENT_TYPES == ("codex", "claude_code", "hermes", "pi")
+def test_executable_types_exactly_five():
+    assert EXECUTABLE_AGENT_TYPES == (
+        "codex", "claude_code", "hermes", "pi", "zcode")
 
 
-def test_observable_types_five_including_generic():
+def test_observable_types_six_including_generic():
     assert OBSERVABLE_AGENT_TYPES == (
-        "codex", "claude_code", "hermes", "pi", "generic")
+        "codex", "claude_code", "hermes", "pi", "zcode", "generic")
     assert set(OBSERVABLE_AGENT_TYPES) == set(PROFILES)
 
 
@@ -31,6 +32,17 @@ def test_pi_profile_default_command_and_session_layout():
     assert profile.basenames == ("pi",)
     assert profile.native_session_root == "~/.pi/agent/sessions"
     assert profile.native_session_depth == 2
+
+
+def test_zcode_profile_default_command_and_session_layout():
+    cmd = default_command("zcode")
+    assert cmd is not None and cmd == ("zcode", "-p", "{instruction}")
+    profile = PROFILES["zcode"]
+    # shim 与桌面版脚本直跑两种进程形态都要能精确分类
+    assert profile.basenames == ("zcode", "zcode.cjs")
+    assert profile.native_session_root == "~/.zcode/cli/rollout"
+    # rollout 目录是平铺 model-io-sess_*.jsonl，深度 1 即覆盖
+    assert profile.native_session_depth == 1
 
 
 def test_generic_not_executable_but_observable():
@@ -53,10 +65,10 @@ from tools.probe_collectors import DEFAULT_AGENT_TYPES as PROBE_TYPES
 def test_hub_default_agent_types_derived_from_registry():
     # 身份断言:必须与注册表同一个 tuple 对象(派生),而非字面量副本
     assert HUB_TYPES is EXECUTABLE_AGENT_TYPES
-    assert HUB_TYPES == ("codex", "claude_code", "hermes", "pi")
+    assert HUB_TYPES == ("codex", "claude_code", "hermes", "pi", "zcode")
 
 
 def test_probe_default_agent_types_derived_from_registry():
     assert PROBE_TYPES is OBSERVABLE_AGENT_TYPES
     assert set(PROBE_TYPES) == set(OBSERVABLE_AGENT_TYPES)
-    assert len(PROBE_TYPES) == 5
+    assert len(PROBE_TYPES) == 6

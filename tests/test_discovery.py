@@ -78,19 +78,36 @@ def test_non_agent_rows_are_filtered_out(monkeypatch):
 
 def test_family_classification_is_bounded_to_observable_types():
     assert set(discovery.OBSERVABLE_AGENT_TYPES) == {
-        "codex", "claude_code", "hermes", "pi", "generic"}
+        "codex", "claude_code", "hermes", "pi", "zcode", "generic"}
     cases = {
         "/usr/local/bin/codex": "codex",
         "/opt/homebrew/bin/codex.js": "codex",
         "/usr/bin/claude": "claude_code",
         "/usr/local/bin/hermes": "hermes",
         "/opt/homebrew/bin/pi": "pi",
+        "/usr/local/bin/zcode": "zcode",
         "/usr/bin/opencode": "generic",
         "/tmp/fleetdoos/aider": "generic",
     }
     for path, expected in cases.items():
         assert discovery.classify_family(path, "ignored") == expected
     assert discovery.classify_family("/usr/bin/sshd", "sshd") is None
+
+
+def test_zcode_script_cli_classified_via_second_argv_token():
+    # 桌面版跑法：exe 是 node，家族身份只在 argv[1] 的 basename（zcode.cjs）。
+    assert discovery.classify_family(
+        "/usr/bin/node",
+        "node F:\programe\ZCode\resources\glm\zcode.cjs -p hi",
+    ) == "zcode"
+    assert discovery.classify_family(
+        "/usr/local/bin/node", "node /opt/cli/zcode.cjs --version") == "zcode"
+    # node 跑非家族脚本绝不误分类
+    assert discovery.classify_family(
+        "/usr/bin/node", "node /opt/server/app.cjs serve") is None
+    # argv[1] 必须精确 basename：同前缀的别的脚本不算
+    assert discovery.classify_family(
+        "/usr/bin/node", "node /opt/cli/zcodeUtils.cjs run") is None
 
 
 def test_pi_basename_never_matches_as_substring():

@@ -190,6 +190,12 @@ def _argv0(args: str) -> str:
     return args.split(None, 1)[0].strip()
 
 
+def _argv1(args: str) -> str:
+    """Second argv token (script path for interpreter-run CLIs like node)."""
+    parts = args.split(None, 2) if args else []
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
 def _exe_path_for(pid: int, comm: str | None, args: str) -> str:
     argv0 = _argv0(args)
     # 1) /proc/<pid>/exe (Linux) — always canonical when available.
@@ -274,10 +280,11 @@ def classify_family(exe_path: str, cmdline: str) -> str | None:
     """Map one process to an observable family or ``None``.
 
     Classification is bounded to ``OBSERVABLE_AGENT_TYPES``; the result is
-    always one of ``codex|claude_code|hermes|generic`` or ``None``.  The
-    executable basename is inspected first (the exact family aliases), then
-    the first argv token against the profile's ``generic`` pattern (so a
-    helper process such as ``grep codex`` is never misclassified).
+    an observable family id or ``None``.  The executable basename is
+    inspected first (the exact family aliases), then — for interpreter-run
+    script CLIs — the second argv token's basename (e.g. ``zcode.cjs``);
+    finally the first argv token against the profile's ``generic`` pattern
+    (so a helper process such as ``grep codex`` is never misclassified).
     """
     if not exe_path:
         return None
@@ -287,6 +294,15 @@ def classify_family(exe_path: str, cmdline: str) -> str | None:
             if base in aliases:
                 return family
     argv0 = _argv0(cmdline or "").strip().lower()
+    # 解释器直跑的脚本型 CLI（argv0 是 node/python 等）：argv[1] 的
+    # basename 仍可精确命中家族别名（如 npm/桌面版跑法
+    # ``node .../resources/glm/zcode.cjs``）。只检查这一个 token，
+    # 不做全命令行扫描——``grep codex`` 之类的 helper 永不误分类。
+    script_base = os.path.basename(_argv1(cmdline or "")).strip().lower()
+    if script_base:
+        for family, aliases in _FAMILY_BASENAMES.items():
+            if script_base in aliases:
+                return family
     probe = base or argv0
     if probe:
         if _GENERIC_RE.search(probe):

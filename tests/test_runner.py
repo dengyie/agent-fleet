@@ -461,6 +461,8 @@ class AdapterDefaultsTests(unittest.TestCase):
                          ["claude", "-p", "修 bug"])
         self.assertEqual(adapters.create("pi").build_argv("修 bug"),
                          ["pi", "-p", "修 bug"])
+        self.assertEqual(adapters.create("zcode").build_argv("修 bug"),
+                         ["zcode", "-p", "修 bug"])
         self.assertIsNone(adapters.create("hermes").command)
 
     def test_argv_without_placeholder_appends_instruction(self):
