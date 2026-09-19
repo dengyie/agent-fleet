@@ -88,7 +88,7 @@ def _load_or_create_spool_key(path: Path) -> bytes:
 
 def _read_token_file(path: Path, what: str) -> str:
     try:
-        token = Path(path).expanduser().read_text().strip()
+        token = Path(path).expanduser().read_text(encoding="utf-8").strip()
     except OSError as exc:
         raise CliError(f"无法读取 {what}") from exc
     if not token:

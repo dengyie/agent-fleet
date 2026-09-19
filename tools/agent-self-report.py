@@ -71,7 +71,7 @@ def resolve_token(cli_token, token_file):
     if env_token:
         return env_token
     try:
-        return Path(token_file).expanduser().read_text().strip()
+        return Path(token_file).expanduser().read_text(encoding="utf-8").strip()
     except OSError:
         return ""
 

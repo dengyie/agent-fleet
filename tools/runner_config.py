@@ -79,7 +79,7 @@ def _to_int(value, default, what, allow_zero=False):
 def load_config(path=DEFAULT_CONFIG_PATH):
     path = Path(path)
     try:
-        data = yaml.safe_load(path.read_text()) or {}
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError, UnicodeDecodeError) as exc:
         _err(f"无法读取/解析配置 {path}: {exc}")
     if not isinstance(data, dict):
@@ -95,7 +95,7 @@ def load_config(path=DEFAULT_CONFIG_PATH):
     cred_file = Path(str(data.get("credential_file")
                          or Path.home() / ".config" / "agent-fleet" / "runner-credential")).expanduser()
     try:
-        credential = cred_file.read_text().strip()
+        credential = cred_file.read_text(encoding="utf-8").strip()
     except OSError:
         _err(f"无法读取 runner credential 文件 {cred_file}")
     if not credential:
