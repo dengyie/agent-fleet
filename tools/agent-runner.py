@@ -422,7 +422,7 @@ def main(argv=None):
     try:
         cfg = runner_config.load_config(args.config)
     except Exception as exc:
-        _setup_logging(resident, Path.home() / ".cache" / "agent-fleet")
+        _setup_logging(resident, runner_config.DEFAULT_CACHE_DIR)
         log.error("配置加载失败: %s", exc)
         return 2
     interval = args.interval or cfg.poll_interval_s

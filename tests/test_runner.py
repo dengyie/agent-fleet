@@ -638,9 +638,9 @@ class AgentRunnerTests(unittest.TestCase):
         monkeypatch Path.home：默认目录落在临时区，不污染真实文件。"""
         bad_cfg = self.temp / "bad.yaml"
         bad_cfg.write_text("projects: [broken", encoding="utf-8")
-        fake_home = self.temp / "fakehome"
-        log_path = fake_home / ".cache" / "agent-fleet" / "runner.log"
-        with mock.patch("pathlib.Path.home", return_value=fake_home):
+        fake_cache = self.temp / "fakecache"
+        log_path = fake_cache / "runner.log"
+        with mock.patch.object(runner_config, "DEFAULT_CACHE_DIR", fake_cache):
             try:
                 rc = self.runner.main(["--config", str(bad_cfg)])
                 self.assertEqual(rc, 2)
