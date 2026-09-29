@@ -32,6 +32,9 @@ def _bootstrap_direct_imports():
     if __package__ not in (None, ""):
         return
     root = Path(__file__).resolve().parent.parent
+    # Direct scripts put tools/ first, where platform/ shadows the stdlib.
+    # Keep only the package root on sys.path, as Python -m already does.
+    sys.path[:] = [entry for entry in sys.path if Path(entry).resolve() != root / 'tools']
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
 

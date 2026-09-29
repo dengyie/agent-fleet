@@ -8,7 +8,6 @@ metadata to the HK hub; no reverse connection or central machine access is used.
 import argparse
 import json
 import os
-import platform
 import sys
 import urllib.request
 from pathlib import Path
@@ -24,11 +23,16 @@ def _bootstrap_direct_imports():
     if __package__ not in (None, ""):
         return
     root = Path(__file__).resolve().parent.parent
+    # Direct scripts put tools/ first, where platform/ shadows the stdlib.
+    # Keep only the package root on sys.path, as Python -m already does.
+    sys.path[:] = [entry for entry in sys.path if Path(entry).resolve() != root / 'tools']
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
 
 
 _bootstrap_direct_imports()
+
+import platform
 
 from tools.probe_collectors import (
     DEFAULT_AGENT_TYPES,
