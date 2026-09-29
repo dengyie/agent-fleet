@@ -54,6 +54,8 @@ const [origin, taskId] = process.argv.slice(2);
     await page.screenshot({path: path.join(output, 'session-desktop.png'), fullPage: true});
     await page.goto(origin + '/monitoring');
     await page.getByText('studio-mac-api', {exact: true}).first().waitFor();
+    await page.locator('.monitoring-node').first().waitFor();
+    assert.ok((await page.locator('.monitoring-nodes').textContent()).includes('2026-09-30T00:00:00Z'));
     await page.screenshot({path: path.join(output, 'monitoring-desktop.png'), fullPage: true});
     await page.route('**/api/platform/v1/nodes', route => route.fulfill({status:503, contentType:'application/json', body:JSON.stringify({ok:false,detail:'nodes unavailable'})}));
     await page.goto(origin + '/assistant');

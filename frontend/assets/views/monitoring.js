@@ -431,7 +431,7 @@ export function mountMonitoring(target, api) {
         row.appendChild(el('span', 'meta', machine.online ? '在线' : '离线'));
         var system = machine.system || {};
         row.appendChild(el('p', 'meta', '负载 ' + safeText(system.load) + ' · 内存 ' + safeText(system.mem_used_mb) + ' / ' + safeText(system.mem_total_mb) + ' MB · 磁盘 ' + safeText(system.disk_used_pct)));
-        row.appendChild(el('p', 'meta', '上报：' + formatTime(machine.ts)));
+        row.appendChild(el('p', 'meta', '上报：' + safeText(machine.timestamp)));
         rows.appendChild(row);
       });
       if (!rows.childElementCount) rows.appendChild(el('p', 'meta', '暂无节点上报'));

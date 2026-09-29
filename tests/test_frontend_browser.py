@@ -35,7 +35,7 @@ def test_console_in_real_browser(tmp_path):
     ))
     repo = app.extensions['fleet']['platform_repository']
     for name in ('studio-mac', 'compute-01', 'gateway-01'):
-        state.save_snapshot(name, {'machine': name, 'source': 'ingest', 'ts': time.time(),
+        state.save_snapshot(name, {'machine': name, 'source': 'ingest', 'ts': time.time(), 'timestamp': '2026-09-30T00:00:00Z',
             'reachable': True, 'system': {'platform': 'Linux', 'load': '0.42', 'uptime': '8 days'},
             'agents': {'codex': {'installed': True, 'active_count': 1}}})
         events.emit('state_changed', machine=name, summary='本地浏览器验收节点已同步')
@@ -44,7 +44,7 @@ def test_console_in_real_browser(tmp_path):
             'service_id': name + '-api', 'node_id': name, 'adapter': 'systemd',
             'target_alias': 'fixture.service', 'allowed_actions': ['inspect']})
     for _ in range(150):
-        state.save_snapshot('studio-mac', {'machine': 'studio-mac', 'source': 'ingest', 'ts': time.time(),
+        state.save_snapshot('studio-mac', {'machine': 'studio-mac', 'source': 'ingest', 'ts': time.time(), 'timestamp': '2026-09-30T00:00:00Z',
             'reachable': True, 'system': {'platform': 'Linux'}, 'agents': {}})
     SessionRepository(session_db).upsert_session({'session_id': 'browser-session',
         'machine_id': 'studio-mac', 'managed': False, 'capture_quality': 'best_effort'})
