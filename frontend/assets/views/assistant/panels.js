@@ -3,7 +3,7 @@ import { getPlatformArtifactContentUrl } from '../../api/platform.js';
 
 export function el(tag, className, text) { var node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
 export function clear(node) { while (node && node.firstChild) node.removeChild(node.firstChild); }
-export function showError(host, error) { host.appendChild(el('div', 'err', (error && (error.detail || error.message || error.code)) || '平台请求失败')); }
+export function showError(host, error) { var text = (error && (error.detail || error.message || error.code)) || '平台请求失败'; if (error && error.requestId) text += ' · 请求编号 ' + error.requestId; host.appendChild(el('div', 'err', text)); }
 export function renderMessages(host, messages) {
   clear(host);
   (Array.isArray(messages) ? messages : []).forEach(function (message) {
@@ -26,9 +26,13 @@ export function renderEvents(host, events) {
       if (event.kind === 'tool_call') card.setAttribute('args', JSON.stringify(payload.argument_keys || []));
       if (event.kind === 'tool_result') card.setAttribute('output', JSON.stringify(payload));
     } else {
-      var labels = {run_started: '开始运行', run_finished: '运行结束', memory_context_selected: '已载入记忆上下文'};
+      var labels = {run_started: '开始运行', run_finished: '运行结束', run_failed: '运行失败', run_unknown: '运行结果待确认', memory_context_selected: '已载入记忆上下文'};
       var text = labels[event.kind] || event.kind;
       if (event.kind === 'run_finished') text += '：' + ({succeeded: '已完成', failed: '执行失败', unknown: '结果待确认', cancelled: '已取消'}[payload.state] || payload.state || '');
+      if (payload.provider_error || payload.error_code) text += ' · ' + (payload.provider_error || payload.error_code);
+      if (payload.upstream_code) text += ' · ' + payload.upstream_code;
+      if (payload.provider_status) text += ' · HTTP ' + payload.provider_status;
+      if (payload.step) text += ' · 步骤 ' + payload.step;
       host.appendChild(el('div', 'assistant-event', text));
     }
   });

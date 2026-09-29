@@ -70,8 +70,8 @@ class PersistentAssistantWorker(AssistantWorker):
             return result
         except Exception:
             try:
-                self._append_event("run_unknown", {"run_id": run_id})
                 if lease_id is None:
+                    self._append_event("run_unknown", {"run_id": run_id})
                     usage = None
                     meter = getattr(self.runtime, "usage_meter", None)
                     if meter is not None:

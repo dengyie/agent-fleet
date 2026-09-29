@@ -4,7 +4,7 @@ from __future__ import annotations
 from flask import Blueprint, current_app, g, jsonify, request
 
 from hub.auth import require_operator
-from hub.http.errors import ApplicationError, error_response
+from hub.http.errors import ApplicationError, error_response, get_request_id
 from hub.infrastructure.platform_db import PlatformRepositoryError
 from platform_schema import PlatformValidationError
 
@@ -68,6 +68,18 @@ def _invoke(fn):
         return error_response(ApplicationError(exc.code, detail, status))
     except PlatformValidationError as exc:
         return error_response(ApplicationError(exc.code, exc.detail, 400))
+
+
+@bp.get('/readiness')
+@require_operator
+def get_readiness():
+    def check():
+        from hub.application.platform_readiness_service import check_platform_readiness
+        result = check_platform_readiness(current_app.extensions['fleet'], g.operator)
+        if not result['configuration_ready']:
+            result.update(error='platform_not_ready', detail='平台配置不完整', request_id=get_request_id())
+        return jsonify(result), 200 if result['configuration_ready'] else 503
+    return _invoke(check)
 
 
 @bp.get("/defaults")

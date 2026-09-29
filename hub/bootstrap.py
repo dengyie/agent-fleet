@@ -854,14 +854,18 @@ def start_platform_worker(app, *, owner_id: str | None = None, interval_s: float
         while not stop.is_set():
             try:
                 worker.run_once(owner)
-            except Exception:
-                pass
+            except Exception as exc:
+                from hub.diagnostics import log_failure
+                log_failure(app.logger, 'platform_worker_tick_failed', exc,
+                            worker_id=worker.worker_id)
             bridge = fleet.get("services", {}).get("legacy_task_bridge")
             if bridge is not None:
                 try:
                     bridge.process_once(owner)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    from hub.diagnostics import log_failure
+                    log_failure(app.logger, 'platform_legacy_bridge_failed', exc,
+                                worker_id=worker.worker_id)
             stop.wait(delay)
 
     thread = threading.Thread(target=loop, name="platform-run-worker", daemon=True)

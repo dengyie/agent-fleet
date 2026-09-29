@@ -66,6 +66,9 @@ def test_console_in_real_browser(tmp_path):
     repo.update_defaults(OWNER, {'model_profile_id': 'fixture', 'workspace_id': 'workspace'}, 0)
     class Provider:
         def complete(self, messages, tools):
+            if messages[-1].get('content') == 'diagnostic-failure':
+                from tools.platform.providers.openai_compatible import ProviderError
+                raise ProviderError('transient_http', status=503, retryable=True)
             return ModelResponse(kind='final', text='## 浏览器验收结果\n\n通过真实 API 持久化。\n\n- 支持刷新恢复\n- 运行与产物分离\n\n```python\nprint("hello")\n```\n<img src=x onerror=alert(1)>')
     worker = app.extensions['fleet']['services']['platform_worker']
     worker.provider_factory = lambda _: Provider()

@@ -90,6 +90,16 @@ const [origin, taskId] = process.argv.slice(2);
     await page.getByText('浏览器验收结果', {exact: true}).waitFor();
     assert.equal(await page.locator('.assistant-message.assistant').count(), 1);
     await page.screenshot({path: path.join(output, 'assistant-complete.png'), fullPage: true});
+    const completedConversationUrl = page.url();
+    await page.goto(origin + '/assistant');
+    await page.getByText('就绪', {exact:true}).waitFor();
+    await page.getByRole('textbox', {name:'给助手的任务'}).fill('diagnostic-failure');
+    await page.getByRole('button', {name:'发送任务'}).click();
+    await page.locator('.assistant-event').filter({hasText:'HTTP 503'}).waitFor();
+    await page.reload();
+    await page.locator('.assistant-event').filter({hasText:'transient_http'}).waitFor();
+    await page.goto(completedConversationUrl);
+    await page.getByText('浏览器验收结果', {exact:true}).waitFor();
     const unicode = await page.evaluate(async () => {
       const md = document.createElement('stream-markdown'); document.body.append(md);
       const results = [];

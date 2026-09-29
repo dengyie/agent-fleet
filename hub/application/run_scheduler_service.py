@@ -1,11 +1,17 @@
 """Durable multi-owner scheduler for the platform Run worker."""
 from __future__ import annotations
 
+import logging
 import secrets
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
+
+
+from hub.diagnostics import log_failure
+
+logger = logging.getLogger(__name__)
 
 
 class RunSchedulerService:
@@ -44,8 +50,8 @@ class RunSchedulerService:
             try:
                 self.repository.release_worker_slot(
                     slot["lease_id"], worker_id=self.scheduler_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                log_failure(logger, 'platform_slot_release_failed', exc, run_id=run_id)
             return {"run_id": run_id, "state": "scheduler_slot_lost"}
         heartbeat_stop = threading.Event()
         heartbeat_lost = threading.Event()
@@ -54,15 +60,20 @@ class RunSchedulerService:
             delay = max(0.5, min(10.0, min(self.owner_lease_s, self.worker.lease_s) / 3.0))
             while not heartbeat_stop.wait(delay):
                 current = float(self.clock())
-                checks = (
-                    self.repository.renew_worker_slot(
-                        slot["lease_id"], worker_id=self.scheduler_id, now=current,
-                        lease_s=self.worker.lease_s),
-                    self.repository.renew_run_lease(
-                        owner_id, run_id, lease_id=claim["lease_id"],
-                        worker_id=self.worker.worker_id, now=current,
-                        lease_s=self.worker.lease_s),
-                )
+                try:
+                    checks = (
+                        self.repository.renew_worker_slot(
+                            slot["lease_id"], worker_id=self.scheduler_id, now=current,
+                            lease_s=self.worker.lease_s),
+                        self.repository.renew_run_lease(
+                            owner_id, run_id, lease_id=claim["lease_id"],
+                            worker_id=self.worker.worker_id, now=current,
+                            lease_s=self.worker.lease_s),
+                    )
+                except Exception as exc:
+                    heartbeat_lost.set()
+                    log_failure(logger, 'platform_heartbeat_failed', exc, run_id=run_id)
+                    return
                 if not all(checks):
                     heartbeat_lost.set()
                     return
@@ -91,8 +102,8 @@ class RunSchedulerService:
         if self.legacy_bridge is not None:
             try:
                 self.legacy_bridge.process_once(owner_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                log_failure(logger, 'platform_legacy_bridge_failed', exc, worker_id=self.scheduler_id)
         claim = self.repository.claim_run(
             owner_id, worker_id=self.worker.worker_id, now=float(self.clock()),
             lease_s=self.worker.lease_s)
@@ -156,7 +167,8 @@ class RunSchedulerService:
         for run_id, future in futures:
             try:
                 results.append(future.result())
-            except Exception:
+            except Exception as exc:
+                log_failure(logger, 'platform_worker_future_failed', exc, run_id=run_id, worker_id=self.scheduler_id)
                 results.append({"run_id": run_id, "state": "worker_error"})
         return results
 
@@ -171,12 +183,15 @@ class RunSchedulerService:
         stop = stop_event or threading.Event()
 
         def loop():
+            delay = self.interval_s
             while not stop.is_set():
                 try:
                     self.run_once()
-                except Exception:
-                    pass
-                stop.wait(self.interval_s)
+                    delay = self.interval_s
+                except Exception as exc:
+                    log_failure(logger, 'platform_scheduler_tick_failed', exc, worker_id=self.scheduler_id)
+                    delay = min(30.0, max(self.interval_s, delay * 2))
+                stop.wait(delay)
 
         thread = threading.Thread(target=loop, name="platform-run-scheduler", daemon=True)
         thread.start()

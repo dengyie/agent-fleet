@@ -17,6 +17,7 @@ The Task 8 contract:
 import uuid
 
 from flask import g, jsonify, request
+from hub.diagnostics import log_failure
 
 from hub.application.task_service import ApplicationError
 
@@ -87,6 +88,25 @@ def register_error_handlers(app):
     The handlers must be registered after blueprints so ``jsonify`` and
     ``request`` see the final app.
     """
+
+    def _log_exception(exc_info):
+        # Flask's default traceback includes arbitrary exception messages.
+        # Keep code locations and correlation without echoing credentials/SQL.
+        log_failure(app.logger, 'http_unhandled_exception', exc_info[1],
+                    request_id=get_request_id())
+
+    app.log_exception = _log_exception
+
+    @app.after_request
+    def _correlate_response(response):
+        rid = get_request_id()
+        response.headers['X-Request-ID'] = rid
+        if _is_api_path() and response.status_code >= 400:
+            route = request.url_rule.rule if request.url_rule else (
+                '/api/platform/v1/*' if request.path.startswith('/api/platform/v1/') else '/api/*')
+            log_failure(app.logger, 'api_request_failed', request_id=rid,
+                        method=request.method, route=route, status=response.status_code)
+        return response
 
     @app.errorhandler(404)
     def _not_found(exc):

@@ -27,8 +27,21 @@ info() { echo "smoke: $*"; }
 WORK="$(mktemp -d)"
 HUB_PID=""
 cleanup() {
+  local rc=$? evidence
+  if [ -n "$HUB_PID" ]; then
+    kill "$HUB_PID" 2>/dev/null || true
+    wait "$HUB_PID" 2>/dev/null || true
+  fi
+  if [ "$rc" -ne 0 ] && [ -f "$WORK/hub.log" ]; then
+    evidence="${FLEET_SMOKE_ARTIFACT_DIR:-$(mktemp -d)}"
+    mkdir -p "$evidence"
+    chmod 700 "$evidence"
+    cp "$WORK/hub.log" "$evidence/hub.log"
+    chmod 600 "$evidence/hub.log"
+    echo "SMOKE evidence: $evidence/hub.log" >&2
+  fi
   rm -rf "$WORK" 2>/dev/null || true
-  if [ -n "$HUB_PID" ]; then kill "$HUB_PID" 2>/dev/null || true; fi
+  return "$rc"
 }
 trap cleanup EXIT
 

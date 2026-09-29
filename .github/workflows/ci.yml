@@ -43,7 +43,17 @@ jobs:
       - name: Run test suite
         run: |
           FLEET_PLAYWRIGHT_MODULE="$RUNNER_TEMP/fleet-browser/node_modules/playwright" \
-          FLEET_BROWSER_CHANNEL=chromium PYTHONPATH=. python -m pytest tests -q
+          FLEET_SCREENSHOTS="$RUNNER_TEMP/fleet-test-evidence/browser" \
+          FLEET_BROWSER_CHANNEL=chromium PYTHONPATH=. python -m pytest tests -q \
+            --junitxml="$RUNNER_TEMP/fleet-test-evidence/results.xml"
+      - name: Preserve test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-fleet-test-evidence
+          path: ${{ runner.temp }}/fleet-test-evidence/
+          retention-days: 7
+          if-no-files-found: warn
 
   # 仅 main 上的 push / 手动触发打包。按 ref 判断而非事件类型：
   # PR（refs/pull/*）与从非 main 分支手动 dispatch 都不得产出部署用

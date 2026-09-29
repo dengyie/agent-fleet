@@ -2,9 +2,15 @@
 from __future__ import annotations
 
 import json
+import logging
+
+from hub.diagnostics import log_failure
+
+logger = logging.getLogger(__name__)
 import time
 
 from .base import RuntimeLimits, UsageSummary, WorkerResult
+from ..providers.openai_compatible import ProviderError
 
 try:
     from hub.infrastructure.usage_repository import UsageLimitExceeded, normalize_usage
@@ -21,6 +27,10 @@ except Exception:  # pragma: no cover - runtime remains importable in node-only 
 
 class ProviderBoundaryUnknown(RuntimeError):
     """The provider call crossed the boundary but its final outcome is unknown."""
+    def __init__(self, code='provider_boundary_unknown', *, diagnostic=None):
+        super().__init__(code)
+        self.diagnostic = diagnostic or {}
+
 
 
 class NativeAssistantRuntime:
@@ -56,18 +66,22 @@ class NativeAssistantRuntime:
                     return self._result("failed", "模型预算已用尽。", step - 1, input_tokens, output_tokens, measured_total_tokens, provider_requests)
             try:
                 response = self.provider.complete(transcript, tools)
-            except Exception:
+            except Exception as exc:
+                diagnostic = exc.diagnostic() if isinstance(exc, ProviderError) else {'provider_error': 'provider_exception'}
+                diagnostic.update({'step': step, 'attempt': attempt, 'phase': 'provider_call'})
                 if reservation is not None:
-                    self.usage_meter.settle(reservation, None, "unknown", now=float(self.clock()))
-                raise ProviderBoundaryUnknown("provider_boundary_unknown") from None
+                    self._settle_unknown(reservation, run_id=run_id, step=step, attempt=attempt)
+                raise ProviderBoundaryUnknown(diagnostic=diagnostic) from exc
             try:
                 usage = normalize_usage(response.usage)
                 if reservation is not None:
                     self.usage_meter.settle(reservation, usage, "succeeded", now=float(self.clock()))
-            except Exception:
+            except Exception as exc:
                 if reservation is not None:
-                    self.usage_meter.settle(reservation, None, "unknown", now=float(self.clock()))
-                raise ProviderBoundaryUnknown("provider_boundary_unknown") from None
+                    self._settle_unknown(reservation, run_id=run_id, step=step, attempt=attempt)
+                raise ProviderBoundaryUnknown('usage_accounting_unknown', diagnostic={
+                    'step': step, 'attempt': attempt, 'phase': 'usage_accounting',
+                    'provider_error': 'usage_accounting_unknown'}) from exc
             provider_requests += 1
             input_tokens += usage["input_tokens"]
             output_tokens += usage["output_tokens"]
@@ -125,6 +139,15 @@ class NativeAssistantRuntime:
                 "result": receipt.result,
             })
         return self._result("failed", "模型步骤已达到上限。", self.limits.max_steps, input_tokens, output_tokens, measured_total_tokens, provider_requests)
+
+    def _settle_unknown(self, reservation, *, run_id, step, attempt):
+        try:
+            self.usage_meter.settle(reservation, None, "unknown", now=float(self.clock()))
+        except Exception as exc:
+            # The provider/accounting boundary remains uncertain; a second failure
+            # must not replace its original cause or permit automatic replay.
+            log_failure(logger, 'platform_usage_settlement_failed', exc,
+                        run_id=run_id, step=step, attempt=attempt)
 
     @staticmethod
     def _result(state, text, steps, input_tokens, output_tokens, total_tokens, provider_requests):

@@ -30,6 +30,14 @@ TRANSIENT_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 SAFE_HEADER_NAMES = frozenset({"user-agent", "accept-language", "x-client-name", "openai-organization"})
 
 
+PROVIDER_ERROR_CODES = frozenset({
+    'auth_error', 'rate_limit', 'transient_http', 'request_rejected',
+    'provider_http_error', 'timeout', 'network_error', 'invalid_response',
+    'response_too_large', 'provider_unavailable', 'provider_network_disabled',
+    'provider_secret_missing', 'provider_secret_unavailable',
+})
+
+
 class ProviderError(RuntimeError):
     """Stable, secret-free provider failure."""
 
@@ -37,7 +45,17 @@ class ProviderError(RuntimeError):
         self.code = code
         self.retryable = bool(retryable)
         self.status = status
+        self.upstream_code = None
         super().__init__(code)
+
+    def diagnostic(self):
+        result = {'provider_error': self.code if self.code in PROVIDER_ERROR_CODES else 'provider_error',
+                  'retryable': self.retryable}
+        if type(self.status) is int and 100 <= self.status <= 599:
+            result['provider_status'] = self.status
+        if self.upstream_code in {'system_cpu_overloaded', 'system_memory_overloaded'}:
+            result['upstream_code'] = self.upstream_code
+        return result
 
     def __str__(self) -> str:
         return self.code
@@ -397,15 +415,23 @@ class OpenAICompatibleProvider:
             if 200 <= status < 300:
                 return response
             if status in (401, 403):
-                raise ProviderError("auth_error", status=status)
-            if status == 429:
+                error = ProviderError("auth_error", status=status)
+            elif status == 429:
                 error = ProviderError("rate_limit", retryable=True, status=status)
             elif status in TRANSIENT_STATUS:
                 error = ProviderError("transient_http", retryable=True, status=status)
             elif 400 <= status < 500:
-                raise ProviderError("request_rejected", status=status)
+                error = ProviderError("request_rejected", status=status)
             else:
                 error = ProviderError("provider_http_error", retryable=True, status=status)
+            if isinstance(response.body, bytes) and len(response.body) <= 4096:
+                try:
+                    body_error = json.loads(response.body).get('error', {})
+                    upstream = body_error.get('code') if isinstance(body_error, dict) else None
+                    if upstream in {'system_cpu_overloaded', 'system_memory_overloaded'}:
+                        error.upstream_code = upstream
+                except (ValueError, AttributeError, TypeError):
+                    pass
             if error.retryable and attempt < self.max_retries:
                 self.sleeper(min(2.0, 0.1 * (2 ** attempt)))
                 continue

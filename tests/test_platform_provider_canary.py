@@ -39,6 +39,23 @@ class _CanaryHandler(BaseHTTPRequestHandler):
         })
         parts = self.path.rstrip("/").split("/")
         route = parts[-3] if parts[-1] == "completions" and len(parts) >= 5 else (parts[-2] if parts[-1] == "completions" else parts[-1])
+        if route == 'tool-contract':
+            definitions = {t['function']['name']: t['function'] for t in payload.get('tools', [])}
+            write = definitions.get('workspace.write', {})
+            schema = write.get('parameters', {})
+            valid = set(schema.get('required', [])) == {'path', 'content'} and write.get('description')
+            valid = valid and schema.get('properties', {}).get('path', {}).get('type') == 'string'
+            if not valid:
+                self._send(400, b'{"error":{"code":"invalid_tool_schema"}}'); return
+            if payload['messages'][-1]['role'] == 'tool':
+                result = json.loads(payload['messages'][-1]['content'])
+                if result.get('path') != 'contract.txt':
+                    self._send(400, b'{"error":{"code":"invalid_tool_result"}}'); return
+                response = {'choices': [{'message': {'content': 'file verified'}, 'finish_reason': 'stop'}]}
+            else:
+                response = {'choices': [{'message': {'tool_calls': [{'id': 'call-contract', 'type': 'function',
+                    'function': {'name': 'workspace.write', 'arguments': json.dumps({'path': 'contract.txt', 'content': 'contract-evidence'})}}]}, 'finish_reason': 'tool_calls'}]}
+            self._send(200, json.dumps(response).encode()); return
         if route == "retry":
             fixture.counts[route] = fixture.counts.get(route, 0) + 1
             if fixture.counts[route] == 1:
@@ -244,3 +261,24 @@ def test_worker_canary_uses_provider_gate_and_does_not_leak_secret(tmp_path, mon
         public = json.dumps({"run": stored, "events": events}, ensure_ascii=False)
         assert CANARY_KEY not in public
         assert server.requests[0]["authorization_correct"] is True
+
+
+def test_real_http_tool_contract_drives_worker_file_and_second_turn(tmp_path, monkeypatch):
+    monkeypatch.setenv('AGENT_FLEET_CANARY_KEY', CANARY_KEY)
+    with _CanaryServer() as server:
+        app = create_app(FleetConfig.from_root(tmp_path, dev_operator=OWNER,
+            platform_enabled=True, platform_worker_enabled=True, platform_provider_network_enabled=True))
+        repo = app.extensions['fleet']['platform_repository']
+        repo.upsert_model(OWNER, {'profile_id':'contract','provider':'openai_compatible','model':'contract',
+            'secret_ref':'env://AGENT_FLEET_CANARY_KEY','provider_config':{'endpoint':server.base_url + '/v1/tool-contract/chat/completions'}})
+        repo.upsert_workspace(OWNER, {'workspace_id':'home','root_path':str(tmp_path/'workspace')})
+        repo.update_defaults(OWNER, {'model_profile_id':'contract','workspace_id':'home'}, 0)
+        client = app.test_client()
+        conv = client.post('/api/platform/v1/conversations',json={}).get_json()['conversation']
+        client.post('/api/platform/v1/conversations/'+conv['conversation_id']+'/turns', json={'text':'write a file','client_token':'contract'})
+        result = app.extensions['fleet']['services']['platform_worker'].run_once(OWNER)
+        assert result['state'] == 'succeeded'
+        assert result['result_text'] == 'file verified'
+        assert (tmp_path/'workspace/contract.txt').read_text() == 'contract-evidence'
+        assert len(server.requests) == 2
+        assert all(row['authorization_correct'] for row in server.requests)

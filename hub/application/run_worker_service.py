@@ -7,6 +7,7 @@ started during app construction.
 """
 from __future__ import annotations
 
+import logging
 import secrets
 import time
 from pathlib import Path
@@ -24,6 +25,11 @@ from hub.application.platform_memory_context_service import (
 )
 from tools.platform.tool_broker import ToolBroker
 from tools.platform.remote_tool_broker import RemoteToolBroker
+
+
+from hub.diagnostics import log_failure
+
+logger = logging.getLogger(__name__)
 
 
 class RunLeaseLost(RuntimeError):
@@ -215,15 +221,26 @@ class LocalRunWorkerService:
             except Exception:
                 return {"run_id": claim["run_id"], "state": "lease_lost", "attempt": claim["attempt"]}
         except ProviderBoundaryUnknown as exc:
+            diagnostic = {'run_id': claim['run_id'], 'error_code': str(exc),
+                          'attempt': claim['attempt'], **exc.diagnostic}
+            log_failure(logger, 'platform_run_failure', exc,
+                        worker_id=self.worker_id, **diagnostic)
             try:
-                self._event(claim, "run_unknown", {"run_id": claim["run_id"], "error_code": str(exc)[:120]})
+                self._event(claim, "run_unknown", diagnostic)
                 usage = self.usage_meter.get_run_usage(
                     claim["owner_id"], claim["run_id"]
                 ) if self.usage_meter is not None else None
-                return self._finish(claim, "unknown", usage=usage)
-            except Exception:
+                detail = '模型调用结果待确认：' + diagnostic.get('provider_error', 'provider_error')
+                if diagnostic.get('upstream_code'): detail += ' / ' + diagnostic['upstream_code']
+                if diagnostic.get('provider_status'): detail += '（HTTP ' + str(diagnostic['provider_status']) + '）'
+                return self._finish(claim, "unknown", text=detail, usage=usage)
+            except Exception as persist_error:
+                log_failure(logger, 'platform_failure_persistence_failed', persist_error,
+                            run_id=claim['run_id'], worker_id=self.worker_id)
                 return {"run_id": claim["run_id"], "state": "lease_lost", "attempt": claim["attempt"]}
         except (ResourceLeaseError, RuntimeError) as exc:
+            log_failure(logger, 'platform_run_failure', exc,
+                        run_id=claim['run_id'], worker_id=self.worker_id)
             code = str(exc)[:120]
             try:
                 self._event(claim, "run_failed", {"run_id": claim["run_id"], "error_code": code})
@@ -233,7 +250,9 @@ class LocalRunWorkerService:
                 return self._finish(claim, "failed", text=code, usage=usage)
             except Exception:
                 return {"run_id": claim["run_id"], "state": "lease_lost", "attempt": claim["attempt"]}
-        except Exception:
+        except Exception as exc:
+            log_failure(logger, 'platform_run_failure', exc,
+                        run_id=claim['run_id'], worker_id=self.worker_id)
             try:
                 self._event(claim, "run_unknown", {"run_id": claim["run_id"]})
                 usage = self.usage_meter.get_run_usage(
