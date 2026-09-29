@@ -888,7 +888,7 @@ function parseEventPayload(kind, payload) {
       throw new ContractError('invalid_payload_type',
                               key + ' 必须是原始值，拒绝嵌套容器');
     }
-    out[key] = String(value).slice(0, 4096);
+    out[key] = String(value);
   }
   return out;
 }

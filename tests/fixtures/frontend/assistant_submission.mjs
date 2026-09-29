@@ -8,6 +8,7 @@ class Element {
   insertBefore(child, before) { if (child.parentNode) child.parentNode.removeChild(child); child.parentNode = this; this.children.splice(this.children.indexOf(before), 0, child); return child; }
   getAttribute(key) { return this.attributes[key]; }
   removeChild(child) { this.children.splice(this.children.indexOf(child), 1); child.parentNode = null; }
+  get options() { return this.children; }
   get firstChild() { return this.children[0] || null; }
   set textContent(value) { this._text = String(value); this.children = []; }
   get textContent() { return this._text + this.children.map(c => c.textContent).join(''); }
@@ -20,7 +21,7 @@ globalThis.document = {
 };
 globalThis.DOMParser = class { parseFromString() { return {documentElement: new Element('svg')}; } };
 const [origin, modulePath, scenario] = process.argv.slice(2);
-globalThis.window = { FleetConfig: {apiBaseUrl: origin + '/api'}, history: {replaceState() {}} };
+globalThis.window = { dispatchEvent() {}, FleetConfig: {apiBaseUrl: origin + '/api'}, history: {replaceState() {}} };
 const realFetch = globalThis.fetch;
 const requests = [];
 const replies = [];

@@ -48,6 +48,17 @@ def test_console_in_real_browser(tmp_path):
             'reachable': True, 'system': {'platform': 'Linux'}, 'agents': {}})
     SessionRepository(session_db).upsert_session({'session_id': 'browser-session',
         'machine_id': 'studio-mac', 'managed': False, 'capture_quality': 'best_effort'})
+    session_service = app.extensions['fleet']['services']['sessions']
+    for seq in range(1, 206):
+        session_service.ingest_events([{
+            'schema_version': 1, 'event_id': f'browser-evt-{seq}',
+            'stream_id': 'browser-stream', 'machine_id': 'studio-mac',
+            'session_id': 'browser-session', 'sequence': seq,
+            'kind': 'assistant_message', 'capture_quality': 'best_effort',
+            'source': 'fixture', 'emitted_at': '2026-09-30T00:00:00Z',
+            'payload': {'text': ('LONG_' + '中' * 5000 + '_END') if seq == 1 else f'History row {seq}',
+                        'is_complete': True},
+        }])
     task, _ = task_store.create_task(machine='studio-mac', agent_type='codex', project='demo',
         instruction='浏览器验收任务', requested_by=OWNER, client_token='browser-task')
     repo.upsert_model(OWNER, {'profile_id': 'fixture', 'provider': 'deterministic', 'model': '本地验收模型'})

@@ -52,12 +52,12 @@ def load_fixture(name):
 
 
 class EventKindTests(unittest.TestCase):
-    def test_fifteen_event_kinds(self):
-        self.assertEqual(len(EVENT_KINDS), 15)
+    def test_sixteen_event_kinds(self):
+        self.assertEqual(len(EVENT_KINDS), 16)
 
     def test_spec_event_kinds_present(self):
         expected = {
-            'session_start', 'session_metadata', 'user_message',
+            'source_record', 'session_start', 'session_metadata', 'user_message',
             'assistant_message', 'tool_call', 'tool_result',
             'process_spawn', 'process_exit', 'step_start', 'step_end',
             'session_close', 'capture_quality_changed', 'capture_gap',

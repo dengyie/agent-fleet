@@ -148,7 +148,7 @@ def _make_bridge_factory():
             "quality_by_kind": {},
             "diagnostics": [],
         }
-        bridge = SessionBridge.open(manifest, cfg)
+        bridge = SessionBridge.open(manifest, {**cfg, "preserve_source": True})
         # ``native_file_path`` rides in the adopt config; the bridge stores it
         # at construction, so later pump ticks can call ingest_native() with no
         # path.
@@ -161,6 +161,10 @@ def _pump_bridges(client) -> None:
     """Best-effort native tail + flush for every live adopted bridge."""
     for bridge in client.iter_bridges():
         try:
+            supervisor = getattr(client, "supervisor", None)
+            pump = getattr(supervisor, "pump_output", None)
+            if callable(pump):
+                pump(bridge.session_id)
             ingest = getattr(bridge, "ingest_native", None)
             if callable(ingest):
                 ingest()

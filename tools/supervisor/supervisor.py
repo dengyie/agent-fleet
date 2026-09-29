@@ -25,6 +25,7 @@ import select
 import signal
 import subprocess
 import time
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -69,7 +70,7 @@ _CONTROL_OUTCOMES = frozenset({
     "resumed", "recovered",
     "pause_failed", "quarantine_failed", "resume_failed",
     "terminated", "terminated_forced", "escape_unverified",
-    "group_remaining",
+    "group_remaining", "completed",
     "already_finished", "no_live_process", "control_failed",
     "appended", "applied", "unknown_profile", "family_mismatch",
     "resume_unverified", "unsupported_action",
@@ -1096,6 +1097,18 @@ class Supervisor:
         self._release_handle(session_id)
         return "escape_unverified"
 
+    def pump_output(self, session_id: str) -> None:
+        """Drain resumed children on control-client ticks to avoid full pipes."""
+        m = self.get(session_id)
+        handle = self._handle_of(session_id)
+        if handle is None or getattr(handle, "proc", None) is None:
+            return
+        rc = self._ops.proc_poll(handle)
+        if rc is not None:
+            self._finish_completed(m, handle, session_id, rc, lambda line: None)
+        else:
+            self._ops.pump(handle, 0.1, lambda line: None)
+
     def wait_session(
         self,
         session_id: str,
@@ -1115,7 +1128,19 @@ class Supervisor:
         handle = self._handle_of(session_id)
         if handle is None:
             return ManagedRunResult(exit_code=125, outcome="no_live_process")
-        on_line = on_line or (lambda _s: None)
+        consumer = on_line or (lambda _s: None)
+        def on_line(line):
+            # Codex reports the native identity before any model output. Keep
+            # it with the private entry so a finished session can resume.
+            if m.agent == "codex":
+                try:
+                    record = json.loads(line)
+                    token = record.get("thread_id") if record.get("type") == "thread.started" else None
+                    if isinstance(token, str) and token:
+                        self._entries[session_id].resume_token = token
+                except (ValueError, TypeError, AttributeError):
+                    pass
+            consumer(line)
         should_abort = should_abort or (lambda: False)
         deadline = time.monotonic() + max(0.0, float(timeout_s))
         aborted = False
@@ -1202,7 +1227,7 @@ class Supervisor:
                 pass
             self._ops.close(handle)
             self._release_handle(session_id)
-            self._mark_terminated(m, "terminated")
+            self._mark_terminated(m, "completed")
             return ManagedRunResult(exit_code=int(rc or 0),
                                     outcome="finished")
 
@@ -1483,7 +1508,7 @@ def _native_resume_identity(entry):
             if src is None:
                 continue
             val = getattr(src, name, None)
-            if val:
+            if val or (name == "env" and isinstance(val, Mapping)):
                 return val
         return None
 
@@ -1517,11 +1542,11 @@ _RESUME_FORBIDDEN_FLAGS = frozenset({
 
 
 def _native_resume_argv(family: str, exe: str, token: str, text: str) -> list[str]:
-    """Build a native ``--resume`` argv.  Never reuse adapter defaults."""
+    """Build the family-specific native resume argv."""
     if not exe or not token or not isinstance(text, str) or not text:
         return []
     if family == "codex":
-        argv = [exe, "exec", "--resume", token, text]
+        argv = [exe, "exec", "resume", "--json", token, text]
     elif family == "claude_code":
         argv = [exe, "--resume", token, text]
     elif family == "pi":

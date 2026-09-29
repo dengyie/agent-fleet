@@ -85,7 +85,7 @@ class JsonlTailer:
         try:
             handle.seek(self.offset)
             while consumed < self.read_limit_bytes:
-                raw = handle.readline(_CHUNK * 4)
+                raw = handle.readline(self.max_line_bytes + 1)
                 if raw == b"":
                     break
                 consumed += len(raw)
@@ -174,23 +174,12 @@ class JsonlTailer:
                         **kw) -> "JsonlTailer":
         """Restore a tailer from a persisted checkpoint when one exists."""
         offset = 0
-        restored = False
         if checkpoint_path is not None and os.path.exists(checkpoint_path):
             try:
                 with open(checkpoint_path, "r", encoding="utf-8") as fh:
                     data = json.load(fh)
                 offset = int(data.get("offset", 0))
-                restored = True
             except (OSError, ValueError, TypeError):
-                offset = 0
-                restored = False
-        if checkpoint_path is not None and not restored:
-            # Adopt / first KeepAlive: do not replay the whole native file
-            # (a 20 MiB jsonl starves supervisor poll). Follow-up lines still
-            # tail from EOF once a checkpoint exists.
-            try:
-                offset = os.path.getsize(path)
-            except OSError:
                 offset = 0
         return cls(path, offset=max(0, offset), **kw)
 

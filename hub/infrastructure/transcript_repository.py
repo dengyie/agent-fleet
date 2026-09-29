@@ -394,7 +394,9 @@ class TranscriptRepository:
             is_gap = sequence > max_seq + 1
 
             # Redact the clean event deterministically.
-            redacted, _report = Redactor().redact_event(clean)
+            # source_record is an explicitly complete operator archive;
+            # normalized message/tool previews retain their existing redaction.
+            redacted = clean if clean["kind"] == "source_record" else Redactor().redact_event(clean)[0]
 
             # Raw quota: the cap is on total raw bytes stored PER SESSION when
             # many sessions share this repository.  Compute what adding this
@@ -462,7 +464,7 @@ class TranscriptRepository:
 
     # -- redacted read ----------------------------------------------------------------
 
-    def read_redacted(self, session_id: str, *, limit: int = 100) -> list[dict]:
+    def read_redacted(self, session_id: str, *, limit: int = 100, after_sequence: int = 0) -> list[dict]:
         self._validate_session_id(session_id)
         try:
             bounded = max(1, min(int(limit), 1000))
@@ -473,9 +475,9 @@ class TranscriptRepository:
             rows = conn.execute(
                 "SELECT event_id, session_id, stream_id, machine_id, sequence,"
                 " kind, capture_quality, emitted_at, redacted_json"
-                " FROM redacted_events WHERE session_id=?"
+                " FROM redacted_events WHERE session_id=? AND sequence>?"
                 " ORDER BY sequence ASC LIMIT ?",
-                (session_id, bounded)).fetchall()
+                (session_id, max(0, int(after_sequence)), bounded)).fetchall()
         finally:
             conn.close()
         out: list[dict[str, Any]] = []

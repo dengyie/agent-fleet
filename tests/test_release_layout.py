@@ -345,6 +345,13 @@ class RoutingDocumentationTests(unittest.TestCase):
     documenting that Access bypass stays an edge policy.
     """
 
+    def test_release_routing_smoke_matches_current_config(self):
+        result = subprocess.run(
+            ["bash", str(REPO_ROOT / "deploy/test-release-routing.sh")],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def _read(self, path):
         return Path(path).read_text()
 

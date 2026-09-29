@@ -9,7 +9,7 @@ no network, no filesystem access, no CLI packages, no credentials.
 The envelope, identity fields, quality model, and size bounds mirror the frozen
 agent-session-supervision design (v5):
 
-- exactly fifteen ``EVENT_KINDS``;
+- event kinds including complete ``source_record`` chunks;
 - three ``CAPTURE_QUALITIES`` (``exact > structured > best_effort``);
 - single-event and batch size limits;
 - ``validate_event`` / ``validate_batch`` that remove unknown top-level fields,
@@ -44,6 +44,7 @@ from datetime import datetime
 from typing import Any
 
 EVENT_KINDS = frozenset({
+    'source_record',
     'session_start',
     'session_metadata',
     'user_message',
@@ -90,7 +91,7 @@ _REQUIRED_FIELDS = (
     'emitted_at',
 )
 
-_TEXT_PAYLOAD_KINDS = frozenset({'user_message', 'assistant_message'})
+_TEXT_PAYLOAD_KINDS = frozenset({'user_message', 'assistant_message', 'source_record'})
 _TOOL_PAYLOAD_KINDS = frozenset({'tool_call', 'tool_result'})
 _QUALITY_CHANGE_KIND = 'capture_quality_changed'
 _CAPTURE_GAP_KIND = 'capture_gap'

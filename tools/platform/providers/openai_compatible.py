@@ -366,6 +366,7 @@ class OpenAICompatibleProvider:
         headers = {
             "Accept": "text/event-stream" if self.stream else "application/json",
             "Content-Type": "application/json",
+            "User-Agent": "agent-fleet/1.0",
             "Authorization": f"Bearer {self.api_key}",
             **self.headers,
         }

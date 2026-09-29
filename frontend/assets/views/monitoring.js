@@ -1,5 +1,5 @@
 /* Service monitoring and explicitly gated actions. Dynamic values are text nodes. */
-import { uiIcon } from '../routes.js';
+import { uiIcon, pagePath } from '../routes.js';
 
 var MAX_SERVICES = 100;
 var MAX_EVIDENCE = 5;
@@ -336,6 +336,8 @@ export function mountMonitoring(target, api) {
 
   var notice = el('div', 'monitoring-notice', '准备加载');
   root.appendChild(notice);
+  var nodePanel = el('section', 'panel monitoring-nodes');
+  root.appendChild(nodePanel);
   var summary = el('div', 'monitoring-summary');
   root.appendChild(summary);
   var columns = el('div', 'monitoring-grid');
@@ -415,7 +417,30 @@ export function mountMonitoring(target, api) {
     }
   }
 
+  async function refreshNodes() {
+    if (typeof client.getStatus !== 'function') return;
+    try {
+      var data = await client.getStatus();
+      clear(nodePanel);
+      nodePanel.appendChild(el('h2', null, '节点监控'));
+      nodePanel.appendChild(el('p', 'meta', '来自节点最近一次上报；离线节点的指标仅供历史参考。'));
+      var rows = el('div', 'monitoring-node-grid');
+      (data.machines || []).forEach(function (machine) {
+        var row = el('div', 'monitoring-node');
+        var link = el('a', null, safeText(machine.machine)); link.href = pagePath('machine', machine.machine); row.appendChild(link);
+        row.appendChild(el('span', 'meta', machine.online ? '在线' : '离线'));
+        var system = machine.system || {};
+        row.appendChild(el('p', 'meta', '负载 ' + safeText(system.load) + ' · 内存 ' + safeText(system.mem_used_mb) + ' / ' + safeText(system.mem_total_mb) + ' MB · 磁盘 ' + safeText(system.disk_used_pct)));
+        row.appendChild(el('p', 'meta', '上报：' + formatTime(machine.ts)));
+        rows.appendChild(row);
+      });
+      if (!rows.childElementCount) rows.appendChild(el('p', 'meta', '暂无节点上报'));
+      nodePanel.appendChild(rows);
+    } catch (error) { renderState(nodePanel, 'monitoring-error', '节点监控加载失败：' + errorText(error)); }
+  }
+
   async function refresh() {
+    refreshNodes();
     refreshButton.disabled = true;
     setNotice('正在同步监控数据…');
     renderState(serviceList, 'monitoring-loading', '正在加载服务列表…');

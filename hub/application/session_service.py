@@ -53,6 +53,8 @@ class SessionServiceError(RuntimeError):
     _STATUS_OVERRIDES = {
         "session_not_found": 404,
         "session_unavailable": 503,
+        "session_not_managed": 409,
+        "control_unavailable": 503,
         "invalid_batch": 400,
         "batch_too_many": 400,
         "batch_too_large": 400,
@@ -91,6 +93,7 @@ class SessionService:
         self.session_repo = session_repo
         self.transcript_repo = transcript_repo
         self.event_publisher = event_publisher
+        self.supervisor = None
 
     # -- write use case -----------------------------------------------------
 
@@ -381,12 +384,24 @@ class SessionService:
             raise SessionServiceError("session_not_found")
         return {"session": public_session_dto(row)}
 
+    def send_message(self, session_id: str, text: str) -> dict:
+        """Queue a follow-up for a managed session through the existing channel."""
+        session = self.get_session(session_id)["session"]
+        if not session.get("managed"):
+            raise SessionServiceError("session_not_managed", "请先纳管此会话")
+        if self.supervisor is None:
+            raise SessionServiceError("control_unavailable", "会话控制未启用")
+        command = self.supervisor.enqueue(
+            session["machine_id"], session_id, session.get("attempt_id"), "append_user_turn",
+            "operator_requested", payload={"text": text})
+        return {"session_id": session_id, "command_id": command["command_id"], "status": "pending"}
+
     def session_events(self, session_id: str,
-                       limit: int = DEFAULT_QUERY_LIMIT) -> dict:
+                       limit: int = DEFAULT_QUERY_LIMIT, after_sequence: int = 0) -> dict:
         """Return the bounded redacted event stream for one session."""
         try:
             rows = self.transcript_repo.read_redacted(
-                session_id, limit=_bounded_limit(limit))
+                session_id, limit=_bounded_limit(limit), after_sequence=after_sequence)
         except TranscriptError as exc:
             raise SessionServiceError(exc.code) from None
         except Exception:

@@ -488,7 +488,7 @@ class SupervisorTests(unittest.TestCase):
         argv = resume["argv"]
         self.assertTrue(argv)
         self.assertEqual(argv[0], "/opt/codex")
-        self.assertIn("--resume", argv)
+        self.assertEqual(argv[1:4], ["exec", "resume", "--json"])
         self.assertIn("abc123xyz", argv)
         self.assertNotIn("--ephemeral", argv)
         self.assertNotIn("-p", argv)
@@ -532,7 +532,7 @@ class SupervisorTests(unittest.TestCase):
         resume = ops.create_calls[-1]
         self.assertEqual(resume["cwd"], "/srv/jobs")
         self.assertEqual(resume["env"], {"HOME": "/srv/jobs"})
-        self.assertIn("--resume", resume["argv"])
+        self.assertEqual(resume["argv"][1:4], ["exec", "resume", "--json"])
         self.assertIn("sessTok9", resume["argv"])
         self.assertNotIn("--ephemeral", resume["argv"])
         self.assertNotIn(signal.SIGCONT, handle.signals)
@@ -601,7 +601,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertNotEqual(cwd, "/tmp")
         self.assertIsNotNone(cwd)
         self.assertEqual(env, {"HOME": "/srv/jobs"})
-        self.assertIn("--resume", argv)
+        self.assertEqual(argv[1:4], ["exec", "resume", "--json"])
         self.assertIn("tokLive1", argv)
         self.assertNotIn("--ephemeral", argv)
         self.assertNotIn("--ignore-user-config", argv)
@@ -993,7 +993,7 @@ class SupervisorTests(unittest.TestCase):
         joined = "\n".join(lines)
         self.assertIn("line1", joined)
         self.assertIn("tail", joined)
-        self.assertEqual(sv.get(m.session_id).reason, "terminated")
+        self.assertEqual(sv.get(m.session_id).reason, "completed")
 
     # ---- review round 2 hardening: _wait_gone (finding 3 optional) ---------
 
@@ -1217,6 +1217,7 @@ class RealStopResumeTests(unittest.TestCase):
             cwd="/tmp", env_allowlist={},
             session_id=_sid(), attempt_id=None,
         )
+        self.addCleanup(sv.terminate_session, m.session_id, grace_s=0.2)
         handle = sv._handle_of(m.session_id)
         pid = handle.proc.pid
         if not _proc_exists(pid):
@@ -1229,6 +1230,9 @@ class RealStopResumeTests(unittest.TestCase):
         # pause -> SIGSTOP delivered to the whole group; /proc shows T.
         outcome = sv.pause_session(m.session_id)
         self.assertEqual(outcome, "paused")
+        deadline = time.monotonic() + 5
+        while _proc_stat(pid) != "T" and time.monotonic() < deadline:
+            time.sleep(.01)
         state = _proc_stat(pid)
         self.assertEqual(state, "T", "process must be OS-stopped after pause")
         # resume -> SIGCONT -> state returns to a runnable one.
@@ -1253,6 +1257,7 @@ class RealStopResumeTests(unittest.TestCase):
             cwd="/tmp", env_allowlist={},
             session_id=_sid(), attempt_id=None,
         )
+        self.addCleanup(sv.terminate_session, m.session_id, grace_s=0.2)
         handle = sv._handle_of(m.session_id)
         pid = handle.proc.pid
         if not _proc_exists(pid):
@@ -1261,6 +1266,9 @@ class RealStopResumeTests(unittest.TestCase):
         self.assertEqual(sv.pause_session(m.session_id), "paused")
         # a SIGSTOPped process stays alive (no zombie, still scheduled state T)
         self.assertTrue(_proc_exists(pid))
+        deadline = time.monotonic() + 5
+        while _proc_stat(pid) != "T" and time.monotonic() < deadline:
+            time.sleep(.01)
         self.assertEqual(_proc_stat(pid), "T")
         self.assertEqual(sv.resume_session(m.session_id), "running")
         deadline = time.time() + 5

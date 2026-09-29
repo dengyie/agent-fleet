@@ -454,6 +454,9 @@ def create_app(
             getattr(config, "apply_local_profile_enabled", False)),
     )
 
+    if session_service is not None and config.supervisor_enabled:
+        session_service.supervisor = supervisor_service
+
     # Task 10: connect task cancel to managed-attempt termination.  Additive
     # and gated: the control router exists only when BOTH the supervisor plane
     # is enabled AND session repositories (managed-session metadata) are on.

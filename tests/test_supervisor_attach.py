@@ -402,7 +402,7 @@ class AttachTests(unittest.TestCase):
         self.assertEqual(resume["cwd"], "/srv/jobs")
         self.assertNotEqual(resume["cwd"], "/tmp")
         self.assertEqual(resume["env"], {"HOME": "/srv/jobs"})
-        self.assertIn("--resume", resume["argv"])
+        self.assertEqual(resume["argv"][1:4], ["exec", "resume", "--json"])
         self.assertIn("adoptTok", resume["argv"])
         self.assertNotIn("--ephemeral", resume["argv"])
         self.assertEqual(handle.signals, [])
@@ -462,6 +462,7 @@ class AttachTests(unittest.TestCase):
         with mock.patch.object(os, "readlink", side_effect=OSError("no /proc")), \
              mock.patch.dict(os.environ, {"PATH": "/bin"}, clear=False), \
              mock.patch.object(sup_mod.os.path, "isdir", return_value=True), \
+             mock.patch.object(sup_mod.os.path, "isfile", side_effect=lambda p: p == "/usr/sbin/lsof"), \
              mock.patch.object(sup_mod.subprocess, "run", return_value=lsof) as run:
             cwd = sup_mod._live_process_cwd(123)
         self.assertEqual(cwd, "/Users/mango")

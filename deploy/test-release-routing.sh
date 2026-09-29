@@ -2,7 +2,7 @@
 # deploy/test-release-routing.sh — 本地路由冒烟(Phase gate)
 #
 # 目标:验证 deploy/nginx-frontend-backend.example.conf 的「路由意图」:
-#   - / 与 /assets/* 走前端 release (fleet_frontend);
+#   - / 与 /assets/* 由 Nginx root 直接提供前端 release;
 #   - /api/* (含 /api/stream、/api/ingest、/api/scan、/api/commands/*) 走后端
 #     (fleet_backend);
 #   - /api/stream 关闭 proxy_buffering 且长读超时(SSE);
@@ -22,36 +22,33 @@ CONF="deploy/nginx-frontend-backend.example.conf"
 fail() { echo "ROUTE FAIL: $*" >&2; exit 1; }
 info() { echo "routing: $*"; }
 
-# 用 grep -c 计数;set -e 下 0 匹配会让管道失败,故统一 || true 后判定。
-have() { grep -c -- "$1" "$CONF" 2>/dev/null || true; }
-
-# --- 1. 静态路由意图: / 和 /assets/* -> fleet_frontend ---
-for loc in "location /assets/" "location /"; do
-  [ "$(have "$loc")" -ge 1 ] || fail "缺少静态 location: $loc"
+# --- 1. 静态路由意图: Nginx 直接提供 release ---
+static_block="$(awk '/location \/assets\//,/^    }/' "$CONF")"
+root_block="$(awk '/location \/ \{/,/^    }/' "$CONF")"
+config_block="$(awk '/location = \/config\.js/,/^    }/' "$CONF")"
+grep -q 'root /srv/agent-fleet/frontend/current;' "$CONF" || fail "缺少前端 release root"
+for block in "$static_block" "$config_block"; do
+  printf '%s\n' "$block" | grep -qF 'try_files $uri =404;' || fail "assets/config 路由缺少 404 边界"
 done
-[ "$(have "proxy_pass http://fleet_frontend")" -ge 2 ] \
-  || fail "前端 location 未指向 fleet_frontend"
-info "静态 / 与 /assets/* -> fleet_frontend ✓"
-
-# --- 2. API 路由意图: /api/* 与 probe/runner 路径 -> fleet_backend ---
-for loc in "/api/stream" "/api/ingest" "/api/scan" "/api/commands/" "/api/tasks" "/api/machines" "/api/"; do
-  [ "$(have "location ${loc}")" -ge 1 ] || fail "缺少 API location: ${loc}"
-done
-[ "$(have "proxy_pass http://fleet_backend")" -ge 6 ] \
-  || fail "API location 未指向 fleet_backend"
-info "/api/* (含 probe/runner) -> fleet_backend ✓"
-
-# --- 3. SSE 契约: /api/stream 必须关闭 buffering 且长读超时 ---
-sse_block="$(awk '/location \/api\/stream/,/^    }/' "$CONF")"
-printf '%s\n' "$sse_block" | grep -q "proxy_buffering off" \
-  || fail "/api/stream 未关闭 proxy_buffering"
-printf '%s\n' "$sse_block" | grep -qE "proxy_read_timeout [0-9]+s" \
-  || fail "/api/stream 未设置 proxy_read_timeout"
-pcfg="$(printf '%s\n' "$sse_block" | grep -E "proxy_read_timeout" | grep -oE '[0-9]+' || true)"
-if [ -n "${pcfg:-}" ] && [ "${pcfg:-0}" -lt 60 ]; then
-  fail "/api/stream 读超时过短 ($pcfg s),SSE 要求长超时"
+printf '%s\n' "$root_block" | grep -qF 'try_files $uri $uri/ /index.html;' || fail "缺少 SPA 入口回退"
+if printf '%s\n' "$static_block" "$config_block" "$root_block" | grep -q 'proxy_pass'; then
+  fail "静态路由不应代理到后端"
 fi
-info "/api/stream: proxy_buffering off + 长读超时 ✓"
+info "静态 /、/assets/*、/config.js 由 Nginx release 提供 ✓"
+
+# --- 2. API 前缀涵盖 ingest、scan、commands、tasks、machines ---
+api_block="$(awk '/location \/api\/ \{/,/^    }/' "$CONF")"
+printf '%s\n' "$api_block" | grep -qF 'proxy_pass http://fleet_backend;' || fail "API 未指向 fleet_backend"
+info "/api/* -> fleet_backend ✓"
+
+# --- 3. 精确 SSE 路由禁止缓存/缓冲，保留长读超时 ---
+sse_block="$(awk '/location = \/api\/stream/,/^    }/' "$CONF")"
+for directive in 'proxy_pass http://fleet_backend;' 'proxy_buffering off;' 'proxy_cache off;' 'proxy_http_version 1.1;'; do
+  printf '%s\n' "$sse_block" | grep -qF "$directive" || fail "SSE 缺少 $directive"
+done
+pcfg="$(printf '%s\n' "$sse_block" | sed -nE 's/^[[:space:]]*proxy_read_timeout ([0-9]+)s;.*/\1/p')"
+[ -n "$pcfg" ] && [ "$pcfg" -ge 60 ] || fail "SSE 读超时缺失或小于 60 秒"
+info "/api/stream: 禁用缓冲/缓存 + 长读超时 ✓"
 
 # --- 4. 无通配 CORS(no-cors 规则) ---
 if grep -qi "Access-Control-Allow-Origin" "$CONF"; then

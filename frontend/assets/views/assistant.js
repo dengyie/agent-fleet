@@ -1,8 +1,8 @@
 /* Persistent assistant workspace: bounded DOM rendering and cursor recovery. */
 import { uiIcon, pagePath } from '../routes.js';
 import {
-  getPlatformDefaults, getPlatformModels, getPlatformWorkspaces, getConversations,
-  getPlatformNodes, getPlatformArtifacts,
+  getPlatformDefaults, getConversations,
+  getPlatformArtifacts,
   getPlatformArtifactPreview,
   getPlatformMemories, searchPlatformMemories,
   createConversation, getConversation,
@@ -59,7 +59,7 @@ export function mountAssistant(target, options) {
   var conversationId = options.conversationId || null; var conversationWorkspaceId = null; var activeRunId = null; var latestRunId = null; var cursor = 0; var polling = false; var windowEventCursor = 0; var windowPolling = false; var windowState = { loading: false, error: null, window: null, mode: 'disconnected', events: [], holderId: token(), leaseToken: null, leaseExpiresAt: 0 };
   var disposed = false; var timers = new Set();
   function later(fn, delay) { if (disposed) return; var timer = setTimeout(function () { timers.delete(timer); if (!disposed) fn(); }, delay); timers.add(timer); }
-  var pendingTurn = null; var submitting = false;
+  var pendingTurn = null; var submitting = false; var catalogReady = false;
   var artifactState = { loading: false, error: null, artifacts: [], workspaceId: null, previewById: {} };
   var memoryState = { loading: false, error: null, items: [], selected: {}, order: [], maxItems: 8, maxBytes: 8192, query: '' }; var memoryRequestSequence = 0;
   renderArtifacts(artifactHost, artifactState); renderMemoryItems(memoryHost, memoryState, toggleMemory); renderSelectedMemoryItems(selectedMemoryHost, memoryState, removeMemory); renderExecutionWindow(windowHost, windowState, closeWindow);
@@ -75,9 +75,9 @@ export function mountAssistant(target, options) {
   }
   function lockPendingTurn() {
     var locked = submitting || !!pendingTurn;
-    input.readOnly = locked || !!activeRunId; model.disabled = locked; workspace.disabled = locked;
+    input.readOnly = locked || !!activeRunId; model.disabled = locked || !catalogReady; workspace.disabled = locked || !catalogReady || !!conversationId;
     memoryEnabled.disabled = locked;
-    send.disabled = submitting || !!activeRunId;
+    send.disabled = submitting || !!activeRunId || !catalogReady;
     send.textContent = pendingTurn && !submitting ? '重试提交' : '运行';
   }
   function setWindowState(next) {
@@ -216,6 +216,7 @@ export function mountAssistant(target, options) {
     }
   }
   function renderConversationHistory(rows) {
+    window.dispatchEvent(new CustomEvent('fleet-conversations-updated'));
     clear(historyHost);
     var conversations = Array.isArray(rows) ? rows.slice(0, 100) : [];
     if (!conversations.length) { historyHost.appendChild(el('div', 'assistant-history-empty meta', '暂无历史对话')); return; }
@@ -292,7 +293,7 @@ export function mountAssistant(target, options) {
       });
     } catch (error) { showError(eventHost, error); }
   }
-  function fill(select, rows, valueKey, labelKey) { clear(select); (Array.isArray(rows) ? rows : []).forEach(function (row) { var option = document.createElement('option'); option.value = row[valueKey] || ''; option.textContent = row[labelKey] || option.value; select.appendChild(option); }); }
+  function fill(select, rows, valueKey, labelKey) { clear(select); (Array.isArray(rows) ? rows : []).filter(function (row) { return row.enabled !== false; }).forEach(function (row) { var option = document.createElement('option'); option.value = row[valueKey] || ''; option.textContent = row[labelKey] || option.value; select.appendChild(option); }); }
   async function refreshLegacy(runId) { if (!runId || legacyForm.hidden) return; try { var data = await getPlatformLegacyTask(runId); var link = data.legacy_task || data; legacyStatus.textContent = '状态：' + (link.state || 'unknown') + (link.task_state ? ' · ' + link.task_state : '') + (link.task_id ? ' · task ' + link.task_id : ''); renderLegacyProjection(legacyDetails, link); if (link.session_id) { var session = document.createElement('a'); session.href = pagePath('session', link.session_id); session.textContent = '打开会话'; legacyDetails.appendChild(session); } } catch (error) { legacyStatus.textContent = (error && error.code === 'legacy_task_not_found') ? '尚未关联旧任务' : ((error && (error.detail || error.message)) || '旧任务状态不可用'); clear(legacyDetails); } }
   async function refreshRunEvents(runId) { if (!runId) return; clear(eventHost); cursor = 0; try { var eventData = await getRunEvents(runId, 0); var events = eventData.events || []; if (events.length) { cursor = eventData.next_cursor || events[events.length - 1].sequence || 0; renderEvents(eventHost, events); } } catch (error) { showError(eventHost, error); } }
   async function refreshConversation() {
@@ -305,6 +306,8 @@ export function mountAssistant(target, options) {
       conversationWorkspaceId = nextWorkspaceId;
       await refreshArtifacts(conversationWorkspaceId);
     } else if (conversationWorkspaceId) await refreshArtifacts(conversationWorkspaceId);
+    if (nextWorkspaceId) workspace.value = nextWorkspaceId;
+    lockPendingTurn();
     var runs = conversation.runs || [];
     var last = runs[runs.length - 1];
     if (last) { setStatus(last.state); latestRunId = last.run_id; showRunModel(last); }
@@ -356,7 +359,7 @@ export function mountAssistant(target, options) {
   memoryEnabled.addEventListener('change', function () { renderMemoryState(); });
   composer.addEventListener('submit', async function (event) {
     event.preventDefault();
-    if (submitting || activeRunId) return;
+    if (submitting || activeRunId || !catalogReady) return;
     var text = input.value.trim();
     if (!pendingTurn && !text) return;
     if (!pendingTurn) {
@@ -405,6 +408,21 @@ export function mountAssistant(target, options) {
   cancel.addEventListener('click', async function () { if (!activeRunId) return; cancel.disabled = true; try { var result = await cancelRun(activeRunId); setStatus(result.state || 'cancelling'); } catch (error) { showError(eventHost, error); } finally { cancel.disabled = false; } });
   legacyToggle.addEventListener('click', function () { legacyForm.hidden = !legacyForm.hidden; legacyToggle.textContent = legacyForm.hidden ? '打开旧任务关联' : '收起旧任务关联'; if (!legacyForm.hidden) refreshLegacy(latestRunId || activeRunId); });
   legacySubmit.addEventListener('click', async function () { var runId = activeRunId || latestRunId; if (!runId) { legacyStatus.textContent = '请先提交一次主助手运行'; return; } legacySubmit.disabled = true; legacyStatus.textContent = '提交中'; try { var result = await createPlatformLegacyTask(runId, { machine: legacyMachine.value.trim(), agent_type: legacyAgent.value.trim(), project: legacyProject.value.trim(), instruction: legacyInstruction.value.trim(), confirm: legacyConfirm.checked }); var link = result.legacy_task || result; legacyStatus.textContent = '已关联：' + (link.state || 'pending') + (link.task_id ? ' · ' + link.task_id : ''); renderLegacyProjection(legacyDetails, link); } catch (error) { legacyStatus.textContent = (error && (error.detail || error.message || error.code)) || '提交失败'; } finally { legacySubmit.disabled = false; } });
-  Promise.all([getPlatformDefaults(), getPlatformModels(), getPlatformWorkspaces(), getPlatformNodes(), refreshConversationHistory()]).then(function (rows) { var defaults = rows[0].defaults || {}; fill(model, rows[1].models, 'profile_id', 'model'); fill(workspace, rows[2].workspaces, 'workspace_id', 'name'); if (defaults.model_profile_id) model.value = defaults.model_profile_id; if (defaults.workspace_id) workspace.value = defaults.workspace_id; setStatus('就绪'); return Promise.all([refreshConversation(), refreshUnknownCommands(), refreshMemoryItems('')]); }).catch(function (error) { showError(eventHost, error); setStatus('平台不可用'); });
+  lockPendingTurn();
+  refreshConversationHistory();
+  // Defaults contains one coherent catalog; optional panels cannot block it.
+  getPlatformDefaults().then(async function (data) {
+    if (disposed) return;
+    var defaults = data.defaults || {};
+    fill(model, data.models, 'profile_id', 'model');
+    fill(workspace, data.workspaces, 'workspace_id', 'name');
+    if (defaults.model_profile_id && Array.from(model.options).some(function (o) { return o.value === defaults.model_profile_id; })) model.value = defaults.model_profile_id;
+    if (defaults.workspace_id && Array.from(workspace.options).some(function (o) { return o.value === defaults.workspace_id; })) workspace.value = defaults.workspace_id;
+    catalogReady = !!model.value && !!workspace.value;
+    setStatus(catalogReady ? '就绪' : '请先配置可用模型和工作区');
+    await refreshConversation();
+    refreshUnknownCommands();
+    refreshMemoryItems('');
+  }).catch(function (error) { showError(eventHost, error); setStatus('平台配置加载失败'); });
   return function teardown() { disposed = true; timers.forEach(clearTimeout); timers.clear(); };
 }

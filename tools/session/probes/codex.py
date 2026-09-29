@@ -1,10 +1,10 @@
 """Probe definitions for the Codex CLI.
 
 Codex's ``exec`` (non-interactive spawn), ``--json`` (structured event
-stream), ``--rollout`` (native transcript) and ``--resume`` capabilities are
+stream), ``--rollout`` (native transcript) and ``resume`` capabilities are
 claimed only when the observed help text matches the family grammar at a token
 boundary.  ``execute``, ``--json-lines`` and ``--rollout-foo`` never match;
-a bare ``exec`` subcommand is required for spawn.  ``--resume`` additionally
+a bare ``exec`` subcommand is required for spawn.  ``resume`` additionally
 requires a successful explicit resume probe executed by the probe runner.
 
 Codex is one of the two families allowed to advertise structured/native
@@ -42,7 +42,7 @@ def match(text: str) -> dict[str, bool]:
     """Return the capability bits observed in a decoded ``--help`` text."""
     text = text or ""
     spawn = _word_present(text, "exec")
-    resume = _flag_present(text, "--resume")
+    resume = _word_present(text, "resume")
     rollout = _flag_present(text, "--rollout")
     json_flag = _flag_present(text, "--json")
     # ``--json`` must not be confused with ``exec --json``; the structured
@@ -61,7 +61,7 @@ def help_flags() -> dict[str, str]:
     """Documentation tokens matched by :func:`match` (kept for compatibility)."""
     return {
         "spawn": "exec",
-        "resume": "--resume",
+        "resume": "resume",
         "native_transcript": "--rollout",
         "structured_stream": "--json",
         "hooks": None,

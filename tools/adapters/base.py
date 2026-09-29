@@ -44,6 +44,7 @@ class BaseAdapter:
         tail_len = [0]
 
         def feed(line):
+            original = line
             line = line[:MAX_LINE]
             tail.append(line)
             tail_len[0] += len(line) + 1
@@ -51,7 +52,7 @@ class BaseAdapter:
                 tail_len[0] -= len(tail.pop(0)) + 1
             if on_line:
                 try:
-                    on_line(line)
+                    on_line(original)
                 except Exception:
                     pass
 

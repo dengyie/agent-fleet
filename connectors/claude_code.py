@@ -16,9 +16,9 @@ class ClaudeCodeConnector(BaseConnector):
     # ------------------------------------------------------------------
     def collect(self, ctx):
         remote_script = r"""
-import json, os, glob, time
+import json, os, glob, time, shutil
 base = os.path.expanduser('~/.claude/projects')
-out = {'installed': os.path.isdir(base)}
+out = {'installed': bool(shutil.which('claude')) or os.path.isdir(base)}
 if not out['installed']:
     print(json.dumps(out)); raise SystemExit(0)
 files = []
@@ -54,4 +54,3 @@ print(json.dumps(out))
         if action == "restart":
             return ctx.restart_process("claude")
         return {"ok": False, "message": f"claude_code 不支持 action={action}"}
-

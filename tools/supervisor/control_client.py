@@ -394,7 +394,9 @@ class ControlClient:
 
         # 4. local conflict/state gate (a stale resume never resurrects a
         # quarantined/terminated session).
-        if action in _SCOPE_BLOCKED and state in _SCOPE_BLOCKED[action]:
+        if (action in _SCOPE_BLOCKED and state in _SCOPE_BLOCKED[action]
+                and not (action == "append_user_turn" and state == "terminated"
+                         and getattr(manifest, "reason", None) == "completed")):
             self._receipt(cid, "rejected", "scope_mismatch")
             return
 
@@ -566,7 +568,7 @@ class ControlClient:
                       "unknown_profile", "family_mismatch",
                       "invalid_payload"):
             return ("rejected", result)
-        if result in _EXECUTION_OK:
+        if result == {"append_user_turn": "appended", "apply_local_profile": "applied"}[action]:
             return ("succeeded", result)
         if result in ("already_finished", "no_live_process"):
             return ("already_finished", result)

@@ -11,13 +11,13 @@
 统一错误序列化（含不透明 request_id）。业务逻辑全部在
 ``hub.application.session_service``；本模块经由
 ``current_app.extensions["fleet"]["services"]["sessions"]`` 取得服务，不在
-模块级做任何 credential / 路径查找。原始 transcript 永不进入任何响应体：
-仅返回经过共享 schema 白名单的 bounded DTO。
+模块级做任何 credential / 路径查找。Operator 可读取完整 source_record；
+事件仍经过共享 schema 校验，以有界分片和分页传输。
 """
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, g, jsonify, request
 
 from hub.application.session_service import SessionService, SessionServiceError
-from hub.auth import require_ingest_token, require_operator
+from hub.auth import require_ingest_token, require_operator, require_runner
 from hub.http.errors import ApplicationError, error_response, get_request_id
 
 bp = Blueprint("sessions", __name__)
@@ -48,6 +48,13 @@ def _query_limit(default: int = 100) -> int:
     return max(1, min(limit, _MAX_QUERY_LIMIT))
 
 
+def _query_after_sequence() -> int:
+    try:
+        return max(0, min(int(request.args.get("after_sequence", 0)), 2**63 - 1))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _query_bool(name: str) -> bool:
     return str(request.args.get(name, "")).strip().lower() in {
         "1", "true", "yes", "on",
@@ -75,6 +82,25 @@ def api_session_events():
     return jsonify(result)
 
 
+@bp.route("/api/runner-session-events", methods=["POST"])
+@require_runner
+def api_runner_session_events():
+    # A runner can publish only its own machine-scoped stream. No extra
+    # ingest credential is needed for the normal task execution path.
+    import hashlib
+    prefix = "runner_" + hashlib.sha256(g.runner_machine.encode()).hexdigest()[:16] + "_"
+    data = request.get_json(silent=True)
+    if not isinstance(data, list):
+        return error_response(ApplicationError("invalid_json", "请求体必须是事件列表", 400))
+    if any(not isinstance(e, dict) or e.get("machine_id") != g.runner_machine
+           or not str(e.get("session_id", "")).startswith(prefix) for e in data):
+        return error_response(ApplicationError("machine_mismatch", "会话不属于当前 runner", 403))
+    try:
+        return jsonify(_sessions().ingest_events(data))
+    except SessionServiceError as exc:
+        return _session_error(exc)
+
+
 @bp.route("/api/sessions")
 @require_operator
 def api_sessions():
@@ -97,12 +123,28 @@ def api_session_detail(session_id):
     return jsonify(result)
 
 
+@bp.route("/api/sessions/<session_id>/messages", methods=["POST"])
+@require_operator
+def api_session_message(session_id):
+    from hub.application.supervisor_service import SupervisorServiceError
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("text"), str):
+        return error_response(ApplicationError("invalid_message", "text 必须是字符串", 400))
+    try:
+        return jsonify(_sessions().send_message(session_id, data["text"])), 202
+    except SessionServiceError as exc:
+        return _session_error(exc)
+    except SupervisorServiceError as exc:
+        return error_response(ApplicationError(exc.code, exc.detail, exc.status))
+
+
 @bp.route("/api/sessions/<session_id>/events")
 @require_operator
 def api_session_events_query(session_id):
     try:
         result = _sessions().session_events(
-            session_id, limit=_query_limit())
+            session_id, limit=_query_limit(),
+            after_sequence=_query_after_sequence())
     except SessionServiceError as exc:
         return _session_error(exc)
     return jsonify(result)

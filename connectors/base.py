@@ -6,6 +6,7 @@
 
 from abc import ABC, abstractmethod
 import json
+from agent_profiles import default_command
 
 
 class BaseConnector(ABC):
@@ -55,11 +56,11 @@ class BaseConnector(ABC):
 
 # --- codex/pi 共用的 jsonl 会话目录采集脚本 --------------------------------
 # 两个连接器的采集逻辑逐字一致，仅扫描根目录不同（~/.codex/sessions、
-# ~/.pi/agent/sessions）；模板以 base 作唯一参数，避免逐字复制走样。
+# ~/.pi/agent/sessions）；命令名来自 profile，安装检测不依赖首次会话。
 _JSONL_SESSION_SCRIPT_TEMPLATE = r"""
-import json, os, glob, time
+import json, os, glob, time, shutil
 base = os.path.expanduser(%(base)r)
-out = {'installed': os.path.isdir(base)}
+out = {'installed': bool(shutil.which(%(command)r)) or os.path.isdir(base)}
 if not out['installed']:
     print(json.dumps(out)); raise SystemExit(0)
 files = []
@@ -82,9 +83,9 @@ print(json.dumps(out))
 """
 
 
-def jsonl_session_script(base: str) -> str:
+def jsonl_session_script(base: str, command: str) -> str:
     """生成扫描 ``base`` 下 *.jsonl 会话元数据的远端脚本（codex/pi 共用）。"""
-    return _JSONL_SESSION_SCRIPT_TEMPLATE % {'base': base}
+    return _JSONL_SESSION_SCRIPT_TEMPLATE % {'base': base, 'command': command}
 
 
 class JsonlConnector(BaseConnector):
@@ -97,7 +98,8 @@ class JsonlConnector(BaseConnector):
     SESSION_BASE = ""  # 子类必须覆盖：远端会话根目录（如 ~/.codex/sessions）
 
     def collect(self, ctx):
-        raw = ctx.run_python(jsonl_session_script(self.SESSION_BASE))
+        command = default_command(self.TYPE)[0]
+        raw = ctx.run_python(jsonl_session_script(self.SESSION_BASE, command))
         try:
             result = json.loads(raw)
             if not isinstance(result, dict):
@@ -106,7 +108,7 @@ class JsonlConnector(BaseConnector):
             if "error" in result:
                 return result  # 直接传递脚本报告的错误
             # The probe intentionally omits session fields when the agent's
-            # session directory is absent. Preserve that state so the public
+            # executable and session directory are absent. Preserve that state so the public
             # snapshot reports an absent agent instead of a false collector
             # failure.
             if result.get("installed") is False:

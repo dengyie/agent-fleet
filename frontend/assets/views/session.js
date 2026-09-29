@@ -2,7 +2,7 @@
  *
  * 只按授权 API（/api/sessions/<id>、<id>/events、<id>/policy-signals）经过
  * api/contracts.js 校验的公开模型渲染。不直接发起任何 HTTP 长连接或页面跳转，
- * 不访问全局运行时配置，不渲染任何契约拒绝的内部字段或原始 transcript——
+ * 不访问全局运行时配置；完整源记录通过 source_record 字符串展示——
  * 所有动态文本一律 textContent。
  *
  * 显式布局：
@@ -47,6 +47,7 @@ var MAX_RESULT_RENDER = 4000;
 /* -- 事件 kind → 可见文案标签（与 session_schema.EVENT_KINDS 对齐） ---------- */
 
 var KIND_LABELS = {
+  source_record: '源事件记录',
   session_start: '会话开始',
   session_metadata: '会话元数据',
   user_message: '用户消息',
@@ -143,6 +144,16 @@ function ellipsis(v, limit) {
     s = s + '…';
   }
   return s;
+}
+
+function fullText(text, previewLimit) {
+  if (text.length <= previewLimit) {
+    return h('pre', 'session-event-text', text);
+  }
+  var details = h('details', 'session-full-text');
+  details.appendChild(h('summary', null, text.slice(0, previewLimit) + '… 展开全文（' + text.length + ' 字符）'));
+  details.appendChild(h('pre', 'session-event-text', text));
+  return details;
 }
 
 function metaTime(ts) {
@@ -264,16 +275,23 @@ function renderPayloadBody(ev) {
   function textNode(text) {
     var s = ellipsis(text, MAX_TEXT_RENDER);
     if (s) {
-      nodes.push(h('div', 'session-event-text', s));
+      nodes.push(fullText(text, MAX_TEXT_RENDER));
     }
   }
   function resultNode(text) {
     var s = ellipsis(text, MAX_RESULT_RENDER);
     if (s) {
-      nodes.push(h('div', 'session-event-text', s));
+      nodes.push(fullText(text, MAX_RESULT_RENDER));
     }
   }
 
+  if (kind === 'source_record') {
+    var source = h('details', 'session-source-record');
+    source.appendChild(h('summary', null, '查看源事件' + (p.is_complete === false ? '（续片）' : '')));
+    source.appendChild(h('pre', 'session-event-text', p.text || ''));
+    nodes.push(source);
+    return nodes;
+  }
   if (kind === 'user_message' || kind === 'assistant_message') {
     textNode(p.text);
     return nodes;
@@ -321,13 +339,11 @@ function renderPayloadBody(ev) {
     head.appendChild(statusWrap);
     badge.appendChild(head);
     if (typeof p.arguments === 'string' && p.arguments) {
-      var argsBlock = h('pre', 'tool-call-drawer');
-      argsBlock.textContent = ellipsis(p.arguments, MAX_TEXT_RENDER) || '';
+      var argsBlock = fullText(p.arguments, MAX_TEXT_RENDER);
       badge.appendChild(argsBlock);
     }
     if (typeof p.result === 'string' && p.result) {
-      var outBlock = h('pre', 'tool-call-drawer');
-      outBlock.textContent = ellipsis(p.result, MAX_RESULT_RENDER) || '';
+      var outBlock = fullText(p.result, MAX_RESULT_RENDER);
       badge.appendChild(outBlock);
     }
     nodes.push(badge);
@@ -465,7 +481,9 @@ function enqueueControl(clientMethods, viewState, paint, sid, action, payload) {
   viewState.controlError = null;
   viewState.controlNotice = '正在入队…';
   paint();
-  var request = (payload && typeof payload === 'object')
+  var request = action === 'append_user_turn' && typeof clientMethods.sendSessionMessage === 'function'
+    ? clientMethods.sendSessionMessage(sid, payload.text)
+    : (payload && typeof payload === 'object')
     ? clientMethods.controlSession(sid, action, 'operator_requested', payload)
     : clientMethods.controlSession(sid, action, 'operator_requested');
   request.then(function (result) {
@@ -491,7 +509,8 @@ function enqueueControl(clientMethods, viewState, paint, sid, action, payload) {
           return;
         }
         if (events && Array.isArray(events.events)) {
-          viewState.events = events.events;
+          viewState.hasNextPage = events.events.length > 100;
+          viewState.events = events.events.slice(0, 100);
         }
         paint();
       });
@@ -784,6 +803,8 @@ export function mountSession(root, sessionId, store, client) {
     controlError: null,
     localProfiles: [],
     followUpText: '',
+    pageStarts: [0],
+    hasNextPage: false,
   };
 
   var lastSummaryKey = '';
@@ -813,9 +834,10 @@ export function mountSession(root, sessionId, store, client) {
     summaryRefreshInFlight = true;
     var jobs = [];
     if (typeof clientMethods.getSessionEvents === 'function') {
-      jobs.push(clientMethods.getSessionEvents(sessionId, 100).then(function (events) {
+      jobs.push(clientMethods.getSessionEvents(sessionId, 101, viewState.pageStarts[viewState.pageStarts.length - 1]).then(function (events) {
         if (!viewState.disposed && events && Array.isArray(events.events)) {
-          viewState.events = events.events;
+          viewState.hasNextPage = events.events.length > 100;
+          viewState.events = events.events.slice(0, 100);
         }
       }));
     }
@@ -926,6 +948,23 @@ export function mountSession(root, sessionId, store, client) {
     timelineTitle.appendChild(document.createTextNode('事件时间线'));
     timelinePanel.appendChild(timelineTitle);
     renderEventList(timelinePanel, viewState.events);
+    var pages = h('div', 'session-pagination');
+    var previous = h('button', null, '上一页');
+    previous.disabled = viewState.pageStarts.length < 2;
+    previous.addEventListener('click', function () {
+      viewState.pageStarts.pop();
+      viewState.loading = true; render(); loadSync();
+    });
+    var next = h('button', null, '下一页');
+    next.disabled = !viewState.hasNextPage;
+    next.addEventListener('click', function () {
+      viewState.pageStarts.push(viewState.events[viewState.events.length - 1].sequence);
+      viewState.loading = true; render(); loadSync();
+    });
+    pages.appendChild(previous);
+    pages.appendChild(h('span', 'meta', ' 第 ' + viewState.pageStarts.length + ' 页 '));
+    pages.appendChild(next);
+    timelinePanel.appendChild(pages);
     root.appendChild(timelinePanel);
 
     var controlPanel = h('section', 'panel');
@@ -945,7 +984,7 @@ export function mountSession(root, sessionId, store, client) {
   function loadSync() {
     var jobs = [
       clientMethods.getSession(sessionId),
-      clientMethods.getSessionEvents(sessionId, 100),
+      clientMethods.getSessionEvents(sessionId, 101, viewState.pageStarts[viewState.pageStarts.length - 1]),
       clientMethods.getSessionSignals(sessionId),
     ];
     if (typeof clientMethods.getStatus === 'function' &&
@@ -968,8 +1007,9 @@ export function mountSession(root, sessionId, store, client) {
         if (detail && detail.session) {
           viewState.session = detail.session;
         }
+        viewState.hasNextPage = Boolean(events && events.events && events.events.length > 100);
         viewState.events = (events && Array.isArray(events.events)) ?
-          events.events : [];
+          events.events.slice(0, 100) : [];
         viewState.signals = (signals && Array.isArray(signals.signals)) ?
           signals.signals : [];
         viewState.loading = false;

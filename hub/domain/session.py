@@ -124,7 +124,7 @@ def validate_session_spec(
     }
     if process_group_id is not None:
         clean['process_group_id'] = process_group_id
-    if spec.get('attempt_id') is not None and managed:
+    if spec.get('attempt_id') is not None:
         clean['attempt_id'] = _opaque(spec['attempt_id'], 'attempt_id')
     if quality in CAPTURE_QUALITIES:
         clean['capture_quality'] = quality

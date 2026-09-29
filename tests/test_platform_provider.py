@@ -66,6 +66,7 @@ def test_non_streaming_request_uses_frozen_endpoint_model_and_redacts_key():
     assert call["url"] == "https://llm.example.test/v1/chat/completions"
     assert json.loads(call["body"])["model"] == "gpt-test"
     assert call["headers"]["Authorization"] == "Bearer super-secret"
+    assert call["headers"]["User-Agent"] == "agent-fleet/1.0"
     assert "super-secret" not in repr(result)
     assert broker.refs == ["env://TEST_PROVIDER_KEY"]
 
@@ -173,3 +174,19 @@ def test_endpoint_rejects_embedded_query_credentials():
         ProviderFactory(secret_broker=Broker({"env://TEST_PROVIDER_KEY": "x"}), transport=FakeTransport([]))(
             _profile(provider_config={"endpoint": "https://llm.example.test/v1?api_key=secret"}))
     assert caught.value.code == "provider_endpoint_invalid"
+
+
+def test_workspace_tool_contract_reaches_real_provider_request():
+    from tools.platform.tool_broker import ToolBroker
+    transport = FakeTransport([_response({
+        "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+    })])
+    provider = ProviderFactory(secret_broker=Broker({"env://TEST_PROVIDER_KEY": "secret"}), transport=transport)(_profile())
+    provider.complete([{"role": "user", "content": "write a file"}], ToolBroker.tool_definitions())
+    definitions = {row["function"]["name"]: row["function"] for row in json.loads(transport.calls[0]["body"])["tools"]}
+    write = definitions["workspace.write"]["parameters"]
+    assert set(write["required"]) == {"path", "content"}
+    assert write["properties"]["path"]["type"] == "string"
+    assert write["properties"]["content"]["type"] == "string"
+    assert definitions["workspace.exec"]["parameters"]["properties"]["argv"]["type"] == "array"
+    assert all(tool["description"] for tool in definitions.values())

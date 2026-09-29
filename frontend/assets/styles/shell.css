@@ -66,3 +66,13 @@ body[data-page=monitoring] .monitoring-heading h1,body[data-page=monitoring] .mo
   .grid { grid-template-columns: minmax(0, 1fr); }
   .healthbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+.console-conversations { flex: 1 1 160px; min-height: 70px; }
+.console-conversations a { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#sidebar-nodes { max-height: 22vh; flex-shrink: 0; }
+.console-sidebar { overflow-y: auto; }
+
+.monitoring-nodes { margin-bottom: 18px; }
+.monitoring-node-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 16px; margin-top: 14px; }
+.monitoring-node { min-width: 0; overflow-wrap: anywhere; }
+.monitoring-node > span { margin-left: 12px; }

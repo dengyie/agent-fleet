@@ -268,12 +268,11 @@ class SessionRepository:
         }
         if process_group_id:
             clean["process_group_id"] = process_group_id
-        if managed:
-            attempt_id = spec.get("attempt_id")
-            if attempt_id is not None and not is_valid_session_id(attempt_id):
-                raise SessionError("invalid_session_spec")
-            if isinstance(attempt_id, str) and attempt_id:
-                clean["attempt_id"] = attempt_id
+        attempt_id = spec.get("attempt_id")
+        if attempt_id is not None and not is_valid_session_id(attempt_id):
+            raise SessionError("invalid_session_spec")
+        if isinstance(attempt_id, str) and attempt_id:
+            clean["attempt_id"] = attempt_id
 
         family = spec.get("agent_family")
         if (isinstance(family, str) and family

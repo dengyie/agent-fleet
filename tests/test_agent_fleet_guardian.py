@@ -164,7 +164,7 @@ class TestAgentFleetGuardian(unittest.IsolatedAsyncioTestCase):
     @patch("hub.agent_fleet_guardian.os.kill")
     async def test_restart_service_repo_not_exists(self, mock_kill, mock_popen):
         """Test restart fails when repo root doesn't exist."""
-        self.guardian.repo_root = Path("/nonexistent")
+        self.guardian.repo_root = self.repo_root / "missing-repository"
 
         success = await self.guardian.restart_service()
 

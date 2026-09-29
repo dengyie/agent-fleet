@@ -15,8 +15,9 @@ Design rules enforced here (see the Task 7 brief):
 - Managed/unmanaged semantics are authoritative: an unmanaged session reports
   ``managed=False``, ``capture_quality='best_effort'``,
   ``control_capability='unavailable'`` and may only ever capture best-effort.
-- Redaction (:mod:`tools.session.redact`) runs BEFORE the spool append.  The
-  spool is encrypted, append-only, quota-bounded (Task 4).
+- Normalized previews are redacted before append. Opted-in source_record
+  archives preserve all observable field values. The spool is encrypted,
+  append-only and quota-bounded.
 - Uploads go through the injected :class:`SessionUploader` / ``post_json``
   callable and honor the Task 6 response contract
   (``accepted_through`` / ``next_cursor`` / bounded ``rejected``).  The bridge
@@ -130,6 +131,24 @@ def _shape_native_row(raw: Mapping) -> list[tuple[str, Mapping]]:
     is now captured rather than only the first tool block).
     """
     rtype = str(raw.get("type") or "")
+    if rtype in ("item.started", "item.updated", "item.completed"):
+        item = raw.get("item")
+        if not isinstance(item, Mapping):
+            return []
+        itype = item.get("type")
+        completed = rtype == "item.completed"
+        if itype == "agent_message":
+            return [("assistant_message", {"text": item.get("text", ""),
+                                            "is_complete": completed})] if completed else []
+        if itype in ("command_execution", "mcp_tool_call", "file_change", "web_search"):
+            return [("tool_result" if completed else "tool_call", {
+                "tool_name": str(item.get("tool") or itype),
+                "call_id": str(item.get("id") or ""),
+                "arguments": _bounded_json(item.get("command", item.get("arguments", item.get("changes", item.get("query"))))),
+                "result": _bounded_json(item.get("aggregated_output", item.get("result", item.get("error")))),
+                "status": str(item.get("status") or ("completed" if completed else "running")),
+            })]
+        return []
     if rtype in ("event_msg", "response_item"):
         # codex rollout rows (type/payload wrapper) — see _shape_codex_row.
         return _shape_codex_row(raw)
@@ -297,6 +316,17 @@ def _shape_codex_row(raw: Mapping) -> list[tuple[str, Mapping]]:
         return []
     ptype = str(payload.get("type") or "")
     if rtype == "event_msg":
+        if ptype == "item_completed":
+            item = payload.get("item")
+            if isinstance(item, Mapping) and item.get("type") in ("UserMessage", "AgentMessage"):
+                blocks = item.get("content") or []
+                text = "\n".join(block["text"] for block in blocks
+                                 if isinstance(block, Mapping)
+                                 and block.get("type") in ("text", "Text")
+                                 and isinstance(block.get("text"), str))
+                return [("user_message" if item["type"] == "UserMessage" else "assistant_message",
+                         {"text": text, "is_complete": True})]
+            return []
         if ptype == "user_message":
             text = payload.get("message")
             if isinstance(text, str) and text:
@@ -567,6 +597,7 @@ class SessionBridge:
             config.update(dict(session_config))
         config.update(kwargs)
 
+        self._preserve_source = bool(config.get("preserve_source", False))
         self._manifest = dict(manifest or {})
         self._session_id = _required_opaque(config.get("session_id"),
                                             "session_id")
@@ -633,6 +664,7 @@ class SessionBridge:
         self._redactor = Redactor()
         self._hook_adapter = None
         self._pty_adapter = None
+        self._checkpoint_path = config.get("checkpoint_path")
         self._tailer = None
         self._last_error: str | None = None
         self._last_reject: str | None = None
@@ -721,8 +753,11 @@ class SessionBridge:
             path = self._native_path
         if path is None:
             raise ValueError("native path not configured")
-        if self._tailer is None or checkpoint_path is not None:
-            self._tailer = _tailer(path, checkpoint_path=checkpoint_path)
+        if checkpoint_path is not None:
+            self._checkpoint_path = checkpoint_path
+        if self._tailer is None:
+            options = {"max_line_bytes": 16 << 20} if self._preserve_source else {}
+            self._tailer = _tailer(path, checkpoint_path=self._checkpoint_path, **options)
         count = 0
         try:
             for obj in self._tailer.read():
@@ -735,8 +770,8 @@ class SessionBridge:
             self._emit_disconnect_gap("native_transcript", "source_disconnected")
         elif self._tailer.last_error:
             self._emit_disconnect_gap("native_transcript", "source_unavailable")
-        if checkpoint_path is not None and self._tailer is not None:
-            self._tailer.checkpoint_to(checkpoint_path)
+        if self._checkpoint_path is not None and self._tailer is not None:
+            self._tailer.checkpoint_to(self._checkpoint_path)
         return count
 
     def ingest_one(self, raw, *, source: str | None = None) -> bool:
@@ -822,6 +857,8 @@ class SessionBridge:
         return self._handle_raw("structured_stream", raw)
 
     def _handle_raw(self, source: str, raw) -> bool:
+        if self._preserve_source:
+            self.record_source(raw)
         if source == "structured_stream":
             return self._handle_structured(raw)
         if source == "native_transcript":
@@ -831,6 +868,20 @@ class SessionBridge:
         if source == "pty":
             return self._handle_pty(raw)
         return False
+
+    def record_source(self, raw) -> None:
+        """Retain observable source records, chunking instead of truncating.
+
+        4000 codepoints fit the wire cap even for escaped non-BMP Unicode.
+        Consecutive chunks end with is_complete=true and retain source order.
+        """
+        text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+        parts = [text[i:i + 4000] for i in range(0, len(text), 4000)] or [""]
+        for index, part in enumerate(parts):
+            event = self._build("source_record", payload={
+                "text": part, "is_complete": index == len(parts) - 1})
+            if not self._emit_event(event):
+                raise RuntimeError("source_record_not_persisted")
 
     def _handle_structured(self, raw) -> bool:
         return self._emit_all(self._normalize(raw))
@@ -1054,7 +1105,9 @@ class SessionBridge:
             # control event); do not redact or persist a rejected event.
             return False
         # (1) redact
-        redacted, _ = self._redactor.redact_event(event)
+        # Source records are the operator's complete conversation archive.
+        # Unlike the normalized preview, do not rewrite paths/values here.
+        redacted = event if event["kind"] == "source_record" else self._redactor.redact_event(event)[0]
         try:
             result = self._spool.append(redacted)
         except (ValueError, TypeError, SpoolError) as exc:
@@ -1064,6 +1117,8 @@ class SessionBridge:
             return False
         if result.capture_blocked:
             self._emit_downgrade(event, "spool_quota")
+        if event["kind"] == "source_record":
+            return result.accepted
         return result.accepted or result.gap_sequence is not None
 
     def _emit_direct(self, event: dict) -> None:

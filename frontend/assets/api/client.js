@@ -324,10 +324,16 @@ export async function getSession(sessionId) {
     API.sessions + '/' + encodeURIComponent(sessionId)));
 }
 
-export async function getSessionEvents(sessionId, limit) {
+export async function getSessionEvents(sessionId, limit, afterSequence) {
   return parseSessionEvents(await request(
     API.sessions + '/' + encodeURIComponent(sessionId) + '/events' +
-    queryString({ limit: limit || 100 })));
+    queryString({ limit: limit || 100, after_sequence: afterSequence || 0 })));
+}
+
+export async function sendSessionMessage(sessionId, text) {
+  return parseControlEnqueue(await request(API.sessions + '/' + encodeURIComponent(sessionId) + '/messages', {
+    method: 'POST', headers: JSON_HEADERS, body: { text: text }
+  }));
 }
 
 export async function getSessionSignals(sessionId) {

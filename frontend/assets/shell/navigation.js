@@ -1,4 +1,5 @@
 import { uiIcon, pagePath } from '../routes.js';
+import { getConversations } from '../api/platform.js';
 const labels = {
   fleet: ['总览', '集群总览', '节点、任务与服务状态，一处掌握。', 'WORKSPACE OVERVIEW'],
   assistant: ['主助手', '主助手', '从一个想法开始，让助手把工作推进到完成。', 'ASSISTANT'],
@@ -68,6 +69,38 @@ export function mountNavigation(route, store) {
     }
   }
   document.addEventListener('keydown', onKeydown);
+  let disposed = false;
+  let historyRequest = 0;
+  async function refreshHistory() {
+    const request = ++historyRequest;
+    const list = document.getElementById('sidebar-conversations');
+    try {
+      const data = await getConversations(50);
+      if (disposed || request !== historyRequest) return;
+      list.replaceChildren();
+      for (const row of (data.conversations || []).slice(0, 50)) {
+        if (!row.conversation_id) continue;
+        const link = document.createElement('a');
+        link.href = pagePath('conversation', row.conversation_id);
+        link.textContent = row.title || row.last_message_preview || '未命名对话';
+        link.title = link.textContent;
+        if (resolveRoute().id === row.conversation_id) link.setAttribute('aria-current', 'page');
+        list.appendChild(link);
+      }
+      if (!list.childElementCount) list.textContent = '暂无 Hub 历史对话';
+    } catch (error) {
+      if (disposed || request !== historyRequest) return;
+      list.replaceChildren();
+      const message = document.createElement('p'); message.className = 'sidebar-empty';
+      message.textContent = error.status === 401 ? '登录后查看 Hub 历史对话' : '历史对话加载失败';
+      const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = '重试';
+      retry.addEventListener('click', refreshHistory);
+      list.append(message, retry);
+    }
+  }
+  refreshHistory();
+  window.addEventListener('fleet-conversations-updated', refreshHistory);
+  window.addEventListener('focus', refreshHistory);
   let renderedNodes;
   const unsubscribe = store.subscribe(() => {
     const state = store.getState();
@@ -94,6 +127,9 @@ export function mountNavigation(route, store) {
     }
   });
   return () => {
+    disposed = true;
+    window.removeEventListener('fleet-conversations-updated', refreshHistory);
+    window.removeEventListener('focus', refreshHistory);
     unsubscribe();
     mobile.removeEventListener('change', resetDrawer);
     button.removeEventListener('click', onMenu);

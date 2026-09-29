@@ -313,7 +313,7 @@ def _run_binary(
 
 
 def _resume_probe(
-    exe_path: str, timeout_s: float, path_adds: Sequence[str] = ()
+    exe_path: str, timeout_s: float, path_adds: Sequence[str] = (), agent: str = "claude_code"
 ) -> bool:
     """Verify a genuine resume path; only a success yields ``True``.
 
@@ -321,7 +321,8 @@ def _resume_probe(
     to False and ``resume`` stays False.  Uses the same isolated invocation.
     """
     code, _stdout = _run_binary(
-        [exe_path, "--resume", "--help"], timeout_s, path_adds=path_adds
+        ([exe_path, "exec", "resume", "--help"] if agent == "codex" else
+         [exe_path, "--resume", "--help"]), timeout_s, path_adds=path_adds
     )
     return code == "ok"
 
@@ -471,7 +472,7 @@ def probe_agent(
     # ---- resume is never auto-appended ------------------------------
     if (agent in _RESUME_VERIFIABLE_FAMILIES and verify_resume
             and caps.get("resume")):
-        if _resume_probe(exe_path, timeout_s, path_adds):
+        if _resume_probe(exe_path, timeout_s, path_adds, agent=agent):
             caps["resume"] = True
         else:
             caps["resume"] = False

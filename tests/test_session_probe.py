@@ -76,7 +76,7 @@ def _run_fake_factory(entries):
         if spec.get("timeout"):
             raise subprocess.TimeoutExpired(argv, kwargs.get("timeout", 1))
         flags = set(argv[1:])
-        if "--resume" in flags:
+        if "--resume" in flags or argv[1:3] == ["exec", "resume"]:
             if spec.get("resume_timeout"):
                 raise subprocess.TimeoutExpired(argv, kwargs.get("timeout", 1))
             if spec.get("resume_fail"):
@@ -478,7 +478,7 @@ class CapabilityDowngradeTests(unittest.TestCase):
     def test_resume_false_when_resume_probe_fails(self):
         m = _probe("codex", CODEX,
                     {"codex": {"version": "codex 0.44.0\n",
-                                "help": "  --resume SESSION\n",
+                                "help": "  resume SESSION\n",
                                 "resume_fail": True}})
         self.assertTrue(m.installed)
         self.assertFalse(m.resume)
@@ -487,7 +487,7 @@ class CapabilityDowngradeTests(unittest.TestCase):
     def test_resume_false_when_resume_probe_times_out(self):
         m = _probe("codex", CODEX,
                     {"codex": {"version": "codex 0.44.0\n",
-                                "help": "  --resume SESSION\n",
+                                "help": "  resume SESSION\n",
                                 "resume_timeout": True}})
         self.assertTrue(m.installed)
         self.assertFalse(m.resume)
@@ -495,7 +495,7 @@ class CapabilityDowngradeTests(unittest.TestCase):
 
     def test_resume_false_when_verification_disabled(self):
         with patch_probe({"codex": {"version": "codex 0.44.0\n",
-                                    "help": "  --resume SESSION\n"}}):
+                                    "help": "  resume SESSION\n"}}):
             m2 = probe_agent("codex", [CODEX], timeout_s=4.0,
                              verify_resume=False)
         self.assertFalse(m2.resume)
@@ -504,7 +504,7 @@ class CapabilityDowngradeTests(unittest.TestCase):
     def test_resume_true_only_after_successful_resume_probe(self):
         m = _probe("codex", CODEX,
                     {"codex": {"version": "codex 0.44.0\n",
-                                "help": "  --resume SESSION\n"}})
+                                "help": "  resume SESSION\n"}})
         self.assertTrue(m.installed)
         self.assertTrue(m.resume)          # resume probe succeeded
         self.assertNotIn("resume_unverified", m.diagnostics)
