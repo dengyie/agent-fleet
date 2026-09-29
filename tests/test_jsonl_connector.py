@@ -82,3 +82,27 @@ def test_zcode_connector_collect_reports_missing_dir_honestly():
 
     result = ZcodeConnector().collect(FakeContext())
     assert result["installed"] is False
+
+
+def test_jsonl_connector_preserves_uninstalled_result_without_sessions():
+    """A missing session directory is an absent agent, not a collector error."""
+    from connectors.codex import CodexConnector
+
+    class MissingContext:
+        def run_python(self, script):
+            return '{"installed": false}\n'
+
+    result = CodexConnector().collect(MissingContext())
+    assert result == {"installed": False}
+
+
+def test_jsonl_connector_rejects_installed_result_without_sessions():
+    from connectors.codex import CodexConnector
+
+    class BrokenContext:
+        def run_python(self, script):
+            return '{"installed": true}\n'
+
+    result = CodexConnector().collect(BrokenContext())
+    assert result["sessions"] == []
+    assert "缺少" in result["error"]

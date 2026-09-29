@@ -4,6 +4,7 @@
 The application assembly lives in :mod:`hub.bootstrap`; this module keeps the
 legacy CLI, helper functions, and ``make_app`` signature stable for callers.
 """
+import json
 import os
 import time
 from pathlib import Path
@@ -146,6 +147,33 @@ _SUPERVISOR_ENABLE_ENV = "AGENT_FLEET_SUPERVISOR_ENABLED"
 _ADOPTION_ENABLE_ENV = "AGENT_FLEET_ADOPTION_REPOSITORIES_ENABLED"
 _APPEND_TURN_ENABLE_ENV = "AGENT_FLEET_APPEND_USER_TURN_ENABLED"
 _APPLY_PROFILE_ENABLE_ENV = "AGENT_FLEET_APPLY_LOCAL_PROFILE_ENABLED"
+_SERVICE_MONITORING_ENABLE_ENV = "AGENT_FLEET_SERVICE_MONITORING_ENABLED"
+_SERVICE_ACTIONS_ENABLE_ENV = "AGENT_FLEET_SERVICE_ACTIONS_ENABLED"
+_EXECUTION_WINDOWS_ENABLE_ENV = "AGENT_FLEET_EXECUTION_WINDOWS_ENABLED"
+_KOMARI_ENABLE_ENV = "AGENT_FLEET_KOMARI_ENABLED"
+_KOMARI_NETWORK_ENABLE_ENV = "AGENT_FLEET_KOMARI_NETWORK_ENABLED"
+_KOMARI_SYNC_ENABLE_ENV = "AGENT_FLEET_KOMARI_SYNC_ENABLED"
+_KOMARI_BASE_URL_ENV = "AGENT_FLEET_KOMARI_BASE_URL"
+_KOMARI_NODES_PATH_ENV = "AGENT_FLEET_KOMARI_NODES_PATH"
+_KOMARI_TOKEN_ENV = "AGENT_FLEET_KOMARI_TOKEN"
+_KOMARI_NODE_MAPPING_ENV = "AGENT_FLEET_KOMARI_NODE_MAPPING"
+_KOMARI_SYNC_INTERVAL_ENV = "AGENT_FLEET_KOMARI_SYNC_INTERVAL_S"
+_HTTP_PROBE_ENABLE_ENV = "AGENT_FLEET_HTTP_PROBE_ENABLED"
+_HTTP_PROBE_NETWORK_ENABLE_ENV = "AGENT_FLEET_HTTP_PROBE_NETWORK_ENABLED"
+_HTTP_PROBE_SYNC_ENABLE_ENV = "AGENT_FLEET_HTTP_PROBE_SYNC_ENABLED"
+_HTTP_PROBE_SYNC_INTERVAL_ENV = "AGENT_FLEET_HTTP_PROBE_SYNC_INTERVAL_S"
+_HTTP_PROBE_ALLOWED_ORIGINS_ENV = "AGENT_FLEET_HTTP_PROBE_ALLOWED_ORIGINS"
+_HTTP_PROBE_ALLOW_LOOPBACK_ENV = "AGENT_FLEET_HTTP_PROBE_ALLOW_LOOPBACK"
+_INCIDENT_RECOVERY_REQUIRED_ENV = "AGENT_FLEET_INCIDENT_RECOVERY_REQUIRED"
+_PLATFORM_WORKER_ENABLE_ENV = "AGENT_FLEET_PLATFORM_WORKER_ENABLED"
+_PLATFORM_WORKER_SCHEDULER_ENABLE_ENV = "AGENT_FLEET_PLATFORM_WORKER_SCHEDULER_ENABLED"
+_PLATFORM_WORKER_INTERVAL_ENV = "AGENT_FLEET_PLATFORM_WORKER_INTERVAL_S"
+_PLATFORM_WORKER_LEASE_ENV = "AGENT_FLEET_PLATFORM_WORKER_LEASE_S"
+_PLATFORM_WORKER_MAX_CONCURRENCY_ENV = "AGENT_FLEET_PLATFORM_WORKER_MAX_CONCURRENCY"
+_PLATFORM_WORKER_MAX_WORKSPACE_CONCURRENCY_ENV = "AGENT_FLEET_PLATFORM_WORKER_MAX_WORKSPACE_CONCURRENCY"
+_PLATFORM_PROVIDER_NETWORK_ENABLE_ENV = "AGENT_FLEET_PLATFORM_PROVIDER_NETWORK_ENABLED"
+_PLATFORM_MEMORY_ENABLE_ENV = "AGENT_FLEET_PLATFORM_MEMORY_ENABLED"
+_PLATFORM_MEMORY_CONTEXT_ENABLE_ENV = "AGENT_FLEET_PLATFORM_MEMORY_CONTEXT_ENABLED"
 
 #: Optional per-release gate file, ``<FLEET_HOME>/fleet-gates.conf``, with
 #: ``AGENT_FLEET_*_ENABLED=1`` lines.  It is ONLY consulted when the matching
@@ -193,14 +221,71 @@ def _feature_on(value: bool | None, *, env: str) -> bool:
     return text.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _optional_setting(value, *, env: str):
+    """Resolve an optional runtime setting without printing its value."""
+    if value is not None:
+        return value
+    return os.environ.get(env) or None
+
+
+def _bounded_float(value, *, default: float, lower: float, upper: float) -> float:
+    try:
+        parsed = float(default if value is None else value)
+    except (TypeError, ValueError):
+        parsed = default
+    if not (parsed == parsed) or parsed in (float("inf"), float("-inf")):
+        parsed = default
+    return max(lower, min(upper, parsed))
+
+
+def _bounded_int(value, *, default: int, lower: int, upper: int) -> int:
+    try:
+        parsed = int(default if value is None else value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(lower, min(upper, parsed))
+
+
+def _node_mapping(value):
+    value = _optional_setting(value, env=_KOMARI_NODE_MAPPING_ENV)
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def make_app(ingest_token=None, require_token=True, dev_operator=None,
              runner_credentials=None, project_whitelist=None,
-             frontend_cutover=False, frontend_dir=None,
+             serve_frontend=True, frontend_dir=None,
              session_repositories_enabled=None,
              supervisor_enabled=None,
              adoption_repositories_enabled=None,
              append_user_turn_enabled=None,
-             apply_local_profile_enabled=None):
+             apply_local_profile_enabled=None,
+             platform_enabled=None, platform_db=None,
+             service_monitoring_enabled=None, komari_enabled=None,
+             komari_network_enabled=None,
+             service_actions_enabled=None,
+             execution_windows_enabled=None,
+             komari_base_url=None, komari_nodes_path=None, komari_token=None,
+             komari_node_mapping=None, komari_sync_enabled=None,
+             komari_sync_interval_s=None, incident_recovery_required=None,
+             http_probe_enabled=None, http_probe_network_enabled=None,
+             http_probe_sync_enabled=None, http_probe_sync_interval_s=None,
+             http_probe_allowed_origins=None, http_probe_allow_loopback=None,
+             platform_worker_enabled=None, platform_worker_interval_s=None,
+             platform_worker_lease_s=None, platform_worker_scheduler_enabled=None,
+             platform_worker_max_concurrency=None, platform_sandbox_launcher=None,
+             platform_worker_max_workspace_concurrency=None,
+             platform_provider_network_enabled=None,
+             platform_remote_execution_enabled=None,
+             platform_memory_enabled=None,
+             platform_memory_context_enabled=None):
     """Compatibility wrapper around ``hub.bootstrap.create_app``.
 
     ``session_repositories_enabled`` / ``supervisor_enabled`` /
@@ -228,6 +313,83 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         append_user_turn_enabled, env=_APPEND_TURN_ENABLE_ENV)
     apply_profile_on = _feature_on(
         apply_local_profile_enabled, env=_APPLY_PROFILE_ENABLE_ENV)
+    platform_on = _feature_on(
+        platform_enabled, env="AGENT_FLEET_PLATFORM_ENABLED")
+    service_monitoring_on = _feature_on(
+        service_monitoring_enabled, env=_SERVICE_MONITORING_ENABLE_ENV)
+    service_actions_on = _feature_on(
+        service_actions_enabled, env=_SERVICE_ACTIONS_ENABLE_ENV)
+    execution_windows_on = _feature_on(
+        execution_windows_enabled, env=_EXECUTION_WINDOWS_ENABLE_ENV)
+    komari_on = _feature_on(komari_enabled, env=_KOMARI_ENABLE_ENV)
+    komari_network_on = _feature_on(
+        komari_network_enabled, env=_KOMARI_NETWORK_ENABLE_ENV)
+    komari_sync_on = _feature_on(
+        komari_sync_enabled, env=_KOMARI_SYNC_ENABLE_ENV)
+    komari_base_url = _optional_setting(
+        komari_base_url, env=_KOMARI_BASE_URL_ENV)
+    komari_nodes_path = _optional_setting(
+        komari_nodes_path, env=_KOMARI_NODES_PATH_ENV)
+    komari_token = _optional_setting(komari_token, env=_KOMARI_TOKEN_ENV)
+    komari_node_mapping = _node_mapping(komari_node_mapping)
+    komari_sync_interval = _bounded_float(
+        _optional_setting(komari_sync_interval_s, env=_KOMARI_SYNC_INTERVAL_ENV),
+        default=60.0, lower=5.0, upper=3600.0)
+    http_probe_on = _feature_on(http_probe_enabled, env=_HTTP_PROBE_ENABLE_ENV)
+    http_probe_network_on = _feature_on(
+        http_probe_network_enabled, env=_HTTP_PROBE_NETWORK_ENABLE_ENV)
+    http_probe_sync_on = _feature_on(
+        http_probe_sync_enabled, env=_HTTP_PROBE_SYNC_ENABLE_ENV)
+    http_probe_sync_interval = _bounded_float(
+        _optional_setting(http_probe_sync_interval_s, env=_HTTP_PROBE_SYNC_INTERVAL_ENV),
+        default=60.0, lower=5.0, upper=3600.0)
+    http_probe_allowed = _optional_setting(
+        http_probe_allowed_origins, env=_HTTP_PROBE_ALLOWED_ORIGINS_ENV)
+    if isinstance(http_probe_allowed, str):
+        http_probe_allowed = [item.strip() for item in http_probe_allowed.split(",") if item.strip()]
+    elif not isinstance(http_probe_allowed, (list, tuple, set)):
+        http_probe_allowed = []
+    http_probe_loopback = _feature_on(
+        http_probe_allow_loopback, env=_HTTP_PROBE_ALLOW_LOOPBACK_ENV)
+    incident_recovery = _bounded_float(
+        _optional_setting(incident_recovery_required, env=_INCIDENT_RECOVERY_REQUIRED_ENV),
+        default=2.0, lower=1.0, upper=10.0)
+    platform_worker_on = _feature_on(
+        platform_worker_enabled, env=_PLATFORM_WORKER_ENABLE_ENV)
+    platform_worker_scheduler_on = _feature_on(
+        platform_worker_scheduler_enabled, env=_PLATFORM_WORKER_SCHEDULER_ENABLE_ENV)
+    platform_worker_interval = _bounded_float(
+        _optional_setting(platform_worker_interval_s, env=_PLATFORM_WORKER_INTERVAL_ENV),
+        default=1.0, lower=0.1, upper=60.0)
+    platform_worker_lease = _bounded_float(
+        _optional_setting(platform_worker_lease_s, env=_PLATFORM_WORKER_LEASE_ENV),
+        default=60.0, lower=5.0, upper=3600.0)
+    sandbox_launcher = _optional_setting(
+        platform_sandbox_launcher, env="AGENT_FLEET_PLATFORM_SANDBOX_LAUNCHER")
+    if sandbox_launcher is None:
+        sandbox_launcher = ()
+    elif isinstance(sandbox_launcher, str):
+        try:
+            sandbox_launcher = json.loads(sandbox_launcher)
+        except ValueError:
+            raise ValueError("AGENT_FLEET_PLATFORM_SANDBOX_LAUNCHER must be a JSON argv list") from None
+    platform_worker_max_concurrency = _bounded_int(
+        _optional_setting(platform_worker_max_concurrency, env=_PLATFORM_WORKER_MAX_CONCURRENCY_ENV),
+        default=1, lower=1, upper=64)
+    platform_worker_max_workspace_concurrency = _bounded_int(
+        _optional_setting(platform_worker_max_workspace_concurrency,
+                          env=_PLATFORM_WORKER_MAX_WORKSPACE_CONCURRENCY_ENV),
+        default=1, lower=1, upper=64)
+    platform_provider_network_on = _feature_on(
+        platform_provider_network_enabled, env=_PLATFORM_PROVIDER_NETWORK_ENABLE_ENV)
+    platform_remote_execution_on = _feature_on(
+        platform_remote_execution_enabled,
+        env="AGENT_FLEET_PLATFORM_REMOTE_EXECUTION_ENABLED")
+    platform_memory_on = _feature_on(
+        platform_memory_enabled, env=_PLATFORM_MEMORY_ENABLE_ENV)
+    platform_memory_context_on = _feature_on(
+        platform_memory_context_enabled,
+        env=_PLATFORM_MEMORY_CONTEXT_ENABLE_ENV)
     # Adoption audits to the session transcript store. ``from_root`` only
     # derives that path when the session gate is on; ``create_app`` then
     # raises if adoption is on without it. Do not auto-enable session
@@ -246,13 +408,44 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         dev_operator=dev_operator,
         runner_credentials=runner_credentials,
         project_whitelist=project_whitelist,
-        frontend_cutover=frontend_cutover,
+        serve_frontend=serve_frontend,
         frontend_dir=frontend_dir,
         session_repositories_enabled=session_on,
         supervisor_enabled=supervisor_on,
         adoption_repositories_enabled=adoption_on,
         append_user_turn_enabled=append_turn_on,
         apply_local_profile_enabled=apply_profile_on,
+        platform_enabled=platform_on,
+        platform_db=platform_db,
+        service_monitoring_enabled=service_monitoring_on,
+        service_actions_enabled=service_actions_on,
+        execution_windows_enabled=execution_windows_on,
+        komari_enabled=komari_on,
+        komari_network_enabled=komari_network_on,
+        komari_base_url=komari_base_url,
+        komari_nodes_path=komari_nodes_path,
+        komari_token=komari_token,
+        komari_node_mapping=komari_node_mapping,
+        komari_sync_enabled=komari_sync_on,
+        komari_sync_interval_s=komari_sync_interval,
+        http_probe_enabled=http_probe_on,
+        http_probe_network_enabled=http_probe_network_on,
+        http_probe_sync_enabled=http_probe_sync_on,
+        http_probe_sync_interval_s=http_probe_sync_interval,
+        http_probe_allowed_origins=http_probe_allowed,
+        http_probe_allow_loopback=http_probe_loopback,
+        incident_recovery_required=int(incident_recovery),
+        platform_worker_enabled=platform_worker_on,
+        platform_worker_scheduler_enabled=platform_worker_scheduler_on,
+        platform_worker_max_concurrency=platform_worker_max_concurrency,
+        platform_worker_max_workspace_concurrency=platform_worker_max_workspace_concurrency,
+        platform_worker_interval_s=platform_worker_interval,
+        platform_worker_lease_s=platform_worker_lease,
+        platform_sandbox_launcher=sandbox_launcher,
+        platform_provider_network_enabled=platform_provider_network_on,
+        platform_remote_execution_enabled=platform_remote_execution_on,
+        platform_memory_enabled=platform_memory_on,
+        platform_memory_context_enabled=platform_memory_context_on,
     )
     app = create_app(config)
     # Reflect the runtime gates on the app config so routes can assert them.
@@ -260,6 +453,21 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         config.session_repositories_enabled)
     app.config["ADOPTION_REPOSITORIES_ENABLED"] = bool(
         config.adoption_repositories_enabled)
+    app.config["PLATFORM_ENABLED"] = bool(config.platform_enabled)
+    app.config["PLATFORM_MEMORY_ENABLED"] = bool(
+        getattr(config, "platform_memory_enabled", False))
+    app.config["PLATFORM_MEMORY_CONTEXT_ENABLED"] = bool(
+        getattr(config, "platform_memory_context_enabled", False))
+    app.config["SERVICE_ACTIONS_ENABLED"] = bool(
+        getattr(config, "service_actions_enabled", False))
+    app.config["EXECUTION_WINDOWS_ENABLED"] = bool(
+        getattr(config, "execution_windows_enabled", False))
+    app.config["HTTP_PROBE_ENABLED"] = bool(
+        getattr(config, "http_probe_enabled", False))
+    app.config["HTTP_PROBE_NETWORK_ENABLED"] = bool(
+        getattr(config, "http_probe_network_enabled", False))
+    app.config["HTTP_PROBE_SYNC_ENABLED"] = bool(
+        getattr(config, "http_probe_sync_enabled", False))
     return app
 
 
@@ -278,12 +486,12 @@ if __name__ == "__main__":
     parser.add_argument("--dev-operator", default=None,
                         help="开发模式 operator 兜底身份（生产勿用）")
     parser.add_argument(
-        "--frontend-cutover", action="store_true",
+        "--serve-frontend", action=argparse.BooleanOptionalAction, default=True,
         help="serve the independent frontend release from frontend-dir",
     )
     parser.add_argument(
         "--frontend-dir", default=None,
-        help="frontend release directory used with --frontend-cutover",
+        help="frontend release directory used with --serve-frontend",
     )
     args = parser.parse_args()
 
@@ -297,7 +505,7 @@ if __name__ == "__main__":
         ingest_token=args.ingest_token,
         require_token=True,
         dev_operator=args.dev_operator,
-        frontend_cutover=args.frontend_cutover,
+        serve_frontend=args.serve_frontend,
         frontend_dir=args.frontend_dir,
     )
     # 仅真实进程入口显式启动后台生命周期作业；make_app 本身不派生线程。

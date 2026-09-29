@@ -9,26 +9,26 @@ contracts guard the Task 12 interfaces:
   server-rendered business data.
 - ``frontend/config.js`` exposes only non-secret runtime configuration
   (``window.FleetConfig.apiBaseUrl`` defaulting to the same-origin ``/api``).
-- ``frontend/routes.js`` provides ``apiPath(...)`` / ``pagePath(...)`` helpers
+- ``frontend/assets/routes.js`` provides ``apiPath(...)`` / ``pagePath(...)`` helpers
   that percent-encode each path segment and reject a raw ``/`` inside a segment.
 
 Task 13 adds the API client and public contracts:
 
-- ``frontend/api/client.js`` is the only HTTP entry: it owns every API path,
+- ``frontend/assets/api/client.js`` is the only HTTP entry: it owns every API path,
   encodes path segments, uses ``cache: "no-store"``, converts non-2xx and
   network/timeout failures to a stable ``ApiError``, and never adds ingest or
   runner headers.
-- ``frontend/api/contracts.js`` exposes public DTO parsers
+- ``frontend/assets/api/contracts.js`` exposes public DTO parsers
   (``parseStatus`` / ``parseMachine`` / ``parseEvents`` / ``parseTask`` /
   ``parseSseEvent`` / ``parseError``) that return allowlisted models or throw
   bounded ``ContractError``.
 
 Task 14 adds the SSE lifecycle and state store:
 
-- ``frontend/realtime/sse.js`` is the sole ``new EventSource`` owner with
+- ``frontend/assets/realtime/sse.js`` is the sole ``new EventSource`` owner with
   idempotent ``start()``, bounded poll fallback and terminal task refresh via
   an injected client callback.
-- ``frontend/state/store.js`` is a DOM/client-agnostic ``FleetStore`` that
+- ``frontend/assets/state/store.js`` is a DOM/client-agnostic ``FleetStore`` that
   applies contract-validated SSE events with ``Math.max`` stale fencing,
   bounded text logs (500 lines), bounded events, machine summary merges and
   listener notifications.
@@ -52,11 +52,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_DIR = REPO_ROOT / 'frontend'
 INDEX_HTML = FRONTEND_DIR / 'index.html'
 CONFIG_JS = FRONTEND_DIR / 'config.js'
-ROUTES_JS = FRONTEND_DIR / 'routes.js'
-CLIENT_JS = FRONTEND_DIR / 'api' / 'client.js'
-CONTRACTS_JS = FRONTEND_DIR / 'api' / 'contracts.js'
-SSE_JS = FRONTEND_DIR / 'realtime' / 'sse.js'
-STORE_JS = FRONTEND_DIR / 'state' / 'store.js'
+ROUTES_JS = FRONTEND_DIR / 'assets' / 'routes.js'
+CLIENT_JS = FRONTEND_DIR / 'assets' / 'api' / 'client.js'
+CONTRACTS_JS = FRONTEND_DIR / 'assets' / 'api' / 'contracts.js'
+SSE_JS = FRONTEND_DIR / 'assets' / 'realtime' / 'sse.js'
+STORE_JS = FRONTEND_DIR / 'assets' / 'state' / 'store.js'
 
 
 # Node-only fixture runner for the pure contract parsers.  Contracts are pure
@@ -248,6 +248,15 @@ if (fixture === 'task_reject') {
   const staleRejected = s2.applySseEvent({ type: 'fleet_event', data: { event: 'b', machine: 'mac', changes: [], ts: 5 } });
   if (staleRejected === false && s2.getLastEventTs() === 10 && s2.getState().events.length === 1) ok('store.rejects_stale_ts');
   else fail('store.rejects_stale_ts', 'rej=' + staleRejected + ' last=' + s2.getLastEventTs() + ' ev=' + s2.getState().events.length);
+
+  // Durable event_seq admits same-timestamp events and rejects duplicate replay.
+  const sSeq = new S();
+  const seqOne = sSeq.applySseEvent({ type: 'fleet_event', data: { event: 'a', machine: 'mac', changes: [], ts: 10, event_seq: 1 } });
+  const seqTwo = sSeq.applySseEvent({ type: 'fleet_event', data: { event: 'b', machine: 'mac', changes: [], ts: 10, event_seq: 2 } });
+  const seqDup = sSeq.applySseEvent({ type: 'fleet_event', data: { event: 'b', machine: 'mac', changes: [], ts: 10, event_seq: 2 } });
+  if (seqOne === true && seqTwo === true && seqDup === false &&
+      sSeq.getLastEventSeq() === 2 && sSeq.getState().events.length === 2) ok('store.sequence_same_timestamp');
+  else fail('store.sequence_same_timestamp', 'one=' + seqOne + ' two=' + seqTwo + ' dup=' + seqDup + ' seq=' + sSeq.getLastEventSeq());
 
   // 未知事件类型只推进游标、不应用
   const unknownTs = s2.applySseEvent({ type: 'bogus_type', data: { event: 'x', ts: 20 } });
@@ -666,16 +675,15 @@ class StaticFrontendTests(unittest.TestCase):
 
     def test_entry_has_page_mount_points(self):
         source = INDEX_HTML.read_text()
-        for mount_id in ('mount-fleet', 'mount-machine', 'mount-task'):
-            self.assertIn(mount_id, source, f'missing mount point {mount_id}')
-        # Navigation state must be non-sensitive: data-page attribute on body.
-        self.assertIn('data-page', source)
+        for mount_id in ('route-view', 'main-content'):
+            self.assertIn(mount_id, source)
+        self.assertIn('data-nav', source)
 
     def test_entry_loads_module_and_config_scripts(self):
         source = INDEX_HTML.read_text()
         self.assertIn('type="module"', source)
         self.assertIn('config.js', source)
-        self.assertIn('routes.js', source)
+        self.assertIn('assets/app.js', source)
         self.assertIn('styles/app.css', source)
 
     def test_entry_contains_no_embedded_observation_or_task_data(self):
@@ -732,9 +740,9 @@ class ApiClientSourceTests(unittest.TestCase):
     """Task 13 Step 1 source contracts: client owns fetch and API paths."""
 
     def test_views_are_not_allowed_to_call_fetch_directly(self):
-        views_dir = FRONTEND_DIR / 'views'
+        views_dir = FRONTEND_DIR / 'assets' / 'views'
         if not views_dir.is_dir():
-            self.skipTest('frontend/views not yet present (Task 15)')
+            self.skipTest('frontend/assets/views not yet present (Task 15)')
         for path in views_dir.glob('*.js'):
             self.assertNotIn('fetch(', path.read_text())
 
@@ -855,7 +863,7 @@ class SseBoundaryTests(unittest.TestCase):
         owners = [path for path in files
                   if 'new EventSource' in path.read_text()]
         self.assertEqual([p.relative_to(REPO_ROOT).as_posix() for p in owners],
-                         ['frontend/realtime/sse.js'])
+                         ['frontend/assets/realtime/sse.js'])
 
     def test_store_deduplicates_or_rejects_stale_event_timestamps(self):
         source = STORE_JS.read_text()
@@ -1056,16 +1064,16 @@ class ViewBoundaryTests(unittest.TestCase):
     """
 
     def test_views_use_dom_safe_writes_for_dynamic_text(self):
-        for path in (FRONTEND_DIR / 'views' / 'fleet.js',
-                     FRONTEND_DIR / 'views' / 'machine.js'):
+        for path in (FRONTEND_DIR / 'assets' / 'views' / 'fleet.js',
+                     FRONTEND_DIR / 'assets' / 'views' / 'machine.js'):
             source = path.read_text()
             self.assertNotIn('insertAdjacentHTML', source, path)
             self.assertNotIn('innerHTML', source, path)
             self.assertIn('textContent', source, path)
 
     def test_views_export_mount_interfaces(self):
-        fleet = (FRONTEND_DIR / 'views' / 'fleet.js').read_text()
-        machine = (FRONTEND_DIR / 'views' / 'machine.js').read_text()
+        fleet = (FRONTEND_DIR / 'assets' / 'views' / 'fleet.js').read_text()
+        machine = (FRONTEND_DIR / 'assets' / 'views' / 'machine.js').read_text()
         self.assertIn('export function mountFleet(root, store, client)',
                       fleet)
         self.assertIn(
@@ -1073,8 +1081,8 @@ class ViewBoundaryTests(unittest.TestCase):
             machine)
 
     def test_views_use_injected_client_methods_only(self):
-        fleet = (FRONTEND_DIR / 'views' / 'fleet.js').read_text()
-        machine = (FRONTEND_DIR / 'views' / 'machine.js').read_text()
+        fleet = (FRONTEND_DIR / 'assets' / 'views' / 'fleet.js').read_text()
+        machine = (FRONTEND_DIR / 'assets' / 'views' / 'machine.js').read_text()
         # 不允许直接调用 HTTP 底层：fetch / EventSource / XMLHttpRequest
         for source in (fleet, machine):
             self.assertNotIn('fetch(', source)
@@ -1089,14 +1097,14 @@ class ViewBoundaryTests(unittest.TestCase):
             self.assertIn(token, machine)
 
     def test_views_subscribe_to_store(self):
-        fleet = (FRONTEND_DIR / 'views' / 'fleet.js').read_text()
-        machine = (FRONTEND_DIR / 'views' / 'machine.js').read_text()
+        fleet = (FRONTEND_DIR / 'assets' / 'views' / 'fleet.js').read_text()
+        machine = (FRONTEND_DIR / 'assets' / 'views' / 'machine.js').read_text()
         self.assertIn('store.subscribe', fleet)
         self.assertIn('store.subscribe', machine)
 
     def test_views_encode_page_navigation_with_page_path(self):
-        fleet = (FRONTEND_DIR / 'views' / 'fleet.js').read_text()
-        machine = (FRONTEND_DIR / 'views' / 'machine.js').read_text()
+        fleet = (FRONTEND_DIR / 'assets' / 'views' / 'fleet.js').read_text()
+        machine = (FRONTEND_DIR / 'assets' / 'views' / 'machine.js').read_text()
         # 机器导航必须用编码的 pagePath("machine", name)
         self.assertIn("pagePath('machine', name)", fleet)
         self.assertIn("import { pagePath } from '../routes.js'", fleet)
@@ -1107,23 +1115,44 @@ class ViewBoundaryTests(unittest.TestCase):
         for source in (fleet, machine):
             self.assertIn('setAttribute', source)
 
+    def test_fleet_dispatch_link_targets_create_form_anchor(self):
+        fleet = (FRONTEND_DIR / 'assets' / 'views' / 'fleet.js').read_text()
+        self.assertIn("pagePath('machine', name) + '#task-create-form'", fleet)
+        self.assertIn('下发任务', fleet)
+
+    def test_metric_bars_do_not_invent_four_core_load_percent(self):
+        fleet = (FRONTEND_DIR / 'assets' / 'views' / 'fleet.js').read_text()
+        machine = (FRONTEND_DIR / 'assets' / 'views' / 'machine.js').read_text()
+        for source, name in ((fleet, 'fleet.js'), (machine, 'machine.js')):
+            self.assertNotIn('/ 4', source, f'{name} must not treat load as 4-core %')
+            self.assertNotIn('/4', source, f'{name} must not treat load as 4-core %')
+        self.assertNotIn('function loadPct', fleet)
+        self.assertNotIn("appendMetricBar(card, '负载'", fleet)
+        self.assertNotIn("appendMetricBar(host, '负载'", machine)
+        self.assertIn("statItem('负载', sys.load)", fleet)
+        self.assertIn("kv('负载', fmtValue(sys.load))", machine)
+        self.assertIn("appendMetricBar(card, '内存'", fleet)
+        self.assertIn("appendMetricBar(card, '磁盘'", fleet)
+        self.assertIn("appendMetricBar(host, '内存'", machine)
+        self.assertIn("appendMetricBar(host, '磁盘'", machine)
+
     def test_views_have_no_flask_bootstrap_or_path_handcoding(self):
-        fleet = (FRONTEND_DIR / 'views' / 'fleet.js').read_text()
-        machine = (FRONTEND_DIR / 'views' / 'machine.js').read_text()
+        fleet = (FRONTEND_DIR / 'assets' / 'views' / 'fleet.js').read_text()
+        machine = (FRONTEND_DIR / 'assets' / 'views' / 'machine.js').read_text()
         for source in (fleet, machine):
             self.assertNotIn('url_for', source)
             self.assertNotIn('window.FleetConfig', source)
             self.assertNotIn("'/api", source)
 
     def test_machine_form_uses_text_content_errors_and_validates_for_ux(self):
-        machine = (FRONTEND_DIR / 'views' / 'machine.js').read_text()
+        machine = (FRONTEND_DIR / 'assets' / 'views' / 'machine.js').read_text()
         self.assertIn('errorBox.textContent', machine)
         self.assertIn('请输入项目名', machine)
         self.assertIn('请输入指令', machine)
         self.assertIn('createTask', machine)
 
     def test_machine_view_optional_session_deep_link_on_create(self):
-        machine = (FRONTEND_DIR / 'views' / 'machine.js').read_text()
+        machine = (FRONTEND_DIR / 'assets' / 'views' / 'machine.js').read_text()
         self.assertIn("pagePath('session', task.session_id)", machine)
         self.assertIn("typeof task.session_id === 'string'", machine)
 
@@ -1147,8 +1176,8 @@ class Task15ReviewFixTests(unittest.TestCase):
          success/failure callbacks re-touching a cleared root.
     """
 
-    MACHINE_JS = FRONTEND_DIR / 'views' / 'machine.js'
-    FLEET_JS = FRONTEND_DIR / 'views' / 'fleet.js'
+    MACHINE_JS = FRONTEND_DIR / 'assets' / 'views' / 'machine.js'
+    FLEET_JS = FRONTEND_DIR / 'assets' / 'views' / 'fleet.js'
 
     def test_machine_render_sources_live_store_tasks_not_only_stale_viewstate(self):
         source = self.MACHINE_JS.read_text()
@@ -1180,14 +1209,11 @@ class Task15ReviewFixTests(unittest.TestCase):
         self.assertNotIn('viewState.agents', source)
 
     def test_index_html_has_single_terminal_refresh_owner(self):
-        source = INDEX_HTML.read_text()
-        # 旧的双路径（store.setRefreshTaskHandler + SseClient({client})）已移除，
-        # 终态刷新只经注入 client 的 SseClient 触发（getTask 回填在 sse.js 内部）。
-        self.assertIn('new SseClient(store, { client: client })', source)
+        source = (FRONTEND_DIR / 'assets/app.js').read_text()
+        self.assertEqual(source.count('new SseClient('), 1)
+        self.assertIn('new SseClient(store, {client})', source)
         self.assertNotIn('store.setRefreshTaskHandler', source)
         self.assertNotIn('getRefreshTaskHandler', source)
-        # 刷新行为保留：注入 client 正是给 SseClient 的终态 getTask 回填使用
-        self.assertIn('{ client: client }', source)
 
     def test_both_views_render_before_async_requests(self):
         machine = self.MACHINE_JS.read_text()
@@ -1233,7 +1259,7 @@ class Task66MachineClassAllowlistTests(unittest.TestCase):
       4. 动态状态文本仍以 textContent 呈现（白名单只管类名，不碰文本）。
     """
 
-    MACHINE_JS = FRONTEND_DIR / 'views' / 'machine.js'
+    MACHINE_JS = FRONTEND_DIR / 'assets' / 'views' / 'machine.js'
 
     def test_task_state_classes_are_explicit_allowlist_mapping(self):
         source = self.MACHINE_JS.read_text()
@@ -1347,8 +1373,8 @@ class AgentTypesDynamicDropdownTests(unittest.TestCase):
     render 被 SSE 高频触发，绝不在重建路径内重发请求。
     """
 
-    MACHINE_JS = FRONTEND_DIR / 'views' / 'machine.js'
-    CLIENT_JS = FRONTEND_DIR / 'api' / 'client.js'
+    MACHINE_JS = FRONTEND_DIR / 'assets' / 'views' / 'machine.js'
+    CLIENT_JS = FRONTEND_DIR / 'assets' / 'api' / 'client.js'
     INDEX_HTML = FRONTEND_DIR / 'index.html'
 
     def test_fallback_agent_types_subset_of_executable_registry(self):
@@ -1372,7 +1398,7 @@ class AgentTypesDynamicDropdownTests(unittest.TestCase):
         source = self.MACHINE_JS.read_text()
         # 内置兜底清单存在且含全部四个注册表 family（值 ⊆ EXECUTABLE_AGENT_TYPES）
         self.assertIn('FALLBACK_AGENT_TYPES', source)
-        for family in ('codex', 'claude_code', 'hermes', 'pi'):
+        for family in ('codex', 'claude_code', 'hermes', 'pi', 'zcode'):
             self.assertIn(f"'{family}'", source)
         # 填充必须经由助手（去重 + 非 innerHTML），异步覆盖以 isActive 护栏
         self.assertIn('fillAgentSelect(select, FALLBACK_AGENT_TYPES)', source)
@@ -1406,55 +1432,20 @@ class AgentTypesDynamicDropdownTests(unittest.TestCase):
         self.assertIn('export function parseAgentTypes(', source)
 
     def test_shell_wires_list_agent_types_into_client(self):
-        source = self.INDEX_HTML.read_text()
-        self.assertIn('listAgentTypes,', source)
-        self.assertIn('listAgentTypes: listAgentTypes,', source)
+        source = (FRONTEND_DIR / 'assets/app.js').read_text()
+        self.assertIn("import * as api from './api/client.js'", source)
+        self.assertIn('...api', source)
 
 
 class Task16ShellContractTests(unittest.TestCase):
-    """Task 16 Step 2 shell contracts: task view is wired into the static shell.
-
-    index.html must import/mount the task view, resolve ``/task/<id>`` or
-    ``?task=<id>``, keep fleet/machine routes, and preserve the single SSE
-    terminal-refresh owner (``SseClient(store, { client: client })``).  It must
-    never render task/observation business objects itself, and must not wire a
-    second terminal-refresh hook (``setRefreshTaskHandler``).
-    """
-
-    def test_index_imports_and_mounts_task_view(self):
-        source = INDEX_HTML.read_text()
-        self.assertIn("import { mountTask } from './views/task.js'", source)
-        self.assertIn('mountTask(target, taskId, store, client)', source)
-
-    def test_index_resolves_task_id_from_path_or_query(self):
-        source = INDEX_HTML.read_text()
-        self.assertIn('function resolveTask', source)
-        # 实体名统一由 resolveEntity(name) 从 pathname 段或 query 解析
-        self.assertIn("function resolveEntity(name)", source)
-        self.assertIn("if (segments[i] === name && segments[i + 1])", source)
-        self.assertIn("params.get(name)", source)
-        # 路径段必须解码（URL 编码的任务 id）
-        self.assertIn('decodeURIComponent', source)
-
-    def test_index_preserves_fleet_and_machine_routes(self):
-        source = INDEX_HTML.read_text()
-        self.assertIn('mountFleet(target, store, client)', source)
-        self.assertIn('mountMachine(target, machine, store, client)', source)
-        self.assertIn("page === 'machine' ? resolveEntity('machine') : null", source)
-
-    def test_index_preserves_single_terminal_refresh_owner(self):
-        source = INDEX_HTML.read_text()
-        # 终态刷新仍然唯一由注入 client 的 SseClient 负责
-        self.assertIn('new SseClient(store, { client: client })', source)
-        self.assertNotIn('store.setRefreshTaskHandler', source)
-        self.assertNotIn('getRefreshTaskHandler', source)
-
-    def test_index_keeps_task_route_resolution_without_embedded_business_data(self):
-        source = INDEX_HTML.read_text()
-        self.assertIn("target.textContent = '未指定任务'", source)
-        # Task 视图自身的业务渲染仍留在 views/task.js，不内嵌到 index.html
-        self.assertNotIn('data-task-id="', source)
-        self.assertNotIn('state-node', source)
+    def test_entry_has_single_stream_and_external_views(self):
+        source = (FRONTEND_DIR / 'assets/app.js').read_text()
+        self.assertEqual(source.count('new SseClient('), 1)
+        for name in ['mountFleet', 'mountMachine', 'mountTask', 'mountSession', 'mountAssistant', 'mountMonitoring']:
+            self.assertIn(name, source)
+        self.assertIn('pagehide', source)
+        self.assertIn('teardown()', source)
+        self.assertNotIn('getTask(', source)
 
 
 class TaskViewBoundaryTests(unittest.TestCase):
@@ -1473,7 +1464,7 @@ class TaskViewBoundaryTests(unittest.TestCase):
       - keep bounded diff/log output and reject raw internal fields on display.
     """
 
-    TASK_JS = FRONTEND_DIR / 'views' / 'task.js'
+    TASK_JS = FRONTEND_DIR / 'assets' / 'views' / 'task.js'
 
     def test_task_view_exports_mount_interface(self):
         source = self.TASK_JS.read_text()
@@ -1533,6 +1524,10 @@ class TaskViewBoundaryTests(unittest.TestCase):
         self.assertIn('if (disposed || self.busy)', source)
         self.assertIn('self.busy = true', source)
         self.assertIn('self.busy = false', source)
+        # 图标点在 SVG 子节点上：必须沿 parentNode 找到 data-action 按钮。
+        self.assertIn('node.parentNode', source)
+        self.assertIn("node.tagName === 'BUTTON'", source)
+        self.assertNotIn("btn.tagName !== 'BUTTON'", source)
 
     def test_task_view_fences_teardown_against_late_callbacks(self):
         source = self.TASK_JS.read_text()
@@ -1601,7 +1596,7 @@ class FrontendEsModuleSyntaxTests(unittest.TestCase):
             )
 
             # 2. ES module import evaluation (config.js defines window global in browser, skip in pure Node)
-            if path.name == 'config.js':
+            if path.name in ('config.js', 'app.js') or any(part in ('ui', 'shell') for part in path.parts):
                 continue
 
             file_url = path.resolve().as_uri()
@@ -1615,71 +1610,40 @@ class FrontendEsModuleSyntaxTests(unittest.TestCase):
             )
 
 
-class FrontendAuthContractTests(unittest.TestCase):
-    """2026-09-19 二次修订：web-token 是真实认证，恢复登录 UI。
+class FrontendAuthRemovalContractTests(unittest.TestCase):
+    """Public dashboard remains ungated; production edge validates operator tokens."""
 
-    澄清（修正当日早间"假门禁"误判）：hub 应用层确实不读
-    ``X-Access-Token``，但部署边界 nginx 按 ``$http_x_access_token`` map
-    注入 ``Cf-Access-Authenticated-User-Email`` —— 令牌是真实 operator
-    凭据。当日真实的 P0 是该凭据以 placeholder 形式进了公开仓
-    （2625451001，6e07362 引入、9e2ef47 移除正文、git 历史仍可查），
-    已于 2026-09-19 在 nginx 轮换。本组契约钉住恢复后的诚实形态：
-
-    - 有登录（Auth 按钮 + modal + localStorage + X-Access-Token）；
-    - 无强制门禁（绝不 blur/pointer-events 锁公开看板、绝不自动弹窗）；
-    - 任何 placeholder 不得携带凭据样例；
-    - 401 判定走 ApiError.status，不匹配错误文案。
-    """
-
-    def test_entry_has_auth_modal_without_forced_gatekeeper(self):
+    def test_entry_has_no_auth_modal_or_gatekeeper(self):
         source = INDEX_HTML.read_text()
-        for required in ('id="auth-modal"', 'id="btn-auth"',
-                         'window.openAuthModal', 'updateAuthUI'):
-            self.assertIn(required, source)
-        for banned in ('gatekeeper-locked', 'pointer-events: none'):
+        for banned in ('auth-modal', 'gatekeeper', 'openAuthModal',
+                       'btn-auth', 'Auth Modal'):
             self.assertNotIn(banned, source)
 
-    def test_entry_never_auto_opens_auth_modal(self):
-        source = INDEX_HTML.read_text()
-        # 无 token 首屏绝不开弹窗/锁界面（公开看板保持匿名可用）：
-        # updateAuthUI 内不得出现无条件 openAuthModal() 调用。
-        self.assertNotIn("openAuthModal();\n    }\n  }\n\n  function closeAuthModal", source)
-        self.assertNotIn("      openAuthModal();\n  }\n\n  function closeAuthModal", source)
-
     def test_entry_placeholder_leaks_no_credential_like_value(self):
+        # README 红线：token、口令、凭据样例不进 git、不写文档。
         source = INDEX_HTML.read_text()
         for value in re.findall(r'placeholder="([^"]*)"', source):
             self.assertIsNone(re.search(r'\d{5,}', value),
                               f'placeholder 含长数字串: {value}')
 
-    def test_client_stores_token_and_sends_access_header_only(self):
+    def test_client_does_not_persist_tokens_across_browser_sessions(self):
         source = CLIENT_JS.read_text()
-        for required in ("getAccessToken", "setAccessToken",
-                         "X-Access-Token", "TOKEN_STORAGE_KEY"):
-            self.assertIn(required, source)
-        # 认证域互斥：绝不携带 ingest / runner 域凭据
-        for banned in ('X-Agent-Fleet-Token', 'X-Runner-Credential',
-                       'X-Supervisor-Credential'):
+        for banned in ('localStorage', 'fleet_access_token', 'getAccessToken'):
             self.assertNotIn(banned, source)
 
     def test_fleet_view_keys_auth_error_on_status_not_message_text(self):
-        source = (FRONTEND_DIR / 'views' / 'fleet.js').read_text()
+        # 401 判定必须走结构化字段（ApiError.status），不得匹配错误文案
+        source = (FRONTEND_DIR / 'assets' / 'views' / 'fleet.js').read_text()
         self.assertIn('.status === 401', source)
-        self.assertIn('openAuthModal', source)
         self.assertNotIn('operator identity required', source)
+        self.assertNotIn('openAuthModal', source)
 
-    def test_styles_have_auth_modal_but_no_gatekeeper_rules(self):
-        source = (FRONTEND_DIR / 'styles' / 'app.css').read_text()
-        self.assertIn('.auth-modal-dialog', source)
-        self.assertNotIn('gatekeeper', source)
-
-    def test_no_leaked_credential_anywhere_in_frontend(self):
-        # 2625451001 已于 2026-09-19 在 nginx 轮换；公开仓任何前端文件
-        # 不得再出现该值（git 历史清洗另行决策）。
-        for path in (INDEX_HTML, CLIENT_JS, ROUTES_JS,
-                     FRONTEND_DIR / 'views' / 'fleet.js',
-                     FRONTEND_DIR / 'styles' / 'app.css'):
-            self.assertNotIn('2625451001', path.read_text())
+    def test_styles_have_no_gatekeeper_or_auth_modal_rules(self):
+        source = (FRONTEND_DIR / 'assets' / 'styles' / 'app.css').read_text()
+        for banned in ('gatekeeper', 'auth-modal', 'is-authed'):
+            self.assertNotIn(banned, source)
+        self.assertNotIn('.modal {', source)
+        self.assertNotIn('.modal.open', source)
 
     def test_routes_helper_has_no_dead_escape_attr(self):
         source = ROUTES_JS.read_text()

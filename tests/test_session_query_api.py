@@ -171,6 +171,22 @@ class SessionQueryDtoTests(SessionQueryTestBase):
         self.assertEqual(session["capture_quality"], "structured")
         self.assertEqual(session["control_capability"], "available")
 
+    def test_active_filter_excludes_terminal_and_idle_sessions(self):
+        repo = self.app.extensions["fleet"]["services"]["sessions"].session_repo
+        conn = repo._connect()
+        try:
+            conn.execute("UPDATE sessions SET status='closed' WHERE session_id=?",
+                         ("sess_q_1",))
+            conn.execute("UPDATE sessions SET status='idle' WHERE session_id=?",
+                         ("sess_q_2",))
+        finally:
+            conn.close()
+        resp = self.client.get(
+            "/api/sessions?active=true",
+            headers={"Cf-Access-Authenticated-User-Email": "op@example.com"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["sessions"], [])
+
     def test_detail_maps_public_dto(self):
         resp = self.client.get("/api/sessions/sess_q_1")
         self.assertEqual(resp.status_code, 200)
@@ -215,6 +231,43 @@ class SessionQueryDtoTests(SessionQueryTestBase):
         resp = self.client.get("/api/sessions/sess_q_1/events?limit=2")
         events_ = resp.get_json()["events"]
         self.assertLessEqual(len(events_), 2)
+
+    def test_corrupt_event_sequence_degrades_to_bounded_skeleton(self):
+        service = self.app.extensions["fleet"]["services"]["sessions"]
+        conn = service.transcript_repo._connect()
+        try:
+            conn.execute(
+                "UPDATE redacted_events SET sequence=? WHERE event_id=?",
+                ("not-a-number", "evt_q_001"))
+        finally:
+            conn.close()
+
+        resp = self.client.get("/api/sessions/sess_q_1/events")
+
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.get_json()["events"]
+        corrupt = next(row for row in rows if row["event_id"] == "evt_q_001")
+        self.assertEqual(corrupt["sequence"], 0)
+        self.assertNotIn("payload", corrupt)
+
+    def test_invalid_public_event_sequences_degrade_to_skeleton(self):
+        service = self.app.extensions["fleet"]["services"]["sessions"]
+        row = {
+            "event_id": "evt_invalid_sequence",
+            "stream_id": "stream_q_1",
+            "machine_id": "mac-q-1",
+            "session_id": "sess_q_1",
+            "kind": "user_message",
+            "capture_quality": "structured",
+            "emitted_at": "2026-08-26T00:00:00Z",
+            "payload": {"text": "not public on invalid sequence"},
+        }
+        for sequence in (True, -1, 1 << 63):
+            with self.subTest(sequence=sequence):
+                row["sequence"] = sequence
+                result = service._public_event_row(row)
+                self.assertEqual(result["sequence"], 0)
+                self.assertNotIn("payload", result)
 
     def test_policy_signals_bounded(self):
         resp = self.client.get("/api/sessions/sess_q_2/policy-signals")

@@ -133,7 +133,7 @@ Operator 经 `/api/adoptions` 显式纳管座机会话，生命周期 `pending �
 - probe 接受纳管并回执 `adopted` 后，`pending → adopted`（幂等）；受控 source 面板只对 `adopted` 座席出现 5 个固定动作。
 - 显式撤销 / 漂移自动撤销都把座席置 `revoked` 并只入队一次 detach——**detach 从不发送信号**。
 - 漂移撤销（保卫器拒绝且 reason 属于固定漂移码集）追加一条 `adoption_drift` 有界审计（只含 reason + policy，无 pid/exe/cmdline 明文）。
-- 关闭 `adoption_repositories_enabled` 时不建 adoption 服务，`/api/adoptions` operator 表面不可用：完整产品上（SSR/静态 `/<path>` catch-all 已挂载）未注册路径的 POST 返回有界 405 `method_not_allowed`；仅当该 catch-all 路由也被移除时才是 404 `not_found`。既有的 `/api/*`、`/api/v1`、task/runner/SSE 与前端契约不变。
+- 关闭 `adoption_repositories_enabled` 时不建 adoption 服务，`/api/adoptions` operator 表面不可用：未注册的 API 路径返回有界 404 `not_found`；已注册路径使用不支持的方法返回 405 `method_not_allowed`。页面路由不拦截 API。既有的 `/api/*`、`/api/v1`、task/runner/SSE 与前端契约不变。
 - 证据路径：签名回执经 `SupervisorReceiptHook` 扇出到 adoption 服务，审计落在独立 adoption transcript DB；验收只比较固定有界码。
 
 ## 前后端分离发布与回滚
@@ -141,8 +141,12 @@ Operator 经 `/api/adoptions` 显式纳管座机会话，生命周期 `pending �
 后端与静态前端是两个可独立发布、回滚的 release。细节见
 [deploy/frontend-release-layout.md](deploy/frontend-release-layout.md)。
 
-- **backend**: 仓库 Python 包 + `requirements.txt`；启动 JSON API 不需要任何 `frontend/` 文件。
-- **frontend**: `frontend/` 静态文件，纯静态服务器即可发布：
+- **backend**: 仓库 Python 包 + `requirements.txt`；启动 JSON API 不需要任何 `frontend/` 文件；生产使用 `--no-serve-frontend`，守护进程通过 `/api/status` 检查健康。
+- **frontend**: `frontend/` 静态文件；Nginx 提供页面回退和同源 API 代理，两个 CI artifacts 分别为 `agent-fleet-release` 与 `agent-fleet-frontend`。
+- **开发预览**：完整源码默认提供静态页面。旧 `--frontend-cutover` 已删除；外部前端目录使用 `--serve-frontend --frontend-dir <目录>`。
+- **UI**：统一侧栏、明暗主题、移动导航；助手会话、执行事件和产物分区，复用 awesome-ui 组件。
+
+本地打包与资源冒烟：
 
 ```bash
 deploy/package-frontend-release.sh /tmp/agent-fleet-frontend 99.0.0   # 打包（显式输出目录+版本）
@@ -152,8 +156,8 @@ bash deploy/test-static-frontend.sh                                    # 静态�
 - 打包脚本 fail-closed：任何命中 `credentials`/`state`/`runner-credential`/`ingest-token`/
   `.env`/`*.pem`/`*.key` 的路径即整体拒绝且不产生任何输出；不用 npm/构建链，不访问外部
   网络或生产端点。`manifest.json` 只含调用者提供的版本与稳定排序的文件清单。
-- **缓存**：带内容哈希的 `/assets/*` 可长期 immutable；`index.html`/`config.js` 是运行时
-  入口，**不得**长期缓存。
+- **缓存**：当前资源文件名不含内容哈希；`/assets/*`、`index.html`、`config.js`
+  均须重新验证（`no-cache`），不得使用 immutable 缓存。
 - **发布顺序**：backend 先于 frontend 上线新 client 依赖的字段/`/api/v1`。
 - **回滚**：frontend 只切换静态 release，不影响 probe/runner/state；backend 回滚必须
   保留 JSONL、SQLite schema 与旧 `/api/*` 路径，不得破坏未完成的 task lease。

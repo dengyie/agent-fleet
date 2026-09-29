@@ -521,27 +521,6 @@ class AuthDecoratorTests(unittest.TestCase):
                          .get("/guarded").status_code, 200)
 
 
-class TaskPageTests(TaskApiTestBase):
-    def test_task_page_renders(self):
-        task = self.client.post("/api/tasks", json={
-            "machine": "mac-local", "agent_type": "codex",
-            "project": "agent-fleet", "instruction": "做个页面"}).get_json()["task"]
-        resp = self.client.get(f"/task/{task['task_id']}")
-        self.assertEqual(resp.status_code, 200)
-        html = resp.get_data(as_text=True)
-        self.assertIn('data-page="task"', html)
-        self.assertIn('data-task-id="' + task["task_id"], html)
-        self.assertIn("做个页面", html)
-        self.assertEqual(self.client.get("/task/t-missing").status_code, 404)
-
-    def test_machine_page_has_task_section_and_create_button(self):
-        self.client.post("/api/tasks", json={
-            "machine": "mac-local", "agent_type": "codex",
-            "project": "agent-fleet", "instruction": "任务甲"})
-        html = self.client.get("/machine/mac-local").get_data(as_text=True)
-        self.assertIn("task-list", html)
-        self.assertIn("任务甲", html)
-        self.assertIn("新建任务", html)
 
 
 class LeaseReconcilerTests(TaskApiTestBase):

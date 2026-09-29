@@ -13,9 +13,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_DIR = REPO_ROOT / 'frontend'
-MACHINE_JS = FRONTEND_DIR / 'views' / 'machine.js'
-CLIENT_JS = FRONTEND_DIR / 'api' / 'client.js'
-CONTRACTS_JS = FRONTEND_DIR / 'api' / 'contracts.js'
+MACHINE_JS = FRONTEND_DIR / 'assets' / 'views' / 'machine.js'
+CLIENT_JS = FRONTEND_DIR / 'assets' / 'api' / 'client.js'
+CONTRACTS_JS = FRONTEND_DIR / 'assets' / 'api' / 'contracts.js'
 
 INSTANCE_FIELDS = ('pid', 'pgid', 'exe_path', 'cmdline', 'agent_family',
                    'native_file_path', 'started_at', 'attachable')
@@ -170,7 +170,7 @@ class SourceControlViewTests(unittest.TestCase):
 
 
 class InstanceDtoContractTests(unittest.TestCase):
-    """frontend/api/contracts.js 把 instances 保留在 machine current 上。"""
+    """frontend/assets/api/contracts.js 把 instances 保留在 machine current 上。"""
 
     def test_machine_current_allows_sanitized_instances(self):
         source = CONTRACTS_JS.read_text()

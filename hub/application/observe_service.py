@@ -219,6 +219,7 @@ class ObserveService:
                 "event": e.get("event"),
                 "machine": e.get("machine"),
                 "ts": e.get("ts"),
+                "event_seq": e.get("event_seq"),
                 "changes": e.get("changes", []),
             })
         return items

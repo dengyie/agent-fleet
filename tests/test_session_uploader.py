@@ -151,6 +151,11 @@ class BoundedBatchTests(UploaderTestBase):
 
 
 class AckSemanticsTests(UploaderTestBase):
+    def test_invalid_server_ack_cannot_skip_a_local_sequence_gap(self):
+        uploader = self._uploader()
+        self.assertIsNone(uploader._validated_prefix_end(
+            [{'sequence': 1}, {'sequence': 3}], 0, 3))
+
     def test_ack_honors_accepted_through(self):
         for n in range(1, 6):
             self.spool.append(_evt(n))

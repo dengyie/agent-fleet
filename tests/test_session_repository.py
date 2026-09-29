@@ -104,12 +104,119 @@ class SessionRepositoryTests(unittest.TestCase):
         self.assertEqual(got["capture_quality"], "structured")
         self.assertEqual(got["process_group_id"], "grp_t5_001")
 
+    def test_upsert_preserves_managed_binding_when_later_event_is_sparse(self):
+        """Telemetry must not revoke a managed session implicitly."""
+        self.repo.upsert_session(_spec())
+
+        row = self.repo.upsert_session({
+            "session_id": "sess_t5_a1b2",
+            "machine_id": "host-t5-1",
+            "managed": False,
+            "capture_quality": "best_effort",
+        })
+
+        self.assertTrue(row["managed"])
+        self.assertEqual(row["process_group_id"], "grp_t5_001")
+        self.assertEqual(row["attempt_id"], "att_t5_001")
+
+    def test_upsert_rejects_binding_drift(self):
+        self.repo.upsert_session(_spec())
+
+        with self.assertRaises(SessionError) as ctx:
+            self.repo.upsert_session(_spec(process_group_id="grp_other"))
+
+        self.assertEqual(ctx.exception.code, "session_binding_mismatch")
+        row = self.repo.get_session("sess_t5_a1b2")
+        self.assertEqual(row["process_group_id"], "grp_t5_001")
+
+        with self.assertRaises(SessionError) as ctx:
+            self.repo.upsert_session(_spec(attempt_id="att_other"))
+        self.assertEqual(ctx.exception.code, "session_binding_mismatch")
+        self.assertEqual(self.repo.get_session("sess_t5_a1b2")["attempt_id"],
+                         "att_t5_001")
+
+    def test_best_effort_quality_cannot_be_upgraded_by_late_event(self):
+        self.repo.upsert_session({
+            "session_id": "sess_quality",
+            "machine_id": "host-t5-1",
+            "managed": True,
+            "capture_quality": "best_effort",
+            "process_group_id": "grp_quality",
+        })
+
+        row = self.repo.upsert_session({
+            "session_id": "sess_quality",
+            "machine_id": "host-t5-1",
+            "managed": True,
+            "capture_quality": "exact",
+            "process_group_id": "grp_quality",
+        })
+
+        self.assertEqual(row["capture_quality"], "best_effort")
+
+    def test_close_session_is_terminal_and_preserves_finished_at(self):
+        sid = "sess_close_repo"
+        self.repo.upsert_session(_spec(session_id=sid))
+        closed = self.repo.close_session(sid, "closed", "2026-08-26T00:00:00Z")
+        self.assertEqual(closed["status"], "closed")
+        self.assertEqual(closed["finished_at"], "2026-08-26T00:00:00Z")
+        reopened = self.repo.upsert_session(_spec(session_id=sid))
+        self.assertEqual(reopened["status"], "closed")
+        self.assertEqual(reopened["finished_at"], "2026-08-26T00:00:00Z")
+        self.repo.close_session(sid, "failed", "2026-08-27T00:00:00Z")
+        final = self.repo.get_session(sid)
+        self.assertEqual(final["status"], "closed")
+        self.assertEqual(final["finished_at"], "2026-08-26T00:00:00Z")
+
+    def test_ack_cursor_reads_durable_prefix_only(self):
+        sid = "sess_ack_cursor"
+        self.repo.note_event(sid, "evt_4", 4, "step_start")
+        self.repo.acknowledge(sid, 4)
+        self.assertEqual(self.repo.ack_cursor(sid), 4)
+
+    def test_acknowledge_clamps_to_last_sequence(self):
+        sid = "sess_ack_clamp"
+        self.repo.note_event(sid, "evt_5", 5, "step_start")
+        self.repo.acknowledge(sid, 99)
+        self.assertEqual(self.repo.ack_cursor(sid), 5)
+
+    def test_ack_cursor_clamps_legacy_invalid_row(self):
+        sid = "sess_ack_legacy"
+        conn = self.repo._connect()
+        try:
+            conn.execute(
+                "INSERT INTO stream_state (session_id, last_sequence, ack_sequence)"
+                " VALUES (?, 5, 99)", (sid,))
+        finally:
+            conn.close()
+        self.assertEqual(self.repo.ack_cursor(sid), 5)
+
     def test_upsert_rejects_invalid_spec_with_bounded_error(self):
         # managed without process_group_id must be rejected (bounded code).
         with self.assertRaises(SessionError) as ctx:
             self.repo.upsert_session(_spec(process_group_id=None))
         self.assertEqual(ctx.exception.code, "invalid_session_spec")
         self.assertNotIn(str(ctx.exception), "process_group_id")
+
+    def test_upsert_rejects_non_opaque_binding_fields(self):
+        for field in ("machine_id", "process_group_id", "attempt_id"):
+            with self.subTest(field=field):
+                spec = _spec(**{field: "../../etc/passwd"})
+                with self.assertRaises(SessionError) as ctx:
+                    self.repo.upsert_session(spec)
+                self.assertEqual(ctx.exception.code, "invalid_session_spec")
+
+    def test_corrupt_cursor_values_are_safe_to_read(self):
+        sid = "sess_corrupt_cursor"
+        conn = self.repo._connect()
+        try:
+            conn.execute(
+                "INSERT INTO stream_state (session_id, last_sequence, ack_sequence)"
+                " VALUES (?, 'not-an-int', 'also-not-an-int')", (sid,))
+        finally:
+            conn.close()
+        self.assertEqual(self.repo.stream_cursor(sid), 0)
+        self.assertEqual(self.repo.ack_cursor(sid), 0)
 
     def test_list_sessions_filters_by_machine(self):
         self.repo.upsert_session(_spec(session_id="sess_a", machine_id="m1"))
@@ -147,6 +254,7 @@ class SessionRepositoryTests(unittest.TestCase):
 
     def test_acknowledge_never_regresses(self):
         sid = "sess_ack_monotonic"
+        self.repo.note_event(sid, "evt_5", 5, "step_start")
         self.repo.acknowledge(sid, 5)
         self.repo.acknowledge(sid, 2)  # late lower ack must not regress
         conn = self.repo._connect()

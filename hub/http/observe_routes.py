@@ -15,6 +15,7 @@
 """
 import json
 import queue
+import re
 import threading
 
 from flask import Blueprint, current_app, jsonify, request, Response, stream_with_context
@@ -175,6 +176,8 @@ def _sse_event_name(e):
         return "task_log"
     if t.startswith("task_"):
         return "task_update"
+    if t == "session_update":
+        return "session_update"
     return "fleet_event"
 
 
@@ -188,37 +191,83 @@ def _sse_payload(e):
             "changes": e.get("changes", []),
             "online": bool(snap.get("reachable", True)),
             "ts": e.get("ts"),
+            "event_seq": e.get("event_seq"),
             "agents": sanitize_agents(snap.get("agents", {})),
             "system": sanitize_system(snap.get("system", {})),
         }
     if name == "task_log":
         return {"task_id": extra.get("task_id"), "line": extra.get("line"),
-                "ts": e.get("ts")}
+                "ts": e.get("ts"), "event_seq": e.get("event_seq")}
     if name == "task_update":
         return {"task_id": extra.get("task_id"), "machine": e.get("machine"),
-                "state": extra.get("state"), "event": e.get("event"), "ts": e.get("ts")}
+                "state": extra.get("state"), "event": e.get("event"),
+                "ts": e.get("ts"), "event_seq": e.get("event_seq")}
+    if name == "session_update":
+        sequence = extra.get("sequence")
+        return {"session_id": extra.get("session_id"),
+                "sequence": sequence, "cursor": extra.get("cursor", sequence),
+                "kind": extra.get("kind"),
+                "capture_quality": extra.get("capture_quality"),
+                "status": extra.get("status"), "ts": e.get("ts"),
+                "event_seq": e.get("event_seq")}
     return {
         "event": e.get("event"),
         "machine": e.get("machine"),
         "changes": e.get("changes", []),
         "ts": e.get("ts"),
+        "event_seq": e.get("event_seq"),
     }
 
 
 @bp.route("/api/stream")
 def api_stream():
-    try:
-        since = float(request.args.get("since", 0) or 0)
-    except (TypeError, ValueError):
-        since = 0.0
+    raw_since = request.args.get("since", "0") or "0"
+    # New clients send the durable integer event sequence.  Legacy static
+    # clients send a fractional timestamp; retain that replay path until they
+    # migrate.  Integer timestamps from the old client are intentionally
+    # interpreted as sequence cursors, which is the only lossless contract.
+    if re.fullmatch(r"[0-9]+", raw_since):
+        cursor_kind = "sequence"
+        cursor = int(raw_since)
+    else:
+        try:
+            cursor_kind = "timestamp"
+            cursor = float(raw_since)
+        except (TypeError, ValueError):
+            cursor_kind = "timestamp"
+            cursor = 0.0
     publisher = _publisher()
     q, unsubscribe = publisher.subscribe_sse(queue_size=200)
+    # Subscribe first so events arriving while we establish the replay end
+    # are queued too. The generator removes that replay/live overlap.
+    recent = publisher.read_recent(1) if cursor and cursor_kind == "sequence" else []
+    watermark = max((e["event_seq"] for e in recent
+                     if isinstance(e.get("event_seq"), int)), default=0)
 
     def gen():
         try:
             yield ": connected\n\n"
-            if since:  # 断线重连补发
-                for e in publisher.read_since(since, 200):
+            replay_cursor = cursor if cursor_kind == "sequence" else 0
+            delivered_sequence = 0
+            if cursor and cursor_kind == "sequence":
+                while replay_cursor < watermark:
+                    replay = publisher.read_since_sequence(replay_cursor, 200)
+                    advanced = False
+                    for e in replay:
+                        sequence = e.get("event_seq", 0)
+                        if not isinstance(sequence, int) or not replay_cursor < sequence <= watermark:
+                            continue
+                        name = _sse_event_name(e)
+                        yield f"event: {name}\ndata: {json.dumps(_sse_payload(e), ensure_ascii=False)}\n\n"
+                        replay_cursor = sequence
+                        delivered_sequence = sequence
+                        advanced = True
+                    if not advanced:
+                        # A failed read must not jump over unconfirmed history
+                        # into the live queue. Reconnect from the client cursor.
+                        return
+            elif cursor:  # Legacy timestamp clients retain their wire format.
+                for e in publisher.read_since(cursor, 200):
                     name = _sse_event_name(e)
                     yield f"event: {name}\ndata: {json.dumps(_sse_payload(e), ensure_ascii=False)}\n\n"
             while True:
@@ -227,6 +276,16 @@ def api_stream():
                 except queue.Empty:
                     yield ": keepalive\n\n"
                     continue
+                if e is getattr(publisher, "SSE_GAP", object()):
+                    # The queue was overrun.  Closing forces EventSource to
+                    # reconnect with the last applied event_seq; continuing
+                    # would silently skip the dropped interval.
+                    return
+                sequence = e.get("event_seq")
+                if isinstance(sequence, int):
+                    if sequence <= delivered_sequence:
+                        continue
+                    delivered_sequence = sequence
                 name = _sse_event_name(e)
                 yield f"event: {name}\ndata: {json.dumps(_sse_payload(e), ensure_ascii=False)}\n\n"
         finally:

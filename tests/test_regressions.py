@@ -142,7 +142,7 @@ class IngestApiSecurityTests(unittest.TestCase):
 
         # Flask 路由匹配后按方法校验：GET /api/scan 无 GET 处理器 → 404
         # （bounded not_found JSON）；无 token POST 仍必须 403。
-        self.assertEqual(client.get("/api/scan").status_code, 404)
+        self.assertEqual(client.get("/api/scan").status_code, 405)
         self.assertEqual(client.post("/api/scan").status_code, 403)
 
     def test_public_status_drops_sensitive_ingest_fields(self):

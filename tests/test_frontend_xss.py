@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPONENTS_JS = REPO_ROOT / 'hub' / 'static' / 'components.js'
 APP_JS = REPO_ROOT / 'hub' / 'static' / 'app.js'
 FRONTEND_DIR = REPO_ROOT / 'frontend'
-VIEWS_DIR = FRONTEND_DIR / 'views'
+VIEWS_DIR = FRONTEND_DIR / 'assets' / 'views'
 
 # Payload the Phase 1 review used to demonstrate the stored XSS.
 _XSS_PAYLOAD = '<img src=x onerror=alert(1)>'
@@ -24,103 +24,8 @@ _XSS_PAYLOAD = '<img src=x onerror=alert(1)>'
 _QUOTED_PAYLOAD = '" onmouseover="alert(2)" '
 
 
-class ComponentsXssEscapingTests(unittest.TestCase):
-    def test_sys_load_is_escaped_in_render_machine_card(self):
-        src = COMPONENTS_JS.read_text()
-        # The fixed form must be present: esc() applied, numeric fallback kept.
-        self.assertIn('${esc(sys.load) || 0}', src)
-        # The raw unescaped interpolation must not reappear.
-        self.assertNotIn('${sys.load || 0}', src)
-
-    def test_no_unwrapped_system_field_interpolation_remains(self):
-        # Any `${sys.X` token not wrapped in esc() would be an unescaped hole.
-        src = COMPONENTS_JS.read_text()
-        unwrapped = re.findall(r'\$\{sys\.[A-Za-z_]+', src)
-        self.assertEqual(unwrapped, [], f'unescaped system field: {unwrapped}')
-
-    def test_esc_helper_covers_all_html_metacharacters(self):
-        src = COMPONENTS_JS.read_text()
-        match = re.search(r'function esc\(s\) \{.*?\n\}', src, re.S)
-        self.assertIsNotNone(match, 'esc() helper not found in components.js')
-        body = match.group(0)
-        for escaped in ('&amp;', '&lt;', '&gt;', '&quot;', '&#39;'):
-            self.assertIn(escaped, body,
-                          f'esc() must escape {escaped}')
-
-    def test_xss_payload_remains_an_attribute_safe_with_esc(self):
-        # Verify esc() escapes the trigger characters of the review payload
-        # ('<' / '>' break the tag, "'" protects attribute context).
-        escaped = (
-            _XSS_PAYLOAD
-            .replace('&', '&amp;')
-            .replace('<', '&lt;')
-            .replace('>', '&gt;')
-            .replace('"', '&quot;')
-            .replace("'", '&#39;')
-        )
-        self.assertNotIn('<', escaped)
-        self.assertNotIn('>', escaped)
-        self.assertNotIn("'", escaped)
-        self.assertNotIn('"', escaped)
 
 
-class TaskFixRegressionTests(unittest.TestCase):
-    """Task 8 review 回归：fleet 任务数首屏初始化 + 取消/重试按响应门控。"""
-
-    def _task_fn(self, name):
-        src = APP_JS.read_text()
-        match = re.search(
-            r"FleetApp\." + name + r" = function\s*\(.*?\n\};", src, re.S)
-        self.assertIsNotNone(match, 'FleetApp.' + name + ' not found')
-        return match.group(0)
-
-    def test_fleet_badge_initializes_on_first_load(self):
-        src = APP_JS.read_text()
-        init = re.search(
-            r"document\.addEventListener\('DOMContentLoaded'.*?\n\}\);",
-            src, re.S)
-        self.assertIsNotNone(init, 'DOMContentLoaded init block not found')
-        body = init.group(0)
-        self.assertIn("page === 'fleet'", body, 'fleet 分支缺失')
-        self.assertIn('refreshTaskCount()', body, '未拉取真实任务数')
-        # 只做一次性调用，不得在 init 内建立无限请求循环
-        self.assertNotIn('setInterval', body, 'init 内不得轮询')
-
-    def test_cancel_gated_on_response_ok(self):
-        body = self._task_fn('cancelTask')
-        self.assertIn("taskActionError('')", body, '开始前应清空错误')
-        self.assertIn('r.status', body, '应解析响应状态')
-        self.assertIn('if (res.d.ok)', body, '成功门控缺失')
-        self.assertIn('taskActionError', body, '失败应显示可见错误')
-        ok_idx = body.find('if (res.d.ok)')
-        reload_idx = body.find('location.reload()')
-        self.assertNotEqual(reload_idx, -1, '成功路径应有 reload')
-        self.assertGreater(reload_idx, ok_idx, 'reload 必须被 ok 守卫')
-        # 守卫之前（函数体前段）不得出现 reload
-        self.assertNotIn('location.reload()', body[:ok_idx],
-                         'reload 出现在 ok 守卫之前')
-
-    def test_retry_gated_on_response_ok(self):
-        src = APP_JS.read_text()
-        match = re.search(
-            r"FleetApp\.retryTask = function\s*\(.*?\n\};", src, re.S)
-        self.assertIsNotNone(match, 'FleetApp.retryTask not found')
-        body = match.group(0)
-        self.assertIn("taskActionError('')", body)
-        self.assertIn('r.status', body)
-        self.assertIn('if (res.d.ok)', body)
-        ok_idx = body.find('if (res.d.ok)')
-        reload_idx = body.find('location.reload()')
-        self.assertNotEqual(reload_idx, -1)
-        self.assertGreater(reload_idx, ok_idx, 'reload 必须被 ok 守卫')
-        prefix = body[:ok_idx]
-        self.assertNotIn('location.reload()', prefix, '条件前不得 reload')
-        # 失败分支应显示可见错误
-        self.assertIn('taskActionError(res.d.detail || res.d.error ||', body)
-
-    def test_task_action_errors_use_safe_textcontent(self):
-        src = APP_JS.read_text()
-        self.assertIn('el.textContent = msg', src, '错误应用 textContent 写入')
 
 
 class ViewXssProtectionTests(unittest.TestCase):

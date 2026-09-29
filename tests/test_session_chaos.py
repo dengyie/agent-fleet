@@ -805,7 +805,7 @@ class RollbackIndependenceTests(unittest.TestCase):
                 task_db=root / "state" / "fleet_tasks.db",
                 ingest_token="",
                 tasks_enabled=False,
-                frontend_cutover=False,
+                serve_frontend=False,
                 frontend_dir=root / "no-such-frontend",
                 session_repositories_enabled=True,
                 session_db=root / "var" / "sessions" / "meta.db",
@@ -822,8 +822,8 @@ class RollbackIndependenceTests(unittest.TestCase):
     def test_release_routing_config_contracts(self):
         src = (REPO_ROOT / "deploy" / "nginx-frontend-backend.example.conf"
                ).read_text()
-        self.assertIn("location /api/stream", src)
-        start = src.index("location /api/stream")
+        self.assertIn("location = /api/stream", src)
+        start = src.index("location = /api/stream")
         block = src[start:src.index("location /api/", start + 20)]
         self.assertIn("proxy_buffering off", block)
         self.assertIn("proxy_read_timeout", block)
@@ -833,16 +833,20 @@ class RollbackIndependenceTests(unittest.TestCase):
                  "proxy_read_timeout 600s")),
             "SSE read timeout must be long")
         self.assertIn("proxy_http_version 1.1", block)
-        self.assertIn("proxy_set_header Connection", block)
+        # A location-level proxy_set_header replaces the entire parent set.
+        # Keep Connection alongside Host/forwarded identity headers at server scope.
+        self.assertIn('proxy_set_header Connection ""', src.split('location /assets/')[0])
+        self.assertIn('proxy_set_header Host $host', src.split('location /assets/')[0])
+        self.assertNotIn('proxy_set_header', block)
         for token in ("BEGIN PRIVATE KEY", "ingest-token", "runner-credential",
                       "secret="):
             self.assertNotIn(token, src)
 
     def test_frontend_release_module_set_registered(self):
         frontend = REPO_ROOT / "frontend"
-        required = ("index.html", "config.js", "api/client.js",
-                    "api/contracts.js", "realtime/sse.js", "state/store.js",
-                    "views/session.js")
+        required = ("index.html", "config.js", "assets/api/client.js",
+                    "assets/api/contracts.js", "assets/realtime/sse.js", "assets/state/store.js",
+                    "assets/views/session.js")
         for rel in required:
             self.assertTrue((frontend / rel).is_file(), rel)
 

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "nodes": [
+    {
+      "uuid": "capture-node-1",
+      "hostname": "capture-edge-a",
+      "online": true,
+      "status": "online",
+      "version": "capture-1",
+      "secret": "capture-secret-ignore",
+      "token": "capture-token-ignore",
+      "raw_output": "capture-raw-ignore"
+    },
+    {
+      "uuid": "capture-node-2",
+      "hostname": "capture-edge-b",
+      "online": false,
+      "status": "offline",
+      "platform": "linux"
+    }
+  ],
+  "unknown_envelope": "capture-envelope-ignore"
+}

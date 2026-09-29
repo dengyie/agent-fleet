@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from hub.agent_fleet_guardian import AgentFleetGuardian, agent_fleet_guardian_watcher
 
 
-class TestAgentFleetGuardian(unittest.TestCase):
+class TestAgentFleetGuardian(unittest.IsolatedAsyncioTestCase):
     """Test cases for AgentFleetGuardian class."""
 
     def setUp(self):
@@ -58,6 +58,7 @@ class TestAgentFleetGuardian(unittest.TestCase):
 
         self.assertEqual(status, 200)
         mock_exec.assert_called_once()
+        self.assertEqual(mock_exec.call_args.args[-1], 'http://127.0.0.1:8790/api/status')
 
     @patch("hub.agent_fleet_guardian.asyncio.create_subprocess_exec")
     async def test_check_health_failure(self, mock_exec):
@@ -92,11 +93,13 @@ class TestAgentFleetGuardian(unittest.TestCase):
             ProcessLookupError(),  # Check after SIGTERM (dead)
             None,  # Check new process exists
         ]
+        self.guardian.process_matches = MagicMock(side_effect=[True, False, True])
 
         # Mock new process
         mock_proc = MagicMock()
         mock_proc.pid = 67890
         mock_popen.return_value = mock_proc
+        self.guardian.process_matches = MagicMock(return_value=True)
 
         # Create hub/web.py to pass existence check
         (self.repo_root / "hub").mkdir()
@@ -111,10 +114,10 @@ class TestAgentFleetGuardian(unittest.TestCase):
     @patch("hub.agent_fleet_guardian.asyncio.sleep", new_callable=AsyncMock)
     @patch("hub.agent_fleet_guardian.subprocess.Popen")
     @patch("hub.agent_fleet_guardian.os.kill")
-    def test_restart_service_popen_uses_frontend_cutover(
+    def test_restart_service_popen_uses_api_only(
         self, mock_kill, mock_popen, _mock_sleep
     ):
-        """SPA 生产必须 --frontend-cutover；缺了会掉回 SSR 总览页。"""
+        """Independent backend releases must not depend on frontend files."""
         log_dir = Path(self.temp_dir) / "logs"
         log_dir.mkdir()
         self.guardian.web_log = log_dir / "web.log"
@@ -124,6 +127,7 @@ class TestAgentFleetGuardian(unittest.TestCase):
         mock_proc = MagicMock()
         mock_proc.pid = 67890
         mock_popen.return_value = mock_proc
+        self.guardian.process_matches = MagicMock(return_value=True)
         (self.repo_root / "hub").mkdir()
         (self.repo_root / "hub" / "web.py").touch()
 
@@ -133,7 +137,7 @@ class TestAgentFleetGuardian(unittest.TestCase):
         mock_popen.assert_called_once()
         argv = mock_popen.call_args[0][0]
         self.assertEqual(argv[1], "hub/web.py")
-        self.assertIn("--frontend-cutover", argv)
+        self.assertIn("--no-serve-frontend", argv)
         self.assertNotIn("--frontend-dir", argv)
 
     @patch("hub.agent_fleet_guardian.subprocess.Popen")
@@ -194,7 +198,7 @@ class TestAgentFleetGuardian(unittest.TestCase):
         self.assertNotIn("/home/mango", source)
 
 
-class TestAgentFleetGuardianWatcher(unittest.TestCase):
+class TestAgentFleetGuardianWatcher(unittest.IsolatedAsyncioTestCase):
     """Test cases for agent_fleet_guardian_watcher function."""
 
     @patch.dict(os.environ, {

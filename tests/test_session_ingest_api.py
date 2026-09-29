@@ -271,6 +271,22 @@ class SessionIngestIsolationTests(SessionHttpTestBase):
         finally:
             sr_mod.SessionRepository.upsert_session = original
 
+    def test_session_store_oserror_is_bounded_503_not_500(self):
+        import hub.infrastructure.session_repository as sr_mod
+
+        original = sr_mod.SessionRepository.upsert_session
+
+        def unavailable(*a, **kw):
+            raise OSError("read-only session volume")
+
+        sr_mod.SessionRepository.upsert_session = unavailable
+        try:
+            resp = self._ingest([_event(1)])
+            self.assertEqual(resp.status_code, 503)
+            self.assertEqual(resp.get_json()["error"], "session_unavailable")
+        finally:
+            sr_mod.SessionRepository.upsert_session = original
+
     def test_no_raw_text_in_sse_or_public_status(self):
         self._ingest([_event(1, text="password=supersecret_42")])
         status = str(self.client.get("/api/status").get_json())
@@ -416,7 +432,7 @@ class SessionServiceQuotaGapTests(unittest.TestCase):
             _event(3, session_id="sess_quota_4", text="skip seq 2"),
         ])
         self.assertEqual(result["status"], "accepted")
-        self.assertEqual(result["accepted_through"], 3)
+        self.assertEqual(result["accepted_through"], 0)
         self.assertEqual(result["rejected"], [])
         rows = tr_repo.read_redacted("sess_quota_4")
         self.assertEqual([r["sequence"] for r in rows], [3])
@@ -515,6 +531,18 @@ class SessionServiceBoundTests(unittest.TestCase):
             service.ingest_events({"schema_version": 1})
         self.assertEqual(ctx.exception.code, "invalid_batch")
 
+    def test_service_rejects_unserializable_batch(self):
+        from hub.application.session_service import SessionService, SessionServiceError
+        from hub.infrastructure.session_repository import SessionRepository
+        from hub.infrastructure.transcript_repository import TranscriptRepository
+
+        tmp = Path(tempfile.mkdtemp())
+        service = SessionService(SessionRepository(tmp / "s.db"),
+                                 TranscriptRepository(tmp / "t.db"))
+        with self.assertRaises(SessionServiceError) as ctx:
+            service.ingest_events([object()])
+        self.assertEqual(ctx.exception.code, "invalid_batch")
+
 
 class SessionServiceSpecExtractionTests(unittest.TestCase):
     def test_session_spec_from_event_extracts_agent_family(self):
@@ -535,6 +563,101 @@ class SessionServiceSpecExtractionTests(unittest.TestCase):
         })
         self.assertNotIn("agent_family", spec)
 
+class SessionOrderingAndLifecycleTests(SessionHttpTestBase):
+    def test_out_of_order_batch_ack_is_contiguous_prefix(self):
+        second = _event(2, event_id="evt_002_out_of_order")
+        first = _event(1, event_id="evt_001_out_of_order")
+        response = self._ingest([second])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["accepted_through"], 0)
+        response = self._ingest([first])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["accepted_through"], 2)
+
+    def test_rejected_lower_sequence_cannot_ack_higher_sibling(self):
+        from hub.infrastructure.transcript_repository import TranscriptRepository
+        service = self.app.extensions["fleet"]["services"]["sessions"]
+        capped = TranscriptRepository(
+            self.temp_dir / "var" / "sessions" / "quota-order.db",
+            key=_key(), max_raw_bytes=500)
+        capped.init()
+        service.transcript_repo = capped
+        accepted = _event(2, event_id="evt_002_quota_order")
+        rejected = _event(1, quality="best_effort",
+                          text="z" * 4096, event_id="evt_001_quota_order")
+        response = self._ingest([accepted, rejected])
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["accepted_through"], 0)
+        self.assertEqual(body["rejected"][0]["code"], "raw_quota_exceeded")
+
+    @staticmethod
+    def _close_event(seq=2, status="completed", exit_code=0):
+        event = _event(seq, kind="session_close",
+                       event_id="evt_close_%d_%s" % (seq, status))
+        event["payload"] = {"status": status, "exit_code": exit_code,
+                             "reason": "finished"}
+        return event
+
+    def test_session_close_is_terminal_and_exposes_finished_at(self):
+        self.assertEqual(self._ingest([_event(1)]).status_code, 200)
+        response = self._ingest([self._close_event()])
+        self.assertEqual(response.status_code, 200)
+        session = self.client.get("/api/sessions/sess_api_1").get_json()["session"]
+        self.assertEqual(session["status"], "closed")
+        self.assertEqual(session["finished_at"], "2026-08-26T00:00:00Z")
+        self.assertEqual(self.client.get("/api/sessions?active=true")
+                         .get_json()["sessions"], [])
+        late = _event(3, event_id="evt_003_late")
+        self.assertEqual(self._ingest([late]).status_code, 200)
+        session = self.client.get("/api/sessions/sess_api_1").get_json()["session"]
+        self.assertEqual(session["status"], "closed")
+        self.assertEqual(session["finished_at"], "2026-08-26T00:00:00Z")
+
+    def test_failed_close_maps_to_failed(self):
+        response = self._ingest([self._close_event(seq=1, status="error",
+                                                   exit_code=1)])
+        self.assertEqual(response.status_code, 200)
+        session = self.client.get("/api/sessions/sess_api_1").get_json()["session"]
+        self.assertEqual(session["status"], "failed")
+
+    def test_close_storage_oserror_is_bounded(self):
+        service = self.app.extensions["fleet"]["services"]["sessions"]
+        original = service.session_repo.close_session
+
+        def unavailable(*args, **kwargs):
+            raise OSError("read-only session volume")
+
+        service.session_repo.close_session = unavailable
+        try:
+            response = self._ingest([self._close_event(seq=1)])
+        finally:
+            service.session_repo.close_session = original
+        self.assertEqual(response.status_code, 503)
+        body = response.get_json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["error"], "session_unavailable")
+        self.assertNotIn("read-only", str(body))
+
+    def test_ingest_publishes_safe_session_sse_summary(self):
+        response = self.client.get("/api/stream", buffered=False)
+        try:
+            next(response.response)
+            event = _event(1, text="token=should-not-be-in-summary")
+            self.assertEqual(self._ingest([event]).status_code, 200)
+            body = b""
+            for chunk in response.response:
+                body += chunk
+                if b"event: session_update" in body:
+                    break
+        finally:
+            response.close()
+        text = body.decode()
+        self.assertIn("event: session_update", text)
+        self.assertIn('"session_id": "sess_api_1"', text)
+        self.assertIn('"event_seq":', text)
+        self.assertNotIn("should-not-be-in-summary", text)
+        self.assertNotIn("payload", text)
 
 if __name__ == "__main__":
     unittest.main()

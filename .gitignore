@@ -15,9 +15,9 @@ state/
 var/
 *.db-wal
 *.db-shm
-# frontend/state 是静态源码模块，不是运行时状态
-!frontend/state/
-!frontend/state/**
+# frontend/assets/state 是静态源码模块，不是运行时状态
+!frontend/assets/state/
+!frontend/assets/state/**
 
 # 临时
 *.tmp

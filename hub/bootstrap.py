@@ -69,6 +69,289 @@ def create_app(
     from hub.infrastructure.state_repository import JsonlObservationRepository
     from hub.infrastructure.task_repository import SqliteTaskRepository
 
+    platform_service = None
+    platform_repository = None
+    platform_delivery = None
+    conversation_service = None
+    run_service = None
+    run_event_service = None
+    artifact_store = None
+    service_health = None
+    service_repository = None
+    incident_repository = None
+    incident_service = None
+    diagnostic_service = None
+    komari_client = None
+    platform_scheduler_repository = None
+    platform_monitoring = None
+    http_probe_monitoring = None
+    platform_schedule_repository = None
+    platform_schedule_service = None
+    platform_memory_repository = None
+    platform_memory_service = None
+    platform_memory_context_service = None
+    approval_repository = None
+    service_actions = None
+    execution_window_repository = None
+    execution_window_service = None
+    platform_worker_service = None
+    usage_repository = None
+    platform_run_scheduler = None
+    legacy_task_bridge = None
+    command_inspection = None
+    command_postcheck = None
+    if config.platform_enabled:
+        from hub.application.defaults_service import DefaultsService
+        from hub.infrastructure.platform_db import PlatformRepository
+        from hub.infrastructure.usage_repository import UsageRepository
+        from hub.infrastructure.command_repository import CommandRepository
+        from hub.application.command_delivery_service import CommandDeliveryService
+        from hub.application.command_inspection_service import CommandInspectionService
+        from hub.application.command_postcheck_service import CommandPostcheckService
+        from hub.auth import load_platform_command_signing_key
+        if config.platform_db is None:
+            raise RuntimeError("platform_enabled requires a platform_db path")
+        platform_repository = (repositories or {}).get("platform")
+        if platform_repository is None:
+            platform_repository = PlatformRepository(config.platform_db)
+            platform_repository.init()
+        usage_repository = (repositories or {}).get("platform_usage")
+        if usage_repository is None:
+            usage_repository = UsageRepository(
+                config.platform_db,
+                enforce_limits=bool(getattr(config, "platform_usage_limits_enabled", False)),
+            )
+            usage_repository.init()
+        command_repository = (repositories or {}).get("platform_commands")
+        if command_repository is None:
+            command_repository = CommandRepository(config.platform_db)
+            command_repository.init()
+        command_signing_key = getattr(config, "platform_command_signing_raw", None)
+        if command_signing_key is None:
+            command_signing_key = load_platform_command_signing_key()
+        platform_delivery = CommandDeliveryService(
+            command_repository,
+            signing_key=command_signing_key,
+            require_signature=bool(getattr(config, "platform_require_command_signature", False)),
+        )
+        command_inspection = CommandInspectionService(command_repository)
+        command_postcheck = CommandPostcheckService(command_repository, platform_delivery)
+        platform_service = DefaultsService(platform_repository)
+        from hub.application.conversation_service import ConversationService, RunService
+        from hub.application.run_event_service import RunEventService
+        from tools.platform.artifacts import ArtifactStore
+        if config.service_monitoring_enabled:
+            from hub.infrastructure.service_repository import ServiceRepository
+            from hub.application.service_health_service import ServiceHealthService
+        conversation_service = ConversationService(platform_repository, platform_service)
+        run_service = RunService(platform_repository)
+        run_event_service = RunEventService(platform_repository)
+        if config.platform_artifact_root is None:
+            raise RuntimeError("platform_enabled requires a platform_artifact_root")
+        artifact_store = ArtifactStore(config.platform_artifact_root)
+        if getattr(config, "execution_windows_enabled", False):
+            from hub.infrastructure.execution_window_repository import ExecutionWindowRepository
+            from hub.application.execution_window_service import ExecutionWindowService
+
+            execution_window_repository = (repositories or {}).get("execution_windows")
+            if execution_window_repository is None:
+                execution_window_repository = ExecutionWindowRepository(config.platform_db)
+                execution_window_repository.init()
+            execution_window_service = ExecutionWindowService(execution_window_repository)
+        if config.service_monitoring_enabled:
+            service_repository = (repositories or {}).get("platform_services")
+            if service_repository is None:
+                service_repository = ServiceRepository(config.platform_db)
+                service_repository.init()
+            service_health = ServiceHealthService(
+                service_repository,
+                probe_allowed_origins=getattr(config, "http_probe_allowed_origins", ()),
+                probe_allow_loopback=getattr(config, "http_probe_allow_loopback", False),
+            )
+            command_postcheck.service_repository = service_repository
+            command_postcheck.service_health = service_health
+            from hub.infrastructure.incident_repository import IncidentRepository
+            from hub.integrations.health_events import IncidentService
+            from hub.application.diagnostic_service import DiagnosticService
+            incident_repository = (repositories or {}).get("platform_incidents")
+            if incident_repository is None:
+                incident_repository = IncidentRepository(config.platform_db)
+                incident_repository.init()
+            incident_service = IncidentService(
+                service_health, incident_repository,
+                node_mapping=getattr(config, "komari_node_mapping", None),
+                recovery_required=getattr(config, "incident_recovery_required", 2),
+            )
+            diagnostic_service = DiagnosticService(service_health, incident_repository)
+            if getattr(config, "service_actions_enabled", False):
+                from hub.infrastructure.approval_repository import ApprovalRepository
+                from hub.application.service_action_service import ServiceActionService
+
+                approval_repository = (repositories or {}).get("platform_approvals")
+                if approval_repository is None:
+                    approval_repository = ApprovalRepository(config.platform_db)
+                    approval_repository.init()
+                service_actions = ServiceActionService(
+                    service_repository=service_repository,
+                    approval_repository=approval_repository,
+                    delivery=platform_delivery,
+                    command_repository=command_repository,
+                )
+            if getattr(config, "komari_enabled", False):
+                from hub.integrations.komari import KomariClient
+                if not (config.komari_base_url and config.komari_nodes_path and config.komari_token):
+                    raise RuntimeError("komari_enabled requires endpoint, nodes path, and token")
+                komari_client = KomariClient(
+                    config.komari_base_url, config.komari_token,
+                    nodes_path=config.komari_nodes_path,
+                    allow_network=bool(getattr(config, "komari_network_enabled", False)),
+                )
+                # The durable scheduler is a separate gate from the
+                # request-triggered sync route.  Construct it only when the
+                # complete read-only monitoring stack is explicitly enabled;
+                # otherwise the default app creates no scheduler state or
+                # background lifecycle.
+                if getattr(config, "komari_sync_enabled", False):
+                    from hub.application.platform_monitoring_service import (
+                        PlatformMonitoringService,
+                    )
+                    from hub.infrastructure.platform_scheduler_repository import (
+                        PlatformSchedulerRepository,
+                    )
+
+                    platform_scheduler_repository = (repositories or {}).get(
+                        "platform_scheduler")
+                    if platform_scheduler_repository is None:
+                        platform_scheduler_repository = PlatformSchedulerRepository(
+                            config.platform_db)
+                    platform_scheduler_repository.init()
+                    platform_monitoring = PlatformMonitoringService(
+                        service_repository=service_repository,
+                        incident_service=incident_service,
+                        komari_client=komari_client,
+                        scheduler_repository=platform_scheduler_repository,
+                        interval_s=getattr(config, "komari_sync_interval_s", 60.0),
+                    )
+            if (
+                getattr(config, "http_probe_enabled", False)
+                and getattr(config, "http_probe_network_enabled", False)
+                and getattr(config, "http_probe_sync_enabled", False)
+            ):
+                from hub.application.http_probe_monitoring_service import (
+                    HttpProbeMonitoringService,
+                )
+                from hub.infrastructure.platform_scheduler_repository import (
+                    PlatformSchedulerRepository,
+                )
+                if platform_scheduler_repository is None:
+                    platform_scheduler_repository = (repositories or {}).get(
+                        "platform_scheduler")
+                    if platform_scheduler_repository is None:
+                        platform_scheduler_repository = PlatformSchedulerRepository(
+                            config.platform_db)
+                    platform_scheduler_repository.init()
+                http_probe_monitoring = HttpProbeMonitoringService(
+                    service_repository=service_repository,
+                    incident_service=incident_service,
+                    scheduler_repository=platform_scheduler_repository,
+                    interval_s=getattr(config, "http_probe_sync_interval_s", 60.0),
+                    network_enabled=getattr(config, "http_probe_network_enabled", False),
+                    allow_loopback=getattr(config, "http_probe_allow_loopback", False),
+                    allowed_origins=getattr(config, "http_probe_allowed_origins", ()),
+                )
+        if getattr(config, "platform_schedules_enabled", False):
+            from hub.infrastructure.platform_schedule_repository import (
+                PlatformScheduleRepository,
+            )
+            from hub.application.platform_schedule_service import (
+                DurableReadOnlyScheduleService,
+            )
+
+            platform_schedule_repository = (repositories or {}).get(
+                "platform_schedules")
+            if platform_schedule_repository is None:
+                platform_schedule_repository = PlatformScheduleRepository(
+                    config.platform_db)
+            platform_schedule_repository.init()
+
+            def _read_only_schedule_executor(owner_id, action, target):
+                if service_health is None:
+                    raise RuntimeError("service_monitoring_unavailable")
+                service_id = target.get("service_id")
+                if action == "service_health":
+                    public = service_health.get(owner_id, service_id)
+                    return {
+                        "state": (public.get("health") or {}).get("overall", "unknown"),
+                        "service_id": service_id,
+                        "dimension": "overall",
+                    }
+                if action == "http_probe":
+                    if http_probe_monitoring is None:
+                        raise RuntimeError("http_probe_scheduler_unavailable")
+                    public = service_health.get(owner_id, service_id)
+                    dimension = ((public.get("health") or {}).get(
+                        "dimensions") or {}).get("application_health") or {}
+                    return {
+                        "state": dimension.get("state", "unknown"),
+                        "service_id": service_id,
+                        "dimension": "application_health",
+                        "freshness": dimension.get("freshness"),
+                    }
+                raise RuntimeError("invalid_action")
+
+            platform_schedule_service = DurableReadOnlyScheduleService(
+                platform_schedule_repository,
+                executor=_read_only_schedule_executor,
+                worker_id="hub-schedule",
+            )
+
+        if getattr(config, "platform_memory_enabled", False):
+            from hub.infrastructure.platform_memory_repository import (
+                PlatformMemoryRepository,
+            )
+            from hub.application.platform_memory_service import (
+                PlatformMemoryService,
+            )
+            platform_memory_repository = (repositories or {}).get(
+                "platform_memory")
+            if platform_memory_repository is None:
+                platform_memory_repository = PlatformMemoryRepository(
+                    config.platform_db)
+            platform_memory_repository.init()
+            platform_memory_service = PlatformMemoryService(
+                platform_memory_repository)
+            if getattr(config, "platform_memory_context_enabled", False):
+                from hub.application.platform_memory_context_service import (
+                    PlatformMemoryContextService,
+                )
+                platform_memory_context_service = PlatformMemoryContextService(
+                    platform_memory_repository)
+
+        if getattr(config, "platform_worker_enabled", False):
+            from hub.application.run_worker_service import LocalRunWorkerService
+            platform_worker_service = LocalRunWorkerService(
+                platform_repository, run_event_service,
+                lease_s=getattr(config, "platform_worker_lease_s", 60.0),
+                sandbox_launcher=getattr(config, "platform_sandbox_launcher", ()),
+                artifact_store=artifact_store, diagnostics=diagnostic_service,
+                provider_network_enabled=bool(getattr(
+                    config, "platform_provider_network_enabled", False)),
+                remote_execution_enabled=bool(getattr(
+                    config, "platform_remote_execution_enabled", False)),
+                remote_delivery=platform_delivery,
+                usage_meter=usage_repository,
+            )
+            if getattr(config, "platform_worker_scheduler_enabled", False):
+                from hub.application.run_scheduler_service import RunSchedulerService
+                platform_run_scheduler = RunSchedulerService(
+                    platform_repository, platform_worker_service,
+                    owner_lease_s=getattr(config, "platform_worker_lease_s", 60.0),
+                    interval_s=getattr(config, "platform_worker_interval_s", 1.0),
+                    max_concurrency=getattr(config, "platform_worker_max_concurrency", 1),
+                    max_workspace_concurrency=getattr(
+                        config, "platform_worker_max_workspace_concurrency", 1),
+                )
+
     # Session (Task 6) services/repositories are optional.  When enabled they
     # use their own independent durable stores (session metadata + transcript),
     # never the legacy observation/event/task paths.  Imported lazily so the
@@ -106,6 +389,8 @@ def create_app(
         if event_repository is None:
             event_repository = JsonlEventRepository(config.event_log)
         publisher = EventPublisher(event_repository)
+    if session_service is not None:
+        session_service.event_publisher = publisher
     # Keep old Blueprints working while they receive injected services. New
     # callers should use the app extension rather than this facade.
     events.set_publisher(publisher)
@@ -132,6 +417,15 @@ def create_app(
         ),
         session_repo=session_repo,
     )
+    if platform_repository is not None:
+        from hub.application.legacy_task_bridge import LegacyTaskBridge
+
+        legacy_task_bridge = LegacyTaskBridge(
+            platform_repository, task_service, task_repository,
+            worker_id="legacy-bridge-" + (config.dev_operator or "local"),
+        )
+        if platform_run_scheduler is not None:
+            platform_run_scheduler.legacy_bridge = legacy_task_bridge
     runner_service = RunnerService(task_repository, publisher)
 
     # Task 9: supervisor control-plane.  Construction is additive — when
@@ -236,7 +530,7 @@ def create_app(
             transcript_repo)
         supervisor_service.set_adoption(adoption_service)
 
-    app = Flask(__name__, template_folder="templates", static_folder="static")
+    app = Flask(__name__, template_folder=None, static_folder=None)
     app.config["MAX_CONTENT_LENGTH"] = 256 * 1024
     app.config["INGEST_TOKEN"] = config.ingest_token
     app.config["DEV_OPERATOR"] = config.dev_operator
@@ -246,8 +540,46 @@ def create_app(
     app.config["STATE_DIR"] = str(config.state_dir)
     app.config["EVENT_LOG"] = str(config.event_log)
     app.config["TASK_DB"] = str(config.task_db)
+    app.config["PLATFORM_ENABLED"] = bool(config.platform_enabled)
+    app.config["PLATFORM_DB"] = str(config.platform_db) if config.platform_db else None
+    app.config["PLATFORM_REQUIRE_COMMAND_SIGNATURE"] = bool(
+        getattr(config, "platform_require_command_signature", False))
+    app.config["PLATFORM_WORKER_ENABLED"] = bool(platform_worker_service is not None)
+    app.config["PLATFORM_WORKER_INTERVAL_S"] = float(
+        getattr(config, "platform_worker_interval_s", 1.0))
+    app.config["PLATFORM_WORKER_SCHEDULER_ENABLED"] = bool(platform_run_scheduler is not None)
+    app.config["PLATFORM_PROVIDER_NETWORK_ENABLED"] = bool(
+        getattr(config, "platform_provider_network_enabled", False))
+    app.config["PLATFORM_REMOTE_EXECUTION_ENABLED"] = bool(
+        getattr(config, "platform_remote_execution_enabled", False))
+    app.config["SERVICE_MONITORING_ENABLED"] = bool(config.service_monitoring_enabled)
+    app.config["PLATFORM_SCHEDULES_ENABLED"] = bool(
+        platform_schedule_service is not None)
+    app.config["PLATFORM_MEMORY_ENABLED"] = bool(
+        platform_memory_service is not None)
+    app.config["PLATFORM_MEMORY_CONTEXT_ENABLED"] = bool(
+        platform_memory_context_service is not None)
+    app.config["SERVICE_ACTIONS_ENABLED"] = bool(
+        service_actions is not None)
+    app.config["EXECUTION_WINDOWS_ENABLED"] = bool(
+        execution_window_service is not None)
+    app.config["KOMARI_ENABLED"] = bool(getattr(config, "komari_enabled", False))
+    # Expose the effective gate: a requested sync gate without a complete
+    # Komari integration never starts a scheduler and therefore has no status
+    # surface to advertise.
+    app.config["KOMARI_SYNC_ENABLED"] = bool(platform_monitoring is not None)
+    app.config["KOMARI_SYNC_INTERVAL_S"] = float(
+        getattr(config, "komari_sync_interval_s", 60.0))
+    app.config["HTTP_PROBE_ENABLED"] = bool(
+        getattr(config, "http_probe_enabled", False))
+    app.config["HTTP_PROBE_NETWORK_ENABLED"] = bool(
+        getattr(config, "http_probe_network_enabled", False))
+    app.config["HTTP_PROBE_SYNC_ENABLED"] = bool(
+        http_probe_monitoring is not None)
+    app.config["HTTP_PROBE_SYNC_INTERVAL_S"] = float(
+        getattr(config, "http_probe_sync_interval_s", 60.0))
     app.config["TASKS_ENABLED"] = bool(config.tasks_enabled)
-    app.config["FRONTEND_CUTOVER"] = bool(config.frontend_cutover)
+    app.config["SERVE_FRONTEND"] = bool(config.serve_frontend)
     app.config["FRONTEND_DIR"] = str(config.frontend_dir)
     app.config["SUPERVISOR_ENABLED"] = bool(config.supervisor_enabled)
     app.config["SUPERVISOR_TTL_S"] = float(config.supervisor_ttl_s or 3600.0)
@@ -295,6 +627,75 @@ def create_app(
             ),
         },
     }
+    if platform_repository is not None:
+        app.extensions["fleet"]["platform_repository"] = platform_repository
+        app.extensions["fleet"]["platform_commands"] = command_repository
+    if platform_scheduler_repository is not None:
+        app.extensions["fleet"]["repositories"]["platform_scheduler"] = (
+            platform_scheduler_repository)
+    if platform_service is not None:
+        app.extensions["fleet"]["services"]["platform_defaults"] = platform_service
+        app.extensions["fleet"]["services"]["conversations"] = conversation_service
+        app.extensions["fleet"]["services"]["runs"] = run_service
+        app.extensions["fleet"]["services"]["run_events"] = run_event_service
+        if usage_repository is not None:
+            app.extensions["fleet"]["services"]["usage_repository"] = usage_repository
+        if platform_worker_service is not None:
+            app.extensions["fleet"]["services"]["platform_worker"] = platform_worker_service
+        if platform_run_scheduler is not None:
+            app.extensions["fleet"]["services"]["platform_run_scheduler"] = platform_run_scheduler
+        if legacy_task_bridge is not None:
+            app.extensions["fleet"]["services"]["legacy_task_bridge"] = legacy_task_bridge
+        app.extensions["fleet"]["services"]["platform_delivery"] = platform_delivery
+        app.extensions["fleet"]["services"]["command_inspection"] = command_inspection
+        app.extensions["fleet"]["services"]["command_postcheck"] = command_postcheck
+        app.extensions["fleet"]["services"]["platform_artifacts"] = artifact_store
+        if service_health is not None:
+            app.extensions["fleet"]["services"]["service_health"] = service_health
+        if service_repository is not None:
+            app.extensions["fleet"]["repositories"]["platform_services"] = (
+                service_repository)
+        if incident_repository is not None:
+            app.extensions["fleet"]["repositories"]["platform_incidents"] = incident_repository
+        if incident_service is not None:
+            app.extensions["fleet"]["services"]["incidents"] = incident_service
+        if diagnostic_service is not None:
+            app.extensions["fleet"]["services"]["diagnostics"] = diagnostic_service
+        if approval_repository is not None:
+            app.extensions["fleet"]["repositories"]["platform_approvals"] = (
+                approval_repository)
+        if service_actions is not None:
+            app.extensions["fleet"]["services"]["service_actions"] = service_actions
+        if execution_window_repository is not None:
+            app.extensions["fleet"]["repositories"]["execution_windows"] = (
+                execution_window_repository)
+        if execution_window_service is not None:
+            app.extensions["fleet"]["services"]["execution_windows"] = (
+                execution_window_service)
+        if platform_monitoring is not None:
+            app.extensions["fleet"]["services"]["platform_monitoring"] = (
+                platform_monitoring)
+        if http_probe_monitoring is not None:
+            app.extensions["fleet"]["services"]["http_probe_monitoring"] = (
+                http_probe_monitoring)
+        if platform_schedule_repository is not None:
+            app.extensions["fleet"]["repositories"]["platform_schedules"] = (
+                platform_schedule_repository)
+        if platform_schedule_service is not None:
+            app.extensions["fleet"]["services"]["platform_schedules"] = (
+                platform_schedule_service)
+        if platform_memory_repository is not None:
+            app.extensions["fleet"]["repositories"]["platform_memory"] = (
+                platform_memory_repository)
+        if platform_memory_service is not None:
+            app.extensions["fleet"]["services"]["platform_memory"] = (
+                platform_memory_service)
+        if platform_memory_context_service is not None:
+            app.extensions["fleet"]["services"]["platform_memory_context"] = (
+                platform_memory_context_service)
+            conversation_service.memory_context = platform_memory_context_service
+        if komari_client is not None:
+            app.extensions["fleet"]["integrations"] = {"komari": komari_client}
     if session_service is not None:
         app.extensions["fleet"]["services"]["sessions"] = session_service
     if control_router is not None:
@@ -309,6 +710,38 @@ def create_app(
     # 版本化 /api/v1 兼容表面：复用旧 view，旧 /api/* 仍权威。
     app.register_blueprint(observe_v1_bp)
     app.register_blueprint(tasks_v1_bp)
+    if platform_service is not None:
+        from hub.http.platform_routes import bp as platform_bp
+        from hub.http.conversation_routes import bp as conversation_bp
+        from hub.http.node_routes import bp as node_bp
+        from hub.http.artifact_routes import bp as artifact_bp
+        from hub.http.legacy_task_routes import bp as legacy_task_bp
+        from hub.http.execution_window_routes import bp as execution_window_bp
+        app.register_blueprint(platform_bp)
+        app.register_blueprint(conversation_bp)
+        app.register_blueprint(node_bp)
+        app.register_blueprint(artifact_bp)
+        app.register_blueprint(legacy_task_bp)
+        # Keep a stable 404 transport while the execution-window gate is
+        # closed; the service/repository are still absent in that mode.
+        app.register_blueprint(execution_window_bp)
+        if service_health is not None:
+            from hub.http.service_routes import bp as service_bp
+            app.register_blueprint(service_bp)
+            from hub.http.incident_routes import bp as incident_bp
+            app.register_blueprint(incident_bp)
+            # Register the bounded transport even while the gate is closed so
+            # an attempted action receives the stable 404 contract rather than
+            # Flask's method-not-allowed response caused by the service detail
+            # route sharing the same prefix.
+            from hub.http.service_action_routes import bp as service_action_bp
+            app.register_blueprint(service_action_bp)
+        if platform_schedule_service is not None:
+            from hub.http.schedule_routes import bp as schedule_bp
+            app.register_blueprint(schedule_bp)
+        if platform_memory_service is not None:
+            from hub.http.memory_routes import bp as memory_bp
+            app.register_blueprint(memory_bp)
 
     # Task 6: session 蓝图仅在显式启用时注册。禁用（默认）不注册任何 session
     # 路由，旧 observation/task/runner/SSE 行为与 startup 完全不变。
@@ -371,9 +804,79 @@ def start_background_jobs(app, *, reconcile_interval_s=60, lease_reconciler_inte
     except Exception:
         pass
 
-    return {
+    stops = {
         "reconciliation": start_reconciliation(
             service.reconcile_observation, interval_s=reconcile_interval_s),
         "lease_reconciler": start_lease_reconciler(
             service.reconcile_leases, interval_s=lease_reconciler_interval_s),
     }
+    platform_monitoring = fleet.get("services", {}).get("platform_monitoring")
+    if platform_monitoring is not None:
+        stops["platform_monitoring"] = platform_monitoring.start()
+    http_probe_monitoring = fleet.get("services", {}).get("http_probe_monitoring")
+    if http_probe_monitoring is not None:
+        stops["http_probe_monitoring"] = http_probe_monitoring.start()
+    platform_schedules = fleet.get("services", {}).get("platform_schedules")
+    if platform_schedules is not None:
+        stops["platform_schedules"] = platform_schedules.start()
+    if fleet.get("services", {}).get("platform_run_scheduler") is not None:
+        stops["platform_run_scheduler"] = start_platform_run_scheduler(app)
+    elif fleet.get("services", {}).get("platform_worker") is not None and app.config.get("DEV_OPERATOR"):
+        stops["platform_worker"] = start_platform_worker(app)
+    return stops
+
+
+def start_platform_worker(app, *, owner_id: str | None = None, interval_s: float | None = None, stop_event=None):
+    """Explicitly start the local platform Run worker.
+
+    The worker is deliberately separate from legacy reconciliation jobs and is
+    never started by ``create_app``. A single-owner deployment supplies
+    ``owner_id``; multi-owner deployments use ``start_platform_run_scheduler``.
+    """
+    import threading
+    import time
+
+    fleet = app.extensions.get("fleet", {})
+    worker = fleet.get("services", {}).get("platform_worker")
+    if worker is None:
+        raise RuntimeError("platform worker is disabled")
+    owner = owner_id or app.config.get("DEV_OPERATOR")
+    if not owner:
+        raise RuntimeError("platform worker requires owner_id")
+    stop = stop_event or threading.Event()
+    delay = float(interval_s if interval_s is not None else app.config.get("PLATFORM_WORKER_INTERVAL_S", 1.0))
+    delay = max(0.1, min(60.0, delay))
+
+    def loop():
+        while not stop.is_set():
+            try:
+                worker.run_once(owner)
+            except Exception:
+                pass
+            bridge = fleet.get("services", {}).get("legacy_task_bridge")
+            if bridge is not None:
+                try:
+                    bridge.process_once(owner)
+                except Exception:
+                    pass
+            stop.wait(delay)
+
+    thread = threading.Thread(target=loop, name="platform-run-worker", daemon=True)
+    thread.start()
+
+    def shutdown():
+        stop.set()
+        thread.join(timeout=max(1.0, delay * 2))
+
+    return shutdown
+
+
+def start_platform_run_scheduler(app, *, interval_s: float | None = None, stop_event=None):
+    """Explicitly start the durable multi-owner Run scheduler."""
+    fleet = app.extensions.get("fleet", {})
+    scheduler = fleet.get("services", {}).get("platform_run_scheduler")
+    if scheduler is None:
+        raise RuntimeError("platform worker scheduler is disabled")
+    if interval_s is not None:
+        scheduler.interval_s = max(0.1, min(60.0, float(interval_s)))
+    return scheduler.start(stop_event=stop_event)

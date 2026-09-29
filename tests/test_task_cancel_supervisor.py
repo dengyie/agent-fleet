@@ -59,7 +59,10 @@ def _session_repo(path):
 
 
 def _start_managed_session(session_repo, machine, attempt_id, session_id=None):
-    session_id = session_id or f"sess_{machine}_test"
+    # A session is a single supervisor attempt. Reusing one id across the
+    # receipt-outcome loop would intentionally violate the repository's
+    # immutable attempt binding and mask the stale-event guard.
+    session_id = session_id or f"sess_{machine}_{attempt_id}"
     session_repo.upsert_session({
         "session_id": session_id,
         "machine_id": machine,

@@ -40,6 +40,7 @@ _AF_TOKEN_HEADER = "X-Agent-Fleet-Token"
 _RUNNER_CREDENTIAL_HEADER = "X-Runner-Credential"
 _CF_EMAIL_HEADER = "Cf-Access-Authenticated-User-Email"
 _SUPERVISOR_CREDENTIAL_HEADER = "X-Supervisor-Credential"
+_PLATFORM_NODE_CREDENTIAL_HEADER = "X-Platform-Node-Credential"
 
 #: 其他认证域的凭据头。携带这些头的请求，即使配置了 DEV_OPERATOR 也不回退成 operator 身份，
 #: 否则 runner 凭据或 ingest token 可冒充 operator 调用任务 API。蓝图边界 = 认证边界。
@@ -47,6 +48,7 @@ _FOREIGN_IDENTITY_HEADERS = (
     _AF_TOKEN_HEADER,
     _RUNNER_CREDENTIAL_HEADER,
     _SUPERVISOR_CREDENTIAL_HEADER,
+    _PLATFORM_NODE_CREDENTIAL_HEADER,
 )
 
 
@@ -111,6 +113,39 @@ def load_supervisor_signing_key():
     return None
 
 
+def load_platform_command_signing_key():
+    """Load the distinct Hub key used for platform execution commands.
+
+    The command key deliberately has its own environment/file namespace so a
+    node cannot accidentally accept supervisor control-plane envelopes as
+    platform workspace commands.  Values are decoded but never returned in a
+    public response or included in an error string.
+    """
+    import base64 as _b64
+
+    def _decode(value):
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            raw = _b64.b64decode(value.strip(), validate=True)
+        except (ValueError, TypeError):
+            return None
+        return raw if len(raw) == 32 else None
+
+    env = os.environ.get("AGENT_FLEET_PLATFORM_COMMAND_SIGNING_KEY")
+    if env:
+        decoded = _decode(env)
+        if decoded is not None:
+            return decoded
+    try:
+        path = FLEET_HOME / "credentials" / "platform-command-signing.key"
+        if path.exists():
+            return _decode(path.read_text().strip())
+    except OSError:
+        return None
+    return None
+
+
 def extract_supervisor_identity(req=None) -> tuple[str, str] | None:
     """Extract a valid ``(machine, secret)`` from the supervisor credential
     header, or ``None``.
@@ -146,6 +181,44 @@ def require_supervisor(view):
     def wrapper(*args, **kwargs):
         identity = extract_supervisor_identity()
         if identity is None:
+            return _forbidden()
+        return view(*args, **kwargs)
+    return wrapper
+
+
+def extract_platform_node_identity(req=None) -> tuple[str, str] | None:
+    """Authenticate a platform node against the platform repository.
+
+    The header is ``<node_id>:<one-time-provisioned-secret>``. The secret is
+    never returned in the identity tuple or stored in Flask ``g``.
+    """
+    src = request if req is None else req
+    raw = src.headers.get(_PLATFORM_NODE_CREDENTIAL_HEADER, "")
+    node_id, sep, secret = raw.partition(":")
+    if not sep or not node_id or not secret or ":" in secret:
+        return None
+    if not MACHINE_RE.fullmatch(node_id):
+        return None
+    fleet = current_app.extensions.get("fleet", {})
+    repository = fleet.get("platform_repository")
+    if repository is None:
+        return None
+    try:
+        identity = repository.authenticate_node_credential(node_id, secret)
+    except Exception:
+        return None
+    if not identity:
+        return None
+    g.platform_node_id = identity["node_id"]
+    g.platform_node_owner = identity["owner_id"]
+    return identity["owner_id"], identity["node_id"]
+
+
+def require_platform_node(view):
+    """Platform node domain; never falls back to operator identity."""
+    @functools.wraps(view)
+    def wrapper(*args, **kwargs):
+        if extract_platform_node_identity() is None:
             return _forbidden()
         return view(*args, **kwargs)
     return wrapper

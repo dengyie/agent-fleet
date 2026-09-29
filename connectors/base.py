@@ -105,6 +105,12 @@ class JsonlConnector(BaseConnector):
             # 兼容脚本可能返回 error 字段的情况
             if "error" in result:
                 return result  # 直接传递脚本报告的错误
+            # The probe intentionally omits session fields when the agent's
+            # session directory is absent. Preserve that state so the public
+            # snapshot reports an absent agent instead of a false collector
+            # failure.
+            if result.get("installed") is False:
+                return result
             if "sessions" not in result:
                 raise ValueError("缺少 'sessions' 字段")
             return result

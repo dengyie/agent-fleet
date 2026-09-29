@@ -109,11 +109,23 @@ def test_zcode_script_cli_classified_via_second_argv_token():
         "/usr/bin/node",
         'node "F:/programe/ZCode/resources/glm/zcode.cjs" -p hi',
     ) == "zcode"
-    # 反斜杠分隔符同样命中（跨平台 basename 语义）
+    # 引号内含真实空格（"C:\Program Files\..."）：tokenize 必须尊重引号内
+    # 空白，不得在第一个空格处截断
     assert discovery.classify_family(
         "/usr/bin/node",
-        'node "F:\programe\ZCode\resources\glm\zcode.cjs" -p hi',
+        r'node "C:\Program Files\ZCode\resources\glm\zcode.cjs" -p hi',
     ) == "zcode"
+    # 反斜杠分隔符同样命中（跨平台 basename 语义）；raw string 避免无效转义
+    assert discovery.classify_family(
+        "/usr/bin/node",
+        r'node "F:\programe\ZCode\resources\glm\zcode.cjs" -p hi',
+    ) == "zcode"
+    # 未闭合引号宽容退化：不崩溃；退化方向是不识别而非误分类（尾部参数
+    # 会留在 token 里导致 basename 不精确命中，None 是安全答案）
+    assert discovery.classify_family(
+        "/usr/bin/node",
+        'node "/opt/cli/zcode.cjs -p hi',
+    ) is None
     # node 跑非家族脚本绝不误分类
     assert discovery.classify_family(
         "/usr/bin/node", "node /opt/server/app.cjs serve") is None

@@ -21,15 +21,30 @@ CURL="${CURL:-curl}"
 REQUIRED_PATHS=(
   index.html
   config.js
-  routes.js
-  api/client.js
-  api/contracts.js
-  realtime/sse.js
-  state/store.js
-  views/fleet.js
-  views/machine.js
-  views/task.js
-  styles/app.css
+  assets/app.js
+  assets/routes.js
+  assets/api/client.js
+  assets/api/contracts.js
+  assets/api/platform.js
+  assets/realtime/sse.js
+  assets/state/store.js
+  assets/views/fleet.js
+  assets/views/machine.js
+  assets/views/task.js
+  assets/views/session.js
+  assets/views/monitoring.js
+  assets/views/assistant.js
+  assets/views/assistant/panels.js
+  assets/styles/app.css
+  assets/shell/navigation.js
+  assets/shell/theme.js
+  assets/ui/UiIcon.js
+  assets/ui/ChatPromptInput.js
+  assets/ui/StreamMarkdown.js
+  assets/ui/ToolCallBadge.js
+  assets/ui/AutoScrollAnchor.js
+  assets/vendor/marked.js
+  assets/vendor/purify.js
 )
 
 # 与 tests/test_release_layout.py 相同的凭据红线：响应体不得含这些 header 名。
@@ -95,7 +110,7 @@ info "静态服务器就绪: $BASE (pid=$SERVER_PID)"
 # --- 拉取全部必需路径，断言 HTTP 200 + 响应体无凭据 header 名 ---
 for rel in "${REQUIRED_PATHS[@]}"; do
   code="$("$CURL" -s -o "$BODY_TMP" -w '%{http_code}' "$BASE/$rel")"
-  [ "$code" = 200 ] || fail "$rel 返回 $code（期望 200）"
+  [ "$code" = 200 ] || fail "$rel 返回 ${code}（期望 200）"
   for header in "${CREDENTIAL_HEADERS[@]}"; do
     if grep -qF "$header" "$BODY_TMP"; then
       fail "$rel 的响应体含凭据 header 名 '$header'"

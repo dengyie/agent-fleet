@@ -419,6 +419,24 @@ class SupervisorService:
         row = self._commands.get(command_id)
         return row.status if row else None
 
+    def receipt_status(self, command_id: str) -> dict:
+        """Return a bounded operator view of one command's current receipt."""
+        self._expire_stale()
+        row = self._commands.get(str(command_id or ""))
+        if row is None:
+            raise SupervisorServiceError("command_not_found", "", 404)
+        return {
+            "command_id": row.command_id,
+            "action": row.action,
+            "status": row.receipt_status or row.status,
+            "reason": row.receipt_reason or "",
+            "issued_at": _iso(row.issued_s),
+            "expires_at": _iso(row.expires_s),
+            "attempt_id": row.attempt_id,
+            "machine_id": row.machine,
+            "session_id": row.session_id,
+        }
+
     # ------------------------------------------------------------------
     # audit helpers
     # ------------------------------------------------------------------

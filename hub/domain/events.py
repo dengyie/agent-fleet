@@ -12,8 +12,8 @@ from typing import Protocol, runtime_checkable
 class EventRepository(Protocol):
     """Persistent event log used by the application event publisher."""
 
-    def append(self, event: dict) -> None:
-        """Persist one event."""
+    def append(self, event: dict) -> int | None:
+        """Persist one event and optionally return its durable sequence."""
         ...
 
     def read_recent(self, limit: int = 50) -> list[dict]:
@@ -22,4 +22,8 @@ class EventRepository(Protocol):
 
     def read_since(self, ts: float, limit: int = 200) -> list[dict]:
         """Return events with timestamps strictly greater than ``ts``."""
+        ...
+
+    def read_since_sequence(self, sequence: int, limit: int = 200) -> list[dict]:
+        """Return events with durable sequence strictly greater than cursor."""
         ...

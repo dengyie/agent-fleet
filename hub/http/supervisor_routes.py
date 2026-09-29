@@ -15,7 +15,7 @@ from hub.application.supervisor_service import (
     SupervisorService,
     SupervisorServiceError,
 )
-from hub.auth import require_supervisor
+from hub.auth import require_operator, require_supervisor
 from hub.http.errors import ApplicationError, error_response, get_request_id
 
 bp = Blueprint("supervisor", __name__)
@@ -73,6 +73,22 @@ def supervisor_receipts():
     try:
         receipt = _supervisor().receipt(
             command_id, status, reason, machine=machine)
+    except SupervisorServiceError as exc:
+        return error_response(ApplicationError(
+            code=exc.code, detail=exc.detail, status=exc.status))
+    return jsonify({
+        "ok": True,
+        "receipt": receipt,
+        "request_id": get_request_id(),
+    })
+
+
+@bp.route("/api/supervisor/receipts/<command_id>", methods=["GET"])
+@require_operator
+def supervisor_receipt_status(command_id):
+    """Operator read path for the receipt of a queued control command."""
+    try:
+        receipt = _supervisor().receipt_status(command_id)
     except SupervisorServiceError as exc:
         return error_response(ApplicationError(
             code=exc.code, detail=exc.detail, status=exc.status))

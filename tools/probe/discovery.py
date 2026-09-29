@@ -190,10 +190,40 @@ def _argv0(args: str) -> str:
     return args.split(None, 1)[0].strip()
 
 
+def _argv_tokens(args: str) -> list[str]:
+    """按空白切分 argv，但成对引号内的空白不切分（引号本身剥除）。
+
+    WMI/ps 采集的 cmdline 保留引号原样（``node "C:\\Program Files\\x.cjs"``
+    之类），朴素 whitespace split 会把含空格路径截断在第一个空格。未闭合
+    引号退化为「取到串尾」，与 cmd/POSIX 的宽容解析一致。
+    """
+    tokens: list[str] = []
+    i, n = 0, len(args)
+    while i < n:
+        while i < n and args[i].isspace():
+            i += 1
+        if i >= n:
+            break
+        if args[i] in ('"', "'"):
+            close = args.find(args[i], i + 1)
+            if close == -1:
+                tokens.append(args[i + 1:])
+                break
+            tokens.append(args[i + 1:close])
+            i = close + 1
+        else:
+            j = i
+            while j < n and not args[j].isspace():
+                j += 1
+            tokens.append(args[i:j])
+            i = j
+    return tokens
+
+
 def _argv1(args: str) -> str:
     """Second argv token (script path for interpreter-run CLIs like node)."""
-    parts = args.split(None, 2) if args else []
-    return parts[1].strip() if len(parts) > 1 else ""
+    tokens = _argv_tokens(args) if args else []
+    return tokens[1].strip() if len(tokens) > 1 else ""
 
 
 def _token_basename(token: str) -> str:

@@ -29,6 +29,26 @@ from pathlib import Path
 logger = logging.getLogger("gateway.run")
 
 
+def _proc_identity(pid: int) -> tuple[str, str, int] | None:
+    """Read bounded identity fields before touching a PID-file process."""
+    proc = Path("/proc") / str(pid)
+    try:
+        cmdline = " ".join(
+            part.decode("utf-8", "replace")
+            for part in (proc / "cmdline").read_bytes().split(b"\0")
+            if part
+        )
+        cwd = os.path.realpath(proc / "cwd")
+        uid_line = next(
+            line for line in (proc / "status").read_text().splitlines()
+            if line.startswith("Uid:")
+        )
+        uid = int(uid_line.split()[1])
+    except (OSError, StopIteration, ValueError, UnicodeError):
+        return None
+    return cmdline, cwd, uid
+
+
 class AgentFleetGuardian:
     """Health monitoring and auto-recovery for agent-fleet web service."""
 
@@ -73,6 +93,24 @@ class AgentFleetGuardian:
             f"max_restart_failures={max_restart_failures}"
         )
 
+    def process_matches(self, pid: int, *, require_api_only: bool = True) -> bool:
+        """Ensure a PID identifies this user's bounded web identity."""
+        identity = _proc_identity(pid)
+        if identity is None:
+            return False
+        cmdline, cwd, uid = identity
+        try:
+            expected_cwd = str(self.repo_root.resolve())
+            current_uid = os.getuid()
+        except (OSError, RuntimeError):
+            return False
+        return (
+            uid == current_uid
+            and cwd == expected_cwd
+            and "hub/web.py" in cmdline
+            and (not require_api_only or "--no-serve-frontend" in cmdline)
+        )
+
     async def check_health(self) -> int:
         """
         Check agent-fleet web service health.
@@ -90,7 +128,7 @@ class AgentFleetGuardian:
                 "%{http_code}",
                 "--max-time",
                 "5",
-                f"http://127.0.0.1:{self.web_port}/",
+                f"http://127.0.0.1:{self.web_port}/api/status",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -115,31 +153,36 @@ class AgentFleetGuardian:
             if self.web_pid_file.exists():
                 try:
                     old_pid = int(self.web_pid_file.read_text().strip())
-                    try:
-                        os.kill(old_pid, 0)  # Check if process exists
-                        logger.info(f"Killing old web process {old_pid}")
-                        os.kill(old_pid, signal.SIGTERM)
-                        await asyncio.sleep(2)
-
-                        # Force kill if still alive
+                    # A replaced release can have a different launch mode;
+                    # still require the same user, Hub command and cwd.
+                    if not self.process_matches(old_pid, require_api_only=False):
+                        logger.warning("Ignoring stale or mismatched web PID %s", old_pid)
+                        self.web_pid_file.unlink(missing_ok=True)
+                    else:
                         try:
-                            os.kill(old_pid, 0)
-                            logger.warning(f"Process {old_pid} still alive, sending SIGKILL")
-                            os.kill(old_pid, signal.SIGKILL)
-                            await asyncio.sleep(1)
-                        except ProcessLookupError:
-                            pass  # Process already dead
+                            os.kill(old_pid, 0)  # Check if process exists
+                            logger.info(f"Killing old web process {old_pid}")
+                            os.kill(old_pid, signal.SIGTERM)
+                            await asyncio.sleep(2)
 
-                        # Verify killed
-                        try:
-                            os.kill(old_pid, 0)
-                            logger.error(f"Failed to kill process {old_pid}")
-                            return False
-                        except ProcessLookupError:
-                            pass  # Success
+                            # Re-check identity before a force kill. A recycled
+                            # PID must never receive the signal.
+                            if self.process_matches(old_pid, require_api_only=False):
+                                logger.warning(
+                                    f"Process {old_pid} still alive, sending SIGKILL")
+                                os.kill(old_pid, signal.SIGKILL)
+                                await asyncio.sleep(1)
 
-                    except ProcessLookupError:
-                        logger.info(f"Old process {old_pid} already dead")
+                            # Verify killed
+                            try:
+                                os.kill(old_pid, 0)
+                                logger.error(f"Failed to kill process {old_pid}")
+                                return False
+                            except ProcessLookupError:
+                                pass  # Success
+
+                        except ProcessLookupError:
+                            logger.info(f"Old process {old_pid} already dead")
                 except (ValueError, OSError) as e:
                     logger.warning(f"Failed to read/kill old PID: {e}")
 
@@ -165,7 +208,7 @@ class AgentFleetGuardian:
                         self.web_host,
                         "--port",
                         str(self.web_port),
-                        "--frontend-cutover",
+                        "--no-serve-frontend",
                     ],
                     cwd=str(self.repo_root),
                     stdout=log_out,
@@ -183,6 +226,10 @@ class AgentFleetGuardian:
             await asyncio.sleep(2)
             try:
                 os.kill(new_pid, 0)  # Check if process still alive
+                if not self.process_matches(new_pid):
+                    logger.error("New web process identity check failed: PID %s", new_pid)
+                    self.web_pid_file.unlink(missing_ok=True)
+                    return False
                 logger.info(f"Web service verified running: PID {new_pid}")
                 return True
             except ProcessLookupError:

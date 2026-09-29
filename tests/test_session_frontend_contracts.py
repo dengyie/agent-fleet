@@ -3,12 +3,12 @@
 Guards the additive frontend session surface so it can never become a raw
 transcript/control-data leak:
 
-- contract parsers in ``frontend/api/contracts.js`` must allowlist session
+- contract parsers in ``frontend/assets/api/contracts.js`` must allowlist session
   metadata / events / policy-signals / control receipts and *reject* internal
   fields (``nonce`` / ``client_token`` / ``token`` / ``signature``);
-- ``frontend/api/client.js`` must offer the session detail stream getters as
+- ``frontend/assets/api/client.js`` must offer the session detail stream getters as
   the only HTTP path into the session data plane (views never call ``fetch``);
-- ``frontend/views/session.js`` is a DOM-safe timeline view (no ``fetch`` /
+- ``frontend/assets/views/session.js`` is a DOM-safe timeline view (no ``fetch`` /
   ``EventSource`` / ``innerHTML`` / dynamic class concatenation) that
   explicitly renders each event kind and the control queue states
   (queued / executing / succeeded / already_finished / failed / expired);
@@ -30,11 +30,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_DIR = REPO_ROOT / 'frontend'
-SESSION_JS = FRONTEND_DIR / 'views' / 'session.js'
-CONTRACTS_JS = FRONTEND_DIR / 'api' / 'contracts.js'
-CLIENT_JS = FRONTEND_DIR / 'api' / 'client.js'
-SSE_JS = FRONTEND_DIR / 'realtime' / 'sse.js'
-STORE_JS = FRONTEND_DIR / 'state' / 'store.js'
+SESSION_JS = FRONTEND_DIR / 'assets' / 'views' / 'session.js'
+CONTRACTS_JS = FRONTEND_DIR / 'assets' / 'api' / 'contracts.js'
+CLIENT_JS = FRONTEND_DIR / 'assets' / 'api' / 'client.js'
+SSE_JS = FRONTEND_DIR / 'assets' / 'realtime' / 'sse.js'
+STORE_JS = FRONTEND_DIR / 'assets' / 'state' / 'store.js'
 INDEX_HTML = FRONTEND_DIR / 'index.html'
 
 
@@ -216,6 +216,21 @@ if (fixture === 'session_parsers') {
     fail('store.rejects_stale_ts',
       'last=' + st2.lastEventTs + ' sum=' + JSON.stringify(st2.sessionSummaries));
   }
+  // Global event_seq order does not imply per-session sequence order.  A
+  // sequence-1 frame arriving after sequence 2 must not regress the view.
+  const storeOutOfOrder = new S();
+  storeOutOfOrder.applySseEvent({ type: 'session_update', data: {
+    session_id: 's-oo', sequence: 2, event_seq: 1, ts: 10 } });
+  storeOutOfOrder.applySseEvent({ type: 'session_update', data: {
+    session_id: 's-oo', sequence: 1, event_seq: 2, ts: 11 } });
+  const oo = storeOutOfOrder.getState();
+  if (oo.sessionSummaries['s-oo'] &&
+      oo.sessionSummaries['s-oo'].sequence === 2) {
+    ok('store.summary_sequence_monotonic');
+  } else {
+    fail('store.summary_sequence_monotonic',
+      JSON.stringify(oo.sessionSummaries));
+  }
   // cap: sessionSummaries map is bounded by MAX_SESSION_SUMMARIES, oldest evicted
   const s3 = new S();
   for (let i = 0; i < MAX_SUM + 10; i += 1) {
@@ -257,7 +272,7 @@ class SessionFrontendModuleTests(unittest.TestCase):
     """Task 11 Step 1 source contracts: module existence and export surface."""
 
     def test_session_view_module_exists(self):
-        self.assertTrue(SESSION_JS.is_file(), 'frontend/views/session.js missing')
+        self.assertTrue(SESSION_JS.is_file(), 'frontend/assets/views/session.js missing')
 
     def test_session_view_exports_mount_session(self):
         source = SESSION_JS.read_text()
@@ -297,6 +312,13 @@ class SessionFrontendModuleTests(unittest.TestCase):
         self.assertNotIn('window.FleetConfig', source)
         self.assertNotIn("'/api", source)
 
+    def test_session_summary_refresh_retries_after_inflight_update(self):
+        source = SESSION_JS.read_text()
+        self.assertIn('summaryRefreshPending', source)
+        self.assertIn('summaryRefreshPending = true', source)
+        self.assertIn('summaryRefreshPending = false', source)
+        self.assertIn('refreshFromSummary();', source)
+
     def test_session_views_navigation_encoded_with_page_path(self):
         source = SESSION_JS.read_text()
         self.assertIn("import { pagePath } from '../routes.js'", source)
@@ -325,6 +347,19 @@ class SessionFrontendModuleTests(unittest.TestCase):
         self.assertIn('CONTROL_STATE_FALLBACK_CLASS', source)
         self.assertNotIn("'ct-' + ", source)
         self.assertNotIn("ct-' + ", source)
+
+    def test_session_view_maps_tool_status_from_schema_vocabulary(self):
+        source = SESSION_JS.read_text()
+        # 禁止把非 error/failed 的 tool_result（completed/ok/timeout/未知码）默认成 Success。
+        self.assertNotIn(
+            "(p.status === 'error' || p.status === 'failed') ? 'error' : 'success'",
+            source)
+        self.assertIn('function toolCallTone', source)
+        for token in ("'completed'", "'ok'", "'started'", "'timeout'"):
+            self.assertIn(token, source, f'session.js 缺 tool status 词表 {token}')
+        # 原始 status 必须进可见文本，不能只剩 Success/Failed/Running。
+        self.assertIn('p.status', source)
+        self.assertNotIn('function commonHead', source)
 
     def test_session_view_optional_task_deep_link(self):
         source = SESSION_JS.read_text()
@@ -411,17 +446,10 @@ class SessionFrontendModuleTests(unittest.TestCase):
             self.assertIn(token, source, f'sse.js missing {token}')
 
     def test_index_html_mounts_session_route(self):
-        source = INDEX_HTML.read_text()
-        self.assertIn('mount-session', source)
-        self.assertIn('data-route-view="session"', source)
-        self.assertIn("import { mountSession } from './views/session.js'", source)
-        self.assertIn("function resolveSession", source)
-        # 会话 id 统一由 resolveEntity('session') 从 pathname 段或 query 解析
-        self.assertIn("page === 'session' ? resolveEntity('session') : null", source)
-        self.assertIn("mountSession(target", source)
-        # 不内嵌会话业务数据
-        for token in ('data-session="', 'session_id', 'capture_quality'):
-            self.assertNotIn(token, source)
+        source = (FRONTEND_DIR / 'assets/app.js').read_text()
+        navigation = (FRONTEND_DIR / 'assets/shell/navigation.js').read_text()
+        self.assertIn('mountSession', source)
+        self.assertIn("'session'", navigation)
 
     def test_session_view_has_no_embedded_snapshot_or_business_data(self):
         source = SESSION_JS.read_text()

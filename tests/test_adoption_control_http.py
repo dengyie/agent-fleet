@@ -336,9 +336,12 @@ def test_phase45_actions_enqueue_when_enabled(tmp_path):
         body = turn.get_json()
         assert body["action"] == "append_user_turn"
         assert body["status"] == "pending"
-        joined = " ".join(str(v) for v in body.values())
-        assert str(DEFAULT_PID) not in joined
-        assert "SIGKILL" not in joined
+        assert "pid" not in body
+        assert "signal" not in body
+        assert set(body) == {
+            "ok", "command_id", "session_id", "action", "status",
+            "request_id",
+        }
 
         profile = client.post(
             f"{PATH}/{session_id}/source/control",

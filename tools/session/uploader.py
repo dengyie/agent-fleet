@@ -151,6 +151,7 @@ class SessionUploader:
         return {}
 
     def _apply_response(self, payload: dict, response: Mapping) -> int:
+        pending = payload.get("events", [])
         accepted_through = response.get("accepted_through")
         ok = response.get("ok", True)
         if accepted_through is None or ok is False:
@@ -160,10 +161,15 @@ class SessionUploader:
         try:
             accepted = int(accepted_through)
         except (TypeError, ValueError):
+            self.last_error = "invalid_ack_cursor"
             return 0
         ack_before = self._spool.status()["ack_sequence"]
         if accepted > ack_before:
-            self._spool.ack(accepted)
+            effective = self._validated_prefix_end(pending, ack_before, accepted)
+            if effective is None:
+                self.last_error = "invalid_ack_prefix"
+                return 0
+            self._spool.ack(effective)
             self._next_cursor = self._safe_cursor(response.get("next_cursor"))
             # The true newly-acked count is the durable delta measured AFTER
             # the spool clamps (ack beyond the last durable record is
@@ -172,6 +178,32 @@ class SessionUploader:
             # newly-acked delta, never the whole batch length.
             return self._spool.status()["ack_sequence"] - ack_before
         return 0
+
+    @staticmethod
+    def _validated_prefix_end(pending: list, ack_before: int,
+                              accepted: int) -> int | None:
+        """Accept only an ACK that names a contiguous submitted prefix.
+
+        A server response may be ahead of the local batch because a retry was
+        already durably accepted; clamp that value to the largest submitted
+        sequence, then require the batch order to contain every sequence from
+        the local cursor through the effective endpoint.
+        """
+        sequences: list[int] = []
+        for event in pending:
+            try:
+                sequences.append(int(event["sequence"]))
+            except (KeyError, TypeError, ValueError):
+                return None
+        if accepted <= ack_before:
+            return ack_before
+        if not sequences:
+            return None
+        effective = min(accepted, max(sequences))
+        expected = list(range(ack_before + 1, effective + 1))
+        if not expected or sequences[:len(expected)] != expected:
+            return None
+        return effective
 
     @staticmethod
     def _safe_cursor(value: Any) -> str | None:

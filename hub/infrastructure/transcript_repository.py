@@ -491,13 +491,40 @@ class TranscriptRepository:
                 "session_id": row["session_id"],
                 "stream_id": row["stream_id"],
                 "machine_id": row["machine_id"],
-                "sequence": int(row["sequence"]),
+                # Keep the SQLite scalar intact.  The application DTO boundary
+                # validates the sequence and can degrade a corrupt row to a
+                # bounded skeleton instead of turning one bad row into a 503.
+                "sequence": row["sequence"],
                 "kind": row["kind"],
                 "capture_quality": row["capture_quality"],
                 "emitted_at": row["emitted_at"],
                 "payload": payload,
             })
         return out
+
+    def contiguous_sequence(self, session_id: str, start: int = 0) -> int:
+        """Return the highest contiguous durable sequence after start."""
+        self._validate_session_id(session_id)
+        try:
+            cursor = max(0, int(start))
+        except (TypeError, ValueError):
+            cursor = 0
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT sequence FROM redacted_events WHERE session_id=?"
+                " AND sequence>? ORDER BY sequence ASC",
+                (session_id, cursor),
+            )
+            for row in rows:
+                sequence = int(row["sequence"])
+                if sequence == cursor + 1:
+                    cursor = sequence
+                elif sequence > cursor + 1:
+                    break
+        finally:
+            conn.close()
+        return cursor
 
     # -- raw read --------------------------------------------------------------------
 

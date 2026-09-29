@@ -48,6 +48,12 @@ def _query_limit(default: int = 100) -> int:
     return max(1, min(limit, _MAX_QUERY_LIMIT))
 
 
+def _query_bool(name: str) -> bool:
+    return str(request.args.get(name, "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 @bp.route("/api/session-events", methods=["POST"])
 @require_ingest_token
 def api_session_events():
@@ -75,7 +81,7 @@ def api_sessions():
     try:
         result = _sessions().list_sessions(
             machine=request.args.get("machine") or None,
-            limit=_query_limit())
+            limit=_query_limit(), active=_query_bool("active"))
     except SessionServiceError as exc:
         return _session_error(exc)
     return jsonify(result)

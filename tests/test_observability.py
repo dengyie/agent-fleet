@@ -253,6 +253,44 @@ class SseStreamTests(unittest.TestCase):
         self.assertIn("echo 中文日志", text)
         self.assertIn("event: machine_update", text)
 
+    def test_stream_replays_same_timestamp_events_by_sequence(self):
+        publisher = self.app.extensions["fleet"]["publisher"]
+        with self.app.app_context(), mock.patch(
+                "hub.application.event_publisher.time.time", return_value=123.0):
+            publisher.emit("alert", machine="hk", changes=["one"])
+            publisher.emit("alert", machine="hk", changes=["two"])
+        response = self.app.test_client().get(
+            "/api/stream?since=1", buffered=False)
+        body = b""
+        try:
+            for chunk in response.response:
+                body += chunk
+                if body.count(b"event: fleet_event") >= 1:
+                    # The replay generator may yield the first frame and then
+                    # wait for live input; the second frame must already be in
+                    # the same bounded response iterator before keepalive.
+                    if b'"event_seq": 2' in body:
+                        break
+        finally:
+            response.close()
+        text = body.decode()
+        self.assertIn('"event_seq": 2', text)
+        self.assertIn('"changes": ["two"]', text)
+        self.assertNotIn('"changes": ["one"]', text)
+
+    def test_stream_closes_after_queue_gap_for_reconnect(self):
+        publisher = self.app.extensions["fleet"]["publisher"]
+        response = self.app.test_client().get("/api/stream", buffered=False)
+        try:
+            self.assertIn(b"connected", next(response.response))
+            for index in range(201):
+                publisher.emit("alert", machine="hk", changes=[str(index)])
+            with self.assertRaises(StopIteration):
+                while True:
+                    next(response.response)
+        finally:
+            response.close()
+
 
 class EventPersistFailureIsolationTests(unittest.TestCase):
     """Task 11: event persistence is best effort; live subscribers remain fed."""
@@ -418,42 +456,6 @@ class EventReadFailureIsolationTests(unittest.TestCase):
         self.assertIn('"machine": "hk"', text)
 
 
-class PageViewTests(unittest.TestCase):
-    def setUp(self):
-        self.temp_dir = Path(tempfile.mkdtemp())
-        self.old_state_dir = store.STATE_DIR
-        self.old_event_log = events.EVENT_LOG
-        store.STATE_DIR = self.temp_dir
-        events.EVENT_LOG = self.temp_dir / "events.jsonl"
-        from hub import web
-        self.client = web.make_app(ingest_token="secret").test_client()
-
-    def tearDown(self):
-        store.STATE_DIR = self.old_state_dir
-        events.EVENT_LOG = self.old_event_log
-
-    def test_fleet_page_uses_template_and_static_assets(self):
-        store.save_snapshot("hk", {"machine": "hk", "source": "ingest",
-                                   "reachable": True, "agents": {}, "system": {}})
-        html = self.client.get("/").get_data(as_text=True)
-        self.assertIn('data-page="fleet"', html)
-        self.assertIn('static/style.css', html)
-        self.assertIn('static/app.js', html)
-        self.assertIn('data-machine="hk"', html)
-        self.assertNotIn("render_template_string", html)
-
-    def test_machine_page(self):
-        store.save_snapshot("hk", {"machine": "hk", "source": "ingest",
-                                   "reachable": True,
-                                   "agents": {"codex": {"installed": True, "active_count": 1}},
-                                   "system": {"platform": "linux", "load": "0.5"}})
-        resp = self.client.get("/machine/hk")
-        self.assertEqual(resp.status_code, 200)
-        html = resp.get_data(as_text=True)
-        self.assertIn('data-page="machine"', html)
-        self.assertIn('data-machine="hk"', html)
-        self.assertIn("codex", html)
-        self.assertEqual(self.client.get("/machine/ghost").status_code, 404)
 
 
 class MachineDetailDisclosureTests(unittest.TestCase):

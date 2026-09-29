@@ -42,6 +42,12 @@ _FAMILY_REJECT_MARKERS = ("/", "\\", "token", "key", "secret", "private", "passw
 _KNOWN_STATUS = frozenset({
     "unknown", "running", "paused", "closed", "failed", "idle",
 })
+_ACTIVE_STATUSES = ("unknown", "running", "paused")
+_QUALITY_RANK = {
+    "exact": 0,
+    "structured": 1,
+    "best_effort": 2,
+}
 
 
 class SessionError(RuntimeError):
@@ -200,7 +206,7 @@ class SessionRepository:
         return {
             "session_id": str(row.get("session_id") or ""),
             "machine_id": str(row.get("machine_id") or ""),
-            "managed": bool(row.get("managed")),
+            "managed": normalize_managed(row.get("managed")),
             "capture_quality": quality,
             "status": status,
             "process_group_id": row.get("process_group_id"),
@@ -238,12 +244,12 @@ class SessionRepository:
         machine_id = spec.get("machine_id")
         if not is_valid_session_id(session_id):
             raise SessionError("invalid_session_spec")
-        if not isinstance(machine_id, str) or not machine_id:
+        if not is_valid_session_id(machine_id):
             raise SessionError("invalid_session_spec")
 
         managed = normalize_managed(spec.get("managed", False))
         process_group_id = spec.get("process_group_id")
-        if process_group_id is not None and not isinstance(process_group_id, str):
+        if process_group_id is not None and not is_valid_session_id(process_group_id):
             raise SessionError("invalid_session_spec")
         if managed and not process_group_id:
             raise SessionError("invalid_session_spec")
@@ -264,6 +270,8 @@ class SessionRepository:
             clean["process_group_id"] = process_group_id
         if managed:
             attempt_id = spec.get("attempt_id")
+            if attempt_id is not None and not is_valid_session_id(attempt_id):
+                raise SessionError("invalid_session_spec")
             if isinstance(attempt_id, str) and attempt_id:
                 clean["attempt_id"] = attempt_id
 
@@ -287,6 +295,49 @@ class SessionRepository:
         now = _now_iso()
         conn = self._connect()
         try:
+            # Session identity is a binding, not ordinary mutable telemetry.
+            # Serialize the read/merge/write so a sparse or stale event cannot
+            # revoke a managed binding or move a session between machines.
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT machine_id, managed, capture_quality,"
+                " process_group_id, attempt_id, agent_family"
+                " FROM sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+            if existing is not None:
+                if (existing["machine_id"]
+                        and existing["machine_id"] != clean["machine_id"]):
+                    raise SessionError("session_binding_mismatch")
+                existing_group = existing["process_group_id"]
+                incoming_group = clean.get("process_group_id")
+                if (existing_group and incoming_group
+                        and existing_group != incoming_group):
+                    raise SessionError("session_binding_mismatch")
+                existing_attempt = existing["attempt_id"]
+                incoming_attempt = clean.get("attempt_id")
+                if (existing_attempt and incoming_attempt
+                        and existing_attempt != incoming_attempt):
+                    raise SessionError("session_binding_mismatch")
+
+                # Once a session is managed, ordinary telemetry may omit its
+                # binding but can never silently downgrade it.  Capture quality
+                # is similarly monotonic toward best_effort.
+                clean["managed"] = bool(
+                    existing["managed"] or clean["managed"])
+                if existing_group:
+                    clean["process_group_id"] = existing_group
+                if existing_attempt:
+                    clean["attempt_id"] = existing_attempt
+                existing_family = existing["agent_family"]
+                if existing_family:
+                    clean["agent_family"] = existing_family
+                old_quality = existing["capture_quality"]
+                if old_quality not in _QUALITY_RANK:
+                    old_quality = "best_effort"
+                if (_QUALITY_RANK.get(clean["capture_quality"], 2)
+                        < _QUALITY_RANK[old_quality]):
+                    clean["capture_quality"] = old_quality
+
             conn.execute(
                 "INSERT INTO sessions (session_id, machine_id, managed,"
                 " capture_quality, status, started_at, updated_at,"
@@ -299,7 +350,12 @@ class SessionRepository:
                 " updated_at=excluded.updated_at,"
                 " process_group_id=excluded.process_group_id,"
                 " attempt_id=excluded.attempt_id,"
-                " agent_family=excluded.agent_family",
+                " agent_family=excluded.agent_family,"
+                " status = CASE WHEN sessions.status IN ('closed','failed')"
+                " THEN sessions.status ELSE 'running' END,"
+                " started_at = COALESCE(sessions.started_at, excluded.started_at),"
+                " finished_at = CASE WHEN sessions.status IN ('closed','failed')"
+                " THEN sessions.finished_at ELSE NULL END",
                 (session_id, clean["machine_id"], 1 if clean["managed"] else 0,
                  clean["capture_quality"], "running", now, now,
                  clean.get("process_group_id"), clean.get("attempt_id"),
@@ -308,9 +364,44 @@ class SessionRepository:
             row = conn.execute(
                 "SELECT * FROM sessions WHERE session_id=?", (session_id,)
             ).fetchone()
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
         finally:
             conn.close()
         return self._clean_row(row)
+
+    def close_session(self, session_id: str, status: str,
+                      finished_at: str) -> dict[str, Any] | None:
+        """Move a session to a terminal state exactly once.
+
+        Terminal states are monotonic: late metadata cannot reopen them, and
+        a later closed event cannot overwrite failed.
+        """
+        self._validate_session_id(session_id)
+        if status not in ("closed", "failed"):
+            raise SessionError("invalid_session_status")
+        if not isinstance(finished_at, str) or not finished_at:
+            raise SessionError("invalid_finished_at")
+        conn = self._connect()
+        try:
+            conn.execute(
+                "UPDATE sessions SET status = CASE"
+                " WHEN status='failed' THEN 'failed'"
+                " WHEN status='closed' THEN 'closed'"
+                " ELSE ? END, finished_at = CASE"
+                " WHEN status IN ('closed','failed') THEN finished_at"
+                " ELSE ? END, updated_at=? WHERE session_id=?",
+                (status, finished_at, finished_at, session_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM sessions WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return self._clean_row(row) if row is not None else None
 
     def upsert(self, spec: Mapping[str, Any]) -> dict[str, Any]:
         """Alias for :meth:`upsert_session`."""
@@ -330,12 +421,25 @@ class SessionRepository:
 
     def list_sessions(
         self, machine_id: str | None = None, limit: int = 100,
+        active_only: bool = False,
     ) -> list[dict[str, Any]]:
         sql = "SELECT * FROM sessions"
         params: list[Any] = []
+        predicates = []
         if machine_id:
-            sql += " WHERE machine_id=?"
+            predicates.append("machine_id=?")
             params.append(machine_id)
+        if active_only:
+            # Normal active states are explicit.  NULL/unknown future values
+            # remain visible and are normalized to ``unknown`` by _clean_row;
+            # only the known terminal/idle states are excluded.
+            predicates.append(
+                "(status IN (?,?,?) OR status IS NULL OR "
+                "status NOT IN (?,?,?,?,?,?))")
+            params.extend(_ACTIVE_STATUSES)
+            params.extend(sorted(_KNOWN_STATUS))
+        if predicates:
+            sql += " WHERE " + " AND ".join(predicates)
         try:
             bounded = max(1, min(int(limit), 1000))
         except (TypeError, ValueError):
@@ -379,15 +483,19 @@ class SessionRepository:
             conn.close()
         if row is None or row["last_sequence"] is None:
             return 0
-        return int(row["last_sequence"])
+        try:
+            return max(0, int(row["last_sequence"]))
+        except (TypeError, ValueError, OverflowError):
+            return 0
 
     def note_event(self, session_id: str, event_id: str, sequence: int,
                    kind: str) -> None:
         self._validate_session_id(session_id)
-        try:
-            seq = int(sequence)
-        except (TypeError, ValueError):
+        if isinstance(sequence, bool) or not isinstance(sequence, int):
             raise SessionError("invalid_event_sequence") from None
+        seq = sequence
+        if seq < 1:
+            raise SessionError("invalid_event_sequence")
         conn = self._connect()
         try:
             conn.execute(
@@ -405,23 +513,51 @@ class SessionRepository:
     def acknowledge(self, session_id: str, n: int) -> None:
         """Durable - but clamped - ack; never advances ``last_sequence``."""
         self._validate_session_id(session_id)
-        try:
-            ack = int(n)
-        except (TypeError, ValueError):
+        if isinstance(n, bool) or not isinstance(n, int):
             raise SessionError("invalid_ack_sequence") from None
+        ack = n
+        if ack < 0:
+            raise SessionError("invalid_ack_sequence")
         conn = self._connect()
         try:
+            # Materialise the stream row first so an ACK for an unknown or
+            # not-yet-observed session is recorded as zero, never as a
+            # cursor that the durable stream has not reached.  The UPDATE
+            # clamps both the requested value and any legacy invalid value
+            # against last_sequence while retaining monotonic advancement.
             conn.execute(
-                "INSERT INTO stream_state (session_id, last_sequence,"
-                " ack_sequence) VALUES (?, 0, ?)"
-                " ON CONFLICT(session_id) DO UPDATE SET"
-                " ack_sequence = CASE WHEN excluded.ack_sequence"
-                " > stream_state.ack_sequence"
-                " THEN excluded.ack_sequence"
-                " ELSE stream_state.ack_sequence END",
-                (session_id, ack))
+                "INSERT OR IGNORE INTO stream_state"
+                " (session_id, last_sequence, ack_sequence)"
+                " VALUES (?, 0, 0)", (session_id,))
+            conn.execute(
+                "UPDATE stream_state SET ack_sequence = CASE"
+                " WHEN ack_sequence > last_sequence THEN last_sequence"
+                " WHEN MIN(?, last_sequence) > ack_sequence"
+                " THEN MIN(?, last_sequence)"
+                " ELSE ack_sequence END WHERE session_id=?",
+                (ack, ack, session_id))
         finally:
             conn.close()
+
+    def ack_cursor(self, session_id: str) -> int:
+        """Return the durable contiguous uploader ACK cursor."""
+        self._validate_session_id(session_id)
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT MAX(0, MIN(COALESCE(ack_sequence, 0),"
+                " COALESCE(last_sequence, 0))) AS ack_sequence"
+                " FROM stream_state WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None or row["ack_sequence"] is None:
+            return 0
+        try:
+            return max(0, int(row["ack_sequence"]))
+        except (TypeError, ValueError, OverflowError):
+            return 0
 
     # -- event dedupe -------------------------------------------------------------------
 

@@ -39,7 +39,7 @@ MACHINE="smoke-$(( $$ % 1000 ))"
 if [ -z "$ENDPOINT" ]; then
   # --- 本地模式：临时目录跑仓库副本，不污染真实 state/credentials ---
   mkdir -p "$WORK/state" "$WORK/credentials"
-  cp -r hub tools connectors report_schema.py requirements.txt "$WORK/"
+  cp -r hub tools connectors frontend agent_profiles.py report_schema.py session_schema.py platform_schema.py requirements.txt "$WORK/"
   # 隔离的白名单 hosts.yaml：仅冒烟机器 + projects: [demo]
   cat > "$WORK/hosts.yaml" <<EOF
 hosts:
@@ -177,8 +177,8 @@ info "6. SSE 连接 ✓"
 PACKAGE_DIR="$WORK/frontend-release"
 bash deploy/package-frontend-release.sh "$PACKAGE_DIR" "smoke-$(( $$ % 1000 ))" >/dev/null \
   || fail "前端静态打包失败"
-for rel in index.html config.js api/client.js realtime/sse.js \
-           views/fleet.js views/machine.js views/task.js; do
+for rel in index.html config.js assets/api/client.js assets/realtime/sse.js \
+           assets/views/fleet.js assets/views/machine.js assets/views/task.js; do
   [ -f "$PACKAGE_DIR/$rel" ] || fail "前端 release 缺模块: $rel"
 done
 info "6a. 前端静态包含 index/config/client/SSE/视图模块 ✓"
@@ -206,7 +206,7 @@ cfg = FleetConfig(
     task_db=root / "state" / "fleet.db",
     ingest_token="",                            # 空 token 仅作开箱断言，不设生产状态
     tasks_enabled=False,
-    frontend_cutover=False,
+    serve_frontend=False,
     frontend_dir=fake_frontend,                 # 后端启动不读取任何前端文件
 )
 app = create_app(cfg)
@@ -239,7 +239,7 @@ cfg = FleetConfig(
     task_db=root / "state" / "fleet_tasks.db",
     ingest_token="",
     tasks_enabled=False,
-    frontend_cutover=False,
+    serve_frontend=False,
     frontend_dir=root / "no-such-frontend",
     session_repositories_enabled=True,
     session_db=root / "var" / "sessions" / "meta.db",

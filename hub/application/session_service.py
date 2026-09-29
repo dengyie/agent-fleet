@@ -5,8 +5,8 @@ transport-facing surface:
 
 - ``ingest_events`` validates a bounded event batch, durably persists valid
   events (per-event classification, never a lost valid event because a sibling
-  is malformed), upserts session metadata, advances per-session stream
-  cursors, and returns the ``accepted_through`` / ``next_cursor`` / per-event
+  is malformed), upserts session metadata, computes a contiguous ACK prefix,
+  and returns the ``accepted_through`` / ``next_cursor`` / per-event
   rejects the Session Bridge uploader consumes;
 - ``list_sessions`` / ``get_session`` / ``session_events`` /
   ``policy_signals`` form the operator query surface against the same
@@ -40,6 +40,7 @@ from hub.infrastructure.transcript_repository import TranscriptError
 
 DEFAULT_QUERY_LIMIT = 100
 _MAX_QUERY_LIMIT = 1000
+_MAX_SQLITE_SEQUENCE = (1 << 63) - 1
 
 
 class SessionServiceError(RuntimeError):
@@ -69,7 +70,10 @@ class SessionServiceError(RuntimeError):
 
 
 def _json_bytes(value) -> int:
-    return len(json.dumps(value, ensure_ascii=True))
+    try:
+        return len(json.dumps(value, ensure_ascii=True))
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise SessionServiceError("invalid_batch", "批次包含不可序列化内容") from exc
 
 
 def _bounded_limit(value, default: int = DEFAULT_QUERY_LIMIT) -> int:
@@ -83,9 +87,10 @@ def _bounded_limit(value, default: int = DEFAULT_QUERY_LIMIT) -> int:
 class SessionService:
     """Application service owning the session ingest + operator query use cases."""
 
-    def __init__(self, session_repo, transcript_repo) -> None:
+    def __init__(self, session_repo, transcript_repo, event_publisher=None) -> None:
         self.session_repo = session_repo
         self.transcript_repo = transcript_repo
+        self.event_publisher = event_publisher
 
     # -- write use case -----------------------------------------------------
 
@@ -108,9 +113,10 @@ class SessionService:
 
         accepted_through = 0
         stream_id: str | None = None
+        batch_key: tuple[str, str] | None = None
         rejected: list[dict] = []
-        acks: dict[str, int] = {}
-        _reject_occurred = False
+        accepted_sequences: dict[str, set[int]] = {}
+        stored_count = 0
 
         for index, raw in enumerate(events):
             if not isinstance(raw, Mapping):
@@ -122,6 +128,13 @@ class SessionService:
                 continue
 
             session_id = clean["session_id"]
+            current_key = (session_id, clean["stream_id"])
+            if batch_key is None:
+                batch_key = current_key
+                stream_id = clean.get("stream_id")
+            elif current_key != batch_key:
+                rejected.append({"index": index, "code": "mixed_stream"})
+                continue
             sequence = int(clean["sequence"])
             try:
                 self.session_repo.upsert_session(self._session_spec_from_event(clean))
@@ -132,15 +145,12 @@ class SessionService:
                 # Session-binding failures are per-event; the request continues.
                 rejected.append({"index": index, "code": "invalid_session_binding"})
                 continue
-            except sqlite3.Error as exc:
+            except (sqlite3.Error, OSError) as exc:
                 # Session-store unavailability (locked / read-only / corrupt)
                 # is a bounded store failure, isolated from the legacy
                 # observation ingest route — never an unhandled 500.
                 raise SessionServiceError(
                     "session_unavailable", "会话存储不可用，观测链路不受影响") from exc
-
-            if stream_id is None:
-                stream_id = clean.get("stream_id")
 
             try:
                 result = self.transcript_repo.ingest(clean)
@@ -150,35 +160,57 @@ class SessionService:
                 raise SessionServiceError(
                     "session_unavailable", "会话存储不可用，观测链路不受影响") from None
 
-            if result.status in ("accepted", "duplicate"):
-                if not _reject_occurred:
-                    accepted_through = max(accepted_through, sequence)
-                    acks[session_id] = max(acks.get(session_id, 0), sequence)
-            elif result.status == "gap" and result.reason != "raw_quota_exceeded":
-                # A sequence-gap is stored (redacted row is always written; the
-                # raw stream is best-effort) and is therefore acknowledged.
-                if not _reject_occurred:
-                    accepted_through = max(accepted_through, sequence)
-                    acks[session_id] = max(acks.get(session_id, 0), sequence)
+            stored = result.status in ("accepted", "duplicate") or (
+                result.status == "gap" and result.reason != "raw_quota_exceeded")
+            if stored:
+                stored_count += 1
+                accepted_sequences.setdefault(session_id, set()).add(sequence)
+                if clean.get("kind") == "session_close":
+                    self._close_session_from_event(clean)
+                if result.status != "duplicate":
+                    self._publish_session_summary(clean)
             else:
-                # ``gap`` + ``raw_quota_exceeded`` means the quota cap would be
-                # exceeded so the event is NOT stored at all — it is never
-                # acknowledged.  Stop advancing ``accepted_through`` so the
-                # uploader acknowledges only the contiguous prefix, preserving
-                # the un-stored event (and any later events) for retry.
-                _reject_occurred = True
                 rejected.append({"index": index,
                                  "code": result.reason or "rejected"})
 
-        for session_id, seq in acks.items():
+        if batch_key is not None and accepted_sequences:
+            session_id, _ = batch_key
+            cursor_reader = getattr(self.session_repo, "ack_cursor", None)
             try:
-                self.session_repo.acknowledge(session_id, seq)
-            except (SessionError, sqlite3.Error):
-                pass
+                cursor = int(cursor_reader(session_id)) if callable(cursor_reader) else 0
+            except (SessionError, sqlite3.Error, OSError) as exc:
+                raise SessionServiceError(
+                    "session_unavailable", "会话存储不可用，ACK 未提交") from exc
+            except (TypeError, ValueError) as exc:
+                raise SessionServiceError(
+                    "session_unavailable", "会话游标无效，ACK 未提交") from exc
+            contiguous_reader = getattr(self.transcript_repo,
+                                        "contiguous_sequence", None)
+            if callable(contiguous_reader):
+                try:
+                    cursor = int(contiguous_reader(session_id, cursor))
+                except (TranscriptError, sqlite3.Error, OSError) as exc:
+                    raise SessionServiceError(
+                        "session_unavailable", "会话存储不可用，ACK 未提交") from exc
+                except (TypeError, ValueError) as exc:
+                    raise SessionServiceError(
+                        "session_unavailable", "会话游标无效，ACK 未提交") from exc
+            else:
+                for sequence in sorted(accepted_sequences.get(session_id, ())):
+                    if sequence == cursor + 1:
+                        cursor = sequence
+                    elif sequence > cursor + 1:
+                        break
+            accepted_through = cursor
+            try:
+                self.session_repo.acknowledge(session_id, accepted_through)
+            except (SessionError, sqlite3.Error, OSError) as exc:
+                raise SessionServiceError(
+                    "session_unavailable", "会话存储不可用，ACK 未提交") from exc
 
-        if not rejected and accepted_through > 0:
+        if not rejected and stored_count > 0:
             status = "accepted"
-        elif accepted_through > 0:
+        elif stored_count > 0 or accepted_through > 0:
             status = "partial"
         else:
             status = "rejected"
@@ -191,6 +223,60 @@ class SessionService:
             "next_cursor": secrets.token_hex(16),
             "rejected": rejected,
         }
+
+    def _publish_session_summary(self, event: Mapping) -> None:
+        publisher = self.event_publisher
+        if publisher is None:
+            return
+        payload = event.get("payload")
+        status = "running"
+        if event.get("kind") == "session_close":
+            status = self._close_status(payload)
+        try:
+            current = self.session_repo.get_session(event["session_id"])
+            if isinstance(current, Mapping) and current.get("status"):
+                status = str(current["status"])
+        except Exception:
+            pass
+        try:
+            publisher.emit(
+                "session_update",
+                machine=event.get("machine_id"),
+                changes=["session"],
+                session_id=event.get("session_id"),
+                sequence=int(event.get("sequence") or 0),
+                cursor=int(event.get("sequence") or 0),
+                kind=event.get("kind"),
+                capture_quality=event.get("capture_quality"),
+                status=status,
+            )
+        except Exception:
+            # Optional observation fan-out cannot make transcript ingest fail.
+            return
+
+    @staticmethod
+    def _close_status(payload) -> str:
+        if isinstance(payload, Mapping):
+            raw_status = str(payload.get("status") or "").lower()
+            if raw_status in {"failed", "error", "cancelled", "aborted"}:
+                return "failed"
+            try:
+                if int(payload.get("exit_code")) != 0:
+                    return "failed"
+            except (TypeError, ValueError):
+                pass
+        return "closed"
+
+    def _close_session_from_event(self, event: Mapping) -> None:
+        close = getattr(self.session_repo, "close_session", None)
+        if not callable(close):
+            return
+        try:
+            close(event["session_id"], self._close_status(event.get("payload")),
+                  event["emitted_at"])
+        except (SessionError, sqlite3.Error, OSError) as exc:
+            raise SessionServiceError(
+                "session_unavailable", "会话存储不可用，会话状态未更新") from exc
 
     @staticmethod
     def _session_spec_from_event(event: dict) -> dict:
@@ -229,13 +315,17 @@ class SessionService:
         surface is exactly the session event allowlist; a corrupt row degrades
         to a bounded skeleton that never leaks a payload.
         """
+        sequence = row.get("sequence")
+        if (not isinstance(sequence, int) or isinstance(sequence, bool)
+                or not 1 <= sequence <= _MAX_SQLITE_SEQUENCE):
+            sequence = 0
         candidate: dict = {
             "schema_version": 1,
             "event_id": str(row.get("event_id") or ""),
             "stream_id": row.get("stream_id"),
             "machine_id": row.get("machine_id"),
             "session_id": str(row.get("session_id") or ""),
-            "sequence": int(row.get("sequence") or 0),
+            "sequence": sequence,
             "kind": str(row.get("kind") or ""),
             "capture_quality": str(row.get("capture_quality") or ""),
             "emitted_at": str(row.get("emitted_at") or ""),
@@ -258,11 +348,17 @@ class SessionService:
     # -- operator query use cases ----------------------------------------------
 
     def list_sessions(self, machine=None,
-                      limit: int = DEFAULT_QUERY_LIMIT) -> dict:
+                      limit: int = DEFAULT_QUERY_LIMIT,
+                      active: bool = False) -> dict:
         """List session metadata as bounded public DTOs."""
         try:
-            rows = self.session_repo.list_sessions(
-                machine_id=machine or None, limit=_bounded_limit(limit))
+            kwargs = {
+                "machine_id": machine or None,
+                "limit": _bounded_limit(limit),
+            }
+            if active:
+                kwargs["active_only"] = True
+            rows = self.session_repo.list_sessions(**kwargs)
         except SessionError as exc:
             raise SessionServiceError(exc.code) from None
         except Exception:

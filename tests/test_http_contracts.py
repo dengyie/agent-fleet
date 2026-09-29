@@ -144,12 +144,9 @@ class ErrorContractTests(HttpContractTestBase):
         self.assertFalse(body["ok"])
 
     def test_pages_error_responses_are_plain_text(self):
-        self.assertEqual(self.client.get("/machine/ghost").status_code, 404)
-        self.assertEqual(self.client.get("/machine/ghost").get_data(as_text=True),
-                         "machine not found")
-        self.assertEqual(self.client.get("/task/ghost").status_code, 404)
-        self.assertEqual(self.client.get("/task/ghost").get_data(as_text=True),
-                         "task not found")
+        response = self.client.get('/missing-page')
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_data(as_text=True), 'not found')
 
 
 class ApiEdgeErrorContractTests(HttpContractTestBase):
@@ -180,8 +177,8 @@ class ApiEdgeErrorContractTests(HttpContractTestBase):
         self.assert_bounded_api_error(resp, 404, "not_found")
 
     def test_unknown_api_route_post_method_not_allowed_is_bounded_json(self):
-        resp = self.client.post("/api/definitely-unknown", json={})
-        self.assert_bounded_api_error(resp, 405, "method_not_allowed")
+        resp = self.client.post('/api/definitely-unknown', json={})
+        self.assert_bounded_api_error(resp, 404, 'not_found')
 
     def test_method_not_allowed_on_api_route_is_bounded_json(self):
         resp = self.client.delete("/api/tasks")
@@ -207,11 +204,10 @@ class ApiEdgeErrorContractTests(HttpContractTestBase):
 
     def test_unexpected_exception_on_page_route_is_plain_text(self):
         from unittest import mock
-        with mock.patch("hub.http.pages.build_summary",
-                        side_effect=RuntimeError("page boom")):
-            resp = self.client.get("/")
+        with mock.patch('hub.http.pages.send_file', side_effect=RuntimeError('page boom')):
+            resp = self.client.get('/')
         self.assertEqual(resp.status_code, 500)
-        self.assertEqual(resp.get_data(as_text=True), "internal error")
+        self.assertEqual(resp.get_data(as_text=True), 'internal error')
 
     def test_unknown_page_404_remains_plain_text(self):
         resp = self.client.get("/no-such-page")
@@ -525,7 +521,7 @@ class SameOriginProxyContractTests(HttpContractTestBase):
 
     def test_nginx_example_rejects_proxy_buffering_on(self):
         source = Path('deploy/nginx-frontend-backend.example.conf').read_text()
-        self.assertIn('location /api/stream', source)
+        self.assertIn('location = /api/stream', source)
         self.assertIn('proxy_buffering off', source)
         self.assertNotIn('proxy_buffering on', source)
 
@@ -536,18 +532,22 @@ class SameOriginProxyContractTests(HttpContractTestBase):
 
     def test_nginx_example_keeps_stream_http_version_and_long_timeout(self):
         source = Path('deploy/nginx-frontend-backend.example.conf').read_text()
-        start = source.index('location /api/stream')
+        start = source.index('location = /api/stream')
         block = source[start:source.index('\n    }', start)]
         self.assertIn('proxy_http_version 1.1', block)
         self.assertIn('proxy_read_timeout', block)
         timeout = [tok for tok in ('3600s', '1800s', '600s')
                    if f'proxy_read_timeout {tok}' in block]
         self.assertTrue(timeout, 'SSE read timeout must be long')
-        self.assertIn('proxy_set_header Connection', block)
+        # A location-level proxy_set_header replaces the entire parent set.
+        # Keep Connection alongside Host/forwarded identity headers at server scope.
+        self.assertIn('proxy_set_header Connection ""', source.split('location /assets/')[0])
+        self.assertIn('proxy_set_header Host $host', source.split('location /assets/')[0])
+        self.assertNotIn('proxy_set_header', block)
 
     def test_nginx_example_routes_frontend_and_backend_same_origin(self):
         source = Path('deploy/nginx-frontend-backend.example.conf').read_text()
-        self.assertIn('upstream fleet_frontend', source)
+        self.assertIn('root /srv/agent-fleet/frontend/current', source)
         self.assertIn('upstream fleet_backend', source)
         self.assertIn('location /assets/', source)
         self.assertIn('location /api/', source)

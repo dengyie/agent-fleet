@@ -654,7 +654,7 @@ def public_session_dto(session: Mapping[str, Any]) -> dict[str, Any]:
         value = _public_id(session.get(field))
         if value:
             dto[field] = value[:64]
-    for field in ('started_at', 'updated_at'):
+    for field in ('started_at', 'updated_at', 'finished_at'):
         value = session.get(field)
         if _is_rfc3339(value):
             dto[field] = value

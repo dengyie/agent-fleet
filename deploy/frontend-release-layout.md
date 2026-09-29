@@ -1,108 +1,85 @@
 # Frontend Release Layout and Rollback
 
-独立静态前端 release 的布局、缓存、发布顺序与回滚契约。对应 Task 19。
-前端 release 与 backend release 是两个可独立构建、发布、回滚的发布产物；本文档不
-包含任何真实主机凭据、token 或部署秘密。
+前端和后端使用两个独立产物。控制台只有一个静态入口，不再保留 Flask 模板或另一套前端渲染器。
 
-## 1. Release 边界
+## 1. 架构与发布边界
 
 | Release | 内容 | 启动方式 |
 |---|---|---|
-| **frontend** | `frontend/` 静态文件 + `manifest.json` | 任意纯静态服务器（`python3 -m http.server`）或 Nginx `/` 静态 root |
-| **backend** | 仓库 Python 包 + `requirements.txt` | `.venv/bin/python hub/web.py`（JSON API / SSE / probe / runner） |
+| frontend | `index.html`、`config.js`、`assets/`、许可证与 `manifest.json` | Nginx 静态 root |
+| backend | Python 包、配置样例、`requirements.txt`；不包含 `frontend/` | `python hub/web.py --no-serve-frontend` |
 
-- 前端不依赖 backend 进程提供 HTML 或静态资源。
-- backend 启动 JSON API 不需要任何 `frontend/` 文件。
-- 浏览器同源：`/` 与 `/assets/*` 走前端 release，`/api/*` 走 backend release。
+浏览器保持同源：`/`、`/assets/*`、`/config.js` 走静态 release，`/api/*` 代理给 Hub；SSE 使用 `/api/stream`。沿用部署边缘的 operator 身份验证；操作员登录经受保护 API 验证，令牌只存当前浏览器会话、仅发送同源 API。机器和 runner 凭据只由后端处理，不写入前端配置。
 
-## 2. frontend/ 目录结构（release 文件集合）
+`hub/http/pages.py` 只提供可选静态托管，不读取业务状态、不注入 HTML 数据。完整源码下，默认 `serve_frontend=True`，本地运行即可预览；生产独立后端显式使用 `--no-serve-frontend`。需要 Flask 托管另一目录时，指定 `--serve-frontend --frontend-dir <release-directory>`。
+
+旧 `frontend_cutover` 配置和 `--frontend-cutover` 参数已经删除。升级启动配置时必须同步替换；删除前端目录不会恢复旧 SSR 页面。生产安装脚本和守护进程统一启动 API-only 服务，并通过 `/api/status` 检查健康，避免首页 404 引发重启循环。
+
+## 2. 前端目录与代码职责
 
 ```text
 frontend/
-  index.html
-  config.js
-  routes.js
-  api/
-    client.js
-    contracts.js
-  realtime/
-    sse.js
-  state/
-    store.js
-  views/
-    fleet.js
-    machine.js
-    task.js
-  styles/
-    app.css
+  index.html                    # 静态文档，固定 base href=/
+  config.js                     # 公开 API 基址，无凭据
+  THIRD_PARTY.md                 # 组件来源和本地修改
+  assets/
+    app.js                      # 组合 client/store/SSE，装配并销毁页面
+    routes.js                   # 页面/API 路径与共享图标适配
+    api/{client,contracts,platform}.js
+    realtime/sse.js              # 重连、游标回放、去重
+    state/store.js              # 有界客户端投影
+    shell/{navigation,theme}.js  # 导航、移动抽屉、主题
+    views/                      # 六个功能视图和 assistant/panels.js
+    styles/                     # tokens、shell、features、assistant、components
+    ui/                         # 适配后的 awesome-ui 单文件组件
+    vendor/                     # 本地 Markdown 解析器、净化器与许可证
 ```
 
-`manifest.json` 写入 release 根目录，只含两项：
+页面通过 API client 读取数据和发起操作；后端持有授权、状态机、幂等、执行与持久化规则。助手从已持久化会话恢复答案，工具事件仅作执行记录。复用 awesome-ui 的 UiIcon、ChatPromptInput、StreamMarkdown、ToolCallBadge、AutoScrollAnchor；Markdown 经 DOMPurify 净化，禁用嵌入媒体、脚本和危险链接。无 CDN 或运行时 npm 依赖。
 
-```json
-{ "version": "2026-08-24.1", "files": ["index.html", "config.js", ...] }
-```
-
-- `version` 由调用者显式传入（脚本第二参数或 `FRONTEND_RELEASE_VERSION` 环境变量）。
-- `files` 为相对 `frontend/` 的稳定排序文件清单。
-- **绝不**包含时间戳、随机值、机器名、token、私钥、数据库快照或任何秘密。
-
-## 3. 本地打包与冒烟
+## 3. 本地开发和验收
 
 ```bash
-# 打包（显式输出目录；版本号必须由调用者给出）
-deploy/package-frontend-release.sh /tmp/agent-fleet-frontend 99.0.0
+# 完整源码下预览（dev-operator 仅限回环开发环境）
+python hub/web.py --host 127.0.0.1 --dev-operator local@example.test
 
-# 或者用环境变量传版本
-FRONTEND_RELEASE_VERSION=99.0.0 deploy/package-frontend-release.sh /tmp/agent-fleet-frontend
-
-# 静态纯服务器冒烟（命令 17 已定义）
+# 独立静态资源冒烟：不启动 Flask，不访问外部服务
 bash deploy/test-static-frontend.sh
+
+# 临时 Hub + runner + SSE 全链路冒烟
+PYTHON=/path/to/venv/bin/python bash deploy/e2e-smoke.sh
+
+# 真实 Chromium + 临时 API/数据库；使用确定性 provider
+FLEET_PLAYWRIGHT_MODULE=/path/to/node_modules/playwright \
+  python -m pytest -q tests/test_frontend_browser.py
 ```
 
-打包脚本约束：
+浏览器测试需要 Node、Playwright 和 Chrome（本地默认 `channel: chrome`）；CI 安装固定版本 Playwright 与 Chromium，并设置 `FLEET_BROWSER_CHANNEL=chromium` 强制执行浏览器验收。它们仅是开发依赖。未配置 `FLEET_PLAYWRIGHT_MODULE` 时该测试显式跳过。普通 `python -m http.server --directory frontend` 可检验静态资源，但不提供嵌套路由回退或 API 代理；完整页面验收应使用可选 Flask 托管或 Nginx 配置。
 
-- 仅复制 `frontend/` 静态 release 文件，且完整保留相对目录结构。
-- **fail-closed**：任何被复制路径命中 `credentials`、`state`（数据库/状态快照）、
-  `runner-credential`、`ingest-token`、`.env`、`*.pem`、`*.key` 即整体拒绝并返回
-  非零退出码，且不产生任何输出文件（`frontend/state/store.js` 是允许的静态模块）。
-- 不使用 npm/Node 构建链，不调用 `git clean`，不访问外部网络或生产端点。
-- manifest 生成确定，重复打包同版本字节一致。
+## 4. 打包与缓存
 
-## 4. 缓存策略
+```bash
+# backend 从已提交 HEAD 打包
+bash deploy/package-release.sh /tmp/agent-fleet-backend.tgz
 
-- **带内容哈希的静态资源**：`/assets/*`（未来含哈希文件名的 JS/CSS）可以使用
-  长期 immutable cache（`Cache-Control: public, max-age=31536000, immutable`）。
-- **非缓存入口**：`index.html` 与 `config.js` 是运行时入口/配置，**不得**做不可
-  失效的长期缓存。用 `Cache-Control: no-store`（或 `no-cache` + ETag）。
-- JSON API 全部 `Cache-Control: no-store`。
-- `/api/stream`（SSE）：`Content-Type: text/event-stream`、`Cache-Control: no-cache`、
-  `X-Accel-Buffering: no`，代理读超时 > keepalive。
+# frontend 从源码打包到新的版本目录
+bash deploy/package-frontend-release.sh /tmp/agent-fleet-frontend-20260929 2026-09-29.1
+```
 
-## 5. 发布顺序（backend 先于 frontend）
+CI 的 `agent-fleet-release` artifact 只含后端归档；`agent-fleet-frontend` artifact 含独立静态目录。原先只下载后端 artifact 的发布流程需要增加前端 artifact 和静态 root 切换。
 
-1. 先发布/回滚 **backend**：新 client 依赖的任一响应字段、`/api/v1`、错误形状
-   必须先上线。前端不能先依赖尚未部署的字段。
-2. 再发布 **frontend** 静态 release（替换静态 root 或 `index.html`）。
-3. 新前端必须能在旧 `/api/*` backend 上工作，或 release 配置显式选择旧 client；
-   禁止隐式猜测版本。
+前端打包保留目录结构并写入稳定排序的 `manifest.json`（版本、文件清单）。凭据、私钥、数据库/状态快照路径会使打包整体失败；`assets/state/store.js` 是允许的客户端模块。每次使用新的版本目录，避免复用目录留下旧文件。
 
-## 6. 回滚
+当前 JS/CSS 文件名**不含内容哈希**，所有入口和 `/assets/*` 使用 `Cache-Control: no-cache`，允许 ETag/304 重新验证，不能使用 immutable 缓存。JSON API 使用 `no-store`；SSE 关闭代理缓冲和缓存，并设置足够长的读超时。
 
-### frontend-only 回滚
+同源 Nginx 示例见 [nginx-frontend-backend.example.conf](nginx-frontend-backend.example.conf)。`/assets/` 与 `/config.js` 缺失返回 404，页面路径回退到原样 `index.html`，`/api/*` 不允许回退到 HTML。
 
-- 只切换静态 release 目录（例如 保留上一个 `frontend-<ver>/` 目录并切回），
-  **不**影响 probe、runner、backend state/数据库。
+## 5. 发布和回滚
 
-### backend 回滚限制
+1. 在新的不可变目录解包并验收后端与前端产物。保留当前两个版本的路径及 API 契约信息。
+2. 首次分离时先准备前端静态 root、API 代理和既有边缘认证，再将 Hub 启动参数改为 `--no-serve-frontend`。这些配置应作为同一部署步骤验收。
+3. 新 API 字段或能力由后端先上线，再切换依赖它的前端。通过 `/api/status`、六个页面和嵌套页面刷新验证路由、认证和资源加载。
+4. 后续 frontend-only 回滚只切换静态目录，不触碰后端、probe、runner、SQLite 或任务租约。只回滚到已验证兼容当前 API 的前端版本。
+5. 后端代码回滚必须保留当前 `state`、`var`、凭据、库存和已有租约；不通过回滚代码修改 schema 或恢复数据库。数据恢复单独执行备份演练流程。
 
-- backend 回滚必须保留现有 JSONL、SQLite schema 与旧 `/api/*` 路径；
-  不允许通过回滚破坏尚未完成的 task lease。
-- 即：回滚前的任务状态（`state/`、SQLite）与回调契约保持兼容，禁止**降级时改
-  schema** 或丢失正在进行的 lease、heartbeat、结果回调。
-
-## 7. 参考
-
-- 打包/测试命令：见 §3。
-- 路由与 Access (Task 20)：`deploy/nginx-expose.md`、`deploy/cloudflare-access.md`。
-- 全链路验收 (Task 21)：`deploy/e2e-smoke.sh`。
+此文档和本地测试不代表已经变更生产代理、容器启动配置或远端服务。

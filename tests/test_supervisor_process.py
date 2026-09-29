@@ -290,10 +290,20 @@ class SupervisorTests(unittest.TestCase):
         # the raw leader PID lives only on the private handle ...
         self.assertTrue(hasattr(handle, "pid"))
         # ... and never reaches the durable manifest or public status
-        raw = (self.dir / "sup" / f"{m.session_id}.json").read_text()
-        self.assertNotIn(str(handle.pid), raw)
+        raw = json.loads((self.dir / "sup" / f"{m.session_id}.json").read_text())
+
+        def contains_exact(value, needle):
+            if isinstance(value, dict):
+                return any(contains_exact(item, needle) for item in value.values())
+            if isinstance(value, list):
+                return any(contains_exact(item, needle) for item in value)
+            return value == needle
+
+        # An opaque id may legitimately contain the PID's digits as a
+        # substring; only an exact persisted scalar would be a raw PID leak.
+        self.assertFalse(contains_exact(raw, str(handle.pid)))
         status = sv.status(m.session_id)
-        self.assertNotIn(str(handle.pid), json.dumps(status))
+        self.assertFalse(contains_exact(status, str(handle.pid)))
 
     def test_launch_binds_capability_manifest(self):
         sv = self._sv()

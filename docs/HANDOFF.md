@@ -144,25 +144,14 @@ repository 接口与现有 JSONL/SQLite adapter、app 实例级配置与事件 p
 - **生产部署不变**：本阶段不改变公网部署方式（同源反向代理、Cloudflare Access、
   ingest/runner 认证、SSE 行为），也不需要重启或重新配置现有机器。
 
-### 静态前端 cutover（Task 16，默认关闭）
+### 统一静态控制台（2026-09-29）
 
-- 运行时配置新增非敏感开关：`FleetConfig.frontend_cutover`（默认 `False`）与
-  `FleetConfig.frontend_dir`（默认仓库内 `frontend/`）。`hub/web.make_app` 等既有
-  调用点不传参时行为完全不变（cutover 关闭，旧 Flask 模板照常渲染）。
-- 开启后 `hub/http/pages.py` 的 `/`、`/machine/<name>`、`/task/<id>` 三个页面路由
-  改为返回静态 `frontend/index.html` shell（浏览器 URL 不变，由前端路由解码真实页面），
-  并注入 `<base href="/">` 保证嵌套路径下的相对资源解析到站点根。
-- **同一 app 服务静态资产**：cutover 开启时，`frontend/` 下的首屏静态资产（
-  `config.js`、`styles/app.css`、`api/*.js`、`views/*.js`、`realtime/*.js`、
-  `state/*.js`、`routes.js`）由同一个 Flask app 的 catch-all 路由直接下发
-  （`send_file` 提供正确 MIME），无需额外静态服务器；遍历与非文件返回 404，
-  未知 `/api/*` 仍走既有 API JSON 404 契约。cutover 关闭时不服务这些资产。
-- **回滚**：关闭 cutover（或删除 `frontend_dir` 下 shell）即回到旧模板页面；旧模板
-  未删除，始终可用。
-- **shell 归属**：shell 文件归前端 release 目录所有，由仓库 `frontend/` 提供；页面
-  路由只负责按 URL 返回 shell 与 API 静态资产存取，不内嵌任何观测/任务业务数据。
-- **不新增安全承诺**：本开关只做页面/模板层的展示切换，不引入新的凭据、CORS 或
-  部署配置；shell 缺失时失败关闭为有界非敏感响应（404 `frontend shell unavailable`）。
+- `frontend/index.html` 是唯一页面入口，应用模块统一位于 `frontend/assets/`。删除旧 Flask templates/static 及重复渲染器。
+- `FleetConfig.serve_frontend` 默认 `True`，仅用于可选静态托管；`frontend_dir` 可指定独立前端 release。后端不注入 HTML 或业务数据。
+- 生产后端归档不含 frontend，使用 `--no-serve-frontend`，Nginx 同源托管静态页面并代理 `/api/*`；守护进程检查 `/api/status`。
+- 旧 `frontend_cutover` / `--frontend-cutover` 已删除。回滚通过独立 release 切换，不再回退 SSR。
+- 新控制台使用 awesome-ui 单文件组件、集中样式 token 和主题；保留现有 API、任务/会话/运行状态机和幂等规则。
+- 架构、开发、发布与回滚细节见 [frontend-release-layout](../deploy/frontend-release-layout.md)，实施记录见 [前端计划](superpowers/plans/2026-09-29-frontend-console.md)。
 
 ### 独立前端发布 gate（Task 17）
 
@@ -171,7 +160,7 @@ repository 接口与现有 JSONL/SQLite adapter、app 实例级配置与事件 p
 
 - **`deploy/test-static-frontend.sh`（独立静态冒烟）**：用 `python3 -m http.server`
   在动态分配的回环端口上服务仓库 `frontend/`，curl 轮询就绪后，请求
-  index.html、config.js、routes.js、styles/app.css 及全部 api/realtime/state/views
+  index.html、config.js、assets/app.js、assets/styles/app.css 及 assets 下的 api/realtime/state/views
   模块，逐路径断言 HTTP 200，并断言每个响应体都不含 `X-Agent-Fleet-Token` /
   `X-Runner-Credential` 凭据 header 名；另断言越界路径（路径遍历）返回 404。
   `trap cleanup` 只 kill 本脚本启动的服务器 PID；不起 Flask、不访问外部服务、
@@ -197,7 +186,7 @@ deploy/package-frontend-release.sh /tmp/agent-fleet-frontend 99.0.0
 - 仅复制 `frontend/` 静态 release 文件并保留相对目录；写入 `manifest.json`，只含
   调用者显式提供的 release 版本与稳定排序文件清单（无时间戳/随机值/秘密）。
 - **fail-closed**：任何命中 `credentials`、`state`（数据库/状态快照，
-  `frontend/state/store.js` 模块除外）、`runner-credential`、`ingest-token`、`.env`、
+  `frontend/assets/state/store.js` 模块除外）、`runner-credential`、`ingest-token`、`.env`、
   `*.pem`、`*.key` 的路径即整体拒绝且不产生输出；不使用 npm/构建链、不调用
   `git clean`、不访问外部网络或生产端点。manifest 重复打包字节一致（确定性）。
 - 缓存：内容哈希 `/assets/*` 可长期 immutable；`index.html`/`config.js` 不得长期缓存。
@@ -280,9 +269,8 @@ deploy/package-frontend-release.sh /tmp/agent-fleet-frontend 99.0.0
   回执 wrapper）；审计落在独立 adoption transcript DB，验收只比较有界码
   （`accepted`/`executing`/`adopted`/漂移码/错误码），不读自然语言。
 - **禁用旗标**：`adoption_repositories_enabled` 关闭时不建 adoption 服务、
-  `/api/adoptions` operator 表面不可用——完整产品（SSR/静态 catch-all 已挂载）下
-  未注册路径的 POST 返回有界 405 `method_not_allowed`（拆掉 catch-all 路由时为 404
-  `not_found`）；旧 `/api/*`、`/api/v1`、task/runner/SSE 与前端表面完全不变。
+  `/api/adoptions` operator 表面不可用，未注册路径返回有界 404 `not_found`；
+  已注册路径使用错误方法返回 405 `method_not_allowed`，页面路由不拦截 API。
 - **Phase-5 gate**：`tests/test_adoption_lifecycle.py`（promote / 漂移撤销 /
   幂等空单 detach / 无信号 / bounded 审计）与 `tests/test_adoption_e2e.py`
   （4 条 golden，真实 hub + REAL ControlClient + REAL Supervisor 探针）全部通过，

@@ -12,7 +12,7 @@
 #   - release 版本必须由调用者显式提供（$2 或环境变量 FRONTEND_RELEASE_VERSION）。
 #   - fail-closed：清单中任何文件命中下列红线即整体拒绝，且不产生任何输出文件：
 #       credentials/               凭据目录
-#       state/                     runtime 状态/数据库快照（frontend/state/store.js
+#       state/                     runtime 状态/数据库快照（frontend/assets/state/store.js
 #                                  本身是允许的静态模块，见下）
 #       runner-credential          runner 凭据名
 #       ingest-token               ingest 凭据名
