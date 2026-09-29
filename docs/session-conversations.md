@@ -47,4 +47,4 @@ python -m tools.session.sync --config /path/to/runner.yaml \
 
 `tests/test_runner_conversation.py` 覆盖完整行、Codex item、长 Unicode 源记录、源字段保留、断线重传去重、原生历史/增量同步、机器绑定、普通任务会话关联、受管会话追加消息和完成后原生身份保留。
 
-真实浏览器测试验证 205 条事件翻页与 5000 字符正文。pxed 实测记录见 [验收报告](acceptance-2026-09-30.md)。
+真实浏览器测试验证 205 条事件翻页与 5000 字符正文。平台运行条件见 [平台部署说明](platform-availability.md)。
