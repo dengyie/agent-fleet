@@ -30,6 +30,8 @@ TRANSIENT_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 SAFE_HEADER_NAMES = frozenset({"user-agent", "accept-language", "x-client-name", "openai-organization"})
 
 
+UPSTREAM_ERROR_CODES = frozenset({'system_cpu_overloaded', 'system_memory_overloaded', 'do_request_failed'})
+
 PROVIDER_ERROR_CODES = frozenset({
     'auth_error', 'rate_limit', 'transient_http', 'request_rejected',
     'provider_http_error', 'timeout', 'network_error', 'invalid_response',
@@ -53,7 +55,7 @@ class ProviderError(RuntimeError):
                   'retryable': self.retryable}
         if type(self.status) is int and 100 <= self.status <= 599:
             result['provider_status'] = self.status
-        if self.upstream_code in {'system_cpu_overloaded', 'system_memory_overloaded'}:
+        if self.upstream_code in UPSTREAM_ERROR_CODES:
             result['upstream_code'] = self.upstream_code
         return result
 
@@ -428,7 +430,7 @@ class OpenAICompatibleProvider:
                 try:
                     body_error = json.loads(response.body).get('error', {})
                     upstream = body_error.get('code') if isinstance(body_error, dict) else None
-                    if upstream in {'system_cpu_overloaded', 'system_memory_overloaded'}:
+                    if upstream in UPSTREAM_ERROR_CODES:
                         error.upstream_code = upstream
                 except (ValueError, AttributeError, TypeError):
                     pass

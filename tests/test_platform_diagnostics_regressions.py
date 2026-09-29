@@ -35,7 +35,7 @@ def fault_server(status):
         def do_POST(self):
             self.rfile.read(int(self.headers['Content-Length']))
             state['calls'] += 1
-            body = json.dumps({'error': {'code': 'system_cpu_overloaded', 'message': SECRET}}).encode()
+            body = json.dumps({'error': {'code': 'do_request_failed' if status == 500 else 'system_cpu_overloaded', 'message': SECRET}}).encode()
             self.send_response(status); self.send_header('Content-Length', str(len(body))); self.end_headers()
             self.wfile.write(body)
         def log_message(self, *_): pass
@@ -46,7 +46,7 @@ def fault_server(status):
     finally: server.shutdown(); server.server_close(); thread.join(2)
 
 
-@pytest.mark.parametrize('status,code', [(403,'auth_error'), (429,'rate_limit'), (503,'transient_http')])
+@pytest.mark.parametrize('status,code', [(403,'auth_error'), (429,'rate_limit'), (500,'transient_http'), (503,'transient_http')])
 def test_provider_error_is_correlated_durable_and_visible_without_raw_body(tmp_path, caplog, status, code, fault_server):
     provider = OpenAICompatibleProvider(model='test', endpoint=fault_server['url'],
         api_key=SECRET, allow_network=True)
@@ -58,6 +58,7 @@ def test_provider_error_is_correlated_durable_and_visible_without_raw_body(tmp_p
     failure = terminal[0]['payload']
     assert failure['provider_error'] == code
     assert failure['provider_status'] == status
+    assert failure['upstream_code'] == ('do_request_failed' if status == 500 else 'system_cpu_overloaded')
     assert failure['step'] == 1
     assert failure['attempt'] == 1
     assert code in result['result_text'] and str(status) in result['result_text']

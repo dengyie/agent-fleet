@@ -67,6 +67,7 @@ EOF
   (
     cd "$WORK"
     AGENT_FLEET_INGEST_TOKEN="$INGEST_TOKEN" \
+      AGENT_FLEET_SESSION_REPOSITORIES_ENABLED=1 \
       exec "$PY" hub/web.py --port 8799 --host 127.0.0.1 --dev-operator smoke@local
   ) > "$WORK/hub.log" 2>&1 &
   HUB_PID=$!
@@ -163,6 +164,20 @@ except Exception as exc:
 if not ok:
     print("RUNNER MISS: 本轮未领取到任务", file=sys.stderr)
     raise SystemExit(1)
+
+# Task success alone does not prove that Hub received the conversation.
+import json
+from urllib.request import urlopen
+records = list((cfg.cache_dir / 'conversations').glob('runner_*.json'))
+assert len(records) == 1, "expected one captured runner conversation"
+url = cfg.hub + '/api/sessions/' + records[0].stem + '/events?limit=1000'
+with urlopen(url, timeout=5) as response:
+    events = json.load(response)['events']
+assert any(e['kind'] == 'user_message' and e['payload'].get('text') == '写 hello.txt 并打印 done' for e in events), 'Hub missing user message'
+assert any(e['kind'] == 'source_record' and 'done' in e['payload'].get('text', '') for e in events), 'Hub missing agent source output'
+with urlopen(url, timeout=5) as response:
+    assert json.load(response)['events'] == events, 'conversation recovery changed'
+print('smoke: 4a. Hub 会话全文与重复读取 ✓')
 PYEOF
 
 SMOKE_HUB="$ENDPOINT" SMOKE_MACHINE="$MACHINE" SMOKE_SECRET="$RUNNER_SECRET" \
@@ -175,7 +190,13 @@ TASK=$(curl -sf "$ENDPOINT/api/tasks/$TASK_ID") || fail "获取任务详情失�
 STATE=$(printf '%s' "$TASK" | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["task"]["state"])')
 [ "$STATE" = "succeeded" ] || fail "任务状态 $STATE != succeeded"
 printf '%s' "$TASK" | grep -q 'hello.txt' || fail "diff_stat 缺 hello.txt"
-info "5. 任务 succeeded + diff 含 hello.txt ✓"
+# Runner removes its execution worktree; recover the returned artifact from Hub.
+curl -sf "$ENDPOINT/api/tasks/$TASK_ID/diff" \
+  | "$PY" -c 'import json,sys; data=json.load(sys.stdin); assert not data["truncated"]; sys.stdout.write(data["diff_patch"])' \
+  > "$WORK/result.patch" || fail "读取完整 patch 失败"
+git -C "$PROJ" apply "$WORK/result.patch" || fail "Hub 返回 patch 无法恢复"
+[ "$(cat "$PROJ/hello.txt")" = hi ] || fail "恢复文件内容不符"
+info "5. 任务 succeeded + 实际文件内容 + diff 含 hello.txt ✓"
 
 # 5) SSE 可达（curl 超时退出码 28 属预期，只校验收到的首帧）
 SSE_OUT=$(curl -sN --max-time 2 "$ENDPOINT/api/stream" || true)

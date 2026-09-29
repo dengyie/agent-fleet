@@ -18,6 +18,8 @@ Rules (fail closed):
 from __future__ import annotations
 
 import json
+import re
+import uuid
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -113,7 +115,13 @@ def redact_patch(text: str, max_bytes: int = MAX_DIFF_PATCH) -> tuple[str, bool]
     """Redact + bound a unified diff. Empty input stays empty."""
     if not text:
         return "", False
-    redacted, report = redact_content(text)
+    # /dev/null is Git syntax for an added/deleted file, not a private path.
+    # Protect only exact diff headers, retaining whole-text secret redaction
+    # (including multiline private keys). The marker never survives output.
+    marker = "fleet_diff_null_" + uuid.uuid4().hex
+    protected = re.sub(r"(?m)^(---|\+\+\+) /dev/null$", lambda m: m[1] + " " + marker, text)
+    redacted, report = redact_content(protected)
+    redacted = redacted.replace(marker, "/dev/null")
     encoded = redacted.encode("utf-8")
     truncated = len(encoded) > max_bytes
     if truncated:
