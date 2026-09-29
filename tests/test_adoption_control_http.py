@@ -21,6 +21,8 @@ The route ignores unknown body keys (attacker-sent ``pid``/``signal``/
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from hub import events as events_mod
@@ -255,7 +257,8 @@ def test_source_control_response_never_leaks(client):
     texts.append(" ".join(str(v) for v in resp.get_json().values()))
 
     joined = " ".join(texts)
-    assert str(DEFAULT_PID) not in joined
+    # Opaque random IDs can legitimately contain the PID digits as a substring.
+    assert re.search(r"\b" + str(DEFAULT_PID) + r"\b", joined) is None
     assert "/usr/local/bin/codex" not in joined
     assert "codex session" not in joined
     assert DEFAULT_STARTED_AT not in joined
