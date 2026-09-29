@@ -43,6 +43,9 @@ def test_console_in_real_browser(tmp_path):
         app.extensions['fleet']['services']['service_health'].register(OWNER, {
             'service_id': name + '-api', 'node_id': name, 'adapter': 'systemd',
             'target_alias': 'fixture.service', 'allowed_actions': ['inspect']})
+    for _ in range(150):
+        state.save_snapshot('studio-mac', {'machine': 'studio-mac', 'source': 'ingest', 'ts': time.time(),
+            'reachable': True, 'system': {'platform': 'Linux'}, 'agents': {}})
     SessionRepository(session_db).upsert_session({'session_id': 'browser-session',
         'machine_id': 'studio-mac', 'managed': False, 'capture_quality': 'best_effort'})
     task, _ = task_store.create_task(machine='studio-mac', agent_type='codex', project='demo',

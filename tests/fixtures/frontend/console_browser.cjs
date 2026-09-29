@@ -144,6 +144,7 @@ const [origin, taskId] = process.argv.slice(2);
       await page.goto(origin + route);
       await page.locator(ready).first().waitFor();
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'mobile overflow: ' + route);
+      if (route.startsWith('/machine/')) assert.ok(await page.locator('.timeline i').count() > 100, 'dense production history fixture');
     }
     await page.route('**/api/platform/v1/services?*', route => route.fulfill({status: 503, contentType: 'application/json', body: JSON.stringify({ok:false,error:'unavailable',detail:'暂时不可用'})}));
     await page.goto(origin + '/monitoring');

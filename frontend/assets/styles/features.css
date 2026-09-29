@@ -360,7 +360,7 @@
 
 .detail-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 18px;
   margin-bottom: 20px;
 }
@@ -489,6 +489,7 @@ table.agent-table td {
 
 /* 24 小时运行时间轴 (Timeline) */
 .timeline {
+  overflow-x: auto;
   display: flex;
   gap: 2px;
   height: 32px;
@@ -1066,6 +1067,7 @@ button[disabled] {
 .monitoring-error { color: var(--bad); }
 
 @media (max-width: 767px) {
+  .detail-grid { grid-template-columns: minmax(0, 1fr); }
   .monitoring-summary { grid-template-columns: 1fr; }
   .monitoring-grid { grid-template-columns: 1fr; }
   .monitoring-heading { align-items: flex-start; }
