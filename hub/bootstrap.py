@@ -706,6 +706,8 @@ def create_app(
     if adoption_service is not None:
         app.extensions["fleet"]["services"]["adoptions"] = adoption_service
 
+    from hub.http.operator_routes import bp as operator_bp
+    app.register_blueprint(operator_bp)
     app.register_blueprint(observe_bp)
     app.register_blueprint(tasks_bp)
     app.register_blueprint(commands_bp)

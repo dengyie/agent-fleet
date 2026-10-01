@@ -436,19 +436,13 @@ export function mountAssistant(target, options) {
       refreshMemoryItems('');
     } catch (error) {
       if (disposed) return;
-      var needsLogin = error && error.status === 401;
-      var forbidden = error && error.status === 403;
-      setStatus(needsLogin ? '请先登录操作员' : forbidden ? '当前操作员无访问权限' : failureStatus);
+      if (error && error.status === 401) return; // The shared session guard redirects.
+      setStatus(error && error.status === 403 ? '当前操作员无访问权限' : failureStatus);
       initializationHost.hidden = false;
-      if (needsLogin || forbidden) {
-        initializationHost.appendChild(el('p', null, needsLogin
-          ? '登录后即可加载模型、工作区和历史对话。'
-          : '请切换有权限的操作员后重试。'));
-        if (error.requestId) initializationHost.appendChild(el('p', 'meta', '请求编号 ' + error.requestId));
-      } else showError(initializationHost, error);
-      var action = el('button', 'button-secondary', needsLogin ? '操作员登录' : forbidden ? '切换操作员' : '重试加载');
+      showError(initializationHost, error);
+      var action = el('button', 'button-secondary', '重试加载');
       action.type = 'button';
-      action.addEventListener('click', needsLogin || forbidden ? options.onLogin : initialize);
+      action.addEventListener('click', initialize);
       initializationHost.appendChild(action);
     }
   }

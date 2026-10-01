@@ -13,7 +13,9 @@ This read-only command fails for missing routes, authentication, disabled worker
 
 ## Failure evidence
 
-Assistant initialization distinguishes authentication from configuration failures. A 401 on defaults or conversation recovery asks the user to sign in through the existing operator dialog; a 403 asks them to switch to an authorized operator. Tokens remain scoped to the browser session. Successful sign-in reloads the current URL, restoring its model catalog, saved workspace and conversation history. Missing or expired login is not evidence that platform configuration was lost.
+All console function pages validate `GET /api/operator/session` before mounting views, fetching business data or starting SSE. This endpoint reuses the edge-authenticated operator boundary and works with task/platform gates disabled. `/login` is the dedicated entry page; missing or expired authentication redirects there and clears the tab's token. A token's presence in sessionStorage is never proof of authentication. The shared HTTP client also redirects on any API 401, including non-JSON edge responses. Page focus and back/forward restoration revalidate the session.
+
+Successful sign-in returns only to a recognized same-origin function page, preserving its query and fragment; unsafe return URLs fall back to `/assistant`. Logout hides the console, stops SSE and returns to login. Resource-level 403 responses stay on the current page; a session-check outage hides functions and offers retry without discarding credentials. The former login dialog and view-specific login buttons have been removed. Tokens remain scoped to the current browser session. The UI gate complements the existing server-side API authorization; public observation/ingest/runner API contracts remain separate.
 
 Catalog and conversation recovery failures have separate messages, retain the request ID when available and offer an explicit retry. Submission stays disabled until the catalog and saved conversation state are loaded. Diagnose the failing request's HTTP status and request ID before changing server configuration.
 
@@ -29,7 +31,7 @@ Catalog and conversation recovery failures have separate messages, retain the re
 
 The provider fault matrix uses a real local HTTP server returning 403/429/503 and checks the entire worker → event API → durable result/log chain. A separate HTTP tool-contract test validates parameter schemas, writes an actual file and checks the second model request. Browser coverage verifies that HTTP 503 remains visible after reload. Readiness and smoke-failure tests verify nonzero exit and retained evidence, rather than merely checking source strings.
 
-The assistant authentication browser fixture disables developer identity fallback and maps a test token at a local proxy boundary. It verifies actual anonymous/invalid-token 401 responses, sign-in from both a new and saved conversation, model/workspace/history recovery, explicit 503 retries and distinct 403 handling.
+The assistant authentication browser fixture disables developer identity fallback and maps a test token at a local proxy boundary. It verifies all function-page guards, zero business requests before validation, real anonymous/invalid-token 401s, safe return URLs, saved conversation restoration, logout/back navigation, non-JSON API 401 redirects, explicit 503 retries and distinct 403 handling.
 
 No test suite guarantees the absence of all production failures. Production gateway overload, credentials, feature gates and installed agent versions must still be checked against the deployed release.
 

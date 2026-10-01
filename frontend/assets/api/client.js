@@ -164,6 +164,10 @@ async function request(path, options) {
     clearTimeout(timer);
   }
 
+  // Every feature uses this boundary, including non-JSON edge rejections.
+  if (response.status === 401 && typeof window.dispatchEvent === 'function') {
+    window.dispatchEvent(new Event('fleet-auth-required'));
+  }
   var data = null;
   try {
     data = await response.json();
@@ -204,6 +208,14 @@ export async function platformRequest(path, options) {
 }
 
 /* -- 对外异步接口 --------------------------------------------------------- */
+
+export async function getOperatorSession() {
+  var data = await request('/operator/session');
+  if (!data || data.authenticated !== true) {
+    throw new ApiError('contract', 200, 'invalid_session', '登录状态响应无效', null);
+  }
+  return data;
+}
 
 export async function getStatus() {
   return parseStatus(await request(API.status));

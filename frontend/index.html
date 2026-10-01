@@ -12,8 +12,23 @@
 <script type="module" src="./assets/shell/theme.js"></script>
 </head>
 <body>
-<a class="skip-link" href="#main-content">跳到主内容</a>
-<div class="console-layout">
+<section id="access-state" class="access-state" role="status"><p>正在验证登录状态…</p><button type="button" hidden>重新验证</button></section>
+<main id="login-view" class="login-page" hidden>
+  <section class="login-card" aria-labelledby="login-title">
+    <div class="login-brand"><span class="brand-symbol" data-login-icon="layers"></span><span>agent fleet</span></div>
+    <h1 id="login-title">登录工作空间</h1>
+    <p class="login-description">连接你的助手、工作区与计算节点。</p>
+    <form id="login-form">
+      <label for="operator-token">操作员令牌</label>
+      <input id="operator-token" type="password" required autocomplete="current-password" placeholder="输入操作员令牌">
+      <p id="login-status" role="status" aria-live="polite"></p>
+      <button type="submit" class="button-primary">登录</button>
+    </form>
+    <p class="login-footnote"><span data-login-icon="lock"></span>你的工作空间，由你掌控</p>
+  </section>
+</main>
+<div class="console-layout" hidden>
+  <a class="skip-link" href="#main-content">跳到主内容</a>
   <aside class="console-sidebar" id="sidebar" aria-label="主导航">
     <a class="console-brand" href="/"><span class="brand-symbol" data-icon="layers"></span><span>agent fleet<span class="brand-caption">个人智能工作空间</span></span></a>
     <a class="new-conversation" href="/assistant"><span data-icon="sparkles"></span>开始新对话<span class="nav-shortcut">新建</span></a>
@@ -40,7 +55,7 @@
   <div class="console-main">
     <header class="console-topbar">
       <div class="topbar-leading"><button type="button" class="icon-button mobile-menu" id="mobile-menu" aria-label="打开导航" aria-controls="sidebar" aria-expanded="false"><span data-icon="layers"></span></button><span class="topbar-workspace">工作空间</span><span class="breadcrumb-separator">/</span><span id="route-label">总览</span></div>
-      <div class="topbar-trailing"><button type="button" id="operator-login">操作员登录</button><span class="connection-indicator" id="connection-status" role="status"><i></i><span>正在连接</span></span><button type="button" class="icon-button" id="refresh-page" aria-label="刷新当前页面" title="刷新当前页面"><span data-icon="refresh"></span></button></div>
+      <div class="topbar-trailing"><button type="button" id="operator-logout">退出登录</button><span class="connection-indicator" id="connection-status" role="status"><i></i><span>正在连接</span></span><button type="button" class="icon-button" id="refresh-page" aria-label="刷新当前页面" title="刷新当前页面"><span data-icon="refresh"></span></button></div>
     </header>
     <main id="main-content" class="console-content" tabindex="-1">
       <div class="page-heading" id="page-heading"><div><p class="eyebrow" id="page-eyebrow">WORKSPACE OVERVIEW</p><h1 id="page-title">集群总览</h1><p id="page-description">节点、任务与服务状态，一处掌握。</p></div><a class="button-primary" href="/assistant"><span data-icon="sparkles"></span>打开主助手</a></div>
@@ -48,16 +63,6 @@
     </main>
   </div>
 </div>
-<dialog id="operator-dialog" aria-labelledby="operator-title">
-  <form>
-    <h2 id="operator-title">操作员登录</h2>
-    <p>公开看板无需登录。操作令牌经服务器验证后用于任务和会话操作。</p>
-    <label for="operator-token">操作员令牌</label>
-    <input id="operator-token" type="password" required autocomplete="current-password">
-    <p role="status" aria-live="polite"></p>
-    <div class="operator-actions"><button type="button" data-close>取消</button><button type="button" data-logout>退出登录</button><button type="submit" class="button-primary">验证并登录</button></div>
-  </form>
-</dialog>
 <noscript>请启用 JavaScript 以使用控制台。后端 API 独立提供服务。</noscript>
 <script type="module" src="./assets/app.js"></script>
 </body>

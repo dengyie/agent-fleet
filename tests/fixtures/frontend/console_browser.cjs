@@ -177,22 +177,9 @@ const [origin, taskId] = process.argv.slice(2);
     await page.getByText(/加载失败|暂时不可用/).first().waitFor();
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await page.goto(origin);
-    await page.route('**/api/tasks?*', route => {
-      if (route.request().headers()['x-access-token'] !== 'browser-fixture-token') {
-        return route.fulfill({status:401, contentType:'application/json', body:JSON.stringify({ok:false,error:'unauthorized',detail:'operator required'})});
-      }
-      return route.continue();
-    });
-    await page.getByRole('button', {name:'操作员登录', exact:true}).click();
-    await page.getByLabel('操作员令牌', {exact:true}).fill('incorrect-fixture');
-    await page.getByRole('button', {name:'验证并登录'}).click();
-    await page.getByText('令牌无效或无操作权限', {exact:true}).waitFor();
-    assert.equal(await page.evaluate(() => sessionStorage.getItem('fleet_operator_token')), null);
-    await page.getByLabel('操作员令牌', {exact:true}).fill('browser-fixture-token');
-    await Promise.all([page.waitForEvent('load'), page.getByRole('button', {name:'验证并登录'}).click()]);
-    assert.equal(await page.evaluate(() => sessionStorage.getItem('fleet_operator_token')), 'browser-fixture-token');
     const leaked = await page.evaluate(async () => {
       const api = await import('/assets/api/client.js');
+      api.setOperatorToken('browser-fixture-token');
       const originalFetch = window.fetch, config = window.FleetConfig;
       let headers;
       window.FleetConfig = {apiBaseUrl:'https://foreign.invalid/api'};

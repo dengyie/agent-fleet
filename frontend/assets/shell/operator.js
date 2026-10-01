@@ -1,30 +1,61 @@
-import {setOperatorToken, listTasks} from '../api/client.js';
+import {getOperatorSession, setOperatorToken} from '../api/client.js';
+import {pagePath, uiIcon} from '../routes.js';
 
-export function mountOperator() {
-  const dialog = document.getElementById('operator-dialog');
-  const form = dialog.querySelector('form');
-  const input = dialog.querySelector('input');
-  const status = dialog.querySelector('[role=status]');
-  const submit = dialog.querySelector('[type=submit]');
-  function openLogin() {
-    status.textContent = ''; input.value = ''; dialog.showModal();
+export function safeReturnPath(value) {
+  if (typeof value !== 'string' || value.length > 2048) return pagePath('assistant');
+  try {
+    const url = new URL(value, window.location.origin);
+    const known = /^\/(?:index\.html|assistant|monitoring|(?:machine|task|session|conversation)\/[^/]+)?$/;
+    if (url.origin === window.location.origin && known.test(url.pathname)) {
+      return url.pathname + url.search + url.hash;
+    }
+  } catch (_) {}
+  return pagePath('assistant');
+}
+
+export function redirectToLogin() {
+  setOperatorToken('');
+  const returnTo = safeReturnPath(window.location.pathname + window.location.search + window.location.hash);
+  window.location.replace(pagePath('login') + '?' + new URLSearchParams({return_to: returnTo}));
+}
+
+export function mountLogin() {
+  const host = document.getElementById('login-view');
+  const form = document.getElementById('login-form');
+  const input = form.querySelector('input');
+  const status = document.getElementById('login-status');
+  const submit = form.querySelector('[type=submit]');
+  const returnTo = safeReturnPath(new URLSearchParams(window.location.search).get('return_to'));
+  document.getElementById('access-state').hidden = true;
+  document.title = '登录 · Agent Fleet';
+  host.hidden = false;
+  host.querySelectorAll('[data-login-icon]').forEach(slot => slot.replaceChildren(uiIcon(slot.dataset.loginIcon, {size: 18})));
+  let pending = true;
+  submit.disabled = true;
+  function failure(error) {
+    if (error.status === 401 || error.status === 403) {
+      setOperatorToken('');
+      status.textContent = '令牌无效或登录已失效，请重新输入。';
+    } else {
+      status.textContent = '暂时无法验证登录状态，请稍后重试。';
+      if (error.requestId) status.textContent += ' 请求编号 ' + error.requestId;
+    }
   }
-  document.getElementById('operator-login').addEventListener('click', openLogin);
-  dialog.querySelector('[data-close]').addEventListener('click', () => dialog.close());
-  dialog.querySelector('[data-logout]').addEventListener('click', () => {
-    setOperatorToken(''); window.location.reload();
-  });
   form.addEventListener('submit', async event => {
-    event.preventDefault(); submit.disabled = true;
+    event.preventDefault();
+    if (pending) return;
+    pending = true; submit.disabled = true; status.textContent = '正在登录…';
     setOperatorToken(input.value.trim());
     try {
-      await listTasks({limit: 1});
-      window.location.reload();
-    } catch (error) {
-      setOperatorToken('');
-      status.textContent = error.status === 401 ? '令牌无效或无操作权限' : '验证失败，请稍后重试';
-      submit.disabled = false;
-    }
+      await getOperatorSession();
+      window.location.replace(returnTo);
+    } catch (error) { failure(error); }
+    finally { pending = false; submit.disabled = false; }
   });
-  return openLogin;
+  // An existing edge-authenticated session can enter directly; a token's
+  // presence in storage never grants access by itself.
+  getOperatorSession().then(() => window.location.replace(returnTo)).catch(error => {
+    if (error.status === 401) setOperatorToken('');
+    else failure(error);
+  }).finally(() => { pending = false; submit.disabled = false; });
 }

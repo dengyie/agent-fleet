@@ -1610,14 +1610,8 @@ class FrontendEsModuleSyntaxTests(unittest.TestCase):
             )
 
 
-class FrontendAuthRemovalContractTests(unittest.TestCase):
-    """Public dashboard remains ungated; production edge validates operator tokens."""
-
-    def test_entry_has_no_auth_modal_or_gatekeeper(self):
-        source = INDEX_HTML.read_text()
-        for banned in ('auth-modal', 'gatekeeper', 'openAuthModal',
-                       'btn-auth', 'Auth Modal'):
-            self.assertNotIn(banned, source)
+class FrontendCredentialBoundaryContractTests(unittest.TestCase):
+    """Production edge validates tokens; browser credentials stay session scoped."""
 
     def test_entry_placeholder_leaks_no_credential_like_value(self):
         # README 红线：token、口令、凭据样例不进 git、不写文档。
@@ -1637,13 +1631,6 @@ class FrontendAuthRemovalContractTests(unittest.TestCase):
         self.assertIn('.status === 401', source)
         self.assertNotIn('operator identity required', source)
         self.assertNotIn('openAuthModal', source)
-
-    def test_styles_have_no_gatekeeper_or_auth_modal_rules(self):
-        source = (FRONTEND_DIR / 'assets' / 'styles' / 'app.css').read_text()
-        for banned in ('gatekeeper', 'auth-modal', 'is-authed'):
-            self.assertNotIn(banned, source)
-        self.assertNotIn('.modal {', source)
-        self.assertNotIn('.modal.open', source)
 
     def test_routes_helper_has_no_dead_escape_attr(self):
         source = ROUTES_JS.read_text()

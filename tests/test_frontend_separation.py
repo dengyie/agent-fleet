@@ -6,7 +6,7 @@ from hub.config import FleetConfig
 
 ROOT = Path(__file__).resolve().parents[1]
 
-@pytest.mark.parametrize('route', ['/', '/index.html', '/assistant', '/monitoring', '/machine/example', '/task/example', '/session/example', '/conversation/example'])
+@pytest.mark.parametrize('route', ['/', '/index.html', '/login', '/assistant', '/monitoring', '/machine/example', '/task/example', '/session/example', '/conversation/example'])
 def test_pages_are_the_exact_static_release(tmp_path, route):
     app = create_app(FleetConfig.from_root(tmp_path, frontend_dir=ROOT / 'frontend', serve_frontend=True))
     response = app.test_client().get(route)
@@ -19,7 +19,7 @@ def test_api_only_app_needs_no_frontend(tmp_path):
     app = create_app(FleetConfig.from_root(tmp_path, serve_frontend=False))
     client = app.test_client()
     assert client.get('/api/status').status_code == 200
-    for route in ['/', '/assistant', '/config.js', '/assets/app.js', '/static/app.js']:
+    for route in ['/', '/login', '/assistant', '/config.js', '/assets/app.js', '/static/app.js']:
         assert client.get(route).status_code == 404
 
 
