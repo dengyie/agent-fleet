@@ -22,6 +22,42 @@ ROOT = Path(__file__).resolve().parents[1]
 OWNER = 'browser@example.test'
 
 
+def test_assistant_auth_in_real_browser(tmp_path):
+    if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
+        pytest.skip('Set FLEET_PLAYWRIGHT_MODULE to run Chromium acceptance')
+    app = create_app(FleetConfig.from_root(
+        tmp_path, frontend_dir=ROOT / 'frontend', platform_enabled=True,
+        tasks_enabled=True,
+    ))
+    repo = app.extensions['fleet']['platform_repository']
+    repo.upsert_model(OWNER, {'profile_id': 'fixture', 'provider': 'deterministic', 'model': '验收模型'})
+    for workspace_id in ('default', 'saved'):
+        repo.upsert_workspace(OWNER, {'workspace_id': workspace_id, 'name': workspace_id,
+            'root_path': str(tmp_path / workspace_id)})
+    repo.update_defaults(OWNER, {'model_profile_id': 'fixture', 'workspace_id': 'default'}, 0)
+    repo.create_conversation(OWNER, 'conv-auth', title='登录恢复验收', workspace_id='saved')
+    hub = app.wsgi_app
+
+    def edge(environ, start_response):
+        # Local test proxy mirrors the production edge's token-to-identity map.
+        # No DEV_OPERATOR fallback: anonymous and bad-token requests hit real 401s.
+        environ.pop('HTTP_CF_ACCESS_AUTHENTICATED_USER_EMAIL', None)
+        if environ.get('HTTP_X_ACCESS_TOKEN') == 'browser-fixture-token':
+            environ['HTTP_CF_ACCESS_AUTHENTICATED_USER_EMAIL'] = OWNER
+        return hub(environ, start_response)
+
+    app.wsgi_app = edge
+    server = make_server('127.0.0.1', 0, app, threaded=True)
+    serving = Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    try:
+        result = subprocess.run(['node', str(ROOT / 'tests/fixtures/frontend/assistant_auth_browser.cjs'),
+            f'http://127.0.0.1:{server.server_port}'], capture_output=True, text=True, timeout=90)
+        assert result.returncode == 0, result.stdout + result.stderr
+    finally:
+        server.shutdown(); server.server_close(); serving.join(5)
+
+
 def test_console_in_real_browser(tmp_path):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE to run Chromium acceptance')

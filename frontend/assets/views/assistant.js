@@ -41,6 +41,7 @@ export function mountAssistant(target, options) {
   var unknownSection = el('section', 'assistant-unknown-section'); unknownSection.hidden = true; unknownSection.appendChild(el('h2', 'assistant-section-title', '待检查的未知命令')); var unknownHost = el('div', 'assistant-unknown-commands'); unknownSection.appendChild(unknownHost); root.appendChild(historySection); root.appendChild(messageHost); root.appendChild(artifactSection); root.appendChild(windowSection); root.appendChild(legacySection); root.appendChild(el('h2', 'assistant-section-title', '运行事件')); root.appendChild(eventHost); root.appendChild(unknownSection);
   var composer = el('form', 'assistant-composer'); var input = document.createElement('textarea'); input.rows = 3; input.maxLength = 32768; input.placeholder = '描述要完成的工作'; var send = document.createElement('button'); send.type = 'submit'; send.appendChild(uiIcon('play', { size: 14 })); send.appendChild(document.createTextNode('运行')); composer.appendChild(input); composer.appendChild(send); var cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'button-secondary'; cancel.appendChild(uiIcon('x', { size: 14 })); cancel.appendChild(document.createTextNode('取消运行')); cancel.hidden = true; composer.appendChild(cancel); root.appendChild(composer);
   var chat = el('section', 'assistant-chat');
+  var initializationHost = el('div', 'assistant-initialization panel'); initializationHost.hidden = true; initializationHost.setAttribute('role', 'alert'); chat.appendChild(initializationHost);
   var intro = el('div', 'assistant-intro'); intro.appendChild(uiIcon('sparkles', {size: 30})); intro.appendChild(el('h2', null, '今天，我们一起完成什么？')); intro.appendChild(el('p', null, '描述目标，选择工作区。助手的执行过程与产物会保留在这里。'));
   var suggestions = el('div', 'assistant-suggestions');
   ['梳理工作区文件，生成一份项目摘要', '检查服务健康，列出需要关注的问题', '整理最近的工作，生成交付说明'].forEach(function (text) { var chip = el('button', null, text); chip.type = 'button'; chip.addEventListener('click', function () { if (!input.readOnly) { input.value = text; input.focus(); } }); suggestions.appendChild(chip); });
@@ -409,20 +410,48 @@ export function mountAssistant(target, options) {
   legacyToggle.addEventListener('click', function () { legacyForm.hidden = !legacyForm.hidden; legacyToggle.textContent = legacyForm.hidden ? '打开旧任务关联' : '收起旧任务关联'; if (!legacyForm.hidden) refreshLegacy(latestRunId || activeRunId); });
   legacySubmit.addEventListener('click', async function () { var runId = activeRunId || latestRunId; if (!runId) { legacyStatus.textContent = '请先提交一次主助手运行'; return; } legacySubmit.disabled = true; legacyStatus.textContent = '提交中'; try { var result = await createPlatformLegacyTask(runId, { machine: legacyMachine.value.trim(), agent_type: legacyAgent.value.trim(), project: legacyProject.value.trim(), instruction: legacyInstruction.value.trim(), confirm: legacyConfirm.checked }); var link = result.legacy_task || result; legacyStatus.textContent = '已关联：' + (link.state || 'pending') + (link.task_id ? ' · ' + link.task_id : ''); renderLegacyProjection(legacyDetails, link); } catch (error) { legacyStatus.textContent = (error && (error.detail || error.message || error.code)) || '提交失败'; } finally { legacySubmit.disabled = false; } });
   lockPendingTurn();
-  refreshConversationHistory();
-  // Defaults contains one coherent catalog; optional panels cannot block it.
-  getPlatformDefaults().then(async function (data) {
-    if (disposed) return;
-    var defaults = data.defaults || {};
-    fill(model, data.models, 'profile_id', 'model');
-    fill(workspace, data.workspaces, 'workspace_id', 'name');
-    if (defaults.model_profile_id && Array.from(model.options).some(function (o) { return o.value === defaults.model_profile_id; })) model.value = defaults.model_profile_id;
-    if (defaults.workspace_id && Array.from(workspace.options).some(function (o) { return o.value === defaults.workspace_id; })) workspace.value = defaults.workspace_id;
-    catalogReady = !!model.value && !!workspace.value;
-    setStatus(catalogReady ? '就绪' : '请先配置可用模型和工作区');
-    await refreshConversation();
-    refreshUnknownCommands();
-    refreshMemoryItems('');
-  }).catch(function (error) { showError(eventHost, error); setStatus('平台配置加载失败'); });
+  // Authentication, catalog loading and conversation recovery are distinct
+  // failure states. Do not enable submission until the saved state is known.
+  async function initialize() {
+    clear(initializationHost); initializationHost.hidden = true;
+    catalogReady = false; setStatus('加载中');
+    var failureStatus = '平台配置加载失败';
+    try {
+      var data = await getPlatformDefaults();
+      if (disposed) return;
+      var defaults = data.defaults || {};
+      fill(model, data.models, 'profile_id', 'model');
+      fill(workspace, data.workspaces, 'workspace_id', 'name');
+      if (defaults.model_profile_id && Array.from(model.options).some(function (o) { return o.value === defaults.model_profile_id; })) model.value = defaults.model_profile_id;
+      if (defaults.workspace_id && Array.from(workspace.options).some(function (o) { return o.value === defaults.workspace_id; })) workspace.value = defaults.workspace_id;
+      failureStatus = '会话恢复失败';
+      await refreshConversation();
+      if (disposed) return;
+      catalogReady = !!model.value && !!workspace.value;
+      if (!catalogReady) setStatus('请先配置可用模型和工作区');
+      else if (!latestRunId) setStatus('就绪');
+      lockPendingTurn();
+      refreshConversationHistory();
+      refreshUnknownCommands();
+      refreshMemoryItems('');
+    } catch (error) {
+      if (disposed) return;
+      var needsLogin = error && error.status === 401;
+      var forbidden = error && error.status === 403;
+      setStatus(needsLogin ? '请先登录操作员' : forbidden ? '当前操作员无访问权限' : failureStatus);
+      initializationHost.hidden = false;
+      if (needsLogin || forbidden) {
+        initializationHost.appendChild(el('p', null, needsLogin
+          ? '登录后即可加载模型、工作区和历史对话。'
+          : '请切换有权限的操作员后重试。'));
+        if (error.requestId) initializationHost.appendChild(el('p', 'meta', '请求编号 ' + error.requestId));
+      } else showError(initializationHost, error);
+      var action = el('button', 'button-secondary', needsLogin ? '操作员登录' : forbidden ? '切换操作员' : '重试加载');
+      action.type = 'button';
+      action.addEventListener('click', needsLogin || forbidden ? options.onLogin : initialize);
+      initializationHost.appendChild(action);
+    }
+  }
+  initialize();
   return function teardown() { disposed = true; timers.forEach(clearTimeout); timers.clear(); };
 }

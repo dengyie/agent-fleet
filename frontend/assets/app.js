@@ -16,7 +16,7 @@ import './ui/ToolCallBadge.js';
 import './ui/AutoScrollAnchor.js';
 
 import { mountOperator } from './shell/operator.js';
-mountOperator();
+const openOperatorLogin = mountOperator();
 
 const client = {...api, ...platform};
 const store = new FleetStore();
@@ -29,7 +29,7 @@ function mount() {
   target.replaceChildren();
   const mountEntity = {machine: mountMachine, task: mountTask, session: mountSession};
   if (route.page === 'fleet') teardown = mountFleet(target, store, client);
-  else if (route.page === 'assistant') teardown = mountAssistant(target, {conversationId: route.id});
+  else if (route.page === 'assistant') teardown = mountAssistant(target, {conversationId: route.id, onLogin: openOperatorLogin});
   else if (route.page === 'monitoring') teardown = mountMonitoring(target, client);
   else if (mountEntity[route.page] && route.id) teardown = mountEntity[route.page](target, route.id, store, client);
   else target.textContent = '页面不存在或缺少标识，请从导航重新进入。';

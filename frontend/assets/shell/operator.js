@@ -6,9 +6,10 @@ export function mountOperator() {
   const input = dialog.querySelector('input');
   const status = dialog.querySelector('[role=status]');
   const submit = dialog.querySelector('[type=submit]');
-  document.getElementById('operator-login').addEventListener('click', () => {
+  function openLogin() {
     status.textContent = ''; input.value = ''; dialog.showModal();
-  });
+  }
+  document.getElementById('operator-login').addEventListener('click', openLogin);
   dialog.querySelector('[data-close]').addEventListener('click', () => dialog.close());
   dialog.querySelector('[data-logout]').addEventListener('click', () => {
     setOperatorToken(''); window.location.reload();
@@ -25,4 +26,5 @@ export function mountOperator() {
       submit.disabled = false;
     }
   });
+  return openLogin;
 }

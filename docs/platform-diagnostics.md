@@ -13,6 +13,10 @@ This read-only command fails for missing routes, authentication, disabled worker
 
 ## Failure evidence
 
+Assistant initialization distinguishes authentication from configuration failures. A 401 on defaults or conversation recovery asks the user to sign in through the existing operator dialog; a 403 asks them to switch to an authorized operator. Tokens remain scoped to the browser session. Successful sign-in reloads the current URL, restoring its model catalog, saved workspace and conversation history. Missing or expired login is not evidence that platform configuration was lost.
+
+Catalog and conversation recovery failures have separate messages, retain the request ID when available and offer an explicit retry. Submission stays disabled until the catalog and saved conversation state are loaded. Diagnose the failing request's HTTP status and request ID before changing server configuration.
+
 - HTTP responses include `X-Request-ID`; failed requests log the same ID, method, matched route and status without query strings or headers.
 - Provider failures preserve their safe error category, HTTP status, step and attempt in a single durable `run_unknown` event, the result message and a structured `platform_run_failure` log. Known upstream CPU/memory overload and `do_request_failed` codes are retained; arbitrary upstream messages are not.
 - Unknown outcomes remain unknown and are not automatically replayed. Provider network uncertainty is distinct from accounting failures. A 503 does not prove whether the upstream performed chargeable work.
@@ -24,6 +28,8 @@ This read-only command fails for missing routes, authentication, disabled worker
 ## Regression coverage
 
 The provider fault matrix uses a real local HTTP server returning 403/429/503 and checks the entire worker → event API → durable result/log chain. A separate HTTP tool-contract test validates parameter schemas, writes an actual file and checks the second model request. Browser coverage verifies that HTTP 503 remains visible after reload. Readiness and smoke-failure tests verify nonzero exit and retained evidence, rather than merely checking source strings.
+
+The assistant authentication browser fixture disables developer identity fallback and maps a test token at a local proxy boundary. It verifies actual anonymous/invalid-token 401 responses, sign-in from both a new and saved conversation, model/workspace/history recovery, explicit 503 retries and distinct 403 handling.
 
 No test suite guarantees the absence of all production failures. Production gateway overload, credentials, feature gates and installed agent versions must still be checked against the deployed release.
 

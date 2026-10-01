@@ -10,6 +10,8 @@
 .assistant-controls select { font-size: 12px; min-width: 125px; padding: 5px 9px; }
 .assistant-run-model { margin-left: auto; }
 .assistant-chat { min-width: 0; min-height: calc(100vh - 300px); display: flex; flex-direction: column; }
+.assistant-initialization { margin-bottom: 16px; overflow-wrap: anywhere; }
+.assistant-initialization button { margin-top: 12px; }
 .assistant-intro { text-align: center; padding: 64px 22px 42px; margin: auto 0; }
 .assistant-intro>svg { padding: 14px; width: 60px; height: 60px; border: 1px solid var(--border); border-radius: 18px; background: var(--panel); color: var(--link); margin-bottom: 24px; box-shadow: var(--shadow-md); }
 .assistant-intro h2 { font-size: 24px; font-weight: 580; letter-spacing: -.8px; margin-bottom: 12px; }
