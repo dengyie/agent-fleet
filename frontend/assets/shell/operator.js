@@ -1,3 +1,5 @@
+import {accountRequest} from '../api/accounts.js';
+import {mountAccountLogin} from './account-login.js';
 import {getOperatorSession, setOperatorToken} from '../api/client.js';
 import {pagePath, uiIcon} from '../routes.js';
 
@@ -5,7 +7,7 @@ export function safeReturnPath(value) {
   if (typeof value !== 'string' || value.length > 2048) return pagePath('assistant');
   try {
     const url = new URL(value, window.location.origin);
-    const known = /^\/(?:index\.html|assistant|monitoring|(?:machine|task|session|conversation)\/[^/]+)?$/;
+    const known = /^\/(?:index\.html|account|assistant|monitoring|(?:machine|task|session|conversation)\/[^/]+)?$/;
     if (url.origin === window.location.origin && known.test(url.pathname)) {
       return url.pathname + url.search + url.hash;
     }
@@ -19,7 +21,23 @@ export function redirectToLogin() {
   window.location.replace(pagePath('login') + '?' + new URLSearchParams({return_to: returnTo}));
 }
 
-export function mountLogin() {
+export async function mountLogin() {
+  try {
+    const options = await accountRequest("options");
+    const returnTo = safeReturnPath(new URLSearchParams(window.location.search).get("return_to"));
+    if (options.enabled) { mountAccountLogin(options, returnTo); return; }
+  } catch (error) {
+    if (error.status !== 404) {
+      const gate = document.getElementById("access-state");
+      gate.querySelector("p").textContent = "暂时无法加载登录服务";
+      const retry = gate.querySelector("button"); retry.hidden = false; retry.onclick = mountLogin;
+      return;
+    }
+  }
+  mountTokenLogin();
+}
+
+function mountTokenLogin() {
   const host = document.getElementById('login-view');
   const form = document.getElementById('login-form');
   const input = form.querySelector('input');

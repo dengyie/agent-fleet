@@ -35,6 +35,7 @@ def _file(relative: str, *, asset: bool = False):
 @bp.route('/')
 @bp.route('/index.html')
 @bp.route('/login')
+@bp.route('/account')
 @bp.route('/assistant')
 @bp.route('/monitoring')
 @bp.route('/machine/<entity>')

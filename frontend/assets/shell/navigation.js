@@ -1,6 +1,7 @@
 import { uiIcon, pagePath } from '../routes.js';
 import { getConversations } from '../api/platform.js';
 const labels = {
+  account: ['账号设置', '账号设置', '管理个人资料、密码与登录会话。', 'ACCOUNT'],
   fleet: ['总览', '集群总览', '节点、任务与服务状态，一处掌握。', 'WORKSPACE OVERVIEW'],
   assistant: ['主助手', '主助手', '从一个想法开始，让助手把工作推进到完成。', 'ASSISTANT'],
   monitoring: ['服务监控', '服务监控', '查看服务健康与待处理事件，按授权执行操作。', 'SERVICE HEALTH'],
