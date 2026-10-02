@@ -22,7 +22,9 @@ Account mode adds email verification, email/password login, password reset, prof
 | `AGENT_FLEET_SMTP_PASSWORD` | Runtime-only SMTP secret |
 | `AGENT_FLEET_SMTP_FROM` | Verified sender address |
 
-The selected integration is one-mail, using its documented `POST /api/send_mail`, address-JWT `Authorization` header and optional `x-custom-auth`. Each send includes `x-idempotency-key`; only HTTP 200 with `status: ok` confirms delivery. Redirects and automatic retries are disabled. The dedicated address must already have sending permission/balance and its domain must have a working mail transport in one-mail. This integration does not require its global administrator password.
+The one-mail adapter uses its documented `POST /api/send_mail`, address-JWT `Authorization` header and optional `x-custom-auth`. Each send includes `x-idempotency-key`; only HTTP 200 with `status: ok` confirms delivery. Redirects and automatic retries are disabled. The dedicated address must already have sending permission/balance and its domain must have a working mail transport in one-mail. This integration does not require its global administrator password.
+
+Account mode can instead explicitly select a configured TLS SMTP transport. The activation preflight found that the available one-mail API did not confirm delivery; the existing SMTP transport used by the mail project is being validated for activation. Configure only the selected transport's environment variables. There is no automatic retry through a second sender after an uncertain delivery. A successful address login or SMTP authentication alone is not delivery verification: the activation check must receive a code and complete registration with it.
 
 No mail sender means verification requests return an explicit service-unavailable error for every email address. With a configured sender, the public response acknowledges the request without asserting delivery. Public registration and real mail delivery are not activated by adding these files.
 
