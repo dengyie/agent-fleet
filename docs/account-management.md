@@ -30,6 +30,10 @@ No mail sender means verification requests return an explicit service-unavailabl
 
 The durable store is `<root>/var/accounts/accounts.db`. It contains scrypt password/code hashes, SHA-256 hashes of random session tokens, invitations and persistent rate counters. Protect this directory as credential material. First-administrator creation uses `tools/account-admin.py --root <root> --email <email>` and hidden interactive password entry. It refuses to create a second bootstrap administrator. Administrators can promote verified users through account settings. Creating an invitation grants registration eligibility for seven days; it does not send an invitation email. The invited person opens the registration page and requests a verification code.
 
+## Health checks
+
+Guardians and release startup probes use credential-free `GET /healthz`, which returns only `{"status":"ok"}` with `Cache-Control: no-store`. `/api/status` remains an authenticated administrator business API in account mode; using it as an anonymous liveness probe causes repeated restarts on 401. Configuration readiness still requires an authenticated platform check.
+
 ## Authentication and authorization
 
 - Production sessions use host-bound Secure, HttpOnly, SameSite=Lax cookies. Password reset/change and disabling/role-changing a user revoke sessions at the server. Sessions expire after seven days.

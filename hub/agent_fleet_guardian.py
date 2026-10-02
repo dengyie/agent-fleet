@@ -128,7 +128,7 @@ class AgentFleetGuardian:
                 "%{http_code}",
                 "--max-time",
                 "5",
-                f"http://127.0.0.1:{self.web_port}/api/status",
+                f"http://127.0.0.1:{self.web_port}/healthz",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
