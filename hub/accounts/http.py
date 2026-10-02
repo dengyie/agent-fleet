@@ -3,7 +3,7 @@ import os
 from urllib.parse import urlsplit
 
 from flask import Blueprint, current_app, g, jsonify, request
-from hub.accounts.store import AccountStore, email_address, fail
+from hub.accounts.store import AccountStore, email_address, login_identifier, fail
 from hub.accounts.client_address import client_address, proxy_networks
 from hub.accounts.mail import OneMailSender, SmtpSender
 from hub.http.errors import ApplicationError, error_response
@@ -99,7 +99,10 @@ def init_accounts(app, config):
             if request.endpoint in PUBLIC:
                 if request.method == 'POST':
                     data = body()
-                    email_address(data.get('email'))
+                    if request.endpoint == 'accounts.login':
+                        login_identifier(data.get('email'))
+                    else:
+                        email_address(data.get('email'))
                     operation = request.endpoint
                     if operation == 'accounts.code':
                         if data.get('purpose') not in ('register', 'reset'):

@@ -24,7 +24,8 @@ export function mountAccountLogin(options, returnTo) {
       wrapper.append(labelEl, input); form.append(wrapper); fields[key] = input;
       return input;
     };
-    field('email', '邮箱', 'email', 'email').maxLength = 254;
+    field('email', mode === 'login' ? '账号或邮箱' : '邮箱',
+      mode === 'login' ? 'text' : 'email', mode === 'login' ? 'username' : 'email').maxLength = 254;
     if (mode === 'register') field('name', '昵称', 'text', 'nickname').maxLength = 80;
     if (mode !== 'login') {
       const code = field('code', '邮箱验证码', 'text', 'one-time-code'); code.pattern = '[0-9]{6}'; code.maxLength = 6; code.inputMode = 'numeric';

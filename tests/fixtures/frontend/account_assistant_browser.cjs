@@ -16,7 +16,7 @@ const [origin, role] = process.argv.slice(2);
     page.on('response', response => { if (response.status() === 403) denied.push(response.url()); });
     page.on('pageerror', error => errors.push(error.message));
     await page.goto(origin + '/login?return_to=%2Fassistant');
-    await page.getByLabel('邮箱', {exact: true}).fill(role + '@example.test');
+    await page.getByLabel('账号或邮箱', {exact: true}).fill(role === 'admin' ? 'mango' : role + '@example.test');
     await page.getByLabel('密码', {exact: true}).fill('Review-password-123!');
     await page.getByRole('button', {name: '登录', exact: true}).click();
     await page.waitForURL('**/assistant');

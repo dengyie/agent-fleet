@@ -35,6 +35,16 @@ def password_hash(value):
     return generate_password_hash(value, method='scrypt')
 
 
+def username(value):
+    if not isinstance(value, str) or not re.fullmatch(r'[a-z0-9_-]{3,32}', value.strip().lower()):
+        fail('invalid_username', '账号需为 3–32 位字母、数字、下划线或短横线')
+    return value.strip().lower()
+
+
+def login_identifier(value):
+    return email_address(value) if isinstance(value, str) and '@' in value else username(value)
+
+
 def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
@@ -69,6 +79,9 @@ class AccountStore:
             db.execute('BEGIN IMMEDIATE')
             if 'revision' not in {row['name'] for row in db.execute('PRAGMA table_info(users)')}:
                 db.execute('ALTER TABLE users ADD COLUMN revision INTEGER NOT NULL DEFAULT 0')
+            if 'username' not in {row['name'] for row in db.execute('PRAGMA table_info(users)')}:
+                db.execute('ALTER TABLE users ADD COLUMN username TEXT')
+            db.execute('CREATE UNIQUE INDEX IF NOT EXISTS users_username ON users(username)')
         self.path.chmod(0o600)
         self.dummy_hash = generate_password_hash(secrets.token_urlsafe(32), method='scrypt')
 
@@ -167,21 +180,22 @@ class AccountStore:
             fail('invalid_code', '验证码无效或已过期')
 
     def login(self, email, password):
-        email = email_address(email)
-        self.limit('login:' + email, 10, 900)
-        if not isinstance(password, str) or len(password) > 128:
-            fail('invalid_login', '邮箱或密码错误', 401)
+        identifier = login_identifier(email)
         with self.connect() as db:
-            user = db.execute('SELECT * FROM users WHERE email=?', (email,)).fetchone()
+            user = db.execute('SELECT * FROM users WHERE email=? OR username=?', (identifier, identifier)).fetchone()
+        # Alias and email share the account's credential-attempt budget.
+        self.limit('login:' + (user['email'] if user else identifier), 10, 900)
+        if not isinstance(password, str) or len(password) > 128:
+            fail('invalid_login', '账号或密码错误', 401)
         valid = check_password_hash(user['password'] if user else self.dummy_hash, password)
         if not valid or not user or not user['active']:
-            fail('invalid_login', '邮箱或密码错误', 401)
+            fail('invalid_login', '账号或密码错误', 401)
         token = secrets.token_urlsafe(32)
         now = self.clock()
         with self.connect() as db:
             current = db.execute('SELECT * FROM users WHERE id=?', (user['id'],)).fetchone()
             if not current['active'] or current['password'] != user['password']:
-                fail('invalid_login', '邮箱或密码错误', 401)
+                fail('invalid_login', '账号或密码错误', 401)
             db.execute('DELETE FROM sessions WHERE expires<=?', (now,))
             db.execute('INSERT INTO sessions VALUES (?,?,?,?)', (digest(token), user['id'], now, now + 604800))
         return token, self.public(current)
@@ -270,11 +284,12 @@ class AccountStore:
             db.execute('DELETE FROM sessions WHERE user_id=?', (user_id,))
             return self.public(db.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone())
 
-    def bootstrap_admin(self, email, password):
+    def bootstrap_admin(self, email, password, *, login_name=None):
         email = email_address(email)
+        alias = username(login_name) if login_name is not None else None
         hashed = password_hash(password)
         with self.connect() as db:
             if db.execute('SELECT 1 FROM users WHERE role="admin"').fetchone():
                 fail('admin_exists', '管理员已存在', 409)
-            db.execute('INSERT INTO users (id,email,name,password,role,active,created) VALUES (?,?,?,?,?,1,?)',
-                       ('acct_' + uuid.uuid4().hex, email, '管理员', hashed, 'admin', self.clock()))
+            db.execute('INSERT INTO users (id,email,name,password,role,active,created,username) VALUES (?,?,?,?,?,1,?,?)',
+                       ('acct_' + uuid.uuid4().hex, email, '管理员', hashed, 'admin', self.clock(), alias))

@@ -53,7 +53,7 @@ def test_account_assistant_permissions_and_core_flows(tmp_path, role):
         execution_windows_enabled=True,
         accounts={'enabled': True, 'origin': 'http://127.0.0.1', 'registration': 'invite'}))
     accounts = app.extensions['accounts']
-    accounts.bootstrap_admin('admin@example.test', 'Review-password-123!')
+    accounts.bootstrap_admin('admin@example.test', 'Review-password-123!', login_name='mango')
     if role == 'user':
         mail = []
         accounts.invite('user@example.test')
