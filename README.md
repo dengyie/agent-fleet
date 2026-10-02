@@ -141,3 +141,7 @@ python3 tools/agent-self-report.py \
 ## 📄 License
 
 本项目基于 [MIT License](LICENSE) 开源。欢迎 Star、Issue 与 Pull Request！
+
+### 账号体系（开发分支功能，默认关闭）
+
+支持邮箱验证码注册、邮箱密码登录、密码找回、个人资料、会话撤销及管理员账号管理。配置接口、权限边界和现有数据归属限制见 [账号管理说明](docs/account-management.md)。

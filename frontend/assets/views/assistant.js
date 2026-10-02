@@ -20,6 +20,8 @@ function token() { if (typeof crypto !== 'undefined' && crypto.randomUUID) retur
 
 export function mountAssistant(target, options) {
   options = options || {}; clear(target);
+  // The shell supplies its verified identity; legacy operators have no account.
+  var canAdminister = !options.account || options.account.role === 'admin';
   var root = el('div', 'assistant-view');
   var heading = el('div', 'assistant-heading'); var title = el('div'); title.appendChild(el('h1', null, '主助手')); title.appendChild(el('p', 'meta', '持久运行工作区')); heading.appendChild(title); var status = el('span', 'assistant-run-status', '准备中'); heading.appendChild(status); root.appendChild(heading);
   var controls = el('div', 'assistant-controls'); var model = document.createElement('select'); var workspace = document.createElement('select'); model.setAttribute('aria-label', '模型'); workspace.setAttribute('aria-label', '工作区'); controls.appendChild(el('label', null, '模型')); controls.appendChild(model); controls.appendChild(el('label', null, '工作区')); controls.appendChild(workspace); root.appendChild(controls);
@@ -52,10 +54,15 @@ export function mountAssistant(target, options) {
   chat.appendChild(composer); chat.appendChild(el('p', 'composer-hint', 'Enter 发送 · Shift + Enter 换行 · 关闭页面后任务继续运行'));
   var inspector = el('aside', 'assistant-inspector'); inspector.setAttribute('aria-label', '运行与产物');
   function disclosure(section, label, open) { var detail = el('details', 'assistant-disclosure'); detail.open = !!open; detail.appendChild(el('summary', null, label)); detail.appendChild(section); inspector.appendChild(detail); }
-  disclosure(artifactSection, '工作区产物', true); disclosure(windowSection, '执行窗口', true);
+  disclosure(artifactSection, '工作区产物', true);
+  if (canAdminister) disclosure(windowSection, '执行窗口', true);
   var eventSection = el('section'); eventSection.appendChild(eventHost); disclosure(eventSection, '运行记录', true);
-  disclosure(memorySection, '记忆上下文', false); disclosure(historySection, '最近对话', false); disclosure(legacySection, '关联任务', false);
-  inspector.appendChild(unknownSection);
+  if (canAdminister) disclosure(memorySection, '记忆上下文', false);
+  disclosure(historySection, '最近对话', false);
+  if (canAdminister) {
+    disclosure(legacySection, '关联任务', false);
+    inspector.appendChild(unknownSection);
+  }
   clear(root); root.appendChild(heading); root.appendChild(controls); root.appendChild(chat); root.appendChild(inspector); target.appendChild(root);
   var conversationId = options.conversationId || null; var conversationWorkspaceId = null; var activeRunId = null; var latestRunId = null; var cursor = 0; var polling = false; var windowEventCursor = 0; var windowPolling = false; var windowState = { loading: false, error: null, window: null, mode: 'disconnected', events: [], holderId: token(), leaseToken: null, leaseExpiresAt: 0 };
   var disposed = false; var timers = new Set();
@@ -128,6 +135,7 @@ export function mountAssistant(target, options) {
   }
   var windowConnection = null;
   function connectExecutionWindow(runId, create) {
+    if (!canAdminister) return;
     if (windowConnection) return windowConnection;
     windowConnection = doConnectExecutionWindow(runId, create).finally(function () { windowConnection = null; });
     return windowConnection;
@@ -201,6 +209,7 @@ export function mountAssistant(target, options) {
   function selectedMemoryIds() { return memoryState.order.slice(0, memoryState.maxItems); }
   function removeMemory(memoryId) { toggleMemory({ memory_id: memoryId }, false); }
   async function refreshMemoryItems(query) {
+    if (!canAdminister) return;
     var value = typeof query === 'string' ? query.trim() : ''; var sequence = ++memoryRequestSequence;
     memorySearch.disabled = true;
     memoryState = Object.assign({}, memoryState, { loading: true, error: null, query: value }); renderMemoryState();
@@ -269,6 +278,7 @@ export function mountAssistant(target, options) {
     }
   }
   async function refreshUnknownCommands() {
+    if (!canAdminister) return;
     try {
       var data = await getUnknownCommands(50); var commands = data.commands || [];
       unknownSection.hidden = commands.length === 0;
@@ -367,7 +377,7 @@ export function mountAssistant(target, options) {
       var payload = { text: text, client_token: token() };
       if (model.value) payload.overrides = { model_profile_id: model.value };
       var selectedIds = selectedMemoryIds();
-      if (memoryEnabled.checked && selectedIds.length) {
+      if (canAdminister && memoryEnabled.checked && selectedIds.length) {
         payload.memory_context = {
           enabled: true, memory_ids: selectedIds,
           revisions: selectedIds.reduce(function (result, id) { result[id] = memoryState.selected[id].revision; return result; }, {}),
