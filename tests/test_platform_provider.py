@@ -75,7 +75,7 @@ def test_structured_tool_call_arguments_are_normalized():
     transport = FakeTransport([_response({
         "choices": [{"message": {"role": "assistant", "tool_calls": [{
             "id": "call-1", "type": "function",
-            "function": {"name": "workspace.write", "arguments": '{"path":"x","content":"y"}'},
+            "function": {"name": "workspace_write", "arguments": '{"path":"x","content":"y"}'},
         }]}, "finish_reason": "tool_calls"}],
         "usage": {"prompt_tokens": 4, "completion_tokens": 5},
     })])
@@ -95,13 +95,13 @@ def test_sse_preserves_text_and_tool_delta_order():
     events = [
         event({"choices": [{"delta": {"content": "hel"}, "finish_reason": None}]}),
         event({"choices": [{"delta": {"content": "lo"}, "finish_reason": None}]}),
-        event({"choices": [{"delta": {"tool_calls": [{"id": "c1", "function": {"name": "workspace.write", "arguments": '{"path":"x",'}}]}, "finish_reason": None}]}),
+        event({"choices": [{"delta": {"tool_calls": [{"id": "c1", "function": {"name": "workspace_write", "arguments": '{"path":"x",'}}]}, "finish_reason": None}]}),
         event({"choices": [{"delta": {"tool_calls": [{"function": {"arguments": '"content":"y"}'}}]}, "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 2, "completion_tokens": 3}}),
         b"data: [DONE]\n\n",
     ]
     transport = FakeTransport([TransportResponse(200, {"content-type": "text/event-stream"}, events)])
     profile = _profile(provider_config={"endpoint": "https://llm.example.test", "stream": True})
-    result = ProviderFactory(secret_broker=Broker({"env://TEST_PROVIDER_KEY": "x"}), transport=transport)(profile).complete([], [])
+    result = ProviderFactory(secret_broker=Broker({"env://TEST_PROVIDER_KEY": "x"}), transport=transport)(profile).complete([], [{"name": "workspace.write"}])
     # A stream may contain narration before a tool call; the adapter keeps both
     # in order and exposes the structured call to the finite runtime.
     assert result.kind == "tool_call"
@@ -184,9 +184,55 @@ def test_workspace_tool_contract_reaches_real_provider_request():
     provider = ProviderFactory(secret_broker=Broker({"env://TEST_PROVIDER_KEY": "secret"}), transport=transport)(_profile())
     provider.complete([{"role": "user", "content": "write a file"}], ToolBroker.tool_definitions())
     definitions = {row["function"]["name"]: row["function"] for row in json.loads(transport.calls[0]["body"])["tools"]}
-    write = definitions["workspace.write"]["parameters"]
+    write = definitions["workspace_write"]["parameters"]
     assert set(write["required"]) == {"path", "content"}
     assert write["properties"]["path"]["type"] == "string"
     assert write["properties"]["content"]["type"] == "string"
-    assert definitions["workspace.exec"]["parameters"]["properties"]["argv"]["type"] == "array"
+    assert definitions["workspace_exec"]["parameters"]["properties"]["argv"]["type"] == "array"
     assert all(tool["description"] for tool in definitions.values())
+
+
+@pytest.mark.parametrize("names", [
+    ["workspace.write", "workspace_write"],
+    ["workspace.write", "workspace.write"],
+    [""], ["x" * 65], ["workspace/read"],
+])
+def test_invalid_or_ambiguous_tool_names_fail_before_network(names):
+    transport = FakeTransport([])
+    provider = OpenAICompatibleProvider(model="test", endpoint="http://localhost",
+                                        api_key="secret", transport=transport)
+    with pytest.raises(ProviderUnavailable, match="provider_tools_invalid"):
+        provider.complete([], [{"name": name} for name in names])
+    assert transport.calls == []
+
+
+@pytest.mark.parametrize("returned_name", ["workspace_exec", "workspace.write"])
+def test_unadvertised_tool_name_is_not_dispatched(returned_name):
+    transport = FakeTransport([_response({"choices": [{"message": {"tool_calls": [{
+        "id": "call-1", "function": {"name": returned_name, "arguments": "{}"},
+    }]}}]})])
+    provider = OpenAICompatibleProvider(model="test", endpoint="http://localhost",
+                                        api_key="secret", transport=transport)
+    with pytest.raises(ProviderError, match="invalid_response"):
+        provider.complete([], [{"name": "workspace.write"}])
+
+
+def test_tool_name_maps_do_not_leak_between_calls_or_change_inputs():
+    import copy
+    reply = {"choices": [{"message": {"tool_calls": [{
+        "id": "c1", "function": {"name": "workspace_write", "arguments": "{}"},
+    }]}}]}
+    transport = FakeTransport([_response(reply), _response(reply)])
+    provider = OpenAICompatibleProvider(model="test", endpoint="http://localhost",
+                                        api_key="secret", transport=transport)
+    messages = [{"role": "assistant", "tool_calls": [{
+        "id": "c0", "function": {"name": "workspace.write", "arguments": "{}"},
+    }]}, {"role": "tool", "tool_call_id": "c0", "result": {"ok": True}}]
+    tools = [{"name": "workspace.write"}]
+    original = copy.deepcopy((messages, tools))
+    assert provider.complete(messages, tools).tool == "workspace.write"
+    assert (messages, tools) == original
+    sent = json.loads(transport.calls[0]["body"])
+    assert sent["messages"][0]["tool_calls"][0]["function"]["name"] == "workspace_write"
+    # The same valid wire name can be the real broker name in a later request.
+    assert provider.complete([], [{"name": "workspace_write"}]).tool == "workspace_write"
