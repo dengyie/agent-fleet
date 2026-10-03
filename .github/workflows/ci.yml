@@ -1,9 +1,8 @@
 name: CI
 
 # 打包契约：main 的发布产物一律由此 workflow 产出（2026-09-02 起）。
-# 红线：本 workflow 无 secrets、无 SSH、不触宿主/容器；不复制 arch-v2-primary
-# 的 deploy.yml（宿主 SSH + 自动部署属历史流程，禁止上 main）。
-# 发布 = 下载本 workflow 的 artifact，再走部署与运维 §0 手工 staging SOP。
+# test/package 不接触部署凭据。只有 main 的部署 job 使用 production 环境，
+# 经专用受限 SSH 入口提交同一 run 的发布包；宿主保留运行配置和数据库。
 
 on:
   push:
@@ -17,7 +16,8 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Never interrupt a production transaction because another main commit arrived.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test:
@@ -93,3 +93,80 @@ jobs:
           path: out/frontend/
           retention-days: 14
           if-no-files-found: error
+
+  deploy:
+    needs: [test, package]
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    concurrency:
+      group: agent-fleet-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      deployments: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject obsolete main releases
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$current" = "$GITHUB_SHA" ]; then
+            echo 'deploy=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'deploy=false' >> "$GITHUB_OUTPUT"
+            echo 'A newer main commit exists; this release will not deploy.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/download-artifact@v4
+        if: steps.current.outputs.deploy == 'true'
+        with:
+          name: agent-fleet-release
+          path: release/backend
+      - uses: actions/download-artifact@v4
+        if: steps.current.outputs.deploy == 'true'
+        with:
+          name: agent-fleet-frontend
+          path: release/frontend
+      - name: Validate and bundle this run's artifacts
+        if: steps.current.outputs.deploy == 'true'
+        run: |
+          python3 deploy/auto_deploy_ssh.py bundle \
+            --backend "release/backend/agent-fleet-release-$GITHUB_SHA.tgz" \
+            --frontend release/frontend --output "$RUNNER_TEMP/fleet-deploy.tgz" \
+            --sha "$GITHUB_SHA" --run "$GITHUB_RUN_ID"
+      - name: Submit restricted deployment
+        if: steps.current.outputs.deploy == 'true'
+        env:
+          DEPLOY_HOST: ${{ secrets.SSH_HOST }}
+          DEPLOY_PORT: ${{ secrets.SSH_PORT }}
+          DEPLOY_USER: ${{ secrets.SSH_USER }}
+          DEPLOY_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$RUNNER_TEMP/fleet-deploy-key"
+          known="$RUNNER_TEMP/fleet-deploy-known-hosts"
+          trap 'rm -f "$key" "$known"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" > "$key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$known"
+          unset DEPLOY_KEY DEPLOY_KNOWN_HOSTS
+          digest=$(sha256sum "$RUNNER_TEMP/fleet-deploy.tgz" | cut -d ' ' -f 1)
+          size=$(stat -c %s "$RUNNER_TEMP/fleet-deploy.tgz")
+          ssh -T -i "$key" -p "$DEPLOY_PORT" -o IdentitiesOnly=yes \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known" \
+            -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=40 \
+            "$DEPLOY_USER@$DEPLOY_HOST" "deploy $GITHUB_SHA $GITHUB_RUN_ID $digest $size" \
+            < "$RUNNER_TEMP/fleet-deploy.tgz" | tee "$RUNNER_TEMP/deployment.json"
+      - name: Preserve deployment result
+        if: always() && steps.current.outputs.deploy == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-fleet-deployment
+          path: ${{ runner.temp }}/deployment.json
+          retention-days: 14
+          if-no-files-found: warn
