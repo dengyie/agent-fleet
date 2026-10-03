@@ -8,10 +8,13 @@ const [origin] = process.argv.slice(2);
   try {
     const page = await browser.newPage({viewport: {width: 390, height: 844}});
     page.setDefaultTimeout(5000);
-    const errors = [], featureRequests = [];
+    const errors = [], successfulPrivateResponses = [], streamRequests = [];
     page.on('pageerror', error => errors.push(error.message));
     page.on('request', request => {
-      if (/^\/api\/(platform|status|stream|tasks|sessions|machines)/.test(new URL(request.url()).pathname)) featureRequests.push(request.url());
+      if (new URL(request.url()).pathname === '/api/stream') streamRequests.push(request.url());
+    });
+    page.on('response', response => {
+      if (response.ok() && /^\/api\/(platform|status|stream|tasks|sessions|machines)/.test(new URL(response.url()).pathname)) successfulPrivateResponses.push(response.url());
     });
     async function expectLogin(returnTo) {
       await page.waitForURL(url => url.pathname === '/login');
@@ -28,9 +31,17 @@ const [origin] = process.argv.slice(2);
       await page.goto(origin + route);
       await expectLogin(route);
     }
-    assert.deepEqual(featureRequests, [], 'protected data and SSE must not load before session validation');
+    assert.deepEqual(successfulPrivateResponses, [], 'anonymous feature requests must still be rejected by the server');
+    assert.deepEqual(streamRequests, [], 'SSE waits for a verified role');
     await page.goto(origin + '/assistant');
     await expectLogin('/assistant');
+    const optionsRoute = '**/api/accounts/options';
+    await page.route(optionsRoute, route => route.fulfill({status: 503, contentType: 'application/json', body: '{"error":"unavailable"}'}));
+    await page.reload();
+    await page.getByText('暂时无法加载登录服务', {exact: true}).waitFor();
+    await page.unroute(optionsRoute);
+    await page.getByRole('button', {name: '重新验证', exact: true}).click();
+    await page.getByRole('heading', {name: '登录工作空间', exact: true}).waitFor();
     const output = process.env.FLEET_SCREENSHOTS || '/tmp/agent-fleet-console-evidence';
     fs.mkdirSync(output, {recursive: true});
     await page.screenshot({path: path.join(output, 'login-mobile.png'), fullPage: true});
@@ -87,7 +98,7 @@ const [origin] = process.argv.slice(2);
     await page.waitForFunction(() => document.querySelector('[aria-label="工作区"]').value === 'saved');
     await page.waitForFunction(() => !document.querySelector('[aria-label="发送任务"]').disabled);
 
-    // A 401 after a successful entry check must also redirect, even non-JSON errors.
+    // Feature APIs also redirect independently of the background check, even for non-JSON 401s.
     await page.route(defaultsRoute, route => route.fulfill({status: 401, contentType: 'text/html', body: 'unauthorized'}));
     await page.goto(origin + '/assistant');
     await expectLogin('/assistant');
@@ -103,7 +114,8 @@ const [origin] = process.argv.slice(2);
     await page.route(sessionRoute, route => route.fulfill({status: 503, contentType: 'application/json', body: JSON.stringify({error: 'unavailable', detail: 'session unavailable'})}));
     await page.goto(origin + '/monitoring');
     await page.getByText('暂时无法验证登录状态', {exact: true}).waitFor();
-    assert.equal(await page.locator('.console-layout').isVisible(), false);
+    assert.equal(await page.locator('.console-layout').isVisible(), true);
+    assert.ok(await page.locator('#access-state').evaluate(el => el.getBoundingClientRect().height < 200), 'verification failures use a compact notice');
     assert.equal(await page.evaluate(() => sessionStorage.getItem('fleet_operator_token')), 'browser-fixture-token');
     await page.unroute(sessionRoute);
     await page.getByRole('button', {name: '重新验证', exact: true}).click();

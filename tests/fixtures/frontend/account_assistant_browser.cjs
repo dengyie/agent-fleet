@@ -7,6 +7,13 @@ const [origin, role] = process.argv.slice(2);
   try {
     const page = await browser.newPage();
     page.setDefaultTimeout(10000);
+    await page.addInitScript(() => {
+      const setInterval = window.setInterval.bind(window);
+      window.setInterval = (fn, delay, ...args) => {
+        if (delay === 60000) window.runSessionTimer = fn;
+        return setInterval(fn, delay, ...args);
+      };
+    });
     const requests = [], denied = [], errors = [], turns = [];
     const adminApi = /\/api\/platform\/v1\/(memory|execution-windows|commands|legacy-tasks)(\/|\?|$)/;
     page.on('request', request => {
@@ -18,9 +25,62 @@ const [origin, role] = process.argv.slice(2);
     await page.goto(origin + '/login?return_to=%2Fassistant');
     await page.getByLabel('账号或邮箱', {exact: true}).fill(role === 'admin' ? 'mango' : role + '@example.test');
     await page.getByLabel('密码', {exact: true}).fill('Review-password-123!');
+    // Hold identity validation while ordinary page data remains authorized.
+    // The destination and draft must be usable before this request returns.
+    let releaseSession;
+    const heldSession = new Promise(resolve => { releaseSession = resolve; });
+    const sessionRoute = '**/api/operator/session';
+    await page.route(sessionRoute, async route => { await heldSession; await route.continue(); });
     await page.getByRole('button', {name: '登录', exact: true}).click();
     await page.waitForURL('**/assistant');
     await page.getByText('就绪', {exact: true}).waitFor();
+
+    assert.equal(await page.locator('#access-state').isVisible(), false);
+    assert.equal(await page.locator('.console-layout').isVisible(), true);
+    assert.deepEqual(requests, [], 'administrator APIs wait for the verified role');
+    assert.deepEqual(denied, []);
+    await page.getByRole('textbox', {name: '给助手的任务'}).fill('draft before session validation');
+    const documentMarker = await page.evaluate(() => window.authDocumentMarker = Math.random());
+    const sessionResponse = page.waitForResponse(response => response.url().endsWith('/api/operator/session'));
+    releaseSession();
+    await sessionResponse;
+    await page.locator('[data-nav="account"]').waitFor();
+    await page.unroute(sessionRoute);
+    assert.equal(await page.evaluate(() => window.authDocumentMarker), documentMarker, 'first identity resolution must not reload');
+    assert.equal(await page.getByRole('textbox', {name: '给助手的任务'}).inputValue(), 'draft before session validation');
+
+    for (const trigger of ['focus', 'pageshow', 'timer']) {
+      let releaseCheck;
+      const checkHeld = new Promise(resolve => { releaseCheck = resolve; });
+      await page.route(sessionRoute, async route => { await checkHeld; await route.continue(); });
+      const requested = page.waitForRequest(request => request.url().endsWith('/api/operator/session'));
+      await page.evaluate(trigger => {
+        if (trigger === 'timer') window.runSessionTimer();
+        else if (trigger === 'pageshow') {
+          window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: true}));
+          window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}));
+        } else window.dispatchEvent(new Event('focus'));
+      }, trigger);
+      await requested;
+      assert.equal(await page.locator('.console-layout').isVisible(), true, trigger + ' must not hide the page');
+      assert.equal(await page.locator('#access-state').isVisible(), false);
+      await page.getByRole('textbox', {name: '给助手的任务'}).fill('draft during ' + trigger);
+      const response = page.waitForResponse(response => response.url().endsWith('/api/operator/session'));
+      releaseCheck(); await response; await page.unroute(sessionRoute);
+      await page.waitForFunction(() => !document.querySelector('#access-state button').disabled);
+      assert.equal(await page.evaluate(() => window.authDocumentMarker), documentMarker);
+      assert.equal(await page.getByRole('textbox', {name: '给助手的任务'}).inputValue(), 'draft during ' + trigger);
+    }
+
+    await page.route(sessionRoute, route => route.fulfill({status: 503, contentType: 'application/json', body: '{"error":"unavailable"}'}));
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await page.getByText('暂时无法验证登录状态', {exact: true}).waitFor();
+    assert.equal(await page.locator('.console-layout').isVisible(), true);
+    assert.equal(await page.getByRole('textbox', {name: '给助手的任务'}).inputValue(), 'draft during timer');
+    assert.equal(await page.evaluate(() => window.authDocumentMarker), documentMarker);
+    await page.unroute(sessionRoute);
+    await page.getByRole('button', {name: '重新验证', exact: true}).click();
+    await page.locator('#access-state').waitFor({state: 'hidden'});
 
     const restrictedPanels = '.assistant-memory-context, .assistant-execution-window, .assistant-legacy-section, .assistant-unknown-section';
     if (role === 'user') {
@@ -77,6 +137,22 @@ const [origin, role] = process.argv.slice(2);
       assert.equal(JSON.stringify(turns[2]).includes('Use the owner workspace.'), false, 'only references belong in the request');
       await page.locator('.assistant-events').getByText('已载入记忆上下文', {exact: true}).waitFor();
     }
+    // Logout is available immediately, even before the shell knows the account.
+    let releaseLogoutCheck, sawLogoutCheck;
+    const pendingLogoutCheck = new Promise(resolve => { releaseLogoutCheck = resolve; });
+    const logoutCheckSeen = new Promise(resolve => { sawLogoutCheck = resolve; });
+    await page.route(sessionRoute, async route => {
+      sawLogoutCheck(); await pendingLogoutCheck; await route.abort();
+    }, {times: 1});
+    await page.reload();
+    await logoutCheckSeen;
+    await page.getByText('Account assistant completed', {exact: true}).first().waitFor();
+    await page.getByRole('button', {name: '退出登录', exact: true}).click();
+    await page.waitForURL(url => url.pathname === '/login');
+    releaseLogoutCheck();
+    await page.getByRole('heading', {name: '登录工作空间', exact: true}).waitFor();
+    assert.equal((await page.request.get(origin + '/api/operator/session')).status(), 401, 'logout must revoke the server cookie before identity resolution');
+    assert.equal(await page.locator('.console-layout').isVisible(), false);
     assert.deepEqual(denied, []);
     assert.deepEqual(errors, []);
     console.log('PASS: ' + role + ' assistant permissions, completion, recovery, artifacts and cancellation');

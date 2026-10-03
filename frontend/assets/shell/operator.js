@@ -22,6 +22,10 @@ export function redirectToLogin() {
 }
 
 export async function mountLogin() {
+  const gate = document.getElementById('access-state');
+  gate.hidden = false;
+  gate.querySelector('p').textContent = '正在加载登录服务…';
+  gate.querySelector('button').hidden = true;
   try {
     const options = await accountRequest("options");
     const returnTo = safeReturnPath(new URLSearchParams(window.location.search).get("return_to"));
