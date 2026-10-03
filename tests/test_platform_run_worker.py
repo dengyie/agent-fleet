@@ -57,6 +57,84 @@ def test_worker_claims_and_finishes_local_run_with_events(tmp_path):
     assert [event["kind"] for event in events] == ["run_started", "tool_call", "tool_result", "run_finished"]
 
 
+@pytest.mark.parametrize('remote', [False, True])
+@pytest.mark.parametrize('tool', ['workspace.list', 'workspace.write', 'workspace.artifact', 'workspace.exec'])
+def test_acceptance_policy_is_frozen_and_enforced_by_new_worker(tmp_path, remote, tool):
+    from hub.application.run_worker_service import LocalRunWorkerService
+    from tools.platform.providers.base import ModelResponse
+
+    app = _app(tmp_path)
+    repo = _catalog(app, tmp_path)
+    (tmp_path / 'workspace').mkdir()
+    target = tmp_path / 'workspace' / 'flow.txt'
+    target.write_bytes(b'preserved')
+    overrides = {'tool_policy': 'unrestricted', 'allowed_tools': [tool]}
+    if remote:
+        repo.upsert_node(OWNER, {'node_id': 'remote', 'label': 'remote'})
+        overrides['execution_node_id'] = 'remote'
+    client = app.test_client()
+    conversation = client.post('/api/platform/v1/conversations', json={'workspace_id': 'home'}).get_json()['conversation']
+    path = f"/api/platform/v1/conversations/{conversation['conversation_id']}"
+    body = {'text': 'inspect', 'client_token': 'acceptance-policy', 'overrides': overrides}
+    response = client.post(path + '/acceptance-turns', json=body)
+    assert response.status_code == 202
+    run_id = response.get_json()['run']['run_id']
+    assert repo.get_run(OWNER, run_id)['config_snapshot']['tool_policy'] == 'acceptance_read_only'
+    assert client.post(path + '/acceptance-turns', json=body).get_json()['run']['run_id'] == run_id
+    assert client.post(path + '/turns', json=body).status_code == 409
+
+    declarations, commands = [], []
+
+    class Provider:
+        def complete(self, messages, tools):
+            declarations.append([item['name'] for item in tools])
+            if len(declarations) > 1:
+                return ModelResponse(kind='final', text='done')
+            arguments = {'path': 'flow.txt', 'content': 'overwritten'} if tool == 'workspace.write' else {}
+            return ModelResponse(kind='tool_call', tool=tool, arguments=arguments)
+
+    class Delivery:
+        def enqueue(self, command, **kwargs):
+            commands.append(command.action)
+
+        def wait_for_receipt(self, *args, **kwargs):
+            return {'status': 'succeeded', 'result': {}}
+
+    # A fresh service has only the persisted Run snapshot, no CLI/request state.
+    worker = LocalRunWorkerService(repo, app.extensions['fleet']['services']['run_events'],
+        provider_factory=lambda profile: Provider(), remote_execution_enabled=True,
+        remote_delivery=Delivery())
+    result = worker.run_once(OWNER)
+    assert result['state'] == ('succeeded' if tool == 'workspace.list' else 'failed')
+    assert all(names == ['workspace.list'] for names in declarations)
+    assert commands == (['tool.workspace.list'] if remote and tool == 'workspace.list' else [])
+    assert target.read_bytes() == b'preserved'
+    events = client.get(f'/api/platform/v1/runs/{run_id}/events').get_json()['events']
+    receipt = next(e['payload'] for e in events if e['kind'] == 'tool_result')
+    if tool != 'workspace.list':
+        assert receipt['error_code'] == 'tool_not_allowed'
+
+
+@pytest.mark.parametrize('race', [False, True])
+def test_acceptance_cannot_reuse_unrestricted_turn_token(tmp_path, monkeypatch, race):
+    app = _app(tmp_path)
+    _catalog(app, tmp_path)
+    run = _queued(app)
+    if race:
+        repo = app.extensions['fleet']['platform_repository']
+        original = repo.get_conversation
+
+        def stale_conversation(*args, **kwargs):
+            return {**original(*args, **kwargs), 'messages': [], 'runs': []}
+
+        monkeypatch.setattr(repo, 'get_conversation', stale_conversation)
+    response = app.test_client().post(
+        f"/api/platform/v1/conversations/{run['conversation_id']}/acceptance-turns",
+        json={'text': '写一个报告', 'client_token': 'turn-1'},
+    )
+    assert response.status_code == 409
+
+
 def test_worker_injects_frozen_memory_and_journals_redacted_evidence(tmp_path):
     from tools.platform.providers.base import ModelResponse
 

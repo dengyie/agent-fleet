@@ -15,7 +15,7 @@ cd "$repo_root"
 # inventory. §0 restores LIVE hosts.yaml from bak; tests assert absence.
 git archive --format=tar HEAD \
     agent_profiles.py \
-    README.md requirements.txt report_schema.py session_schema.py platform_schema.py \
+    README.md requirements.txt requirements-test.txt report_schema.py session_schema.py platform_schema.py \
     fleet-gates.conf \
     connectors hub tools deploy docs tests \
     > "$repo_root/.package-release.tmp.tar"

@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from hub.application.task_service import ApplicationError
 from hub.domain.conversation import UserTurn
 from hub.domain.run import Run
+from hub.domain.platform import ACCEPTANCE_TOOL_POLICY
 from hub.application.platform_memory_context_service import (
     PlatformMemoryContextError,
 )
@@ -142,8 +143,15 @@ class ConversationService:
         }
 
     def turn(self, owner_id: str, conversation_id: str, *, text: str, client_token: str,
-             overrides: Mapping | None = None, memory_context: Mapping | None = None) -> dict:
+             overrides: Mapping | None = None, memory_context: Mapping | None = None,
+             acceptance: bool = False) -> dict:
         owner_id = self._owner(owner_id)
+        expected_policy = ACCEPTANCE_TOOL_POLICY if acceptance else None
+
+        def verify_policy(run):
+            if (run.get("config_snapshot") or {}).get("tool_policy") != expected_policy:
+                raise ApplicationError("idempotency_conflict", "幂等键对应的执行权限不同", 409)
+
         try:
             turn = UserTurn.from_input(text, client_token)
             conversation = self.repository.get_conversation(owner_id, conversation_id)
@@ -161,6 +169,7 @@ class ConversationService:
                             if item["trigger_message_id"] == prior["message_id"]), None)
                 if run is None:
                     raise ApplicationError("run_not_found", "运行不存在", 404)
+                verify_policy(run)
                 return self._turn_response(owner_id, conversation_id, {
                     "created": False, "message": prior, "run": run,
                 })
@@ -182,6 +191,10 @@ class ConversationService:
                 workspace=workspace_defaults,
                 overrides=overrides or {},
             )
+            if acceptance:
+                # Only the dedicated server route selects this fixed policy.
+                # Client defaults/overrides cannot widen it or silently opt out.
+                snapshot["tool_policy"] = ACCEPTANCE_TOOL_POLICY
             if memory_context is not None:
                 if not isinstance(memory_context, Mapping):
                     raise ApplicationError("invalid_memory_context", "memory_context 必须是 JSON 对象", 400)
@@ -202,6 +215,8 @@ class ConversationService:
                 text=turn.text, client_token=turn.client_token,
                 config_snapshot=snapshot, now=float(self.clock()),
             )
+            # A concurrent submission may have won after the initial lookup.
+            verify_policy(result["run"])
             return self._turn_response(owner_id, conversation_id, result)
         except ApplicationError:
             raise
