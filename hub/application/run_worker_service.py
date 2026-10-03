@@ -25,6 +25,7 @@ from hub.application.platform_memory_context_service import (
 )
 from tools.platform.tool_broker import ToolBroker
 from tools.platform.remote_tool_broker import RemoteToolBroker
+from hub.domain.platform import ACCEPTANCE_TOOL_POLICY
 
 
 from hub.diagnostics import log_failure
@@ -101,6 +102,10 @@ class LocalRunWorkerService:
         lease_owner = None
         try:
             config = claim.get("config_snapshot") or {}
+            policy = config.get("tool_policy")
+            if policy not in (None, ACCEPTANCE_TOOL_POLICY):
+                raise RuntimeError("tool_policy_unavailable")
+            allowed_tools = frozenset({"workspace.list"}) if policy == ACCEPTANCE_TOOL_POLICY else None
             workspace_id = config.get("workspace_id") or claim.get("conversation_workspace_id")
             if not workspace_id:
                 raise RuntimeError("workspace_unavailable")
@@ -164,6 +169,7 @@ class LocalRunWorkerService:
                     self.remote_delivery, node_id=execution_node_id,
                     resource_id=workspace["workspace_id"], run_id=claim["run_id"],
                     waiter=self.remote_waiter,
+                    allowed_tools=allowed_tools,
                     event_sink=lambda kind, payload: self._event(claim, kind, payload),
                 )
             else:
@@ -172,6 +178,7 @@ class LocalRunWorkerService:
                     lease_owner_id=lease_owner, artifact_store=self.artifact_store,
                     diagnostics=self.diagnostics,
                     artifact_workspace_id=workspace["workspace_id"],
+                    allowed_tools=allowed_tools,
                 )
             runtime = NativeAssistantRuntime(
                 provider, broker, limits=self.limits,
@@ -203,7 +210,7 @@ class LocalRunWorkerService:
             result = worker.execute(
                 run_id=claim["run_id"], owner_id=claim["owner_id"],
                 epoch=lease["epoch"], messages=messages,
-                tools=ToolBroker.tool_definitions(), should_cancel=should_cancel,
+                tools=ToolBroker.tool_definitions(allowed_tools), should_cancel=should_cancel,
                 lease_id=lease_id, worker_id=self.worker_id,
                 attempt=int(claim.get("attempt") or 1),
             )

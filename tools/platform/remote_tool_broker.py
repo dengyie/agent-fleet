@@ -15,7 +15,8 @@ class RemoteToolBroker:
     """Turn exactly one model tool call into exactly one Node command."""
 
     def __init__(self, delivery, *, node_id: str, resource_id: str, run_id: str,
-                 event_sink=None, waiter=None, clock=time.time, receipt_timeout_s=30.0):
+                 event_sink=None, waiter=None, clock=time.time, receipt_timeout_s=30.0,
+                 allowed_tools=None):
         self.delivery = delivery
         self.node_id = node_id
         self.resource_id = resource_id
@@ -24,6 +25,7 @@ class RemoteToolBroker:
         self.waiter = waiter
         self.clock = clock
         self.receipt_timeout_s = max(0.1, min(float(receipt_timeout_s), 300.0))
+        self.allowed_tools = ToolBroker.TOOLS if allowed_tools is None else ToolBroker.TOOLS.intersection(allowed_tools)
 
     def _event(self, kind: str, command_id: str, tool: str, **extra):
         payload = {"command_id": command_id, "node_id": self.node_id, "tool": tool, **extra}
@@ -32,6 +34,8 @@ class RemoteToolBroker:
     def execute(self, *, command_id: str, tool: str, arguments: dict, owner_id: str, epoch: int) -> ToolReceipt:
         if tool not in ToolBroker.TOOLS:
             return ToolReceipt(command_id, "failed", {}, "unknown_tool")
+        if tool not in self.allowed_tools:
+            return ToolReceipt(command_id, "failed", {}, "tool_not_allowed")
         if not isinstance(arguments, Mapping):
             return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
         if not isinstance(command_id, str) or not command_id.startswith(self.run_id + ":step:"):

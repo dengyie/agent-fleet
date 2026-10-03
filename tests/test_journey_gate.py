@@ -47,6 +47,16 @@ def test_deselected_required_parameter_cannot_count_as_full_coverage(tmp_path):
                  'test_ok', 1, ['--deselect=tests/test_sample.py::test_ok[2]'])
 
 
+@pytest.mark.parametrize('selection', [
+    ['tests/test_sample.py::test_ok[1]'],
+    ['tests/test_sample.py::test_ok', '-k', 'not 2'],
+    ['--deselect=tests/test_sample.py::test_ok[2]'],
+])
+def test_hidden_failing_parameter_cannot_pass_journey(tmp_path, selection):
+    _assert_gate(tmp_path, 'import pytest\n@pytest.mark.parametrize("n", [1,2])\ndef test_ok(n): assert n == 1',
+                 'test_ok', 1, selection)
+
+
 def test_missing_matrix_cannot_silently_disable_gate(tmp_path):
     result = subprocess.run([sys.executable, '-m', 'pytest', '-p', 'tools.testing.pytest_journeys', '--require-journeys'],
                             cwd=tmp_path, env={**os.environ, 'PYTHONPATH': str(ROOT)}, capture_output=True, text=True, timeout=30)

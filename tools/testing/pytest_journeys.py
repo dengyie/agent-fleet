@@ -49,8 +49,19 @@ class JourneyEvidence:
     def pytest_deselected(self, items):
         self.deselected.update(item.nodeid for item in items)
 
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_make_collect_report(self, collector):
+        # Module/class collection reports include sibling parameter instances
+        # before positional node-ID matching. session.items and deselection
+        # hooks alone miss those excluded by e.g. test_ok[1]. Observe report
+        # creation: pytest need not emit pytest_collectreport for these nodes.
+        outcome = yield
+        report = outcome.get_result()
+        self.selected.update(item.nodeid for item in report.result if isinstance(item, pytest.Item))
+
     def pytest_collection_finish(self, session):
-        self.selected = {item.nodeid for item in session.items} | self.deselected
+        self.selected.update(item.nodeid for item in session.items)
+        self.selected.update(self.deselected)
 
     def pytest_runtest_logreport(self, report):
         self.phases.setdefault(report.nodeid, {})[report.when] = report.outcome

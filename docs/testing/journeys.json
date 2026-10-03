@@ -313,6 +313,11 @@
         "tests/test_platform_acceptance_check.py::test_release_cli_not_ready_cannot_create_runs",
         "tests/test_platform_acceptance_check.py::test_release_cli_malformed_credentials_produce_failed_evidence",
         "tests/test_platform_acceptance_check.py::test_release_cli_rejects_unexpected_writing_tools",
+        "tests/test_platform_acceptance_check.py::test_acceptance_denies_tools_before_side_effects",
+        "tests/test_platform_run_worker.py::test_acceptance_policy_is_frozen_and_enforced_by_new_worker",
+        "tests/test_platform_run_worker.py::test_acceptance_cannot_reuse_unrestricted_turn_token",
+        "tests/test_acceptance_deadline.py::test_model_deadline_rejects_late_success_without_replay",
+        "tests/test_acceptance_deadline.py::test_model_completes_within_deadline",
         "tests/test_platform_acceptance_check.py::test_release_cli_invalid_credentials_cannot_create_runs",
         "tests/test_platform_acceptance_check.py::test_release_cli_private_credentials_and_catalog_are_required",
         "tests/test_platform_acceptance_check.py::test_release_cli_rejects_unsafe_endpoint_before_login"
@@ -327,6 +332,7 @@
       "tests": [
         "tests/test_journey_gate.py::test_required_journeys_use_real_collected_results",
         "tests/test_journey_gate.py::test_deselected_required_parameter_cannot_count_as_full_coverage",
+        "tests/test_journey_gate.py::test_hidden_failing_parameter_cannot_pass_journey",
         "tests/test_journey_gate.py::test_missing_matrix_cannot_silently_disable_gate"
       ]
     }

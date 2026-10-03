@@ -5,15 +5,14 @@ It never retries a submission or replays an unknown Run. Reports exclude
 credentials, prompts, response bodies and file listings.
 """
 import argparse
+import http.client
 import json
 from pathlib import Path
 import secrets
+import socket
+from threading import Timer
 import time
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, quote
-from urllib.request import Request, build_opener
-
-from tools.platform.readiness_check import NoRedirect
 
 MAX_BYTES = 2 * 1024 * 1024
 
@@ -23,26 +22,58 @@ class AcceptanceFailure(Exception):
         self.code, self.status = code, status
 
 
+def remaining(deadline):
+    budget = deadline - time.monotonic()
+    if budget <= 0:
+        raise AcceptanceFailure('acceptance_timeout')
+    return budget
+
+
 class AccountClient:
     def __init__(self, endpoint):
         self.endpoint = endpoint.rstrip('/')
         self.cookie = None
-        self.opener = build_opener(NoRedirect())
 
-    def request(self, path, body=None, *, expected=200):
+    def request(self, path, body=None, *, expected=200, deadline=None):
+        budget = min(15.0, remaining(deadline)) if deadline is not None else 15.0
+        request_deadline = time.monotonic() + budget
         headers = {'User-Agent': 'agent-fleet/1.0', 'Origin': self.endpoint, 'Content-Type': 'application/json'}
         if self.cookie:
             headers['Cookie'] = self.cookie
-        request = Request(self.endpoint + path, data=None if body is None else json.dumps(body).encode(), headers=headers)
+        origin = urlsplit(self.endpoint)
+        connection_type = http.client.HTTPSConnection if origin.scheme == 'https' else http.client.HTTPConnection
+        connection = connection_type(origin.hostname, origin.port, timeout=budget)
+        timer = None
         try:
-            try:
-                response = self.opener.open(request, timeout=15)
-            except HTTPError as exc:
-                response = exc
+            connection.connect()
+            if deadline is not None:
+                remaining(deadline)
+            request_budget = request_deadline - time.monotonic()
+            if request_budget <= 0:
+                raise AcceptanceFailure('transport_unknown')
+            sock = connection.sock
+            sock.settimeout(request_budget)
+
+            def interrupt():
+                # Socket timeouts reset after successful reads. Shutdown also
+                # bounds peers that continuously trickle headers/body bytes.
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+            timer = Timer(request_budget, interrupt)
+            timer.daemon = True
+            timer.start()
+            connection.request('GET' if body is None else 'POST', path,
+                               body=None if body is None else json.dumps(body).encode(), headers=headers)
+            response = connection.getresponse()  # Never follow redirects or replay requests.
             with response:
                 raw = response.read(MAX_BYTES + 1)
-                if response.code != expected:
-                    raise AcceptanceFailure('unexpected_http_status', response.code)
+                if deadline is not None:
+                    remaining(deadline)
+                if response.status != expected:
+                    raise AcceptanceFailure('unexpected_http_status', response.status)
                 if len(raw) > MAX_BYTES:
                     raise AcceptanceFailure('response_too_large')
                 cookie = response.headers.get('Set-Cookie')
@@ -52,48 +83,63 @@ class AccountClient:
                 if not isinstance(payload, dict):
                     raise ValueError()
                 return payload
-        except (URLError, OSError):
+        except (OSError, http.client.HTTPException):
+            if deadline is not None:
+                remaining(deadline)
             raise AcceptanceFailure('transport_unknown') from None
         except (ValueError, UnicodeError):
             raise AcceptanceFailure('invalid_response') from None
+        finally:
+            if timer is not None:
+                timer.cancel()
+            connection.close()
 
 
 def check_model(client, model, workspace, timeout):
     row = {'model_profile_id': model, 'status': 'failed'}
+    deadline = time.monotonic() + timeout
+
+    def request(path, body=None, *, expected=200):
+        remaining(deadline)
+        payload = client.request(path, body, expected=expected, deadline=deadline)
+        remaining(deadline)
+        return payload
+
     try:
-        conversation = client.request('/api/platform/v1/conversations', {
+        conversation = request('/api/platform/v1/conversations', {
             'title': '发布验收：模型与只读工作区调用', 'workspace_id': workspace,
         })['conversation']['conversation_id']
         row['conversation_id'] = conversation
-        turn = client.request('/api/platform/v1/conversations/' + quote(conversation, safe='') + '/turns', {
+        row['client_token'] = 'acceptance-' + secrets.token_hex(12)
+        turn = request('/api/platform/v1/conversations/' + quote(conversation, safe='') + '/acceptance-turns', {
             'text': '请使用工作区列表工具检查当前工作区顶层内容，根据工具的真实返回简要说明有哪些文件和目录。只读检查，不执行命令，不创建或修改文件，不读取任何凭据。',
-            'client_token': 'acceptance-' + secrets.token_hex(12),
+            'client_token': row['client_token'],
             'overrides': {'model_profile_id': model},
         }, expected=202)
         run_id = turn['run']['run_id']; row['run_id'] = run_id
-        deadline = time.monotonic() + timeout
         while True:
-            run = client.request('/api/platform/v1/runs/' + quote(run_id, safe=''))
+            run = request('/api/platform/v1/runs/' + quote(run_id, safe=''))
             state = run['state']; row['run_state'] = state
             if state in ('succeeded', 'failed', 'cancelled', 'unknown'):
                 break
-            if time.monotonic() >= deadline:
-                raise AcceptanceFailure('run_not_terminal')
-            time.sleep(min(1.0, max(0, deadline - time.monotonic())))
+            time.sleep(min(1.0, remaining(deadline)))
         if state != 'succeeded':
             raise AcceptanceFailure('run_' + state)
         if not isinstance(run.get('result_text'), str) or not run['result_text'].strip():
             raise AcceptanceFailure('missing_final_reply')
-        events = client.request('/api/platform/v1/runs/' + quote(run_id, safe='') + '/events')['events']
+        events = request('/api/platform/v1/runs/' + quote(run_id, safe='') + '/events')['events']
         results = [e['payload'] for e in events if e['kind'] == 'tool_result']
         if not results or any(p.get('tool') != 'workspace.list' or p.get('state') != 'succeeded' for p in results):
             raise AcceptanceFailure('read_only_tool_verification_failed')
-        recovered = client.request('/api/platform/v1/conversations/' + quote(conversation, safe=''))['conversation']
+        recovered = request('/api/platform/v1/conversations/' + quote(conversation, safe=''))['conversation']
         if not any(r['run_id'] == run_id and r['state'] == 'succeeded' and r['result_text'] == run['result_text'] for r in recovered['runs']):
             raise AcceptanceFailure('conversation_recovery_failed')
+        remaining(deadline)
         row.update(status='passed', reply_present=True, read_only_tool_succeeded=True, recovered=True)
     except AcceptanceFailure as exc:
         row.update(error=exc.code, http_status=exc.status)
+        if exc.code in ('acceptance_timeout', 'transport_unknown'):
+            row['outcome'] = 'unconfirmed'
     except (KeyError, TypeError):
         row['error'] = 'invalid_response_contract'
     return row

@@ -29,6 +29,7 @@ def test_release_cli_requires_real_tool_final_reply_and_revocation(release_targe
     assert report['models'][0]['recovered']
     assert report['checks']['logout'] == 'passed'
     assert len(hub.provider.requests) == 2
+    assert all([t['function']['name'] for t in r['tools']] == ['workspace_list'] for r in hub.provider.requests)
     assert PASSWORD not in output and 'full-flow-provider-secret' not in output
     assert 'Full flow completed' not in output
 
@@ -44,9 +45,55 @@ def test_release_cli_http_failure_does_not_retry_or_report_success(release_targe
 
 
 def test_release_cli_rejects_unexpected_writing_tools(release_target, capsys):
-    _, _, args = release_target
+    hub, _, args = release_target
+    target = hub.workspace / 'flow.txt'
+    target.write_bytes(b'preserved')
     assert main(args + ['--model', 'full-flow']) == 1
-    assert json.loads(capsys.readouterr().out)['models'][0]['error'] == 'read_only_tool_verification_failed'
+    assert json.loads(capsys.readouterr().out)['models'][0]['error'] == 'run_unknown'
+    assert target.read_bytes() == b'preserved'
+
+
+@pytest.mark.parametrize('tool,arguments', [
+    ('workspace.write', {'path': 'flow.txt', 'content': 'overwritten'}),
+    ('workspace.artifact', {'path': 'flow.txt'}),
+    ('workspace.exec', {'argv': ['touch', 'executed.txt']}),
+    ('workspace.read', {'path': 'flow.txt'}),
+])
+def test_acceptance_denies_tools_before_side_effects(release_target, capsys, monkeypatch, tool, arguments):
+    from support.full_flow import Client
+    from tools.platform.providers.base import ModelResponse
+    from tools.platform.backends.sandbox import SandboxBackend
+
+    hub, _, args = release_target
+    original = b'original workspace bytes\x00\xff'
+    target = hub.workspace / 'flow.txt'
+    target.write_bytes(original)
+    executed = []
+    declarations = []
+
+    def execute(*args, **kwargs):
+        executed.append(True)
+        raise AssertionError('execution backend must never be reached')
+
+    monkeypatch.setattr(SandboxBackend, 'execute', execute)
+
+    class Provider:
+        def complete(self, messages, tools):
+            declarations.append([item['name'] for item in tools])
+            return ModelResponse(kind='tool_call', tool=tool, arguments=arguments)
+
+    hub.app.extensions['fleet']['services']['platform_worker'].provider_factory = lambda profile: Provider()
+    assert main(args + ['--model', 'read-only']) == 1
+    row = json.loads(capsys.readouterr().out)['models'][0]
+    client = Client(hub.origin)
+    client.login()
+    assert target.read_bytes() == original
+    assert client.request('/api/platform/v1/workspaces/home/artifacts')['artifacts'] == []
+    assert executed == []
+    events = client.request('/api/platform/v1/runs/' + row['run_id'] + '/events')['events']
+    receipt = next(e['payload'] for e in events if e['kind'] == 'tool_result')
+    assert receipt['state'] == 'failed' and receipt['error_code'] == 'tool_not_allowed'
+    assert declarations == [['workspace.list']]
 
 
 def test_release_cli_invalid_credentials_cannot_create_runs(release_target, capsys):
@@ -77,7 +124,7 @@ def test_release_cli_all_models_reports_each_failure_and_keeps_testing(release_t
     assert [(r['model_profile_id'], r['status']) for r in report['models']] == [
         ('broken', 'failed'), ('full-flow', 'failed'), ('read-only', 'passed')]
     assert len({r['run_id'] for r in report['models']}) == 3
-    assert len(hub.provider.requests) == 8
+    assert len(hub.provider.requests) == 5
     assert report['checks']['logout'] == 'passed'
 
 
@@ -90,7 +137,8 @@ def test_release_cli_timeout_preserves_queued_run_without_resubmission(release_t
     assert main(args + ['--model', 'read-only']) == 1
     report = json.loads(capsys.readouterr().out)
     row = report['models'][0]
-    assert row['error'] == 'run_not_terminal'
+    assert row['error'] == 'acceptance_timeout'
+    assert row['outcome'] == 'unconfirmed'
     assert row['run_state'] == 'queued'
     from support.full_flow import Client
     client = Client(hub.origin)

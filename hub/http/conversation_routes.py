@@ -64,6 +64,16 @@ def get_conversation(conversation_id):
 @bp.post("/conversations/<conversation_id>/turns")
 @require_operator
 def append_turn(conversation_id):
+    return _append_turn(conversation_id)
+
+
+@bp.post("/conversations/<conversation_id>/acceptance-turns")
+@require_operator
+def append_acceptance_turn(conversation_id):
+    return _append_turn(conversation_id, acceptance=True)
+
+
+def _append_turn(conversation_id, *, acceptance=False):
     def _turn():
         body = _body()
         if "memory_context" in body and body["memory_context"] is not None \
@@ -77,6 +87,7 @@ def append_turn(conversation_id):
             overrides=body.get("overrides") or {},
             memory_context=body.get("memory_context")
             if "memory_context" in body else None,
+            acceptance=acceptance,
         )), 202
     return _call(_turn)
 

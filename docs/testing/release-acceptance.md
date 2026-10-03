@@ -4,9 +4,9 @@
 
 ## MODEL-LIVE
 
-`tools.platform.acceptance_check` 使用真正的账号登录 Cookie。它会为选中的每个模型新建一个带“发布验收”标题的对话，并且每个模型只提交一次任务。任务要求列举指定工作区顶层内容，不读凭据、不执行命令、不写文件；验收结果会检查所有实际工具结果是否都是成功的 `workspace.list`。
+`tools.platform.acceptance_check` 使用真正的账号登录 Cookie。它会为选中的每个模型新建一个带“发布验收”标题的对话，并且每个模型只提交一次任务。专用 `POST /api/platform/v1/conversations/<id>/acceptance-turns` 入口将只允许 `workspace.list` 的策略固定到 Run 快照；Worker 只声明该工具，本地和远程 Broker 在执行或派发命令前拒绝其他工具。任务要求列举指定工作区顶层内容；验收结果还会检查所有实际工具结果是否都是成功的 `workspace.list`。
 
-在专用验收账号和明确指定的工作区执行。模型具有其他工具权限时，仅靠提示词不能构成工具授权隔离；要验证可写工具，使用一次性工作区。不要将该流程指向含敏感文件的生产目录。
+在专用验收账号和明确指定的工作区执行。只读权限由服务端执行，不依赖模型遵守提示词。验收入口不接受扩大权限的覆盖项，也不能用普通任务的幂等键复用其 Run。旧版服务没有该入口时，CLI 失败退出，不回退到普通任务入口。文件名也可能包含敏感信息，仍应使用专用验收目录。
 
 凭据放权限 `0600` 的本地 JSON 文件，格式为 `{"username":"测试账号","password":"测试密码"}`，或使用 `email` 字段。不要把密码写进命令行、仓库、截图或报告。默认验证 HTTPS；仅 loopback 可使用 HTTP，跳转不会携带登录凭据自动跟随。
 
@@ -20,7 +20,7 @@ PYTHONPATH=. python -m tools.platform.acceptance_check \
   --report /private/path/evidence/model-acceptance.json
 ```
 
-只验证明确指定的模型时重复 `--model PROFILE_ID`，不要同时传 `--all-models`。`--timeout` 默认每模型 150 秒，范围 1–600 秒。选项全部显式提供；该工具不从源码读取固定管理员密码，不推断生产域名，也不配置模型、用户或工作区。
+只验证明确指定的模型时重复 `--model PROFILE_ID`，不要同时传 `--all-models`。`--timeout` 默认每模型 150 秒，范围 1–600 秒；同一截止时间覆盖创建对话、提交、状态轮询、事件读取和对话恢复。各请求使用剩余预算，HTTP 响应头及响应体持续缓慢传输也不能重置预算；截止后返回成功终态仍视为未确认。登录、目录预检和最终退出校验独立于每模型预算。选项全部显式提供；该工具不从源码读取固定管理员密码，不推断生产域名，也不配置模型、用户或工作区。
 
 每个模型必须同时满足：
 
@@ -31,7 +31,7 @@ PYTHONPATH=. python -m tools.platform.acceptance_check \
 5. 最终回复非空，重新读取对话时 Run、结果和终态一致。
 6. 退出后，用刚才的旧 Cookie 访问会话接口必须返回 401。
 
-任意模型失败，整体进程退出码为 1，并逐模型输出 `status/error/run_state/conversation_id/run_id`。报告不含回复全文、文件列表、密码或 Cookie。`unknown` 和超时不自动重发；使用报告中的 Run ID 查日志。timeout 表示本次验收没有确认终态，不会伪装为取消，也不会重新提交。完成后保留报告和对话证据，按指定验收数据保留策略清理。
+任意模型失败，整体进程退出码为 1，并逐模型输出 `status/error/run_state/conversation_id/run_id`（以已经获得的信息为准）。报告不含回复全文、文件列表、密码或 Cookie。超时记录 `error=acceptance_timeout`、`outcome=unconfirmed`，保留已知 Run ID；提交响应丢失时保留对话 ID 与 `client_token` 以便查询定位。`unknown` 和超时不自动重发；超时不代表 Run 已取消或失败。完成后保留报告和对话证据，按指定验收数据保留策略清理。
 
 ## MAIL-LIVE
 

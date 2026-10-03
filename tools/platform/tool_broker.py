@@ -107,7 +107,7 @@ class ToolBroker:
 
     def __init__(self, backend, leases, *, resource_id: str, artifact_store=None,
                  diagnostics=None, lease_owner_id: str | None = None,
-                 artifact_workspace_id: str | None = None):
+                 artifact_workspace_id: str | None = None, allowed_tools=None):
         self.backend = backend
         self.leases = leases
         self.resource_id = resource_id
@@ -115,14 +115,18 @@ class ToolBroker:
         self.artifact_store = artifact_store
         self.diagnostics = diagnostics
         self.lease_owner_id = lease_owner_id
+        self.allowed_tools = self.TOOLS if allowed_tools is None else self.TOOLS.intersection(allowed_tools)
 
     @classmethod
-    def tool_definitions(cls):
-        return [dict(item) for item in cls.TOOL_DEFINITIONS]
+    def tool_definitions(cls, allowed_tools=None):
+        allowed = cls.TOOLS if allowed_tools is None else cls.TOOLS.intersection(allowed_tools)
+        return [dict(item) for item in cls.TOOL_DEFINITIONS if item['name'] in allowed]
 
     def execute(self, *, command_id: str, tool: str, arguments: dict, owner_id: str, epoch: int) -> ToolReceipt:
         if tool not in self.TOOLS:
             return ToolReceipt(command_id, "failed", {}, "unknown_tool")
+        if tool not in self.allowed_tools:
+            return ToolReceipt(command_id, "failed", {}, "tool_not_allowed")
         if not self.leases.validate(self.resource_id, self.lease_owner_id or owner_id, epoch):
             return ToolReceipt(command_id, "failed", {}, "lease_mismatch")
         if not isinstance(arguments, dict):
