@@ -12,6 +12,7 @@ import yaml
 from deploy import auto_release as release
 from deploy import auto_deploy_ssh as ssh
 from deploy.auto_deploy_host import HostHooks
+from deploy import auto_deploy_host as host
 
 OLD, NEW = '1' * 40, '2' * 40
 
@@ -356,6 +357,68 @@ def test_nginx_cutover_and_restore_keep_original_account_proxy_config(tmp_path):
     hooks.resume()
     assert nginx.read_text() == original and not marker.exists()
     assert calls.count(['nginx', '-t']) == 3
+
+
+@pytest.mark.parametrize('first_response', ['maintenance', 'old_version'])
+def test_public_probe_waits_for_nginx_reload_to_take_effect(tmp_path, first_response):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append(self.path)
+            status = 503 if len(requests) == 1 and first_response == 'maintenance' else 200
+            version = OLD if len(requests) == 1 else NEW
+            body = json.dumps({'version': version}).encode()
+            self.send_response(status)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_):
+            pass
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    nginx = tmp_path / 'nginx.conf'
+    nginx.write_text('server {\n root /var/www/old;\n}\n')
+    hooks = HostHooks({'nginx_config': str(nginx), 'maintenance_marker': str(tmp_path / 'marker'),
+                       'public_origin': f'http://127.0.0.1:{server.server_port}'})
+    try:
+        hooks.public_verify(NEW)
+        assert requests == ['/manifest.json', '/manifest.json']
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=2)
+
+
+@pytest.mark.parametrize('response', ['unavailable', 'wrong_version', 'late_success'])
+def test_public_probe_has_one_deadline_and_rejects_late_success(tmp_path, monkeypatch, response):
+    nginx = tmp_path / 'nginx.conf'
+    nginx.write_text('server {\n root /var/www/old;\n}\n')
+    hooks = HostHooks({'nginx_config': str(nginx), 'maintenance_marker': str(tmp_path / 'marker'),
+                       'public_origin': 'https://example.test'})
+    now, calls = [0.0], []
+    monkeypatch.setattr(host.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(host.time, 'sleep', lambda seconds: now.__setitem__(0, now[0] + seconds))
+
+    def request(argv, *, timeout):
+        calls.append(timeout)
+        assert 0 < timeout <= .1 - now[0]
+        assert float(argv[argv.index('--max-time') + 1]) == timeout
+        now[0] += .2 if response == 'late_success' else .02
+        if response == 'unavailable':
+            raise release.DeployError('host_command_failed:curl')
+        return json.dumps({'version': NEW if response == 'late_success' else OLD}).encode()
+
+    hooks.run = request
+    with pytest.raises(release.DeployError, match='public_frontend_not_ready'):
+        hooks.public_verify(NEW, timeout=.1)
+    assert calls and len(calls) <= 2
 
 
 def test_ci_deploy_is_main_only_after_tests_and_same_run_packaging():

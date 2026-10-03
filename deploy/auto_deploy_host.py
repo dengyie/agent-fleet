@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import time
 
 try:
     from .auto_release import DeployError
@@ -97,11 +98,29 @@ class HostHooks:
             text = re.sub(r'(^\s*root\s+)[^;]+;', lambda match: match[1] + str(frontend) + ';', text, count=1, flags=re.M)
         self.write_nginx(text)
 
-    def public_verify(self, sha):
-        raw = self.run(['curl', '--fail', '--silent', '--show-error', '--max-time', '15',
-                        self.config['public_origin'] + '/manifest.json'], timeout=20)
-        if json.loads(raw).get('version') != sha:
-            raise DeployError('public_frontend_revision_mismatch')
+    def public_verify(self, sha, *, timeout=30):
+        # Nginx reload returns before new workers take over. Requests can still
+        # reach the maintenance response or previous root during that interval.
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            budget = min(5, remaining)
+            manifest = None
+            try:
+                raw = self.run(['curl', '--fail', '--silent', '--show-error', '--max-time', str(budget),
+                                self.config['public_origin'] + '/manifest.json'], timeout=budget)
+                manifest = json.loads(raw)
+            except (DeployError, subprocess.TimeoutExpired, json.JSONDecodeError):
+                pass
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if isinstance(manifest, dict) and manifest.get('version') == sha:
+                return
+            time.sleep(min(.25, remaining))
+        raise DeployError('public_frontend_not_ready')
 
     def fail_closed(self):
         self.maintenance()
