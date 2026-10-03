@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -41,7 +42,12 @@ class _CanaryHandler(BaseHTTPRequestHandler):
         route = parts[-3] if parts[-1] == "completions" and len(parts) >= 5 else (parts[-2] if parts[-1] == "completions" else parts[-1])
         if route == 'tool-contract':
             definitions = {t['function']['name']: t['function'] for t in payload.get('tools', [])}
-            write = definitions.get('workspace.write', {})
+            names = list(definitions)
+            names.extend(call['function']['name'] for message in payload['messages']
+                         for call in message.get('tool_calls', []))
+            if any(not re.fullmatch(r'[a-zA-Z0-9_-]{1,64}', name) for name in names):
+                self._send(400, b'{"error":{"code":"invalid_tool_name"}}'); return
+            write = definitions.get('workspace_write', {})
             schema = write.get('parameters', {})
             valid = set(schema.get('required', [])) == {'path', 'content'} and write.get('description')
             valid = valid and schema.get('properties', {}).get('path', {}).get('type') == 'string'
@@ -49,12 +55,15 @@ class _CanaryHandler(BaseHTTPRequestHandler):
                 self._send(400, b'{"error":{"code":"invalid_tool_schema"}}'); return
             if payload['messages'][-1]['role'] == 'tool':
                 result = json.loads(payload['messages'][-1]['content'])
-                if result.get('path') != 'contract.txt':
+                previous = payload['messages'][-2]['tool_calls'][0]
+                if (result.get('path') != 'contract.txt'
+                        or previous['function']['name'] != 'workspace_write'
+                        or previous['id'] != payload['messages'][-1]['tool_call_id']):
                     self._send(400, b'{"error":{"code":"invalid_tool_result"}}'); return
                 response = {'choices': [{'message': {'content': 'file verified'}, 'finish_reason': 'stop'}]}
             else:
                 response = {'choices': [{'message': {'tool_calls': [{'id': 'call-contract', 'type': 'function',
-                    'function': {'name': 'workspace.write', 'arguments': json.dumps({'path': 'contract.txt', 'content': 'contract-evidence'})}}]}, 'finish_reason': 'tool_calls'}]}
+                    'function': {'name': 'workspace_write', 'arguments': json.dumps({'path': 'contract.txt', 'content': 'contract-evidence'})}}]}, 'finish_reason': 'tool_calls'}]}
             self._send(200, json.dumps(response).encode()); return
         if route == "retry":
             fixture.counts[route] = fixture.counts.get(route, 0) + 1
@@ -106,7 +115,7 @@ class _CanaryServer:
         wire = b"".join([
             event({"choices": [{"delta": {"content": "hel"}}]}),
             event({"choices": [{"delta": {"content": "lo"}}]}),
-            event({"choices": [{"delta": {"tool_calls": [{"id": "call-canary", "function": {"name": "workspace.write", "arguments": "{\"path\":\"x\","}}]}}]}),
+            event({"choices": [{"delta": {"tool_calls": [{"id": "call-canary", "function": {"name": "workspace_write", "arguments": "{\"path\":\"x\","}}]}}]}),
             event({"choices": [{"delta": {"tool_calls": [{"function": {"arguments": "\"content\":\"y\"}"}}]}, "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 2, "completion_tokens": 3}}),
             b"data: [DONE]\n\n",
         ])
@@ -179,7 +188,7 @@ def test_real_urllib_sse_canary_handles_fragmented_tool_call():
         provider = OpenAICompatibleProvider.from_profile(
             _profile(server, route="stream/chat/completions", stream=True),
             secret_broker=_Broker(), allow_network=True)
-        result = provider.complete([], [])
+        result = provider.complete([], [{"name": "workspace.write"}])
 
         assert result.kind == "tool_call"
         assert result.text == "hello"

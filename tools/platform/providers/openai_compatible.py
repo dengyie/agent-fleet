@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import socket
 import time
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ PROVIDER_ERROR_CODES = frozenset({
     'provider_http_error', 'timeout', 'network_error', 'invalid_response',
     'response_too_large', 'provider_unavailable', 'provider_network_disabled',
     'provider_secret_missing', 'provider_secret_unavailable',
+    'provider_tools_invalid',
 })
 
 
@@ -245,7 +247,8 @@ def _arguments(raw: Any) -> dict[str, Any]:
     return parsed
 
 
-def _tool_response(message: Mapping[str, Any], usage=None) -> ModelResponse | None:
+def _tool_response(message: Mapping[str, Any], usage=None, *,
+                   tool_names: Mapping[str, str]) -> ModelResponse | None:
     calls = message.get("tool_calls")
     if not isinstance(calls, list) or not calls:
         return None
@@ -258,14 +261,41 @@ def _tool_response(message: Mapping[str, Any], usage=None) -> ModelResponse | No
     return ModelResponse(
         kind="tool_call",
         text=str(message.get("content") or "")[:MAX_TEXT_CHARS],
-        tool=function["name"][:256],
+        tool=_internal_tool_name(function["name"], tool_names),
         arguments=_arguments(function.get("arguments", "{}")),
         usage=usage,
         tool_call_id=str(first.get("id"))[:256] if first.get("id") else None,
     )
 
 
-def _messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _tool_name_map(tools: list[dict[str, Any]]) -> dict[str, str]:
+    """Keep broker names internal; the wire protocol forbids their dots.
+
+    Reject ambiguous aliases instead of dispatching a model call to the wrong
+    tool. The map belongs to this request, so provider reuse shares no state.
+    """
+    names = {}
+    used = set()
+    for tool in tools:
+        if not isinstance(tool, Mapping) or not isinstance(tool.get("name"), str):
+            raise ProviderUnavailable("provider_tools_invalid")
+        name = tool["name"]
+        wire_name = name.replace(".", "_")
+        if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", wire_name) or wire_name in used:
+            raise ProviderUnavailable("provider_tools_invalid")
+        names[name] = wire_name
+        used.add(wire_name)
+    return names
+
+
+def _internal_tool_name(wire_name: str, tool_names: Mapping[str, str]) -> str:
+    for name, alias in tool_names.items():
+        if alias == wire_name:
+            return name
+    raise ProviderError("invalid_response")
+
+
+def _messages(messages: list[dict[str, Any]], tool_names: Mapping[str, str]) -> list[dict[str, Any]]:
     result = []
     for message in messages:
         if not isinstance(message, Mapping):
@@ -292,11 +322,13 @@ def _messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 function = call["function"]
                 if not isinstance(function.get("name"), str):
                     continue
+                if function["name"] not in tool_names:
+                    raise ProviderUnavailable("provider_tools_invalid")
                 safe_calls.append({
                     "id": str(call.get("id") or "call")[:256],
                     "type": "function",
                     "function": {
-                        "name": function["name"][:256],
+                        "name": tool_names[function["name"]],
                         "arguments": str(function.get("arguments") or "{}")[:128 * 1024],
                     },
                 })
@@ -306,15 +338,13 @@ def _messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
-def _tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _tools(tools: list[dict[str, Any]], tool_names: Mapping[str, str]) -> list[dict[str, Any]]:
     result = []
     for item in tools:
-        if not isinstance(item, Mapping) or not isinstance(item.get("name"), str):
-            continue
         result.append({
             "type": "function",
             "function": {
-                "name": item["name"][:256],
+                "name": tool_names[item["name"]],
                 "description": str(item.get("description") or "")[:1024],
                 "parameters": item.get("parameters") if isinstance(item.get("parameters"), Mapping) else {"type": "object"},
             },
@@ -441,16 +471,17 @@ class OpenAICompatibleProvider:
         raise ProviderError("provider_unavailable")
 
     def complete(self, messages, tools) -> ModelResponse:
+        tool_names = _tool_name_map(tools)
         payload = {
             "model": self.model,
-            "messages": _messages(messages),
-            "tools": _tools(tools),
+            "messages": _messages(messages, tool_names),
+            "tools": _tools(tools, tool_names),
             "stream": self.stream,
         }
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         response = self._request(body)
         if self.stream:
-            return self._parse_sse(response.body)
+            return self._parse_sse(response.body, tool_names)
         raw = response.body
         if not isinstance(raw, (bytes, bytearray)):
             try:
@@ -466,7 +497,7 @@ class OpenAICompatibleProvider:
         if not isinstance(message, Mapping):
             raise ProviderError("invalid_response")
         usage = _usage(payload)
-        tool = _tool_response(message, usage)
+        tool = _tool_response(message, usage, tool_names=tool_names)
         if tool is not None:
             return ModelResponse(**{**tool.__dict__, "finish_reason": choice.get("finish_reason")})
         text = message.get("content")
@@ -475,7 +506,7 @@ class OpenAICompatibleProvider:
         return ModelResponse(kind="final", text=text[:MAX_TEXT_CHARS], usage=usage,
                              finish_reason=str(choice.get("finish_reason")) if choice.get("finish_reason") else None)
 
-    def _parse_sse(self, body: bytes | Iterable[bytes]) -> ModelResponse:
+    def _parse_sse(self, body: bytes | Iterable[bytes], tool_names: Mapping[str, str]) -> ModelResponse:
         if isinstance(body, (bytes, bytearray)):
             chunks = [bytes(body)]
         else:
@@ -541,7 +572,8 @@ class OpenAICompatibleProvider:
         except UnicodeDecodeError:
             raise ProviderError("invalid_response") from None
         if tool_name:
-            return ModelResponse(kind="tool_call", text="".join(text_parts)[:MAX_TEXT_CHARS], tool=tool_name[:256],
+            return ModelResponse(kind="tool_call", text="".join(text_parts)[:MAX_TEXT_CHARS],
+                                 tool=_internal_tool_name(tool_name, tool_names),
                                  arguments=_arguments(arguments or "{}"), usage=usage,
                                  tool_call_id=str(tool_id)[:256] if tool_id else None,
                                  finish_reason=str(finish_reason) if finish_reason else None)
