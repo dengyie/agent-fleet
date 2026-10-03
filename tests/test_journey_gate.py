@@ -22,13 +22,17 @@ ROOT = Path(__file__).resolve().parents[1]
     ('import pytest\n@pytest.fixture\ndef resource():\n yield\n assert False\ndef test_ok(resource): pass', 'test_ok', 1),
 ])
 def test_required_journeys_use_real_collected_results(tmp_path, source, selector, expected):
+    _assert_gate(tmp_path, source, selector, expected)
+
+
+def _assert_gate(tmp_path, source, selector, expected, extra_args=()):
     (tmp_path / 'tests').mkdir()
     (tmp_path / 'tests/test_sample.py').write_text(source + '\n')
     matrix = {'schema_version': 1, 'journeys': [{'id': 'sample', 'layer': 'contract', 'acceptance': 'real passing case',
                'tests': ['tests/test_sample.py::' + selector]}], 'external_checks': [{'id': 'real-model'}]}
     (tmp_path / 'matrix.json').write_text(json.dumps(matrix))
     result = subprocess.run([sys.executable, '-m', 'pytest', '-p', 'tools.testing.pytest_journeys',
-                             '--require-journeys', '--journey-matrix=matrix.json', '--journey-report=result.json', '-q'],
+                             '--require-journeys', '--journey-matrix=matrix.json', '--journey-report=result.json', '-q', *extra_args],
                             cwd=tmp_path, env={**os.environ, 'PYTHONPATH': str(ROOT)}, capture_output=True, text=True, timeout=30)
     assert result.returncode == expected, result.stdout + result.stderr
     report = json.loads((tmp_path / 'result.json').read_text())
@@ -36,6 +40,11 @@ def test_required_journeys_use_real_collected_results(tmp_path, source, selector
     assert report['external_checks'] == [{'id': 'real-model', 'status': 'not_run'}]
     if 'parametrize' in source:
         assert report['journeys'][0]['selectors'][0]['collected'] == 2
+
+
+def test_deselected_required_parameter_cannot_count_as_full_coverage(tmp_path):
+    _assert_gate(tmp_path, 'import pytest\n@pytest.mark.parametrize("n", [1,2])\ndef test_ok(n): assert n > 0',
+                 'test_ok', 1, ['--deselect=tests/test_sample.py::test_ok[2]'])
 
 
 def test_missing_matrix_cannot_silently_disable_gate(tmp_path):

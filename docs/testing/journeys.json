@@ -326,6 +326,7 @@
       "boundary": "disposable Hub; external services simulated",
       "tests": [
         "tests/test_journey_gate.py::test_required_journeys_use_real_collected_results",
+        "tests/test_journey_gate.py::test_deselected_required_parameter_cannot_count_as_full_coverage",
         "tests/test_journey_gate.py::test_missing_matrix_cannot_silently_disable_gate"
       ]
     }

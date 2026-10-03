@@ -42,11 +42,15 @@ class JourneyEvidence:
     def __init__(self, config, matrix, digest):
         self.config, self.matrix, self.digest = config, matrix, digest
         self.selected = set()
+        self.deselected = set()
         self.phases = {}
         self.nonpassing = set()
 
+    def pytest_deselected(self, items):
+        self.deselected.update(item.nodeid for item in items)
+
     def pytest_collection_finish(self, session):
-        self.selected = {item.nodeid for item in session.items}
+        self.selected = {item.nodeid for item in session.items} | self.deselected
 
     def pytest_runtest_logreport(self, report):
         self.phases.setdefault(report.nodeid, {})[report.when] = report.outcome
