@@ -48,7 +48,7 @@ restrict,command="sudo -n /usr/local/sbin/agent-fleet-deploy \"$SSH_ORIGINAL_COM
 4. 保存旧代码和 Nginx，建立现有 launcher 的维护屏障；Nginx 临时返回 503，阻止公网新请求。再查活动任务；如果已有新任务，恢复访问并退出，不停止任务。
 5. 只停止 UID、cwd、脚本和进程启动时间均匹配的 guardian/Hub；停写后对配置中的每个 SQLite 数据库使用 backup API，并检查 integrity/FK。
 6. 在原 LIVE 目录内更新有限的发布管理路径。**不覆盖** `fleet-gates.conf`、`hosts.yaml`、`.env`、`credentials/`、`state/`、`var/`，不改变 LIVE inode。前端部署到不可变的完整 SHA 目录。
-7. 使用原 launcher 恢复 Hub/guardian；检查版本、healthz、匿名401、账号登录/readiness、退出后旧 Cookie 401；切换 Nginx root 并检查公网 manifest SHA。
+7. 使用原 launcher 恢复 Hub/guardian；检查版本、healthz、匿名401、账号登录/readiness、退出后旧 Cookie 401；切换 Nginx root 并检查公网 manifest SHA。Nginx reload 返回后新 worker 可能尚未接管，公网只读探针在统一 30 秒预算内等待维护503、旧版本或暂时网络失败消失；每次请求最多使用剩余预算，截止后返回成功也不得通过。
 8. 保存成功记录，清除 pending。成功记录提交中途失败时，回滚同时恢复旧成功指针；回滚记录写入失败仍保持维护屏障。重复部署同一成功 SHA 只核验，不再重启。失败记录保留原因类别，不输出凭据、Cookie 或原始应用响应。
 
 自动探针不能证明外部模型、邮箱送达或真实远程执行能力；按 [发布验收](../docs/testing/release-acceptance.md)分别留证。维护期间访问会短暂返回 503；本实现不承诺零停机发布。

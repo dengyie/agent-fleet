@@ -355,6 +355,8 @@
         "tests/test_auto_deploy.py::test_receiver_failures_never_report_success_or_leave_partial_upload",
         "tests/test_auto_deploy.py::test_bundle_roundtrip_keeps_same_run_frontend_and_backend",
         "tests/test_auto_deploy.py::test_nginx_cutover_and_restore_keep_original_account_proxy_config",
+        "tests/test_auto_deploy.py::test_public_probe_waits_for_nginx_reload_to_take_effect",
+        "tests/test_auto_deploy.py::test_public_probe_has_one_deadline_and_rejects_late_success",
         "tests/test_auto_deploy.py::test_ci_deploy_is_main_only_after_tests_and_same_run_packaging"
       ]
     },
