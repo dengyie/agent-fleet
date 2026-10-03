@@ -338,7 +338,24 @@
         "tests/test_acceptance_flow.py::test_acceptance_http_idempotency_cannot_cross_policy",
         "tests/test_acceptance_flow.py::test_acceptance_queued_policy_survives_hub_restart",
         "tests/test_acceptance_flow.py::test_accepted_response_timeout_recovers_unique_run_by_token",
-        "tests/test_acceptance_flow.py::test_legacy_hub_does_not_fallback_to_unrestricted_turn"
+        "tests/test_acceptance_flow.py::test_legacy_hub_does_not_fallback_to_unrestricted_turn",
+        "tests/test_auto_deploy.py::test_deployment_preserves_live_inode_runtime_and_creates_consistent_backup",
+        "tests/test_auto_deploy.py::test_check_only_never_stops_or_changes_live",
+        "tests/test_auto_deploy.py::test_failed_health_rolls_back_code_but_never_restores_old_database",
+        "tests/test_auto_deploy.py::test_partial_copy_is_rolled_back",
+        "tests/test_auto_deploy.py::test_failed_rollback_blocks_later_deployments",
+        "tests/test_auto_deploy.py::test_commit_failure_restores_last_success_and_allows_retry",
+        "tests/test_auto_deploy.py::test_failed_rollback_metadata_still_closes_admissions",
+        "tests/test_auto_deploy.py::test_invalid_bundles_cannot_enter_host_hooks",
+        "tests/test_auto_deploy.py::test_archive_rejects_traversal_links_and_runtime_paths",
+        "tests/test_auto_deploy.py::test_stale_run_cannot_replace_newer_release",
+        "tests/test_auto_deploy.py::test_task_arriving_before_maintenance_is_not_terminated",
+        "tests/test_auto_deploy.py::test_ssh_receiver_rejects_shell_and_unbounded_inputs",
+        "tests/test_auto_deploy.py::test_upload_checks_length_and_digest",
+        "tests/test_auto_deploy.py::test_receiver_failures_never_report_success_or_leave_partial_upload",
+        "tests/test_auto_deploy.py::test_bundle_roundtrip_keeps_same_run_frontend_and_backend",
+        "tests/test_auto_deploy.py::test_nginx_cutover_and_restore_keep_original_account_proxy_config",
+        "tests/test_auto_deploy.py::test_ci_deploy_is_main_only_after_tests_and_same_run_packaging"
       ]
     },
     {

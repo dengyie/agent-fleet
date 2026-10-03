@@ -12,6 +12,7 @@
 | 节点验收 | 同一账号入口 → RemoteToolBroker → command DB → HTTP poll → NodeClient → NodeJournal → DirectoryBackend → HTTP receipt → 模型第二轮 → Run 终态 → 报告 | 上述用例的 `[remote]` 实例使用独立节点目录；模型第二轮必须看到节点 sentinel 文件，Hub 目录为空；命令、journal、Hub receipt 均 succeeded；重复命令不能重执行 | NODE-01、RELEASE-01 |
 | 不确定提交 | Run 已持久化 → 202 响应被阻塞 → 统一截止时间到期 → unconfirmed → GET 对话按 client_token 找消息 → 找回唯一 Run → 重建 Hub → 完成 | `test_acceptance_flow.py::test_accepted_response_timeout_recovers_unique_run_by_token` 要求仅一次提交、报告保留对话和 token、GET 恢复无重发 | ASSIST-02、RELEASE-01 |
 | 质量证据 | pytest 全量收集 → 参数集合 → setup/call/teardown → journeys 门禁 → JUnit/截图 → CI artifact → main 打包前置条件 | `test_journey_gate.py` 用子进程模拟缺失、筛选、缓存、跳过及失败；完整运行同时检查测试退出码与所有 journey 结果 | GATE-01 |
+| 自动部署 | 同 run 前后端 → 包校验 → 受限 SSH → 维护/空闲检查 → 停写备份 → 原目录更新 → 启动/探针 → 发布记录；失败恢复旧代码 | `test_auto_deploy.py` 使用真实临时文件和 SQLite 验证 inode/配置/数据保留、部分复制和健康失败、任务竞态、状态提交失败、回滚失败屏障、缺失结果不假绿 | RELEASE-01 |
 
 以上文件均位于 `tests/`。同一测试为多个 journey 提供证据时只执行一次；selector 数、参数实例数和 pytest 用例总数不是同一指标。
 
@@ -80,6 +81,10 @@ PYTHONPATH=. .venv/bin/python -m pytest \
 # 账号至文件/产物，以及邮件的真实 loopback 协议
 PYTHONPATH=. .venv/bin/python -m pytest \
   tests/test_full_flow.py tests/test_account_smtp_transport.py -q
+
+# 发布包、自动部署事务、回滚与受限接收端
+PYTHONPATH=. .venv/bin/python -m pytest \
+  tests/test_auto_deploy.py tests/test_release_layout.py -q
 
 # 浏览器贯穿（需要已安装 Chromium）
 FLEET_PLAYWRIGHT_MODULE=/tmp/fleet-browser/node_modules/playwright \

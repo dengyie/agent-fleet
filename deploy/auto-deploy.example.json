@@ -1,0 +1,23 @@
+{
+  "live": "/srv/agent-fleet",
+  "state": "/var/lib/agent-fleet-deploy",
+  "frontend_root": "/var/www/agent-fleet",
+  "nginx_config": "/etc/nginx/sites-enabled/fleet.example.com",
+  "maintenance_marker": "/srv/hermes-data/agent-fleet-account-maintenance",
+  "container": "fleet-runtime",
+  "container_user": "fleet",
+  "container_live": "/srv/agent-fleet",
+  "launcher": "/srv/hermes-data/scripts/start-agent-fleet-web.sh",
+  "port": 8790,
+  "public_origin": "https://fleet.example.com",
+  "account_credentials": "/var/lib/agent-fleet-deploy/account.json",
+  "uid": 1000,
+  "gid": 1000,
+  "databases": [
+    "state/fleet.db",
+    "var/platform/platform.db",
+    "var/accounts/accounts.db",
+    "var/sessions/meta.db",
+    "var/adoptions/meta.db"
+  ]
+}
