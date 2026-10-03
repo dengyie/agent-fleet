@@ -96,7 +96,7 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/test_full_flow_browser.py -q
 `tools/testing/pytest_journeys.py` 读取矩阵并检查 **实际收集和执行结果**：
 
 1. 每个必需 selector 至少对应一个已收集的用例。删除/改名/`-k` 排除用例会造成覆盖不完整。
-2. 所有参数实例的 setup、call、teardown 必须通过。skip、xfail、xpass、参数部分跳过、`-k` / `--deselect` 排除参数、清理失败均不算通过。
+2. 所有参数实例的 setup、call、teardown 必须通过。skip、xfail、xpass、参数部分跳过、直接选择单个参数 node ID、`-k` / `--deselect` 排除参数、清理失败均不算通过。`--lf/--last-failed` 会在正常筛选钩子之前裁剪收集结果，因此与 `--require-journeys` 或 `--journey-report` 同用时明确拒绝；普通局部调试仍可使用它。
 3. 任意测试本身失败仍使 CI 失败，即使矩阵中的条目碰巧全绿。
 4. 浏览器未安装或配置错误不能悄悄换成无浏览器发布。
 5. `journeys.json` 报告保存代码 revision、dirty 状态、矩阵 SHA-256、每个 selector 的收集/通过数和未通过 node ID；不保存 Cookie、验证码、提示词、provider 原始正文或数据库。

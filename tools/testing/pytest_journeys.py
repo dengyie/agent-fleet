@@ -17,6 +17,10 @@ def pytest_addoption(parser):
 def pytest_configure(config):
     if not (config.getoption('--require-journeys') or config.getoption('--journey-report')):
         return
+    # Cacheprovider can prune parameters inside report-generation wrappers,
+    # before normal deselection hooks run. Do not certify that partial set.
+    if config.getoption('lf', default=False):
+        raise pytest.UsageError('--lf/--last-failed is incompatible with journey evidence; run the full collection')
     matrix_path = Path(config.getoption('--journey-matrix'))
     try:
         raw = matrix_path.read_bytes()

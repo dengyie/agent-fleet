@@ -62,3 +62,35 @@ def test_missing_matrix_cannot_silently_disable_gate(tmp_path):
                             cwd=tmp_path, env={**os.environ, 'PYTHONPATH': str(ROOT)}, capture_output=True, text=True, timeout=30)
     assert result.returncode != 0
     assert 'Invalid or missing journey matrix' in result.stderr
+
+
+@pytest.mark.parametrize('flag', ['--lf', '--last-failed'])
+@pytest.mark.parametrize('evidence_args', [
+    ['--require-journeys'], ['--journey-report=result.json'],
+    ['--require-journeys', '--journey-report=result.json'],
+])
+def test_last_failed_cache_cannot_hide_required_parameters(tmp_path, flag, evidence_args):
+    (tmp_path / 'tests').mkdir()
+    sample = tmp_path / 'tests/test_sample.py'
+    sample.write_text('import pytest\n@pytest.mark.parametrize("n", [1,2])\ndef test_ok(n): assert n == 2\n')
+    env = {**os.environ, 'PYTHONPATH': str(ROOT)}
+
+    def run(*args):
+        return subprocess.run([sys.executable, '-m', 'pytest', '-q', *args], cwd=tmp_path,
+                              env=env, text=True, capture_output=True, timeout=30)
+
+    assert run().returncode == 1
+    assert json.loads((tmp_path / '.pytest_cache/v/cache/lastfailed').read_text()) == {
+        'tests/test_sample.py::test_ok[1]': True}
+    # Change the size too, so timestamp-based .pyc caching cannot hide the edit.
+    sample.write_text('import pytest\n@pytest.mark.parametrize("n", [1,2])\ndef test_ok(n): assert n == 1 # changed\n')
+    (tmp_path / 'matrix.json').write_text(json.dumps({'schema_version': 1, 'journeys': [
+        {'id': 'sample', 'layer': 'contract', 'acceptance': 'both cases pass',
+         'tests': ['tests/test_sample.py::test_ok']}]}))
+    result = run('-p', 'tools.testing.pytest_journeys', flag, '--journey-matrix=matrix.json', *evidence_args)
+    assert result.returncode == 4, result.stdout + result.stderr
+    assert '--lf/--last-failed is incompatible with journey evidence' in result.stderr
+    assert not (tmp_path / 'result.json').exists()
+    # Ordinary last-failed runs remain available without journey evidence.
+    assert run(flag).returncode == 0
+    assert run().returncode == 1

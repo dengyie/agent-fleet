@@ -8,9 +8,10 @@ import argparse
 import http.client
 import json
 from pathlib import Path
+from queue import Empty, Queue
 import secrets
 import socket
-from threading import Timer
+from threading import Thread, Timer
 import time
 from urllib.parse import urlsplit, quote
 
@@ -33,24 +34,79 @@ class AccountClient:
     def __init__(self, endpoint):
         self.endpoint = endpoint.rstrip('/')
         self.cookie = None
+        self._resolution = None
+
+    def _resolve(self, address, deadline):
+        remaining(deadline)
+        if self._resolution is None:
+            results = Queue(maxsize=1)
+            self._resolution = results
+
+            def resolve():
+                # getaddrinfo has no socket timeout. This worker only resolves
+                # names: a late result cannot connect or send an HTTP request.
+                try:
+                    result = socket.getaddrinfo(*address, 0, socket.SOCK_STREAM)
+                except Exception as exc:
+                    result = exc
+                results.put(result)
+
+            Thread(target=resolve, name='acceptance-dns', daemon=True).start()
+        try:
+            result = self._resolution.get(timeout=remaining(deadline))
+        except Empty:
+            # Reuse this pending lookup on the next request. Repeated model
+            # timeouts must not accumulate blocked resolver threads.
+            raise AcceptanceFailure('acceptance_timeout') from None
+        self._resolution = None
+        remaining(deadline)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def _connect_socket(self, address, deadline, source_address=None):
+        last_error = OSError('no resolved addresses')
+        for family, socktype, proto, _, sockaddr in self._resolve(address, deadline):
+            remaining(deadline)
+            sock = socket.socket(family, socktype, proto)
+            connected = False
+            try:
+                sock.settimeout(remaining(deadline))
+                if source_address:
+                    sock.bind(source_address)
+                sock.connect(sockaddr)
+                # HTTPSConnection uses this timeout for the entire TLS
+                # handshake, so it must exclude time spent resolving/connecting.
+                sock.settimeout(remaining(deadline))
+                connected = True
+                return sock
+            except OSError as exc:
+                last_error = exc
+            finally:
+                if not connected:
+                    sock.close()
+        remaining(deadline)
+        raise last_error
 
     def request(self, path, body=None, *, expected=200, deadline=None):
-        budget = min(15.0, remaining(deadline)) if deadline is not None else 15.0
-        request_deadline = time.monotonic() + budget
+        request_deadline = time.monotonic() + 15.0
+        if deadline is not None:
+            request_deadline = min(request_deadline, deadline)
+        budget = remaining(request_deadline)
         headers = {'User-Agent': 'agent-fleet/1.0', 'Origin': self.endpoint, 'Content-Type': 'application/json'}
         if self.cookie:
             headers['Cookie'] = self.cookie
         origin = urlsplit(self.endpoint)
         connection_type = http.client.HTTPSConnection if origin.scheme == 'https' else http.client.HTTPConnection
         connection = connection_type(origin.hostname, origin.port, timeout=budget)
+        # Replace only socket creation. Keep stdlib TLS certificate/hostname
+        # verification and HTTP parsing, with no automatic request retries.
+        connection._create_connection = lambda address, timeout, source_address: self._connect_socket(
+            address, request_deadline, source_address)
         timer = None
         try:
             connection.connect()
-            if deadline is not None:
-                remaining(deadline)
-            request_budget = request_deadline - time.monotonic()
-            if request_budget <= 0:
-                raise AcceptanceFailure('transport_unknown')
+            request_budget = remaining(request_deadline)
             sock = connection.sock
             sock.settimeout(request_budget)
 
@@ -70,8 +126,7 @@ class AccountClient:
             response = connection.getresponse()  # Never follow redirects or replay requests.
             with response:
                 raw = response.read(MAX_BYTES + 1)
-                if deadline is not None:
-                    remaining(deadline)
+                remaining(request_deadline)
                 if response.status != expected:
                     raise AcceptanceFailure('unexpected_http_status', response.status)
                 if len(raw) > MAX_BYTES:
@@ -83,6 +138,10 @@ class AccountClient:
                 if not isinstance(payload, dict):
                     raise ValueError()
                 return payload
+        except AcceptanceFailure as exc:
+            if exc.code == 'acceptance_timeout' and (deadline is None or time.monotonic() < deadline):
+                raise AcceptanceFailure('transport_unknown') from None
+            raise
         except (OSError, http.client.HTTPException):
             if deadline is not None:
                 remaining(deadline)

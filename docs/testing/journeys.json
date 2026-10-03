@@ -318,6 +318,11 @@
         "tests/test_platform_run_worker.py::test_acceptance_cannot_reuse_unrestricted_turn_token",
         "tests/test_acceptance_deadline.py::test_model_deadline_rejects_late_success_without_replay",
         "tests/test_acceptance_deadline.py::test_model_completes_within_deadline",
+        "tests/test_acceptance_deadline.py::test_dns_deadline_preserves_known_ids_without_late_requests",
+        "tests/test_acceptance_deadline.py::test_repeated_dns_timeouts_keep_only_one_pending_resolver",
+        "tests/test_acceptance_deadline.py::test_tcp_address_attempts_share_remaining_budget",
+        "tests/test_acceptance_deadline.py::test_tls_handshake_uses_budget_left_after_dns",
+        "tests/test_acceptance_deadline.py::test_deadline_connection_preserves_tls_verification",
         "tests/test_platform_acceptance_check.py::test_release_cli_invalid_credentials_cannot_create_runs",
         "tests/test_platform_acceptance_check.py::test_release_cli_private_credentials_and_catalog_are_required",
         "tests/test_platform_acceptance_check.py::test_release_cli_rejects_unsafe_endpoint_before_login"
@@ -333,6 +338,7 @@
         "tests/test_journey_gate.py::test_required_journeys_use_real_collected_results",
         "tests/test_journey_gate.py::test_deselected_required_parameter_cannot_count_as_full_coverage",
         "tests/test_journey_gate.py::test_hidden_failing_parameter_cannot_pass_journey",
+        "tests/test_journey_gate.py::test_last_failed_cache_cannot_hide_required_parameters",
         "tests/test_journey_gate.py::test_missing_matrix_cannot_silently_disable_gate"
       ]
     }
