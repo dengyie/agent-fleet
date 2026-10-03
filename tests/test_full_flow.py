@@ -107,7 +107,7 @@ def test_invitation_registration_recovery_and_owner_isolation(full_flow):
     member.request('/api/accounts/login', {'email': 'member@example.test', 'password': 'Changed-password-456!'}, expected=401)
 
 
-@pytest.mark.parametrize('prompt,status', [('http-401', 401), ('http-429', 429), ('http-502', 502), ('http-503', 503), ('bad-json', None), ('invalid-tool', None)])
+@pytest.mark.parametrize('prompt,status', [('http-401', 401), ('http-429', 429), ('http-500', 500), ('http-502', 502), ('http-503', 503), ('bad-json', None), ('invalid-tool', None)])
 def test_provider_fault_is_durable_visible_and_never_replayed(full_flow, prompt, status):
     hub = full_flow
     client = Client(hub.origin); client.login()

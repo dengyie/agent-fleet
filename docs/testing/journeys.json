@@ -99,7 +99,7 @@
       "id": "MODEL-02",
       "title": "模型异常、超时及错误证据",
       "layer": "integration",
-      "acceptance": "401/429/502/503/坏JSON/未知工具成为可恢复查询的unknown；不泄漏上游正文、不自动重放",
+      "acceptance": "401/429/500/502/503/坏JSON/未知工具成为可恢复查询的unknown；不泄漏上游正文、不自动重放",
       "boundary": "disposable Hub; external services simulated",
       "tests": [
         "tests/test_full_flow.py::test_provider_fault_is_durable_visible_and_never_replayed",

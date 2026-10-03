@@ -50,4 +50,4 @@
 
 - [x] Document workflow inventory, test layers, exact commands, failure triage, evidence retention and external acceptance. Replace stale token-login production instructions with current account flow.
 - [x] Run full suite with `--require-journeys --journey-report`, check all mapped outcomes, then run the new account-authenticated release probe against selected live models and report individual results.
-- [ ] Rebase the publication branch onto latest public main, publish a reviewable PR, verify CI and record precise tests and external limits. Do not claim absence of all future bugs or use test counts as proof of user-flow coverage.
+- [x] Rebase the publication branch onto latest public main, publish a reviewable PR, verify CI and record precise tests and external limits. Do not claim absence of all future bugs or use test counts as proof of user-flow coverage.
