@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -559,6 +560,9 @@ class RuntimeStoreHygieneTests(unittest.TestCase):
                 "commit: deadbeef\n"
                 "run: 424242\n"
                 "url: https://github.com/dengyie/agent-fleet/actions/runs/424242\n")
+            with tarfile.open(archive) as packaged:
+                self.assertFalse(any(Path(item.name).name.startswith('._') for item in packaged),
+                                 'macOS resource forks must not enter the deployable archive')
             # No staging leftovers in the working tree after packaging.
             self.assertFalse(
                 (REPO_ROOT / ".RELEASE_ORIGIN.tmp").exists()

@@ -28,7 +28,9 @@ if [[ -n "$origin" ]]; then
     IFS='|' read -r o_commit o_run o_url <<< "$origin"
     printf 'commit: %s\nrun: %s\nurl: %s\n' "$o_commit" "$o_run" "$o_url" \
         > "$repo_root/RELEASE_ORIGIN"
-    tar -rf "$repo_root/.package-release.tmp.tar" \
+    # BSD tar otherwise adds AppleDouble resource-fork files rejected by the
+    # deployment receiver. GNU tar ignores this environment setting.
+    COPYFILE_DISABLE=1 tar -rf "$repo_root/.package-release.tmp.tar" \
         -C "$repo_root" RELEASE_ORIGIN
     # Keep the last writer's stamp for post-mortem; name is gitignored (*.tmp).
     mv "$repo_root/RELEASE_ORIGIN" "$repo_root/.RELEASE_ORIGIN.tmp.staged"
