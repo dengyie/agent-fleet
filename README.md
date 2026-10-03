@@ -131,7 +131,7 @@ python3 tools/agent-self-report.py \
 
 ## 测试与发布验收
 
-完整测试入口：[全流程测试与质量门禁](docs/testing/README.md)。[可执行流程矩阵](docs/testing/journeys.json)绑定必需用例；CI 在打包前检查实际执行结果，缺失、跳过或失败均阻断。真实模型、邮件和节点按[发布验收手册](docs/testing/release-acceptance.md)分别验证。
+完整测试入口：[全流程测试与质量门禁](docs/testing/README.md)。[可执行流程矩阵](docs/testing/journeys.json)绑定必需用例；[测试链路与证据核验](docs/testing/test-chains.md)提供阶段断言、审查回归和可复制命令。CI 在打包前检查实际执行结果，缺失、跳过或失败均阻断。真实模型、邮件和节点按[发布验收手册](docs/testing/release-acceptance.md)分别验证。
 
 ## 📖 进阶文档
 

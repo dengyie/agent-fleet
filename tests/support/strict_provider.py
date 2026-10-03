@@ -48,7 +48,10 @@ def validate_request(payload):
 
 
 class StrictProvider:
-    def __init__(self):
+    def __init__(self, *, forced_tool=None):
+        # An adversarial peer may return a tool it was never offered. Request
+        # validation still runs unchanged, independently of product code.
+        self.forced_tool = forced_tool
         self.requests = []
         self.errors = []
         self.entered = Event()
@@ -99,7 +102,9 @@ class StrictProvider:
                 if 'bad-json' in prompt:
                     return self.send(200, b'{broken', raw=True)
                 step = sum(m['role'] == 'tool' for m in transcript)
-                if 'invalid-tool' in prompt:
+                if fixture.forced_tool is not None:
+                    name, arguments = fixture.forced_tool
+                elif 'invalid-tool' in prompt:
                     name, arguments = 'not_advertised', {}
                 else:
                     operations = [('workspace_list', {})]

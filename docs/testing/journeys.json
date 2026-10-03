@@ -46,7 +46,8 @@
       "tests": [
         "tests/test_account_http.py::test_csrf_edge_identity_and_role_boundaries",
         "tests/test_account_review_regressions.py::test_untrusted_forwarding_headers_cannot_evade_limits",
-        "tests/test_account_credential_limits.py::test_verified_replacement_allows_new_password_after_lockout"
+        "tests/test_account_credential_limits.py::test_verified_replacement_allows_new_password_after_lockout",
+        "tests/test_acceptance_flow.py::test_acceptance_route_enforces_account_owner_origin_and_policy"
       ]
     },
     {
@@ -80,7 +81,10 @@
       "boundary": "disposable Hub; external services simulated",
       "tests": [
         "tests/test_full_flow.py::test_account_to_real_http_tools_artifact_and_restart",
-        "tests/test_platform_run_worker.py::test_queued_turns_use_trigger_cutoff_and_durable_assistant_history"
+        "tests/test_platform_run_worker.py::test_queued_turns_use_trigger_cutoff_and_durable_assistant_history",
+        "tests/test_acceptance_flow.py::test_acceptance_http_idempotency_cannot_cross_policy",
+        "tests/test_acceptance_flow.py::test_acceptance_queued_policy_survives_hub_restart",
+        "tests/test_acceptance_flow.py::test_accepted_response_timeout_recovers_unique_run_by_token"
       ]
     },
     {
@@ -171,11 +175,13 @@
       "title": "远程节点投递、回执和幂等",
       "layer": "integration",
       "acceptance": "签名/节点/租约均校验；节点执行回执闭合Run；重复投递不重复执行；崩溃未知不得重放",
-      "boundary": "local node journal/executor with in-process HTTP transport; actual host requires NODE-LIVE",
+      "boundary": "loopback account/provider/node HTTP plus separate journal/executor filesystem; signed command checks use injected transport; actual host requires NODE-LIVE",
       "tests": [
         "tests/test_platform_node_http_e2e.py::test_worker_node_http_receipt_closes_remote_run_without_local_side_effect",
         "tests/test_platform_delivery.py::test_node_crash_recovery_is_unknown_until_reconciliation",
-        "tests/test_platform_delivery.py::test_delivery_signs_commands_and_strict_repository_rejects_unsigned"
+        "tests/test_platform_delivery.py::test_delivery_signs_commands_and_strict_repository_rejects_unsigned",
+        "tests/test_acceptance_flow.py::test_acceptance_http_chain_closes_report_and_node_journal",
+        "tests/test_acceptance_flow.py::test_adversarial_wire_tool_cannot_reach_local_or_remote_backend"
       ]
     },
     {
@@ -300,7 +306,7 @@
       "id": "RELEASE-01",
       "title": "发布探活与验收CLI",
       "layer": "integration",
-      "acceptance": "健康探针独立账号；发布探针要求真实工具+回复+恢复；异常不假绿；旧登录会话撤销",
+      "acceptance": "真实账号验收入口固定只读权限；本地/节点HTTP回执、工具、最终回复、恢复和退出闭环；逾期不通过；未知提交按token定位且不重发；旧服务不回退普通入口",
       "boundary": "disposable Hub; external services simulated",
       "tests": [
         "tests/test_account_liveness.py::test_both_guardians_probe_real_account_hub_without_credentials",
@@ -325,7 +331,14 @@
         "tests/test_acceptance_deadline.py::test_deadline_connection_preserves_tls_verification",
         "tests/test_platform_acceptance_check.py::test_release_cli_invalid_credentials_cannot_create_runs",
         "tests/test_platform_acceptance_check.py::test_release_cli_private_credentials_and_catalog_are_required",
-        "tests/test_platform_acceptance_check.py::test_release_cli_rejects_unsafe_endpoint_before_login"
+        "tests/test_platform_acceptance_check.py::test_release_cli_rejects_unsafe_endpoint_before_login",
+        "tests/test_acceptance_flow.py::test_acceptance_http_chain_closes_report_and_node_journal",
+        "tests/test_acceptance_flow.py::test_adversarial_wire_tool_cannot_reach_local_or_remote_backend",
+        "tests/test_acceptance_flow.py::test_acceptance_route_enforces_account_owner_origin_and_policy",
+        "tests/test_acceptance_flow.py::test_acceptance_http_idempotency_cannot_cross_policy",
+        "tests/test_acceptance_flow.py::test_acceptance_queued_policy_survives_hub_restart",
+        "tests/test_acceptance_flow.py::test_accepted_response_timeout_recovers_unique_run_by_token",
+        "tests/test_acceptance_flow.py::test_legacy_hub_does_not_fallback_to_unrestricted_turn"
       ]
     },
     {

@@ -62,12 +62,13 @@ class Client:
 
 
 class FullFlowHub:
-    def __init__(self, root, provider, *, browser=False):
+    def __init__(self, root, provider, *, browser=False, remote=False):
         self.root, self.provider = root, provider
         self.mail = []
         self.mailbox = root / 'mail.json'
         self.clock = [time.time()]
         self.browser = browser
+        self.remote = remote
         self.shutdown_scheduler = None
         self.server = None
 
@@ -93,6 +94,7 @@ class FullFlowHub:
         self.app = create_app(FleetConfig.from_root(self.root,
             frontend_dir=ROOT / 'frontend', platform_enabled=True, platform_worker_enabled=True,
             platform_worker_scheduler_enabled=True, platform_provider_network_enabled=True,
+            platform_remote_execution_enabled=self.remote,
             service_monitoring_enabled=True,
             accounts={'enabled': True, 'origin': 'http://127.0.0.1', 'registration': 'invite', 'sender': self.sender}))
         accounts = self.app.extensions['accounts']

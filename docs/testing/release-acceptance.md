@@ -33,6 +33,18 @@ PYTHONPATH=. python -m tools.platform.acceptance_check \
 
 任意模型失败，整体进程退出码为 1，并逐模型输出 `status/error/run_state/conversation_id/run_id`（以已经获得的信息为准）。报告不含回复全文、文件列表、密码或 Cookie。超时记录 `error=acceptance_timeout`、`outcome=unconfirmed`，保留已知 Run ID；提交响应丢失时保留对话 ID 与 `client_token` 以便查询定位。`unknown` 和超时不自动重发；超时不代表 Run 已取消或失败。完成后保留报告和对话证据，按指定验收数据保留策略清理。
 
+### 不确定结果的只读定位
+
+原验收报告保留为失败/未确认，不因后台稍后完成而改写成当时通过。按下列顺序查询，另存带时间的定位结果：
+
+1. 已有 `run_id`：使用同一验收账号打开对应对话，或 GET `/api/platform/v1/runs/<run_id>` 和 `/events`，确认当前终态、工具结果和最终回复。
+2. 只有 `conversation_id` 和 `client_token`：GET `/api/platform/v1/conversations/<conversation_id>`，在 `messages` 中查找相同 `client_token`。CLI 为每个模型创建新对话且只提交一次，因此仅有一条匹配的用户消息和一个 Run 时，可以唯一定位该 Run。公开 Run 对象不包含 `trigger_message_id`，不要依赖该内部字段。
+3. 零匹配表示尚未确认提交；多个 Run 表示该对话另有操作，不能猜测对应关系。保留证据继续核查，不重新调用验收命令来替代查询。
+4. 没有对话 ID 时只能记录创建结果未确认，结合服务端请求日志定位；不要编造 Run ID。`unknown` 需要依据原命令/事件检查副作用，不能自动重放。
+5. 确认后退出账号。仅保存模型 ID、对话/Run ID、状态、检查时间和有无回复/工具证据，不复制文件列表、回复正文或 Cookie。
+
+这条链路由 `tests/test_acceptance_flow.py::test_accepted_response_timeout_recovers_unique_run_by_token` 验证：真实 Hub 已保存 Run 后阻塞响应，CLI 截止返回未确认；GET 找回唯一 Run，新 Hub 完成原任务，没有第二次提交。其余慢响应、DNS/TCP/TLS 回归及 CI 报告核验见[测试链路文档](test-chains.md)。
+
 ## MAIL-LIVE
 
 SMTP/one-mail 对端测试验证协议，不能证明真实邮箱收到了邮件。发布时使用指定的验收邮箱与两个独立浏览器会话：

@@ -1,6 +1,6 @@
 # 全流程测试与质量门禁
 
-这份文档是测试入口。可执行范围定义在 [journeys.json](journeys.json)；外部验收见 [release-acceptance.md](release-acceptance.md)。测试用例、门禁和文档必须随功能一起更新。
+这份文档是测试入口。可执行范围定义在 [journeys.json](journeys.json)；逐阶段断言、审查回归和证据核验见 [test-chains.md](test-chains.md)；外部验收见 [release-acceptance.md](release-acceptance.md)。测试用例、门禁和文档必须随功能一起更新。
 
 ## 为什么需要这套门禁
 
@@ -45,6 +45,7 @@ macOS 已安装 Chrome 时可用 `FLEET_BROWSER_CHANNEL=chrome`，其余参数�
 PYTHONPATH=. .venv/bin/python -m pytest tests/test_full_flow.py -q
 PYTHONPATH=. .venv/bin/python -m pytest tests/test_platform_provider.py tests/test_platform_provider_canary.py -q
 PYTHONPATH=. .venv/bin/python -m pytest tests/test_account_smtp_transport.py tests/test_journey_gate.py -q
+PYTHONPATH=. .venv/bin/python -m pytest tests/test_acceptance_flow.py tests/test_platform_acceptance_check.py tests/test_acceptance_deadline.py -q
 # 浏览器测试仍需上面的 FLEET_PLAYWRIGHT_MODULE / FLEET_BROWSER_CHANNEL
 PYTHONPATH=. .venv/bin/python -m pytest tests/test_full_flow_browser.py -q
 ```
@@ -90,6 +91,7 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/test_full_flow_browser.py -q
 - `tests/test_full_flow.py` 从真实 HTTP 登录开始，验证邀请、注册、密码重置、停用、跨用户404、最终回复、产物字节/哈希、重复提交、重新创建 app 后恢复、取消和故障持久化。
 - `tests/test_full_flow_browser.py` 不替换模型工厂；页面关闭后释放已阻塞的模型请求，再新开页面验证后台完成。四次工具调用必须留下真实事件，下载文件必须与实际写入内容一致。502 后刷新必须仍显示错误，不能丢掉上一条成功回复。
 - `tests/test_account_smtp_transport.py` 进行实际 TLS/STARTTLS、SMTP AUTH 和 MIME 投递；验证不可信证书被拒绝、SMTP DATA 失败不被当作成功或自动重试。测试 CA 只在该 fixture 内受信任。
+- `tests/test_acceptance_flow.py` 串联真实账号验收入口、模型 HTTP、节点 HTTP poll/receipt、journal、最终报告与恢复；验证越权 wire 工具没有本地或节点副作用，权限覆盖不能改变冻结策略，Hub 重启后仍只允许 list，已提交响应超时后可通过对话/token 找回唯一 Run。`tests/support/loopback_node.py` 使用产品 NodeClient/Transport 和独立目录，不能代替实际远程主机验收。
 
 ## 门禁判定规则
 
@@ -103,6 +105,8 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/test_full_flow_browser.py -q
 6. 报告里的外部检查永远初始化为 `not_run`，必须附加真正的发布验收证据，不能由本地绿色测试推导成功。
 
 CI 在打包前运行门禁，测试失败或不完整时 `package` 不执行。CI 保留 JUnit、流程报告和浏览器截图 7 天。截图只拍临时 fixture 数据；默认不上传网络 trace、登录请求体或邮箱内容。
+
+交付时按[证据核验步骤](test-chains.md#核验-ci-证据)对照最新提交、CI checkout revision、矩阵摘要和 JUnit；Linux CI 要求零跳过。macOS 的 `/proc`/stop-resume 平台跳过须记录原因，由 Linux CI 补齐，不能据此放宽其他用例。
 
 ## 故障定位与修复要求
 
