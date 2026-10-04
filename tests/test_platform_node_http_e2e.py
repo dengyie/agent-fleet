@@ -7,8 +7,9 @@ from hub.bootstrap import create_app
 from hub.config import FleetConfig
 from hub.domain.platform_command import PlatformCommand
 from tools.platform.backends.directory import DirectoryBackend
+from tools.platform.browser_backend import LocalBrowserBackend
 from tools.platform.node_client import NodeClient
-from tools.platform.node_executor import NodeToolExecutor
+from tools.platform.node_executor import BROWSER_TOOLS, NodeToolExecutor
 from tools.platform.journal import NodeJournal
 from tools.platform.providers.base import ModelResponse
 
@@ -194,6 +195,246 @@ def test_browser_screenshot_uses_node_ticket_and_artifact_metadata(tmp_path):
     assert upload_headers["X-Platform-Worker-ID"] == "browser-worker"
     assert "X-Agent-Fleet-Token" not in ticket_headers
     assert "X-Agent-Fleet-Token" not in upload_headers
+
+
+def _browser_run_app(tmp_path):
+    app = _app(tmp_path, browser=True)
+    repo = app.extensions["fleet"]["platform_repository"]
+    repo.upsert_node(OWNER, {
+        "node_id": "node-browser-run", "label": "Browser run",
+        "capabilities": {"browser.session": True},
+    })
+    credential = repo.provision_node_credential(
+        OWNER, "node-browser-run", secret="r" * 40)["credential"]
+    repo.upsert_model(OWNER, {"profile_id": "model", "provider": "deterministic", "model": "test"})
+    repo.upsert_workspace(OWNER, {
+        "workspace_id": "browser-workspace",
+        "root_path": str(tmp_path / "browser-workspace"),
+    })
+    repo.create_conversation(OWNER, "conv-browser-run", title="",
+                             workspace_id="browser-workspace")
+    return app, repo, credential
+
+
+def _browser_run_worker(app, repo, credential, tmp_path, *, driver_factory, provider):
+    delivery = app.extensions["fleet"]["services"]["platform_delivery"]
+    journal = NodeJournal(tmp_path / "browser-run-journal.db")
+    journal.init()
+    transport = FlaskTransport(app.test_client())
+    node = NodeClient(
+        journal,
+        executor=NodeToolExecutor(
+            None, allowed_tools=BROWSER_TOOLS,
+            browser_backend=LocalBrowserBackend(driver_factory, network_enabled=False),
+            browser_enabled=True,
+        ),
+        node_id="node-browser-run", credential=credential,
+        hub_url="https://hub.invalid", transport=transport,
+        worker_id="browser-run-worker",
+    )
+
+    class DeliveryBridge:
+        def enqueue(self, command, *, idempotency_key=None):
+            return delivery.enqueue(command, idempotency_key=idempotency_key)
+
+        def wait_for_receipt(self, command_id, *, timeout_s=30.0):
+            node.poll_once()
+            return delivery.wait_for_receipt(
+                command_id, timeout_s=timeout_s, poll_interval_s=0.01)
+
+    worker = LocalRunWorkerService(
+        repo, app.extensions["fleet"]["services"]["run_events"],
+        worker_id="browser-run-hub-worker", provider_factory=lambda profile: provider,
+        remote_execution_enabled=True, remote_delivery=DeliveryBridge(),
+        browser_enabled=True,
+    )
+    return worker, node, journal, transport
+
+
+def _append_browser_turn(repo, *, run_id, client_token):
+    repo.append_turn(
+        OWNER, "conv-browser-run", "msg-" + run_id, run_id, text="use browser",
+        client_token=client_token,
+        config_snapshot={"workspace_id": "browser-workspace",
+                         "model_profile_id": "model",
+                         "execution_node_id": "node-browser-run"}, now=1,
+    )
+
+
+class _OpenThenProvider:
+    def __init__(self, second_call):
+        self.messages = []
+        self._second_call = second_call
+
+    def complete(self, messages, tools):
+        self.messages.append(list(messages))
+        if not any(m["role"] == "tool" for m in messages):
+            return ModelResponse(kind="tool_call", tool="browser.open",
+                                 arguments={"url": "http://localhost:3000"})
+        return self._second_call(messages)
+
+
+def test_browser_dispatch_failure_markers_stay_off_hub_boundaries(tmp_path):
+    markers = (
+        "https://203.0.113.77/private?token=url-marker", "redirect-location-marker",
+        "response-body-marker", "tls-detail-marker",
+    )
+    cause = RuntimeError(" ".join(markers))
+
+    class Driver:
+        def open(self, _url):
+            return None
+
+        def navigate(self, _url):
+            raise cause
+
+        def close(self):
+            return None
+
+    app, repo, credential = _browser_run_app(tmp_path)
+    _append_browser_turn(repo, run_id="run-leak", client_token="leak-e2e")
+    provider = _OpenThenProvider(lambda messages: ModelResponse(
+        kind="tool_call", tool="browser.navigate",
+        arguments={"session_id": messages[-1]["result"]["session_id"],
+                   "url": "http://localhost:3000/next"},
+    ))
+    worker, node, journal, transport = _browser_run_worker(
+        app, repo, credential, tmp_path, driver_factory=lambda: Driver(),
+        provider=provider,
+    )
+
+    result = worker.run_once(OWNER)
+
+    assert result["state"] == "unknown"
+    delivery = app.extensions["fleet"]["services"]["platform_delivery"]
+    events = app.extensions["fleet"]["services"]["run_events"].list(OWNER, "run-leak")["events"]
+    surfaces = {
+        "run_events": str(events),
+        "model_transcript": str(provider.messages),
+        "hub_command_rows": str(delivery.repository.get("run-leak:step:1"))
+        + str(delivery.repository.get("run-leak:step:2")),
+        "wire_requests": str(transport.requests),
+        "run_row": str(repo.get_run(OWNER, "run-leak")),
+        "node_journal": str(journal.get("run-leak:step:2")),
+    }
+    for name, text in surfaces.items():
+        assert all(marker not in text for marker in markers), name
+    tool_call = next(e["payload"] for e in events
+                     if e["kind"] == "tool_call" and e["payload"]["step"] == 2)
+    assert tool_call["argument_keys"] == ["session_id", "url"]
+    tool_result = next(e["payload"] for e in events
+                       if e["kind"] == "tool_result" and e["payload"]["step"] == 2)
+    assert tool_result["state"] == "unknown"
+    assert tool_result["error_code"] == "receipt_unknown"
+
+
+def test_browser_success_content_flows_only_through_approved_planes(tmp_path):
+    page = {"title": "page-content-marker", "text": "visible page body"}
+
+    class Driver:
+        def open(self, _url):
+            return None
+
+        def snapshot(self):
+            return dict(page)
+
+        def close(self):
+            return None
+
+    app, repo, credential = _browser_run_app(tmp_path)
+    _append_browser_turn(repo, run_id="run-page", client_token="page-e2e")
+
+    def snapshot_call(messages):
+        if sum(m["role"] == "tool" for m in messages) >= 2:
+            return ModelResponse(kind="final", text="done-page")
+        return ModelResponse(kind="tool_call", tool="browser.snapshot",
+                             arguments={"session_id": messages[-1]["result"]["session_id"]})
+
+    provider = _OpenThenProvider(snapshot_call)
+    worker, _node, _journal, _transport = _browser_run_worker(
+        app, repo, credential, tmp_path, driver_factory=lambda: Driver(),
+        provider=provider,
+    )
+
+    result = worker.run_once(OWNER)
+
+    assert result["state"] == "succeeded"
+    # Approved plane: the model transcript carries the backend result.
+    tool_message = next(m for m in provider.messages[-1]
+                        if m.get("tool") == "browser.snapshot")
+    assert tool_message["result"]["result"]["title"] == "page-content-marker"
+    # Approved plane: the Hub command receipt stores the backend result verbatim.
+    # Deliberate policy lock: the Hub DB keeps page content as the model data
+    # plane; a future metadata-only tightening is a conscious spec change.
+    delivery = app.extensions["fleet"]["services"]["platform_delivery"]
+    assert "page-content-marker" in str(delivery.repository.get("run-page:step:2"))
+    # Metadata-only plane: run events carry status/error codes, never page content.
+    events = app.extensions["fleet"]["services"]["run_events"].list(OWNER, "run-page")["events"]
+    assert "page-content-marker" not in str(events)
+    tool_result = next(e["payload"] for e in events
+                       if e["kind"] == "tool_result" and e["payload"]["step"] == 2)
+    assert tool_result["state"] == "succeeded"
+    assert repo.get_run(OWNER, "run-page")["result_text"] == "done-page"
+
+
+def test_browser_screenshot_pixels_stay_out_of_hub_metadata_planes(tmp_path):
+    png = b"\x89PNG\r\n\x1a\n" + b"screenshot-pixel-marker" + b"\x00" * 16
+
+    class Driver:
+        def open(self, _url):
+            return None
+
+        def screenshot(self):
+            return png
+
+        def close(self):
+            return None
+
+    app, repo, credential = _browser_run_app(tmp_path)
+    _append_browser_turn(repo, run_id="run-shot", client_token="shot-e2e")
+
+    def screenshot_call(messages):
+        if sum(m["role"] == "tool" for m in messages) >= 2:
+            return ModelResponse(kind="final", text="shot-done")
+        return ModelResponse(kind="tool_call", tool="browser.screenshot",
+                             arguments={"session_id": messages[-1]["result"]["session_id"]})
+
+    provider = _OpenThenProvider(screenshot_call)
+    worker, _node, journal, transport = _browser_run_worker(
+        app, repo, credential, tmp_path, driver_factory=lambda: Driver(),
+        provider=provider,
+    )
+
+    result = worker.run_once(OWNER)
+
+    assert result["state"] == "succeeded"
+    delivery = app.extensions["fleet"]["services"]["platform_delivery"]
+    events = app.extensions["fleet"]["services"]["run_events"].list(OWNER, "run-shot")["events"]
+    metadata_surfaces = {
+        "run_events": str(events),
+        "model_transcript": str(provider.messages),
+        "hub_command_row": str(delivery.repository.get("run-shot:step:2")),
+        "receipt_and_ticket_posts": str(
+            [body for path, body, _headers in transport.requests
+             if path.endswith(("/nodes/receipts", "/browser-artifact-tickets"))]),
+        "node_journal": str(journal.get("run-shot:step:2")),
+    }
+    for name, text in metadata_surfaces.items():
+        assert "screenshot-pixel-marker" not in text, name
+    tool_message = next(m for m in provider.messages[-1]
+                        if m.get("tool") == "browser.screenshot")
+    assert tool_message["result"]["artifact"]["content_type"] == "image/png"
+    assert "result" not in tool_message["result"]
+    command_row = delivery.repository.get("run-shot:step:2")
+    artifact_meta = command_row["result"]["result"]["artifact"]
+    assert artifact_meta["content_type"] == "image/png"
+    # Approved content plane: the artifact store keeps the exact uploaded bytes.
+    artifacts = app.extensions["fleet"]["services"]["platform_artifacts"].list(
+        OWNER, "browser-workspace")
+    assert len(artifacts) == 1
+    assert app.extensions["fleet"]["services"]["platform_artifacts"].read(
+        OWNER, "browser-workspace", artifacts[0]["artifact_id"]) == png
+
 
 
 
