@@ -417,9 +417,35 @@ def test_dns_answer_limit_is_checked_before_connection(transport_factory):
 
 def test_allowlist_normalizes_default_port_and_hostname(transport_factory):
     transport = transport_factory(
-        [_Response(200)], origins=("https://ONE.EXAMPLE:443/",),
+        [_Response(200)], origins=("HTTPS://ONE.EXAMPLE:443/",),
     )
-    assert transport.request("https://one.example/")[0] == 200
+    assert transport.request("HTTPS://one.example/")[0] == 200
+
+
+@pytest.mark.parametrize("origin", [
+    "https://one.example:", "https://one.example:0", "https://one.example..",
+    "https://one.example/\n",
+])
+def test_allowlist_rejects_ambiguous_authorities(transport_factory, origin):
+    with pytest.raises(BrowserTransportError, match="invalid_url"):
+        transport_factory([], origins=(origin,))
+
+
+def test_allowlist_rejects_duplicate_normalized_origins(transport_factory):
+    with pytest.raises(BrowserTransportError, match="invalid_url"):
+        transport_factory(
+            [], origins=("https://one.example", "HTTPS://ONE.EXAMPLE:443/"),
+        )
+
+
+def test_ipv6_literal_origin_normalizes_and_uses_loopback_fixture(transport_factory):
+    transport = transport_factory(
+        [_Response(200)], origins=("https://[::1]",), fixture_loopback=True,
+    )
+
+    assert transport.request("HTTPS://[0:0:0:0:0:0:0:1]/")[0] == 200
+    assert transport.test_requests[0][0:2] == ("::1", 443)
+    assert transport.test_requests[0][5][0][4] == ("::1", 443, 0, 0)
 
 
 def test_same_origin_redirect_revalidates_and_resolves_each_hop(transport_factory):
@@ -487,6 +513,9 @@ def test_redirect_requires_exactly_one_location(transport_factory, location):
 @pytest.mark.parametrize("value", [
     "https://one.example:abc/path",
     "https://one.example:65536/path",
+    "https://one.example:0/path",
+    "https://one.example:/path",
+    "https://one.example../path",
     "https:///missing-host",
     "https://[::1/path",
     "https://user@one.example/path",
@@ -503,6 +532,9 @@ def test_malformed_request_authority_and_port_are_invalid_url(transport_factory,
 @pytest.mark.parametrize(("location", "code"), [
     ("https://one.example:abc/next", "invalid_url"),
     ("https://one.example:65536/next", "invalid_url"),
+    ("https://one.example:0/next", "invalid_url"),
+    ("https://one.example:/next", "invalid_url"),
+    ("https://one.example../next", "invalid_url"),
     ("https:///missing-host", "invalid_url"),
     ("https://[::1/next", "invalid_url"),
     ("https://user@one.example/next", "invalid_url"),
@@ -576,6 +608,51 @@ def test_non_read_method_is_rejected(transport_factory):
     transport = transport_factory([])
     with pytest.raises(BrowserTransportError, match="method_forbidden"):
         transport.request("https://one.example/", method="POST")
+
+
+@pytest.mark.parametrize("location", [
+    "javascript:alert(1)", "file:///etc/passwd", "ws://one.example/socket",
+    "wss://one.example/socket", "data:text/plain,blocked", "blob:https://one.example/id",
+])
+def test_unsupported_redirect_schemes_are_denied_without_follow_up(transport_factory, location):
+    transport = transport_factory([_Response(302, [("Location", location)]), _Response(200)])
+
+    with pytest.raises(BrowserTransportError):
+        transport.request("https://one.example/start")
+
+    assert len(transport.test_requests) == 1
+
+
+def test_overlong_redirect_location_is_denied_without_follow_up(transport_factory):
+    transport = transport_factory([
+        _Response(302, [("Location", "/" + "a" * 2048)]), _Response(200),
+    ])
+
+    with pytest.raises(BrowserTransportError, match="redirect_denied"):
+        transport.request("https://one.example/start")
+
+    assert len(transport.test_requests) == 1
+
+
+def test_canonical_equivalent_redirect_loop_is_denied_before_second_request(transport_factory):
+    transport = transport_factory([
+        _Response(302, [("Location", "https://ONE.EXAMPLE:443/a")]),
+        _Response(302, [("Location", "https://one.example/a")]),
+    ], max_redirects=4)
+
+    with pytest.raises(BrowserTransportError, match="redirect_denied"):
+        transport.request("https://one.example/a")
+
+    assert len(transport.test_requests) == 1
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_redirect_statuses_preserve_read_method(transport_factory, status, method):
+    transport = transport_factory([_Response(status, [("Location", "/next")]), _Response(200)])
+
+    assert transport.request("https://one.example/start", method=method)[0] == 200
+    assert [request[2] for request in transport.test_requests] == [method, method]
 
 
 def test_body_header_and_redirect_loop_limits(transport_factory):

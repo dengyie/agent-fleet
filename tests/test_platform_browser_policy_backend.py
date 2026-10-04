@@ -29,6 +29,38 @@ def test_policy_matches_effective_default_https_port():
     ) == "https://one.example/page"
 
 
+@pytest.mark.parametrize("value", [
+    "https://one.example:0/path", "https://one.example:/path",
+    "https://one.example../path", "https://one.example/path\n",
+])
+def test_policy_rejects_ambiguous_authorities(value):
+    from tools.platform.browser_policy import BrowserPolicyError
+
+    with pytest.raises(BrowserPolicyError, match="invalid_url"):
+        validate_url(
+            value, network_enabled=True, allowed_origins=("https://one.example",),
+            resolver=_resolver,
+        )
+
+
+def test_policy_normalizes_scheme_case_and_rejects_duplicate_origins():
+    assert validate_url(
+        "HTTPS://ONE.EXAMPLE/path",
+        network_enabled=True,
+        allowed_origins=("https://one.example:443",),
+        resolver=_resolver,
+    ) == "HTTPS://ONE.EXAMPLE/path"
+
+    from tools.platform.browser_policy import BrowserPolicyError
+
+    with pytest.raises(BrowserPolicyError, match="invalid_url"):
+        validate_url(
+            "https://one.example/path", network_enabled=True,
+            allowed_origins=("https://one.example", "HTTPS://ONE.EXAMPLE:443/"),
+            resolver=_resolver,
+        )
+
+
 def test_backend_failure_preserves_driver_cause_without_exposing_it_in_text():
     cause = ValueError("driver-private-detail")
 

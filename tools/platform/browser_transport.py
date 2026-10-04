@@ -12,6 +12,8 @@ import time
 from functools import partial
 from urllib.parse import urldefrag, urljoin, urlsplit
 
+from tools.platform.browser_url import canonical_url, normalize_origin
+
 
 class BrowserTransportError(RuntimeError):
     def __init__(self, code: str):
@@ -47,30 +49,10 @@ _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 
 def _origin(parsed) -> tuple[str, str, int]:
-    scheme = parsed.scheme.lower()
     try:
-        host = parsed.hostname.rstrip(".").lower()
-        if not host or "%" in host:
-            raise ValueError
-        try:
-            literal = ipaddress.ip_address(host)
-        except ValueError:
-            host = host.encode("idna").decode("ascii")
-        parsed_port = parsed.port
-        port = (443 if scheme == "https" else 80) if parsed_port is None else parsed_port
-        if not 1 <= port <= 65535:
-            raise ValueError
-    except (AttributeError, UnicodeError, ValueError):
+        return normalize_origin(parsed.geturl())
+    except (AttributeError, TypeError, ValueError):
         raise BrowserTransportError("invalid_url") from None
-    if ":" not in host:
-        labels = host.split(".")
-        if len(host) > 253 or any(
-            not label or len(label) > 63 or label[0] == "-" or label[-1] == "-"
-            or any(not (char.isalnum() or char == "-") for char in label)
-            for label in labels
-        ):
-            raise BrowserTransportError("invalid_url")
-    return scheme, host, port
 
 
 def _is_loopback(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -103,7 +85,7 @@ def _parse_url(value: str, allowed_origins: frozenset[tuple[str, str, int]], res
         if (scheme not in {"http", "https"} or not host
                 or parsed.username is not None or parsed.password is not None):
             raise ValueError
-        parsed = parsed._replace(fragment="")
+        parsed = parsed._replace(scheme=scheme, fragment="")
     except (ValueError, AttributeError):
         raise BrowserTransportError("invalid_url") from None
 
@@ -435,14 +417,7 @@ class PinnedBrowserTransport:
     @staticmethod
     def _normalize_origin(value):
         try:
-            parsed = urlsplit(value)
-            if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
-                raise ValueError
-            scheme, host, port = _origin(parsed)
-            if (scheme not in {"https", "http"} or parsed.username is not None
-                    or parsed.password is not None):
-                raise ValueError
-            return scheme, host, port
+            return normalize_origin(value, require_root=True)
         except (TypeError, ValueError, AttributeError):
             raise BrowserTransportError("invalid_url") from None
 
@@ -509,7 +484,7 @@ class PinnedBrowserTransport:
                     fixture_loopback=self.fixture_loopback,
                     timeout_s=self.timeout_s, clock=self.clock, deadline=deadline,
                 )
-                key = (method, parsed.geturl())
+                key = (method, canonical_url(parsed.geturl()))
                 if key in visited:
                     raise BrowserTransportError("redirect_denied")
                 visited.add(key)
@@ -574,7 +549,9 @@ class PinnedBrowserTransport:
                         if hop == self.max_redirects or len(locations) != 1:
                             raise BrowserTransportError("redirect_denied")
                         location = locations[0]
-                        if any(ord(char) <= 0x20 or ord(char) == 0x7f for char in location):
+                        if (len(location) > _MAX_URL_LENGTH
+                                or any(ord(char) <= 0x20 or ord(char) == 0x7f
+                                       for char in location)):
                             raise BrowserTransportError("redirect_denied")
                         try:
                             location_parts = urlsplit(location)

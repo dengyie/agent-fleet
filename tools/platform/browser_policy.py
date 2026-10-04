@@ -6,6 +6,8 @@ import re
 import socket
 from urllib.parse import urlsplit
 
+from tools.platform.browser_url import normalize_origin
+
 
 MAX_URL = 2048
 MAX_TEXT = 4096
@@ -26,25 +28,9 @@ class BrowserPolicyError(ValueError):
 
 def _normalized_origin(value: object, *, require_root: bool = False) -> tuple[str, str, int]:
     try:
-        parsed = urlsplit(value)
-        if parsed.scheme not in {"http", "https"} or (require_root and parsed.path not in {"", "/"}):
-            raise ValueError
-        if (parsed.username or parsed.password
-                or (require_root and (parsed.path not in {"", "/"}
-                                     or parsed.query or parsed.fragment))):
-            raise ValueError
-        host = parsed.hostname
-        if not host:
-            raise ValueError
-        host = host.rstrip(".").lower()
-        try:
-            host = host.encode("idna").decode("ascii")
-        except UnicodeError:
-            raise ValueError from None
-        port = parsed.port
+        return normalize_origin(value, require_root=require_root)
     except (AttributeError, TypeError, ValueError):
         raise BrowserPolicyError("invalid_url") from None
-    return parsed.scheme.lower(), host, port or (443 if parsed.scheme == "https" else 80)
 
 
 def _resolved_addresses(host: str, port: int, resolver=None) -> tuple[ipaddress._BaseAddress, ...]:
@@ -81,7 +67,7 @@ def validate_url(value: object, *, network_enabled: bool = False, allowed_origin
         password = parsed.password
     except ValueError:
         raise BrowserPolicyError("invalid_url") from None
-    if parsed.scheme not in {"http", "https"} or not hostname or username or password:
+    if parsed.scheme.lower() not in {"http", "https"} or not hostname or username or password:
         raise BrowserPolicyError("invalid_url")
     try:
         scheme, host, port = _normalized_origin(value)
@@ -96,10 +82,13 @@ def validate_url(value: object, *, network_enabled: bool = False, allowed_origin
         return value
     if not network_enabled:
         raise BrowserPolicyError("network_disabled")
-    configured = {
+    configured_origins = [
         _normalized_origin(origin, require_root=True)
         for origin in (allowed_origins or ())
-    }
+    ]
+    if len(configured_origins) != len(set(configured_origins)):
+        raise BrowserPolicyError("invalid_url")
+    configured = set(configured_origins)
     if (scheme, host, port) not in configured:
         raise BrowserPolicyError("origin_forbidden")
     if address is not None:
