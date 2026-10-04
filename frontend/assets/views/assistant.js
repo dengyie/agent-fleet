@@ -20,8 +20,8 @@ function token() { if (typeof crypto !== 'undefined' && crypto.randomUUID) retur
 
 export function mountAssistant(target, options) {
   options = options || {}; clear(target);
-  // The shell supplies its verified identity; legacy operators have no account.
-  var canAdminister = !options.account || options.account.role === 'admin';
+  // Ordinary content mounts immediately; privileged controls await the verified role.
+  var canAdminister = !options.accountReady && (!options.account || options.account.role === 'admin');
   var root = el('div', 'assistant-view');
   var heading = el('div', 'assistant-heading'); var title = el('div'); title.appendChild(el('h1', null, '主助手')); title.appendChild(el('p', 'meta', '持久运行工作区')); heading.appendChild(title); var status = el('span', 'assistant-run-status', '准备中'); heading.appendChild(status); root.appendChild(heading);
   var controls = el('div', 'assistant-controls'); var model = document.createElement('select'); var workspace = document.createElement('select'); model.setAttribute('aria-label', '模型'); workspace.setAttribute('aria-label', '工作区'); controls.appendChild(el('label', null, '模型')); controls.appendChild(model); controls.appendChild(el('label', null, '工作区')); controls.appendChild(workspace); root.appendChild(controls);
@@ -53,16 +53,18 @@ export function mountAssistant(target, options) {
   input.setAttribute('aria-label', '给助手的任务'); send.setAttribute('aria-label', '发送任务');
   chat.appendChild(composer); chat.appendChild(el('p', 'composer-hint', 'Enter 发送 · Shift + Enter 换行 · 关闭页面后任务继续运行'));
   var inspector = el('aside', 'assistant-inspector'); inspector.setAttribute('aria-label', '运行与产物');
-  function disclosure(section, label, open) { var detail = el('details', 'assistant-disclosure'); detail.open = !!open; detail.appendChild(el('summary', null, label)); detail.appendChild(section); inspector.appendChild(detail); }
+  function disclosure(section, label, open) { var detail = el('details', 'assistant-disclosure'); detail.open = !!open; detail.appendChild(el('summary', null, label)); detail.appendChild(section); inspector.appendChild(detail); return detail; }
   disclosure(artifactSection, '工作区产物', true);
-  if (canAdminister) disclosure(windowSection, '执行窗口', true);
-  var eventSection = el('section'); eventSection.appendChild(eventHost); disclosure(eventSection, '运行记录', true);
-  if (canAdminister) disclosure(memorySection, '记忆上下文', false);
-  disclosure(historySection, '最近对话', false);
-  if (canAdminister) {
+  var eventSection = el('section'); eventSection.appendChild(eventHost);
+  var eventDisclosure = disclosure(eventSection, '运行记录', true);
+  var historyDisclosure = disclosure(historySection, '最近对话', false);
+  function mountAdminPanels() {
+    inspector.insertBefore(disclosure(windowSection, '执行窗口', true), eventDisclosure);
+    inspector.insertBefore(disclosure(memorySection, '记忆上下文', false), historyDisclosure);
     disclosure(legacySection, '关联任务', false);
     inspector.appendChild(unknownSection);
   }
+  if (canAdminister) mountAdminPanels();
   clear(root); root.appendChild(heading); root.appendChild(controls); root.appendChild(chat); root.appendChild(inspector); target.appendChild(root);
   var conversationId = options.conversationId || null; var conversationWorkspaceId = null; var activeRunId = null; var latestRunId = null; var cursor = 0; var polling = false; var windowEventCursor = 0; var windowPolling = false; var windowState = { loading: false, error: null, window: null, mode: 'disconnected', events: [], holderId: token(), leaseToken: null, leaseExpiresAt: 0 };
   var disposed = false; var timers = new Set();
@@ -456,6 +458,16 @@ export function mountAssistant(target, options) {
       initializationHost.appendChild(action);
     }
   }
+  if (options.accountReady) options.accountReady.then(function (account) {
+    if (disposed || (account && account.role !== 'admin')) return;
+    canAdminister = true;
+    mountAdminPanels();
+    if (catalogReady) {
+      refreshUnknownCommands();
+      refreshMemoryItems('');
+      if (latestRunId) connectExecutionWindow(latestRunId, false);
+    }
+  });
   initialize();
   return function teardown() { disposed = true; timers.forEach(clearTimeout); timers.clear(); };
 }

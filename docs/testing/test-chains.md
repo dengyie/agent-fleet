@@ -16,6 +16,14 @@
 
 以上文件均位于 `tests/`。同一测试为多个 journey 提供证据时只执行一次；selector 数、参数实例数和 pytest 用例总数不是同一指标。
 
+### 页面后台鉴权
+
+`test_account_browser.py::test_account_assistant_permissions_and_core_flows` 对普通用户和管理员分别阻塞 `/api/operator/session`，同时让真实账号 Cookie 下的业务 API 正常返回：助手必须先显示就绪，允许输入草稿；释放校验后文档标识与草稿不变。focus、一分钟定时器与 pagehide/pageshow 恢复钩子也逐一阻塞验证，页面必须持续可见。恢复钩子通过浏览器事件驱动，不能据此断言所有浏览器都会启用 BFCache。
+
+校验返回 503 时保留页面和草稿并显示行内重试，恢复后提示消失。身份尚未返回时点击退出，也必须撤销真实服务器 Cookie。普通用户整个助手链路不发管理员 API 请求；管理员确认角色后恢复记忆、执行窗口等功能。
+
+`test_frontend_browser.py::test_assistant_auth_in_real_browser` 验证匿名业务请求不能成功、SSE 不提前启动、会话接口和非 JSON 业务接口的 401 均退回登录并保留安全返回路径，403/503 不误退出；登录服务加载失败仍可重试。`test_account_switch_clears_previous_identity` 继续验证 focus/恢复/定时检查发现账号或角色变化时清除旧视图并重载。
+
 ### 只读权限的四道证据
 
 1. **HTTP 入口和身份。** `test_acceptance_route_enforces_account_owner_origin_and_policy` 通过真实账号 HTTP 验证匿名、伪造 Origin、其他 owner、已撤销 Cookie 被拒绝，拒绝后数据库没有新消息或 Run。

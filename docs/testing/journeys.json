@@ -6,11 +6,13 @@
       "id": "AUTH-01",
       "title": "登录、页面守卫与退出",
       "layer": "browser",
-      "acceptance": "匿名不能进入功能页；账密登录后可进入；退出和返回不能恢复失效会话",
+      "acceptance": "页面先显示、后台校验不清空草稿；匿名 API 拒绝并退回登录；退出和返回不能恢复失效会话",
       "boundary": "disposable Hub; external services simulated",
       "tests": [
         "tests/test_account_browser.py::test_account_browser",
-        "tests/test_account_browser.py::test_account_switch_clears_previous_identity"
+        "tests/test_account_browser.py::test_account_switch_clears_previous_identity",
+        "tests/test_account_browser.py::test_account_assistant_permissions_and_core_flows",
+        "tests/test_frontend_browser.py::test_assistant_auth_in_real_browser"
       ]
     },
     {

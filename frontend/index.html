@@ -14,7 +14,7 @@
 <script type="module" src="./assets/shell/theme.js"></script>
 </head>
 <body>
-<section id="access-state" class="access-state" role="status"><p>正在验证登录状态…</p><button type="button" hidden>重新验证</button></section>
+<section id="access-state" class="access-state" role="status" hidden><p>正在加载登录服务…</p><button type="button" hidden>重新验证</button></section>
 <main id="login-view" class="login-page" hidden>
   <section class="login-card" aria-labelledby="login-title">
     <div class="login-brand"><span class="brand-symbol" data-login-icon="layers"></span><span>agent fleet</span></div>
@@ -37,9 +37,9 @@
     <p class="nav-group-label">工作空间</p>
     <nav class="console-nav">
       <a href="/account" data-nav="account" hidden><span data-icon="lock"></span>账号设置</a>
-      <a href="/" data-nav="fleet"><span data-icon="monitor"></span>总览</a>
+      <a href="/" data-nav="fleet" hidden><span data-icon="monitor"></span>总览</a>
       <a href="/assistant" data-nav="assistant"><span data-icon="sparkles"></span>主助手</a>
-      <a href="/monitoring" data-nav="monitoring"><span data-icon="globe"></span>服务监控</a>
+      <a href="/monitoring" data-nav="monitoring" hidden><span data-icon="globe"></span>服务监控</a>
     </nav>
     <div class="nav-group-heading"><p class="nav-group-label">Hub 历史对话</p></div>
     <nav class="console-nodes console-conversations" id="sidebar-conversations" aria-label="Hub 历史对话"><p class="sidebar-empty">正在获取对话…</p></nav>
