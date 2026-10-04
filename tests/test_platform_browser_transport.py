@@ -72,6 +72,69 @@ def _resolver_for(mapping, calls):
     return resolve
 
 
+class _AdvanceClock:
+    def __init__(self):
+        self.value = 0.0
+
+    def __call__(self):
+        return self.value
+
+
+class _RawSocket:
+    """Fake stream socket serving raw response lines through makefile()."""
+
+    def __init__(self, lines, *, clock=None, events=None):
+        self.lines = list(lines)
+        self.read_calls = []
+        self.clock = clock
+        self.events = events if events is not None else []
+
+    def connect(self, sockaddr):
+        self.events.append(("connect", sockaddr))
+
+    def send(self, data):
+        self.events.append(("send", len(data)))
+        return len(data)
+
+    def sendall(self, data):
+        self.send(data)
+
+    def settimeout(self, value):
+        self.events.append(("timeout", value))
+
+    def makefile(self, _mode, **_kwargs):
+        return self
+
+    def readline(self, size=-1):
+        line = self.lines.pop(0) if self.lines else b""
+        if 0 <= size < len(line):
+            line = line[:size]
+        self.read_calls.append(size)
+        if self.clock is not None:
+            self.clock.value += 7
+        return line
+
+    def read(self, _size=-1):
+        return b""
+
+    def flush(self):
+        return None
+
+    def close(self):
+        self.events.append(("close",))
+
+
+def _literal_transport(socket, *, clock=None, origins=("http://127.0.0.1:8080",), **kwargs):
+    def unreachable_resolver(_host, _port, *, type, timeout):
+        raise AssertionError("loopback literal must not resolve")
+
+    return PinnedBrowserTransport._for_test(
+        origins, resolver=unreachable_resolver, socket_factory=lambda *_: socket,
+        fixture_loopback=True, clock=clock if clock is not None else _AdvanceClock(),
+        **kwargs,
+    )
+
+
 @pytest.fixture
 def transport_factory():
     def make(responses, *, origins=("https://one.example",), resolver=None, **kwargs):
@@ -180,6 +243,44 @@ def test_pinned_connector_all_failures_do_not_resolve_or_expose_detail():
     assert str(caught.value) == "private connect detail"
 
 
+def test_connect_deadline_blocks_later_validated_addresses():
+    events = []
+    clock = _AdvanceClock()
+    addresses = tuple(
+        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (host, 443))
+        for host in ("198.51.100.10", "198.51.100.11")
+    )
+
+    class Socket:
+        def __init__(self, _family, _kind, _proto):
+            self.address = None
+
+        def settimeout(self, value):
+            events.append(("timeout", value))
+
+        def connect(self, sockaddr):
+            self.address = sockaddr
+            events.append(("connect", sockaddr))
+            clock.value += 20
+            raise OSError("first address unavailable")
+
+        def close(self):
+            events.append(("close", self.address))
+
+    connection = _PinnedHTTPConnection(
+        "one.example", 443, addresses, timeout=20,
+        socket_factory=lambda *args: Socket(*args),
+        deadline=20.0, clock=clock,
+    )
+
+    with pytest.raises(BrowserTransportError, match="timeout"):
+        connection.connect()
+
+    assert [event for event in events if event[0] == "connect"] == [
+        ("connect", ("198.51.100.10", 443)),
+    ]
+
+
 @pytest.mark.parametrize(
     ("failure", "code"),
     [(socket.timeout(), "timeout"), (OSError("tls failed"), "tls_failed")],
@@ -225,6 +326,35 @@ def test_https_uses_original_hostname_for_tls_sni():
     assert ("connect", (PUBLIC, 443)) in events
     assert ("sni", "original.example") in events
     connection.close()
+
+
+def test_tls_handshake_consumes_shared_absolute_deadline():
+    events = []
+    clock = _AdvanceClock()
+
+    class _TLSContext:
+        verify_mode = ssl.CERT_REQUIRED
+        check_hostname = True
+
+        def wrap_socket(self, sock, *, server_hostname):
+            events.append(("sni", server_hostname))
+            clock.value += 21
+            return sock
+
+    address = (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+               "", (PUBLIC, 443))
+    connection = _PinnedHTTPSConnection(
+        "one.example", 443, (address,), timeout=20,
+        socket_factory=lambda *args: _Socket(*args, events),
+        tls_context=_TLSContext(), deadline=20.0, clock=clock,
+    )
+    connection.connect()
+
+    with pytest.raises(BrowserTransportError, match="timeout") as caught:
+        connection.send(b"GET / HTTP/1.1\r\n\r\n")
+
+    assert caught.value.code == "timeout"
+    assert ("sni", "one.example") in events
 
 
 def test_transport_resolves_once_and_connects_to_validated_address(transport_factory):
@@ -604,6 +734,31 @@ def test_credentials_and_routing_headers_are_rejected(transport_factory, headers
         transport.request("https://one.example/", headers=headers)
 
 
+@pytest.mark.parametrize("headers", [
+    [("Accept", "a"), ("accept", "b")],
+    [("User-Agent", "first"), ("User-Agent", "second")],
+    [{"Accept", "a"}],
+])
+def test_duplicate_request_header_names_are_rejected(transport_factory, headers):
+    transport = transport_factory([])
+
+    with pytest.raises(BrowserTransportError, match="protocol_forbidden"):
+        transport.request("https://one.example/", headers=headers)
+
+    assert not transport.test_requests
+
+
+def test_non_latin1_request_header_values_are_rejected(transport_factory):
+    transport = transport_factory([])
+
+    with pytest.raises(BrowserTransportError, match="protocol_forbidden"):
+        transport.request(
+            "https://one.example/", headers={"User-Agent": "en–dash"},
+        )
+
+    assert not transport.test_requests
+
+
 def test_non_read_method_is_rejected(transport_factory):
     transport = transport_factory([])
     with pytest.raises(BrowserTransportError, match="method_forbidden"):
@@ -694,6 +849,17 @@ def test_response_sensitive_headers_are_not_returned(transport_factory):
     ])])
     _, headers, _ = transport.request("https://one.example/")
     assert headers == {"Content-Type": "text/plain"}
+
+
+def test_response_duplicate_headers_keep_deterministic_shape(transport_factory):
+    transport = transport_factory([_Response(200, [
+        ("X-Tag", "first"), ("x-tag", "second"), ("Set-Cookie", "a=1"),
+        ("set-cookie", "b=2"), ("X-Tag", "third"),
+    ])])
+
+    _, headers, _ = transport.request("https://one.example/")
+
+    assert headers == {"X-Tag": "third", "x-tag": "second"}
 
 
 def test_public_constructor_fails_closed_without_bounded_resolver():
@@ -830,6 +996,67 @@ def test_deadline_is_shared_with_dns_and_response_body(transport_factory):
     with pytest.raises(BrowserTransportError, match="timeout"):
         body_transport.request("https://one.example/")
     assert body_transport.test_requests
+
+
+def test_redirect_hop_respects_absolute_deadline_before_next_resolution(transport_factory):
+    clock = _AdvanceClock()
+    calls = []
+    redirect = _Response(302, [("Location", "/next")])
+    original_read = redirect.read
+
+    def slow_read(limit=-1):
+        chunk = original_read(limit)
+        clock.value += 21
+        return chunk
+
+    redirect.read = slow_read
+    transport = transport_factory(
+        [redirect, _Response(200, body=b"unreachable")],
+        clock=clock, resolver=_resolver_for({"one.example": PUBLIC}, calls),
+    )
+
+    with pytest.raises(BrowserTransportError, match="timeout") as caught:
+        transport.request("https://one.example/start")
+
+    assert caught.value.code == "timeout"
+    assert len(transport.test_requests) == 1
+    assert len(calls) == 1
+
+
+def test_header_read_shares_absolute_deadline_in_real_parser():
+    clock = _AdvanceClock()
+    lines = [b"HTTP/1.1 200 OK\r\n"] + [b"X-A: 1\r\n"] * 4 + [b"\r\n"]
+    sock = _RawSocket(lines, clock=clock)
+    transport = _literal_transport(sock, clock=clock)
+
+    with pytest.raises(BrowserTransportError, match="timeout") as caught:
+        transport.request("http://127.0.0.1:8080/")
+
+    assert caught.value.code == "timeout"
+    assert len(sock.read_calls) == 3
+
+
+def test_bounded_parser_header_budget_exact_boundary():
+    lines = [b"HTTP/1.1 200 OK\r\n", b"X-A: b\r\n", b"\r\n"]
+
+    exact = _literal_transport(_RawSocket(lines), max_headers_bytes=27)
+    assert exact.request("http://127.0.0.1:8080/") == (200, {"X-A": "b"}, b"")
+
+    tight = _literal_transport(_RawSocket(lines), max_headers_bytes=26)
+    with pytest.raises(BrowserTransportError, match="response_too_large"):
+        tight.request("http://127.0.0.1:8080/")
+
+
+def test_bounded_parser_header_budget_clamps_single_line_reads():
+    long_header = b"X-Long: " + b"a" * 20 + b"\r\n"
+    lines = [b"HTTP/1.1 200 OK\r\n", long_header, b"\r\n"]
+    sock = _RawSocket(lines)
+    transport = _literal_transport(sock, max_headers_bytes=27)
+
+    with pytest.raises(BrowserTransportError, match="response_too_large"):
+        transport.request("http://127.0.0.1:8080/")
+
+    assert sock.read_calls == [28, 11]
 
 
 def test_transport_errors_never_include_url_location_or_response_body(transport_factory):

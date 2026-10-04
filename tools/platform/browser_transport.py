@@ -447,20 +447,33 @@ class PinnedBrowserTransport:
     def _request_headers(headers):
         if headers is None:
             return {}
-        try:
-            values = dict(headers)
-        except (TypeError, ValueError):
-            raise BrowserTransportError("protocol_forbidden") from None
+        if isinstance(headers, dict):
+            items = list(headers.items())
+        else:
+            try:
+                items = list(headers)
+            except (TypeError, ValueError):
+                raise BrowserTransportError("protocol_forbidden") from None
         normalized = {}
-        for name, value in values.items():
+        lowered_names = set()
+        for pair in items:
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                raise BrowserTransportError("protocol_forbidden")
+            name, value = pair
             if not isinstance(name, str) or not isinstance(value, str):
                 raise BrowserTransportError("protocol_forbidden")
             lowered = name.lower()
-            if (not _HEADER_NAME.fullmatch(name) or lowered in _FORBIDDEN_HEADERS
+            if (lowered in lowered_names
+                    or not _HEADER_NAME.fullmatch(name) or lowered in _FORBIDDEN_HEADERS
                     or lowered not in _ALLOWED_REQUEST_HEADERS
                     or any((ord(char) < 0x20 and char != "\t") or ord(char) == 0x7f
                            for char in value)):
                 raise BrowserTransportError("protocol_forbidden")
+            try:
+                value.encode("latin-1")
+            except UnicodeEncodeError:
+                raise BrowserTransportError("protocol_forbidden") from None
+            lowered_names.add(lowered)
             normalized[name] = value
         return normalized
 
