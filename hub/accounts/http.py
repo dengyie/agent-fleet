@@ -6,6 +6,7 @@ from flask import Blueprint, current_app, g, jsonify, request
 from hub.accounts.store import AccountStore, email_address, login_identifier, fail
 from hub.accounts.client_address import client_address, proxy_networks
 from hub.accounts.mail import OneMailSender, SmtpSender
+from hub.accounts.captcha import verify_hcaptcha, verify_turnstile
 from hub.http.errors import ApplicationError, error_response
 
 bp = Blueprint('accounts', __name__, url_prefix='/api/accounts')
@@ -71,9 +72,16 @@ def init_accounts(app, config):
                             password=os.environ.get('AGENT_FLEET_SMTP_PASSWORD', ''),
                             sender=os.environ.get('AGENT_FLEET_SMTP_FROM', ''),
                             starttls=os.environ.get('AGENT_FLEET_SMTP_STARTTLS') == '1')
+    hcaptcha_sitekey = settings.get('hcaptcha_sitekey', os.environ.get('AGENT_FLEET_HCAPTCHA_SITEKEY', ''))
+    hcaptcha_secret = settings.get('hcaptcha_secret', os.environ.get('AGENT_FLEET_HCAPTCHA_SECRET', ''))
+    turnstile_sitekey = settings.get('turnstile_sitekey', os.environ.get('AGENT_FLEET_TURNSTILE_SITEKEY', ''))
+    turnstile_secret = settings.get('turnstile_secret', os.environ.get('AGENT_FLEET_TURNSTILE_SECRET', ''))
+
     app.config.update(ACCOUNTS_ENABLED=True, ACCOUNT_ORIGIN=origin,
                       ACCOUNT_REGISTRATION=registration, ACCOUNT_SENDER=sender,
-                      ACCOUNT_TRUSTED_PROXIES=trusted_proxies, ACCOUNT_COOKIE_SECURE=parsed.scheme == 'https')
+                      ACCOUNT_TRUSTED_PROXIES=trusted_proxies, ACCOUNT_COOKIE_SECURE=parsed.scheme == 'https',
+                      ACCOUNT_HCAPTCHA_SITEKEY=hcaptcha_sitekey, ACCOUNT_HCAPTCHA_SECRET=hcaptcha_secret,
+                      ACCOUNT_TURNSTILE_SITEKEY=turnstile_sitekey, ACCOUNT_TURNSTILE_SECRET=turnstile_secret)
     app.extensions['accounts'] = AccountStore(config.root / 'var' / 'accounts' / 'accounts.db')
     app.register_blueprint(bp)
 
@@ -153,7 +161,9 @@ def account_error(error):
 @bp.get('/options')
 def options():
     return jsonify(enabled=True, registration=current_app.config['ACCOUNT_REGISTRATION'],
-                   mail_available=current_app.config['ACCOUNT_SENDER'] is not None)
+                   mail_available=current_app.config['ACCOUNT_SENDER'] is not None,
+                   hcaptcha_sitekey=current_app.config.get('ACCOUNT_HCAPTCHA_SITEKEY', ''),
+                   turnstile_sitekey=current_app.config.get('ACCOUNT_TURNSTILE_SITEKEY', ''))
 
 
 @bp.post('/code')
@@ -162,8 +172,38 @@ def code():
     sender = current_app.config['ACCOUNT_SENDER']
     if sender is None:
         fail('mail_unavailable', '邮件服务尚未配置，请联系管理员', 503)
+
+    email = data.get('email')
+    address = client_address(request, current_app.config['ACCOUNT_TRUSTED_PROXIES'])
+
+    # Cloudflare Turnstile token validation if configured and supplied
+    turnstile_secret = current_app.config.get('ACCOUNT_TURNSTILE_SECRET')
+    turnstile_response = data.get('turnstile_response') or data.get('cf-turnstile-response')
+    if turnstile_secret and turnstile_response:
+        verifier = current_app.config.get('TURNSTILE_VERIFIER', verify_turnstile)
+        if not verifier(turnstile_response, turnstile_secret, remote_ip=address):
+            fail('invalid_turnstile', '人机验证失败，请刷新重试', 400)
+
+    # Progressive defense: require hCaptcha after 3 or more attempts within 15 minutes window
+    account_store = store()
+    window = 900
+    # Atomically increment and get previous attempts for IP and email
+    ip_attempts = account_store.check_and_increment_limit('mail-attempt:ip:' + address, window)
+    email_attempts = account_store.check_and_increment_limit('mail-attempt:email:' + str(email), window) if email else 0
+    consecutive_attempts = max(ip_attempts, email_attempts)
+
+    hcaptcha_secret = current_app.config.get('ACCOUNT_HCAPTCHA_SECRET')
+    if consecutive_attempts >= 3 and hcaptcha_secret:
+        hcaptcha_response = data.get('hcaptcha_response') or data.get('h-captcha-response')
+        if not hcaptcha_response:
+            fail('captcha_required', '发送过于频繁，请完成人机验证后再试', 400)
+        verifier = current_app.config.get('HCAPTCHA_VERIFIER', verify_hcaptcha)
+        if not verifier(hcaptcha_response, hcaptcha_secret, remote_ip=address):
+            fail('invalid_captcha', '人机验证未通过，请重试', 400)
+
     try:
-        store().issue_code(data.get('email'), data.get('purpose'), current_app.config['ACCOUNT_REGISTRATION'], sender)
+        store().issue_code(data.get('email'), data.get('purpose'), current_app.config['ACCOUNT_REGISTRATION'], sender,
+                           invite_code=data.get('invite_code'))
     except ApplicationError as exc:
         # Delivery quotas and provider outcomes must not reveal email eligibility.
         # The independent request-IP limit is enforced before this handler.
@@ -176,7 +216,8 @@ def code():
 def register():
     data = body()
     store().complete_code(data.get('email'), 'register', data.get('code'), data.get('password'),
-                          registration=current_app.config['ACCOUNT_REGISTRATION'], name=data.get('name', ''))
+                          registration=current_app.config['ACCOUNT_REGISTRATION'], name=data.get('name', ''),
+                          invite_code=data.get('invite_code'))
     return jsonify(ok=True)
 
 
@@ -241,11 +282,17 @@ def users():
     return jsonify(users=store().users(request.args.get('after', '')[:64]))
 
 
+@bp.get('/invitations')
+def list_invitations():
+    admin()
+    return jsonify(invitations=store().invitations())
+
+
 @bp.post('/invitations')
 def invite():
     admin()
-    store().invite(body().get('email'))
-    return jsonify(ok=True, detail='邀请资格已创建，7 天内可通过注册页验证邮箱。')
+    code = store().invite(body().get('email'))
+    return jsonify(ok=True, code=code, detail='邀请码已创建：' + code + '（7 天内有效，仅限单次注册）。')
 
 
 @bp.post('/users/<user_id>')

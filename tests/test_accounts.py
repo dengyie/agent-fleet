@@ -57,11 +57,28 @@ def test_invite_required_and_consumed(accounts):
     sent = []
     repo.issue_code('a@example.test', 'register', 'invite', lambda *a: sent.append(a))
     assert not sent
-    repo.invite('a@example.test')
+    # 1. Test invite by random code
+    code = repo.invite()
+    assert code.startswith('inv_')
+    invites = repo.invitations()
+    assert len(invites) == 1 and invites[0]['code'] == code
+    repo.issue_code('a@example.test', 'register', 'invite', lambda *a: sent.append(a), invite_code=code)
+    assert len(sent) == 1
+    repo.complete_code('a@example.test', 'register', sent[0][2], PASSWORD, registration='invite', invite_code=code)
+    # Once consumed, invitation is claimed
+    assert repo.invitations() == []
+    # Re-using the same code fails
     now[0] += 61
-    register(repo, 'a@example.test', 'invite')
-    with repo.connect() as db:
-        assert not db.execute('SELECT * FROM invitations').fetchall()
+    sent2 = []
+    repo.issue_code('other@example.test', 'register', 'invite', lambda *a: sent2.append(a), invite_code=code)
+    assert not sent2
+    # 2. Test backward-compatibility invite by email
+    repo.invite('b@example.test')
+    sent3 = []
+    repo.issue_code('b@example.test', 'register', 'invite', lambda *a: sent3.append(a))
+    assert len(sent3) == 1
+    repo.complete_code('b@example.test', 'register', sent3[0][2], PASSWORD, registration='invite')
+    assert repo.invitations() == []
 
 
 def test_reset_and_password_change_revoke_all_sessions(accounts):

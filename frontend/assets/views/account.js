@@ -59,9 +59,28 @@ export function mountAccount(root) {
       }
       await load();
     }
-    form(root, '邀请用户', [['email', '受邀邮箱', 'email']], '创建邀请资格', async values => {
-      const result = await accountRequest('invitations', values); status.textContent = result.detail;
+    const invitePanel = node('section'); invitePanel.className = 'panel account-panel';
+    invitePanel.append(node('h2', '邀请注册'));
+    const inviteDesc = node('p', '生成一次性邀请码，用户凭邀请码及邮箱验证码完成注册。7 天内有效。');
+    invitePanel.append(inviteDesc);
+    const codeDisplay = node('div'); codeDisplay.className = 'invite-code-card'; codeDisplay.style.display = 'none';
+    const codeVal = node('strong');
+    const copyBtn = node('button', '复制邀请码'); copyBtn.type = 'button';
+    copyBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(codeVal.textContent);
+      status.textContent = '邀请码已复制到剪贴板';
     });
+    codeDisplay.append(codeVal, copyBtn);
+    invitePanel.append(codeDisplay);
+    button(invitePanel, '生成新邀请码', async () => {
+      const result = await accountRequest('invitations', {});
+      if (result.code) {
+        codeVal.textContent = result.code;
+        codeDisplay.style.display = 'flex';
+        status.textContent = result.detail;
+      }
+    });
+    root.append(invitePanel);
     const section = node('section'); section.className = 'panel account-panel'; section.append(node('h2', '账号管理')); root.append(section);
     let after = '';
     async function users() {
