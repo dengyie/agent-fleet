@@ -109,6 +109,77 @@ def test_pinned_connector_uses_only_validated_sockaddr():
     connection.close()
 
 
+def test_pinned_connector_falls_back_only_within_one_validated_resolution():
+    events = []
+    first = (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+             "", ("198.51.100.10", 443))
+    second = (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+              "", ("198.51.100.11", 443))
+
+    class Socket:
+        def __init__(self, _family, _kind, _proto):
+            self.address = None
+
+        def settimeout(self, value):
+            events.append(("timeout", value))
+
+        def connect(self, sockaddr):
+            self.address = sockaddr
+            events.append(("connect", sockaddr))
+            if sockaddr == first[4]:
+                raise OSError("first address unavailable")
+
+        def close(self):
+            events.append(("close", self.address))
+
+    connection = _PinnedHTTPConnection(
+        "one.example", 443, (first, second), timeout=5,
+        socket_factory=lambda *args: Socket(*args),
+    )
+
+    connection.connect()
+
+    assert [(kind, value) for kind, value in events if kind == "connect"] == [
+        ("connect", first[4]), ("connect", second[4]),
+    ]
+    assert ("close", first[4]) in events
+    connection.close()
+
+
+def test_pinned_connector_all_failures_do_not_resolve_or_expose_detail():
+    events = []
+    addresses = tuple(
+        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (host, 443))
+        for host in ("198.51.100.10", "198.51.100.11")
+    )
+
+    class Socket:
+        def __init__(self, _family, _kind, _proto):
+            self.address = None
+
+        def settimeout(self, value):
+            return None
+
+        def connect(self, sockaddr):
+            self.address = sockaddr
+            events.append(sockaddr)
+            raise OSError("private connect detail")
+
+        def close(self):
+            return None
+
+    connection = _PinnedHTTPConnection(
+        "one.example", 443, addresses, timeout=5,
+        socket_factory=lambda *args: Socket(*args),
+    )
+
+    with pytest.raises(OSError) as caught:
+        connection.connect()
+
+    assert events == [address[4] for address in addresses]
+    assert str(caught.value) == "private connect detail"
+
+
 @pytest.mark.parametrize(
     ("failure", "code"),
     [(socket.timeout(), "timeout"), (OSError("tls failed"), "tls_failed")],
@@ -170,6 +241,54 @@ def test_transport_resolves_once_and_connects_to_validated_address(transport_fac
     assert calls[0][:2] == ("one.example", 443)
     assert 0 < calls[0][2] <= 20
     assert transport.test_requests[0][5][0][4] == (PUBLIC, 443)
+
+
+@pytest.mark.parametrize("address", [
+    "10.0.0.1",
+    "172.16.0.1",
+    "192.168.1.1",
+    "169.254.1.1",
+    "224.0.0.1",
+    "0.0.0.0",
+    "240.0.0.1",
+    "::",
+    "fd00::1",
+    "fe80::1",
+    "ff02::1",
+    "::ffff:192.168.1.2",
+])
+def test_forbidden_address_classes_are_rejected_before_connection(transport_factory, address):
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+
+    def resolve(_host, port, *, type, timeout):
+        sockaddr = (address, port, 0, 0) if family == socket.AF_INET6 else (address, port)
+        return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr)]
+
+    transport = transport_factory([_Response(200)], resolver=resolve)
+
+    with pytest.raises(BrowserTransportError, match="origin_forbidden"):
+        transport.request("https://one.example/")
+
+    assert not transport.test_requests
+
+
+def test_mixed_public_and_private_answers_reject_the_entire_resolution(transport_factory):
+    calls = []
+
+    def resolve(_host, port, *, type, timeout):
+        calls.append(True)
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (PUBLIC, port)),
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("10.0.0.8", port)),
+        ]
+
+    transport = transport_factory([_Response(200)], resolver=resolve)
+
+    with pytest.raises(BrowserTransportError, match="origin_forbidden"):
+        transport.request("https://one.example/")
+
+    assert calls == [True]
+    assert not transport.test_requests
 
 
 def test_mixed_dns_answers_are_denied_before_connection(transport_factory):
@@ -239,6 +358,28 @@ def test_fixture_https_allows_loopback_answer_without_mixing(transport_factory):
     assert transport.test_requests[0][5][0][4] == ("127.0.0.1", 443)
 
 
+def test_each_request_refreshes_resolution_without_re_resolving_fallback(transport_factory):
+    calls = []
+    addresses = ["93.184.216.34", "93.184.216.35"]
+
+    def resolve(_host, port, *, type, timeout):
+        index = len(calls)
+        calls.append(index)
+        address = addresses[index]
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+                 "", (address, port))]
+
+    transport = transport_factory(
+        [_Response(200, body=b"first"), _Response(200, body=b"second")],
+        resolver=resolve,
+    )
+
+    assert transport.request("https://one.example/")[2] == b"first"
+    assert transport.request("https://one.example/")[2] == b"second"
+    assert calls == [0, 1]
+    assert [request[5][0][4][0] for request in transport.test_requests] == addresses
+
+
 def test_dns_rows_are_deduplicated_in_linear_result_size(transport_factory):
     calls = []
 
@@ -306,6 +447,106 @@ def test_redirect_target_policy_fails_closed(transport_factory, location):
     with pytest.raises(BrowserTransportError):
         transport.request("https://one.example/start")
     assert len(transport.test_requests) == 1
+
+
+def test_redirect_limit_allows_ten_hops_and_rejects_the_eleventh(transport_factory):
+    ten_hop_responses = [
+        _Response(302, [("Location", f"/hop/{index + 1}")])
+        for index in range(10)
+    ] + [_Response(200, body=b"done")]
+    allowed = transport_factory(ten_hop_responses)
+
+    assert allowed.request("https://one.example/start")[2] == b"done"
+    assert len(allowed.test_requests) == 11
+
+    eleven_hop_responses = [
+        _Response(302, [("Location", f"/hop/{index + 1}")])
+        for index in range(11)
+    ] + [_Response(200, body=b"must-not-be-read")]
+    denied = transport_factory(eleven_hop_responses)
+
+    with pytest.raises(BrowserTransportError, match="redirect_denied"):
+        denied.request("https://one.example/start")
+    assert len(denied.test_requests) == 11
+    assert len(eleven_hop_responses) == 1
+
+
+@pytest.mark.parametrize("location", [
+    (),
+    (("Location", "/one"), ("location", "/two")),
+])
+def test_redirect_requires_exactly_one_location(transport_factory, location):
+    transport = transport_factory([_Response(302, location), _Response(200)])
+
+    with pytest.raises(BrowserTransportError, match="redirect_denied"):
+        transport.request("https://one.example/start")
+
+    assert len(transport.test_requests) == 1
+
+
+@pytest.mark.parametrize("value", [
+    "https://one.example:abc/path",
+    "https://one.example:65536/path",
+    "https:///missing-host",
+    "https://[::1/path",
+    "https://user@one.example/path",
+])
+def test_malformed_request_authority_and_port_are_invalid_url(transport_factory, value):
+    transport = transport_factory([])
+
+    with pytest.raises(BrowserTransportError, match="invalid_url"):
+        transport.request(value)
+
+    assert not transport.test_requests
+
+
+@pytest.mark.parametrize(("location", "code"), [
+    ("https://one.example:abc/next", "invalid_url"),
+    ("https://one.example:65536/next", "invalid_url"),
+    ("https:///missing-host", "invalid_url"),
+    ("https://[::1/next", "invalid_url"),
+    ("https://user@one.example/next", "invalid_url"),
+])
+def test_malformed_redirect_authority_and_port_are_rejected(transport_factory, location, code):
+    transport = transport_factory([_Response(302, [("Location", location)])])
+
+    with pytest.raises(BrowserTransportError, match=code):
+        transport.request("https://one.example/start")
+
+    assert len(transport.test_requests) == 1
+
+
+def test_same_origin_redirect_preserves_allowed_headers(transport_factory):
+    transport = transport_factory(
+        [_Response(302, [("Location", "/next")]), _Response(200)],
+    )
+
+    transport.request(
+        "https://one.example/start",
+        headers={"User-Agent": "browser-fixture", "Accept-Language": "en"},
+    )
+
+    assert transport.test_requests[0][4] == {
+        "User-Agent": "browser-fixture", "Accept-Language": "en",
+    }
+    assert transport.test_requests[1][4] == transport.test_requests[0][4]
+
+
+def test_cross_origin_redirect_strips_allowed_headers(transport_factory):
+    transport = transport_factory(
+        [_Response(302, [("Location", "https://two.example/next")]), _Response(200)],
+        origins=("https://one.example", "https://two.example"),
+    )
+
+    transport.request(
+        "https://one.example/start",
+        headers={"User-Agent": "browser-fixture", "Accept-Language": "en"},
+    )
+
+    assert transport.test_requests[0][4] == {
+        "User-Agent": "browser-fixture", "Accept-Language": "en",
+    }
+    assert transport.test_requests[1][4] == {}
 
 
 def test_cross_origin_redirect_requires_allowlist(transport_factory):

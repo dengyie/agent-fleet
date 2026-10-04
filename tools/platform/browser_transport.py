@@ -80,7 +80,16 @@ def _is_loopback(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool
 
 def _is_public(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     mapped = getattr(address, "ipv4_mapped", None)
-    return (mapped.is_global if mapped is not None else address.is_global)
+    candidate = mapped if mapped is not None else address
+    return bool(
+        candidate.is_global
+        and not candidate.is_private
+        and not candidate.is_link_local
+        and not candidate.is_loopback
+        and not candidate.is_multicast
+        and not candidate.is_unspecified
+        and not candidate.is_reserved
+    )
 
 
 def _parse_url(value: str, allowed_origins: frozenset[tuple[str, str, int]], resolver,
@@ -568,6 +577,10 @@ class PinnedBrowserTransport:
                         if any(ord(char) <= 0x20 or ord(char) == 0x7f for char in location):
                             raise BrowserTransportError("redirect_denied")
                         try:
+                            location_parts = urlsplit(location)
+                            if (location_parts.scheme.lower() in {"http", "https"}
+                                    and not location_parts.netloc):
+                                raise ValueError
                             joined = urljoin(parsed.geturl(), location)
                             next_url = urldefrag(joined).url
                             next_parsed = urlsplit(next_url)

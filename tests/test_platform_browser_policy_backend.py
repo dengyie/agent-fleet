@@ -169,6 +169,75 @@ def test_node_client_journals_browser_dispatch_failure_as_unknown(tmp_path):
     assert "driver-private-navigation-detail" not in str(transport.receipts)
 
 
+def test_node_client_redacts_dispatch_url_ip_body_and_tls_details(tmp_path):
+    markers = (
+        "https://one.example/private?token=url-marker",
+        "203.0.113.77",
+        "response-body-marker",
+        "tls-detail-marker",
+    )
+    cause = RuntimeError(" ".join(markers))
+
+    class Driver:
+        def open(self, _url):
+            return None
+
+        def navigate(self, _url):
+            raise cause
+
+    backend = LocalBrowserBackend(Driver, network_enabled=False)
+    opened = backend.execute(
+        "browser.open", {"url": "http://localhost:3000"}, run_id="run-a",
+    )
+    executor = NodeToolExecutor(
+        None, allowed_tools=BROWSER_TOOLS, browser_backend=backend,
+        browser_enabled=True,
+    )
+    command = PlatformCommand.create(
+        command_id="run-a:step:leak", target_node="node-a",
+        action="tool.browser.navigate", resource_id="workspace-a",
+        arguments={
+            "session_id": opened["session_id"],
+            "url": "http://localhost:3000/next",
+        },
+        retry_class="manual_only", expires_at=9_999_999_999, run_id="run-a",
+    ).as_dict()
+
+    class Transport:
+        def __init__(self):
+            self.receipts = []
+
+        def post_json(self, url, body, _headers):
+            if url.endswith("/nodes/poll"):
+                return 200, {"ok": True, "commands": [command]}
+            if url.endswith("/nodes/receipts"):
+                self.receipts.append(dict(body))
+                return 200, {"ok": True}
+            raise AssertionError("unexpected Node route")
+
+    journal = NodeJournal(tmp_path / "leak-journal.db")
+    journal.init()
+    transport = Transport()
+    client = NodeClient(
+        journal, executor=executor, node_id="node-a", credential="node-a:fixture",
+        hub_url="https://hub.example.test", transport=transport,
+    )
+
+    assert client.poll_once() == {"ok": True, "commands": 1, "receipts": 1}
+    journal_row = journal.get(command["command_id"])
+    wire_receipt = transport.receipts[0]
+    assert journal_row["state"] == "unknown"
+    assert wire_receipt == {
+        "command_id": command["command_id"],
+        "status": "unknown",
+        "worker_id": "node-a",
+        "result": {"reason": "executor_interrupted"},
+    }
+    for marker in markers:
+        assert marker not in str(journal_row)
+        assert marker not in str(wire_receipt)
+
+
 def test_browser_session_sync_failure_preserves_sync_cause_and_cleans_up():
     sync_error = RuntimeError("hub-private-sync-detail")
     close_calls = []
