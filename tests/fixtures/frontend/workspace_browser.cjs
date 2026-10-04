@@ -111,8 +111,16 @@ const [origin, scenario] = process.argv.slice(2);
       assert.equal(await page.locator('.inspector-toggle').evaluate(n => n === document.activeElement),true);
       await page.getByRole('button',{name:'工作面板',exact:true}).click();
       // Dispose on the same document (auth/session loss), then mount afresh.
-      await page.evaluate(() => window.dispatchEvent(new Event('fleet-auth-required')));
-      await page.waitForFunction(() => !document.querySelector('dialog:modal'));
+      // The fixture must revoke the session too: otherwise token login will
+      // auto-redirect back while the test is navigating to its next page.
+      await page.route('**/api/operator/session', r => r.fulfill({status:401,json:{ok:false,error:'unauthorized'}}));
+      assert.equal(await page.evaluate(() => {
+        window.dispatchEvent(new Event('fleet-auth-required'));
+        return !document.querySelector('dialog:modal');
+      }),true,'teardown must close the native modal before document navigation');
+      await page.waitForURL('**/login?**');
+      await page.waitForFunction(() => !document.querySelector('#login-view').hidden && !document.querySelector('#login-form [type=submit]').disabled);
+      await page.unroute('**/api/operator/session');
       await page.goto(origin + '/assistant');
       await page.getByText('就绪',{exact:true}).waitFor();
       await input.focus();
