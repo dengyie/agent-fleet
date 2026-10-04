@@ -412,6 +412,127 @@ def test_header_budget_is_aggregate_across_responses(transport_factory):
         transport.request("https://one.example/start")
 
 
+def test_seventeenth_concurrent_request_is_rejected_and_capacity_recovers():
+    import threading
+
+    entered = threading.Condition()
+    release = threading.Event()
+    active_factories = 0
+    results = []
+    errors = []
+
+    class BlockingExchange(_Exchange):
+        def request(self, method, path, headers):
+            with entered:
+                entered.notify_all()
+            if not release.wait(timeout=3):
+                raise TimeoutError("fixture release timed out")
+            super().request(method, path, headers)
+
+    def factory(_scheme, host, port, addresses, _timeout, _socket_factory, _tls_context):
+        nonlocal active_factories
+        with entered:
+            active_factories += 1
+            entered.notify_all()
+        return BlockingExchange(
+            host, port, addresses, [_Response(200, body=b"ok")], [],
+        )
+
+    transport = PinnedBrowserTransport._for_test(
+        ("https://one.example",),
+        resolver=lambda _host, port, *, type, timeout: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (PUBLIC, port))
+        ],
+        connection_factory=factory,
+        max_concurrent=16,
+    )
+
+    def run_request():
+        try:
+            results.append(transport.request("https://one.example/"))
+        except Exception as exc:
+            errors.append(exc)
+
+    workers = [threading.Thread(target=run_request) for _ in range(16)]
+    for worker in workers:
+        worker.start()
+
+    with entered:
+        assert entered.wait_for(lambda: active_factories == 16, timeout=3)
+    with pytest.raises(BrowserTransportError, match="request_limit_exceeded"):
+        transport.request("https://one.example/")
+
+    release.set()
+    for worker in workers:
+        worker.join(timeout=3)
+    assert all(not worker.is_alive() for worker in workers)
+    assert errors == []
+    assert len(results) == 16
+    assert transport.request("https://one.example/")[2] == b"ok"
+
+
+def test_deadline_is_shared_with_dns_and_response_body(transport_factory):
+    class Clock:
+        def __init__(self):
+            self.value = 0.0
+
+        def __call__(self):
+            return self.value
+
+    dns_clock = Clock()
+    dns_calls = []
+
+    def slow_resolver(host, port, *, type, timeout):
+        dns_calls.append(timeout)
+        dns_clock.value += timeout
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (PUBLIC, port))]
+
+    dns_transport = transport_factory(
+        [_Response(200)], resolver=slow_resolver, clock=dns_clock,
+    )
+    with pytest.raises(BrowserTransportError, match="timeout"):
+        dns_transport.request("https://one.example/")
+    assert dns_calls and 0 < dns_calls[0] <= 20
+    assert not dns_transport.test_requests
+
+    body_clock = Clock()
+    body_response = _Response(200, body=b"slow")
+    original_read = body_response.read
+
+    def slow_read(limit=-1):
+        chunk = original_read(limit)
+        body_clock.value += 21
+        return chunk
+
+    body_response.read = slow_read
+    body_transport = transport_factory(
+        [body_response], clock=body_clock,
+        resolver=_resolver_for({"one.example": PUBLIC}, []),
+    )
+    with pytest.raises(BrowserTransportError, match="timeout"):
+        body_transport.request("https://one.example/")
+    assert body_transport.test_requests
+
+
+def test_transport_errors_never_include_url_location_or_response_body(transport_factory):
+    secret_url = "https://one.example/private-path?token=url-marker"
+    secret_ip = "203.0.113.77"
+    secret_location = f"https://{secret_ip}/redirect-marker"
+    secret_body = b"response-body-marker"
+    transport = transport_factory([
+        _Response(302, [("Location", secret_location)], body=secret_body),
+    ])
+
+    with pytest.raises(BrowserTransportError) as caught:
+        transport.request(secret_url)
+
+    assert str(caught.value) == "origin_forbidden"
+    assert all(marker not in str(caught.value) for marker in (
+        secret_url, "url-marker", secret_location, secret_ip, "redirect-marker",
+        secret_body.decode("ascii"),
+    ))
+
+
 def test_explicit_loopback_fixture_override(transport_factory):
     transport = transport_factory(
         [_Response(200, body=b"fixture")],
@@ -419,3 +540,152 @@ def test_explicit_loopback_fixture_override(transport_factory):
     )
 
     assert transport.request("http://127.0.0.1:8080/")[2] == b"fixture"
+
+
+@pytest.fixture
+def tls_loopback_server(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    import threading
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "fixture.test")])
+    now = datetime.now(timezone.utc)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(minutes=10))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("fixture.test")]), False)
+        .sign(key, hashes.SHA256())
+    )
+    certificate_pem = certificate.public_bytes(serialization.Encoding.PEM)
+    key_pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
+    )
+    cert_path = tmp_path / "fixture-cert.pem"
+    key_path = tmp_path / "fixture-key.pem"
+    cert_path.write_bytes(certificate_pem)
+    key_path.write_bytes(key_pem)
+
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(cert_path, key_path)
+    sni_names = []
+    peer_addresses = []
+    server_context.set_servername_callback(
+        lambda _socket, server_name, _context: sni_names.append(server_name)
+    )
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(3)
+    port = listener.getsockname()[1]
+    errors = []
+
+    def serve_once():
+        try:
+            accepted, peer = listener.accept()
+            with server_context.wrap_socket(accepted, server_side=True) as connection:
+                peer_addresses.append((peer[0], connection.getsockname()[1]))
+                request = connection.recv(4096)
+                if not request.startswith(b"GET /tls HTTP/1.1\r\n"):
+                    raise AssertionError("unexpected loopback HTTP request")
+                connection.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                    b"Connection: close\r\n\r\nok"
+                )
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            listener.close()
+
+    thread = threading.Thread(target=serve_once, daemon=True)
+    thread.start()
+    try:
+        yield port, certificate_pem, sni_names, peer_addresses, errors, thread
+    finally:
+        listener.close()
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+
+
+def _loopback_tls_transport(port, tls_context):
+    def resolve(_host, effective_port, *, type, timeout):
+        assert effective_port == port
+        assert type == socket.SOCK_STREAM
+        assert 0 < timeout <= 20
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+                 "", ("127.0.0.1", port))]
+
+    return PinnedBrowserTransport._for_test(
+        (f"https://fixture.test:{port}",), resolver=resolve,
+        tls_context=tls_context, fixture_loopback=True,
+    )
+
+
+def test_real_loopback_tls_verifies_ca_hostname_sni_and_pinned_address(tls_loopback_server):
+    port, certificate_pem, sni_names, peer_addresses, server_errors, thread = (
+        tls_loopback_server
+    )
+    client_context = ssl.create_default_context(cadata=certificate_pem.decode("ascii"))
+    transport = _loopback_tls_transport(port, client_context)
+
+    status, _, body = transport.request(f"https://fixture.test:{port}/tls")
+    thread.join(timeout=3)
+
+    assert (status, body) == (200, b"ok")
+    assert sni_names == ["fixture.test"]
+    assert peer_addresses == [("127.0.0.1", port)]
+    assert server_errors == []
+
+
+def test_real_loopback_tls_rejects_untrusted_certificate_with_bounded_code(
+    tls_loopback_server,
+):
+    port, _certificate_pem, _sni_names, _peer_addresses, server_errors, thread = (
+        tls_loopback_server
+    )
+    client_context = ssl.create_default_context()
+    transport = _loopback_tls_transport(port, client_context)
+
+    with pytest.raises(BrowserTransportError, match="tls_failed") as caught:
+        transport.request(f"https://fixture.test:{port}/tls")
+    thread.join(timeout=3)
+
+    assert str(caught.value) == "tls_failed"
+    assert all("fixture" not in str(error).lower() for error in server_errors)
+
+
+def test_real_loopback_tls_rejects_hostname_mismatch_with_bounded_code(
+    tls_loopback_server,
+):
+    port, certificate_pem, _sni_names, _peer_addresses, server_errors, thread = (
+        tls_loopback_server
+    )
+    client_context = ssl.create_default_context(cadata=certificate_pem.decode("ascii"))
+    transport = PinnedBrowserTransport._for_test(
+        (f"https://wrong.test:{port}",),
+        resolver=lambda _host, effective_port, *, type, timeout: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+             "", ("127.0.0.1", effective_port))
+        ],
+        tls_context=client_context,
+        fixture_loopback=True,
+    )
+
+    with pytest.raises(BrowserTransportError, match="tls_failed") as caught:
+        transport.request(f"https://wrong.test:{port}/tls")
+    thread.join(timeout=3)
+
+    assert str(caught.value) == "tls_failed"
+    assert len(server_errors) == 1
+    assert isinstance(server_errors[0], ssl.SSLError)
