@@ -389,6 +389,56 @@ def test_cancel_is_observed_before_next_model_step(tmp_path):
     assert app.test_client().get(f"/api/platform/v1/runs/{run['run_id']}").get_json()["state"] == "cancelled"
 
 
+def test_remote_browser_tools_require_node_session_capability(tmp_path):
+    from hub.application.run_worker_service import LocalRunWorkerService
+    from tools.platform.providers.base import ModelResponse
+
+    app = _app(tmp_path)
+    repo = app.extensions["fleet"]["platform_repository"]
+    repo.upsert_node(OWNER, {"node_id": "node-no-browser", "label": "Remote"})
+    repo.upsert_model(OWNER, {"profile_id": "local", "provider": "deterministic", "model": "local"})
+    repo.upsert_workspace(OWNER, {
+        "workspace_id": "home", "root_path": str(tmp_path / "workspace"),
+    })
+    conversation = repo.create_conversation(OWNER, "conv-no-browser", title="", workspace_id="home")
+    repo.append_turn(
+        OWNER, conversation["conversation_id"], "msg-no-browser", "run-no-browser",
+        text="open browser", client_token="no-browser",
+        config_snapshot={"workspace_id": "home", "model_profile_id": "local",
+                         "execution_node_id": "node-no-browser"}, now=1,
+    )
+
+    class Provider:
+        def complete(self, messages, tools):
+            assert not any(item["name"].startswith("browser.") for item in tools)
+            return ModelResponse(kind="tool_call", tool="browser.open",
+                                 arguments={"url": "http://localhost:3000"})
+
+    class Delivery:
+        def __init__(self):
+            self.commands = []
+
+        def enqueue(self, command, *, idempotency_key=None):
+            self.commands.append(command)
+            return command.as_dict()
+
+        def wait_for_receipt(self, command_id, *, timeout_s=30.0):
+            raise AssertionError("browser command must not be enqueued")
+
+    delivery = Delivery()
+    worker = LocalRunWorkerService(
+        repo, app.extensions["fleet"]["services"]["run_events"],
+        worker_id="no-browser-worker", provider_factory=lambda profile: Provider(),
+        remote_execution_enabled=True, remote_delivery=delivery, browser_enabled=True,
+    )
+
+    result = worker.run_once(OWNER)
+
+    assert result["state"] == "failed"
+    assert repo.get_run(OWNER, "run-no-browser")["state"] == "failed"
+    assert delivery.commands == []
+
+
 def test_remote_run_uses_node_delivery_without_local_filesystem(tmp_path):
     from hub.application.run_worker_service import LocalRunWorkerService
     from tools.platform.providers.base import ModelResponse

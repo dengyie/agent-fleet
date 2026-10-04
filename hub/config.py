@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,11 @@ class FleetConfig:
     platform_provider_network_enabled: bool = False
     # Remote Run-to-Node tool delivery is a separate fail-closed rollout gate.
     platform_remote_execution_enabled: bool = False
+    # Browser control is a separate data-plane gate. Network access and origin
+    # policy are independent and remain disabled unless explicitly enabled.
+    platform_browser_enabled: bool = False
+    platform_browser_network_enabled: bool = False
+    platform_browser_allowed_origins: tuple[str, ...] = ()
     # Usage telemetry is available with the platform store; admission is
     # opt-in during the staged rollout.
     platform_usage_limits_enabled: bool = False
@@ -185,6 +191,9 @@ class FleetConfig:
         platform_sandbox_launcher: tuple[str, ...] = (),
         platform_provider_network_enabled: bool = False,
         platform_remote_execution_enabled: bool = False,
+        platform_browser_enabled: bool = False,
+        platform_browser_network_enabled: bool = False,
+        platform_browser_allowed_origins: tuple[str, ...] | list[str] | None = None,
         platform_usage_limits_enabled: bool = False,
         platform_memory_enabled: bool = False,
         platform_memory_context_enabled: bool = False,
@@ -256,6 +265,19 @@ class FleetConfig:
             except Exception:
                 continue
         allowed_probe_origins = tuple(sorted(set(allowed_probe_origins_list)))
+        browser_origins = []
+        for item in (platform_browser_allowed_origins or ()):
+            if not isinstance(item, str) or not item.strip():
+                continue
+            try:
+                parsed = urlsplit(item.strip())
+                if parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username and not parsed.password:
+                    host = parsed.hostname.rstrip(".").lower()
+                    origin = f"{parsed.scheme.lower()}://{host}" + (f":{parsed.port}" if parsed.port else "")
+                    browser_origins.append(origin)
+            except (TypeError, ValueError):
+                continue
+        browser_origins = tuple(sorted(set(browser_origins)))
         try:
             worker_interval = float(platform_worker_interval_s or 1.0)
         except (TypeError, ValueError):
@@ -360,6 +382,12 @@ class FleetConfig:
                 platform_provider_network_enabled and platform_enabled),
             platform_remote_execution_enabled=bool(
                 platform_remote_execution_enabled and platform_enabled),
+            platform_browser_enabled=bool(
+                platform_browser_enabled and platform_enabled),
+            platform_browser_network_enabled=bool(
+                platform_browser_network_enabled and platform_enabled
+                and platform_browser_enabled),
+            platform_browser_allowed_origins=browser_origins,
             platform_usage_limits_enabled=bool(
                 platform_usage_limits_enabled and platform_enabled),
             platform_memory_enabled=bool(

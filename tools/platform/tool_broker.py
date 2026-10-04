@@ -5,7 +5,9 @@ from hub.domain.workspace import WorkspaceError
 from hub.application.task_service import ApplicationError
 from .artifacts import ArtifactError
 from .backends.base import ToolReceipt
+from .browser_backend import BrowserBackendError
 from .resource_lease import ResourceLeaseError
+from .node_executor import BROWSER_TOOLS
 
 
 class ToolBroker:
@@ -13,8 +15,8 @@ class ToolBroker:
         "workspace.list", "workspace.read", "workspace.write", "workspace.exec",
         "workspace.artifact", "fleet.list_services", "service.get_health",
         "service.read_logs", "incident.get_evidence",
-    })
-    TOOL_DEFINITIONS = ({'name': 'workspace.list',
+    }) | BROWSER_TOOLS
+    _BASE_TOOL_DEFINITIONS = ({'name': 'workspace.list',
       'risk': 'read_only',
       'scope_kind': 'workspace',
       'description': 'List files in the selected workspace. Omit path to list the root.',
@@ -103,11 +105,55 @@ class ToolBroker:
       'parameters': {'type': 'object',
                      'properties': {'incident_id': {'type': 'string', 'description': 'Registered incident ID.'}},
                      'required': ['incident_id'],
-                     'additionalProperties': False}})
+                     'additionalProperties': False}},)
+    _BROWSER_TOOL_DEFINITIONS = (
+        {'name': 'browser.open', 'risk': 'read_only', 'scope_kind': 'browser',
+         'description': 'Open an allowed URL in an isolated browser session.',
+         'parameters': {'type': 'object', 'properties': {'url': {'type': 'string'}},
+                        'required': ['url'], 'additionalProperties': False}},
+        {'name': 'browser.navigate', 'risk': 'read_only', 'scope_kind': 'browser',
+         'description': 'Navigate an existing browser session to an allowed URL.',
+         'parameters': {'type': 'object', 'properties': {
+             'session_id': {'type': 'string'}, 'url': {'type': 'string'}},
+                        'required': ['session_id', 'url'], 'additionalProperties': False}},
+        {'name': 'browser.snapshot', 'risk': 'read_only', 'scope_kind': 'browser',
+         'description': 'Read bounded visible text from a browser session.',
+         'parameters': {'type': 'object', 'properties': {'session_id': {'type': 'string'}},
+                        'required': ['session_id'], 'additionalProperties': False}},
+        {'name': 'browser.screenshot', 'risk': 'read_only', 'scope_kind': 'browser',
+         'description': 'Capture a PNG screenshot from a browser session.',
+         'parameters': {'type': 'object', 'properties': {'session_id': {'type': 'string'}},
+                        'required': ['session_id'], 'additionalProperties': False}},
+        {'name': 'browser.click', 'risk': 'write', 'scope_kind': 'browser',
+         'description': 'Click a bounded selector in a browser session.',
+         'parameters': {'type': 'object', 'properties': {
+             'session_id': {'type': 'string'}, 'selector': {'type': 'string'}},
+                        'required': ['session_id', 'selector'], 'additionalProperties': False}},
+        {'name': 'browser.type', 'risk': 'write', 'scope_kind': 'browser',
+         'description': 'Type non-sensitive bounded text into a browser selector.',
+         'parameters': {'type': 'object', 'properties': {
+             'session_id': {'type': 'string'}, 'selector': {'type': 'string'},
+             'text': {'type': 'string'}},
+                        'required': ['session_id', 'selector', 'text'], 'additionalProperties': False}},
+        {'name': 'browser.scroll', 'risk': 'read_only', 'scope_kind': 'browser',
+         'description': 'Scroll a browser session by a bounded delta.',
+         'parameters': {'type': 'object', 'properties': {
+             'session_id': {'type': 'string'}, 'delta_y': {'type': 'integer'}},
+                        'required': ['session_id', 'delta_y'], 'additionalProperties': False}},
+        {'name': 'browser.back', 'risk': 'read_only', 'scope_kind': 'browser',
+         'description': 'Navigate back in a browser session.',
+         'parameters': {'type': 'object', 'properties': {'session_id': {'type': 'string'}},
+                        'required': ['session_id'], 'additionalProperties': False}},
+        {'name': 'browser.close', 'risk': 'write', 'scope_kind': 'browser',
+         'description': 'Close a browser session.',
+         'parameters': {'type': 'object', 'properties': {'session_id': {'type': 'string'}},
+                        'required': ['session_id'], 'additionalProperties': False}},
+    )
 
     def __init__(self, backend, leases, *, resource_id: str, artifact_store=None,
                  diagnostics=None, lease_owner_id: str | None = None,
-                 artifact_workspace_id: str | None = None, allowed_tools=None):
+                 artifact_workspace_id: str | None = None, allowed_tools=None,
+                 browser_backend=None, browser_enabled: bool = False):
         self.backend = backend
         self.leases = leases
         self.resource_id = resource_id
@@ -115,12 +161,17 @@ class ToolBroker:
         self.artifact_store = artifact_store
         self.diagnostics = diagnostics
         self.lease_owner_id = lease_owner_id
+        self.browser_backend = browser_backend
+        self.browser_enabled = bool(browser_enabled)
         self.allowed_tools = self.TOOLS if allowed_tools is None else self.TOOLS.intersection(allowed_tools)
 
     @classmethod
-    def tool_definitions(cls, allowed_tools=None):
+    def tool_definitions(cls, allowed_tools=None, *, browser_enabled: bool = False):
+        definitions = [dict(item) for item in cls._BASE_TOOL_DEFINITIONS]
+        if browser_enabled:
+            definitions.extend(dict(item) for item in cls._BROWSER_TOOL_DEFINITIONS)
         allowed = cls.TOOLS if allowed_tools is None else cls.TOOLS.intersection(allowed_tools)
-        return [dict(item) for item in cls.TOOL_DEFINITIONS if item['name'] in allowed]
+        return [item for item in definitions if item["name"] in allowed]
 
     def execute(self, *, command_id: str, tool: str, arguments: dict, owner_id: str, epoch: int) -> ToolReceipt:
         if tool not in self.TOOLS:
@@ -131,6 +182,18 @@ class ToolBroker:
             return ToolReceipt(command_id, "failed", {}, "lease_mismatch")
         if not isinstance(arguments, dict):
             return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
+        if tool in BROWSER_TOOLS:
+            if not self.browser_enabled or self.browser_backend is None:
+                return ToolReceipt(command_id, "failed", {}, "browser_disabled")
+            try:
+                result = self.browser_backend.execute(tool, dict(arguments))
+            except BrowserBackendError as exc:
+                return ToolReceipt(command_id, "failed", {}, exc.code)
+            except Exception:
+                raise
+            if not isinstance(result, dict):
+                return ToolReceipt(command_id, "failed", {}, "invalid_backend_receipt")
+            return ToolReceipt(command_id, "succeeded", result)
         def with_command_id(receipt):
             if receipt.command_id == command_id:
                 return receipt

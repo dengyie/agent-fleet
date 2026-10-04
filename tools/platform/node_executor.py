@@ -5,12 +5,18 @@ from collections.abc import Mapping
 from typing import Any
 
 from .backends.base import ToolReceipt
+from .browser_backend import BrowserBackendError, BrowserExecutionError
 
 
+BROWSER_TOOLS = frozenset({
+    "browser.open", "browser.navigate", "browser.snapshot", "browser.screenshot",
+    "browser.click", "browser.type", "browser.scroll", "browser.back", "browser.close",
+})
+BROWSER_SESSION_CAPABILITY = "browser.session"
 NODE_TOOLS = frozenset({
     "workspace.list", "workspace.read", "workspace.write",
     "workspace.exec",
-})
+}) | BROWSER_TOOLS
 POSTCHECK_ACTION = "reconcile.workspace.digest"
 SERVICE_POSTCHECK_ACTION = "reconcile.service.inspect"
 SERVICE_LOGS_POSTCHECK_ACTION = "reconcile.service.logs"
@@ -30,9 +36,12 @@ class NodeToolExecutor:
     """
 
     def __init__(self, backend, *, allowed_tools: frozenset[str] | set[str] | None = None,
-                 service_executor=None, log_reader=None,
+                 service_executor=None, log_reader=None, browser_backend=None,
+                 browser_enabled: bool = False,
                  allowed_postcheck_actions: frozenset[str] | set[str] | None = None):
         self.backend = backend
+        self.browser_backend = browser_backend
+        self.browser_enabled = bool(browser_enabled)
         self.allowed_tools = frozenset(NODE_TOOLS if allowed_tools is None else allowed_tools)
         self.service_executor = service_executor
         self.log_reader = log_reader
@@ -150,6 +159,31 @@ class NodeToolExecutor:
         if not action.startswith("tool."):
             return {"state": "failed", "result": {}, "error_code": "unknown_tool", "command_id": command_id}
         tool = action[5:]
+        if tool in BROWSER_TOOLS:
+            if not self.browser_enabled:
+                return {"state": "failed", "result": {}, "error_code": "browser_disabled", "command_id": command_id}
+            if self.browser_backend is None or not getattr(self.browser_backend, "available", True):
+                return {"state": "failed", "result": {}, "error_code": "backend_unavailable", "command_id": command_id}
+            if tool not in self.allowed_tools:
+                return {"state": "failed", "result": {}, "error_code": "capability_unavailable", "command_id": command_id}
+            arguments = command.get("arguments")
+            run_id = command.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                return {"state": "failed", "result": {}, "error_code": "invalid_arguments", "command_id": command_id}
+            if not isinstance(arguments, Mapping):
+                return {"state": "failed", "result": {}, "error_code": "invalid_arguments", "command_id": command_id}
+            try:
+                receipt = self.browser_backend.execute(
+                    tool, dict(arguments), run_id=run_id,
+                )
+            except BrowserExecutionError:
+                raise
+            except BrowserBackendError as exc:
+                return {"state": "failed", "result": {},
+                        "error_code": exc.code, "command_id": command_id}
+            if not isinstance(receipt, Mapping):
+                return {"state": "failed", "result": {}, "error_code": "invalid_backend_receipt", "command_id": command_id}
+            return {"state": "succeeded", "result": dict(receipt), "command_id": command_id}
         if tool not in self.allowed_tools:
             return {"state": "failed", "result": {}, "error_code": "unknown_tool", "command_id": command_id}
         arguments = command.get("arguments")
@@ -187,6 +221,6 @@ class NodeToolExecutor:
 
 
 __all__ = [
-    "NODE_TOOLS", "POSTCHECK_ACTION", "SERVICE_POSTCHECK_ACTION",
+    "BROWSER_TOOLS", "BROWSER_SESSION_CAPABILITY", "NODE_TOOLS", "POSTCHECK_ACTION", "SERVICE_POSTCHECK_ACTION",
     "SERVICE_LOGS_POSTCHECK_ACTION", "POSTCHECK_ACTIONS", "NodeToolExecutor",
 ]

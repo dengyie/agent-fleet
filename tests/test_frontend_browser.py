@@ -1,4 +1,4 @@
-"""Real Chromium + disposable Hub acceptance; optional external browser runner.
+"""Optional local loopback Chromium UI acceptance; no network-boundary proof.
 
 FLEET_PLAYWRIGHT_MODULE=/path/to/playwright enables this test. No browser or
 Node dependency is shipped in the production frontend.
