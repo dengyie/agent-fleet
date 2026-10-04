@@ -28,7 +28,7 @@ const [origin, role] = process.argv.slice(2);
       assert.deepEqual(requests, [], 'ordinary initialization must not call administrator APIs');
     } else {
       assert.equal(await page.locator(restrictedPanels).count(), 4);
-      await page.locator('summary').filter({hasText: '记忆上下文'}).click();
+      await page.getByRole('tab', {name: '上下文', exact: true}).click();
       const searched = page.waitForResponse(response => response.url().includes('/memory/search'));
       await page.getByRole('searchbox', {name: '搜索记忆'}).fill('fixture');
       await page.getByRole('button', {name: '搜索', exact: true}).click();
@@ -48,7 +48,7 @@ const [origin, role] = process.argv.slice(2);
     await page.getByText('Owner-scoped artifact preview', {exact: true}).waitFor();
     await page.waitForFunction(() => !document.querySelector('.assistant-composer textarea').readOnly);
     if (role === 'admin') {
-      await page.locator('summary').filter({hasText: '记忆上下文'}).click();
+      await page.getByRole('tab', {name: '上下文', exact: true}).click();
       await page.locator('#assistant-memory-enabled').check();
       assert.equal(await page.locator('.assistant-memory-row input').isChecked(), false);
     }
@@ -75,6 +75,7 @@ const [origin, role] = process.argv.slice(2);
       assert.deepEqual(turns[2].memory_context.memory_ids, ['fixture-memory']);
       assert.equal(typeof turns[2].memory_context.revisions['fixture-memory'], 'number');
       assert.equal(JSON.stringify(turns[2]).includes('Use the owner workspace.'), false, 'only references belong in the request');
+      await page.getByRole('tab', {name: '运行', exact: true}).click();
       await page.locator('.assistant-events').getByText('已载入记忆上下文', {exact: true}).waitFor();
     }
     assert.deepEqual(denied, []);

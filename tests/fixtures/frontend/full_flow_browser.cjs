@@ -29,9 +29,11 @@ const origin = process.argv[2];
     await page.goto(conversationUrl);
     await page.getByText('Full flow completed: 中文回复', {exact: true}).waitFor();
     await page.locator('.assistant-run-status[data-state="succeeded"]').waitFor();
+    await page.getByRole('tab', {name: '运行', exact: true}).click();
     for (const name of ['workspace.list', 'workspace.write', 'workspace.read', 'workspace.artifact']) {
       await page.locator('.assistant-events').getByText(name, {exact: true}).waitFor();
     }
+    await page.getByRole('tab', {name: '产物', exact: true}).click();
     await page.getByRole('button', {name: '预览', exact: true}).click();
     await page.getByText('Full-flow artifact: 中文内容', {exact: false}).waitFor();
     const downloadPromise = page.waitForEvent('download');

@@ -296,10 +296,11 @@
       "id": "UI-01",
       "title": "控制台页面和文本渲染",
       "layer": "browser",
-      "acceptance": "节点/任务/会话/监控页面可操作；历史分页、长文本、Markdown和恶意HTML不破坏页面",
+      "acceptance": "节点/任务/会话/监控页面可操作；历史分页、长文本、Markdown和恶意HTML不破坏页面；助手错误可见、弹层隔离、编辑器滚动边界和实际模型展示正确",
       "boundary": "disposable Hub; external services simulated",
       "tests": [
-        "tests/test_frontend_browser.py::test_console_in_real_browser"
+        "tests/test_frontend_browser.py::test_console_in_real_browser",
+        "tests/test_frontend_browser.py::test_assistant_workspace_regressions"
       ]
     },
     {
