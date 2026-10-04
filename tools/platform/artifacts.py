@@ -117,6 +117,74 @@ class ArtifactStore:
             raise ArtifactError("write_failed") from None
         return self._public(manifest)
 
+    def put_bytes(self, owner_id: str, workspace_id: str, raw: bytes, *,
+                  name: str = "screenshot.png", content_type: str = "image/png") -> dict[str, Any]:
+        """Persist bounded bytes supplied by a trusted Node upload adapter."""
+        try:
+            owner_id = validate_owner_id(owner_id)
+            workspace_id = validate_id(workspace_id, "workspace_id")
+        except ValueError:
+            raise ArtifactError("invalid_scope") from None
+        if not isinstance(raw, bytes):
+            raise ArtifactError("invalid_bytes")
+        if len(raw) > self.MAX_BYTES:
+            raise ArtifactError("artifact_too_large")
+        if not isinstance(name, str) or not name or len(name) > self.MAX_NAME:
+            raise ArtifactError("invalid_artifact_name")
+        if name in {".", ".."} or "/" in name or "\\" in name or any(
+                ord(char) < 0x20 or ord(char) == 0x7f for char in name):
+            raise ArtifactError("invalid_artifact_name")
+        if (not isinstance(content_type, str) or content_type != "image/png"
+                or not raw.startswith(b"\x89PNG\r\n\x1a\n")):
+            raise ArtifactError("invalid_content_type")
+        artifact_id = secrets.token_urlsafe(18)
+        content_path, _manifest_path = self._paths(artifact_id)
+        manifest = {
+            "artifact_id": artifact_id, "owner_id": owner_id,
+            "workspace_id": workspace_id, "name": name, "size": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "content_type": content_type, "created_at": float(self.clock()),
+        }
+        self.root.mkdir(parents=True, exist_ok=True)
+        try:
+            with artifact_snapshot_barrier(self.root):
+                with tempfile.TemporaryDirectory(prefix=f".{artifact_id}.", dir=self.root) as temp_name:
+                    temp_dir = Path(temp_name)
+                    (temp_dir / "content").write_bytes(raw)
+                    (temp_dir / "manifest.json").write_text(
+                        json.dumps(manifest, ensure_ascii=True, sort_keys=True), encoding="utf-8"
+                    )
+                    temp_dir.rename(content_path.parent)
+        except (OSError, ValueError):
+            raise ArtifactError("write_failed") from None
+        return self._public(manifest)
+
+    def delete(self, owner_id: str, workspace_id: str, artifact_id: str) -> bool:
+        """Delete one immutable artifact only after owner/scope verification."""
+        try:
+            owner_id = validate_owner_id(owner_id)
+            workspace_id = validate_id(workspace_id, "workspace_id")
+        except ValueError:
+            raise ArtifactError("invalid_scope") from None
+        content_path, manifest_path = self._paths(artifact_id)
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return False
+        if not isinstance(manifest, dict):
+            raise ArtifactError("artifact_corrupt")
+        if manifest.get("owner_id") != owner_id or manifest.get("workspace_id") != workspace_id:
+            return False
+        try:
+            with artifact_snapshot_barrier(self.root):
+                content_path.parent.mkdir(parents=True, exist_ok=True)
+                content_path.unlink(missing_ok=True)
+                manifest_path.unlink(missing_ok=True)
+                content_path.parent.rmdir()
+        except OSError:
+            raise ArtifactError("delete_failed") from None
+        return True
+
     def get(self, owner_id: str, workspace_id: str, artifact_id: str) -> dict[str, Any] | None:
         try:
             owner_id = validate_owner_id(owner_id)

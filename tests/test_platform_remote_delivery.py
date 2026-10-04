@@ -7,6 +7,7 @@ from tools.platform.node_executor import NodeToolExecutor
 from tools.platform.node_client import NodeClient
 from tools.platform.journal import NodeJournal
 from tools.platform.remote_tool_broker import RemoteToolBroker
+from tools.platform.browser_policy import BrowserPolicyError
 
 
 def _command(command_id="cmd-remote", node="node-remote", owner="owner@example.test"):
@@ -69,6 +70,98 @@ def test_remote_tool_broker_enqueues_one_fixed_command_and_maps_receipt():
         ("node_command_queued", {"command_id": command.command_id, "node_id": "node-remote", "tool": "workspace.read"}),
         ("node_receipt", {"command_id": command.command_id, "node_id": "node-remote", "tool": "workspace.read", "status": "succeeded"}),
     ]
+
+
+def test_remote_tool_broker_rejects_invalid_browser_arguments_before_enqueue():
+    queued = []
+
+    class Delivery:
+        def enqueue(self, command, *, idempotency_key=None):
+            queued.append(command)
+            return command.as_dict() | {"status": "queued", "result": None}
+
+        def wait_for_receipt(self, command_id, *, timeout_s=30.0):
+            raise AssertionError("invalid browser command reached receipt wait")
+
+    broker = RemoteToolBroker(
+        Delivery(), node_id="node-remote", resource_id="workspace-remote",
+        run_id="run-remote", browser_enabled=True,
+    )
+
+    invalid_url = broker.execute(
+        command_id="run-remote:step:invalid-url", tool="browser.open",
+        arguments={"url": "https://not-allowed.example"},
+        owner_id="owner@example.test", epoch=1,
+    )
+    sensitive_selector = broker.execute(
+        command_id="run-remote:step:sensitive", tool="browser.click",
+        arguments={"session_id": "session-opaque-123", "selector": "#password"},
+        owner_id="owner@example.test", epoch=1,
+    )
+
+    assert invalid_url == ToolReceipt(
+        "run-remote:step:invalid-url", "failed", {}, "network_disabled",
+    )
+    assert sensitive_selector == ToolReceipt(
+        "run-remote:step:sensitive", "failed", {}, "sensitive_field_forbidden",
+    )
+    assert queued == []
+
+
+def test_remote_tool_broker_passes_valid_loopback_browser_arguments_to_node():
+    queued = []
+
+    class Delivery:
+        def enqueue(self, command, *, idempotency_key=None):
+            queued.append(command)
+            return command.as_dict() | {"status": "queued", "result": None}
+
+        def wait_for_receipt(self, command_id, *, timeout_s=30.0):
+            return {"command_id": command_id, "status": "succeeded", "result": {}}
+
+    broker = RemoteToolBroker(
+        Delivery(), node_id="node-remote", resource_id="workspace-remote",
+        run_id="run-remote", browser_enabled=True,
+    )
+    receipt = broker.execute(
+        command_id="run-remote:step:loopback", tool="browser.open",
+        arguments={"url": "http://localhost:3000"},
+        owner_id="owner@example.test", epoch=1,
+    )
+
+    assert receipt.state == "succeeded"
+    assert len(queued) == 1
+    assert queued[0].arguments == {"url": "http://localhost:3000"}
+
+
+def test_remote_tool_broker_allows_only_configured_global_external_origin():
+    queued = []
+
+    class Delivery:
+        def enqueue(self, command, *, idempotency_key=None):
+            queued.append(command)
+            return command.as_dict() | {"status": "queued", "result": None}
+
+        def wait_for_receipt(self, command_id, *, timeout_s=30.0):
+            return {"command_id": command_id, "status": "succeeded", "result": {}}
+
+    def resolver(host, _port, *, type):
+        import socket
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+
+    broker = RemoteToolBroker(
+        Delivery(), node_id="node-remote", resource_id="workspace-remote",
+        run_id="run-remote", browser_enabled=True, browser_network_enabled=True,
+        browser_allowed_origins=("https://example.test",), browser_resolver=resolver,
+    )
+    receipt = broker.execute(
+        command_id="run-remote:step:external", tool="browser.open",
+        arguments={"url": "https://example.test/page"},
+        owner_id="owner@example.test", epoch=1,
+    )
+
+    assert receipt.state == "succeeded"
+    assert queued[0].arguments == {"url": "https://example.test/page"}
 
 
 def test_remote_tool_broker_never_replays_unknown_receipt():

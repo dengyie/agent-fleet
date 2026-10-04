@@ -8,6 +8,8 @@ from typing import Any
 
 from hub.domain.platform_command import PlatformCommand
 from .backends.base import ToolReceipt
+from .browser_policy import BrowserPolicyError, validate_action
+from .node_executor import BROWSER_TOOLS
 from .tool_broker import ToolBroker
 
 
@@ -16,7 +18,9 @@ class RemoteToolBroker:
 
     def __init__(self, delivery, *, node_id: str, resource_id: str, run_id: str,
                  event_sink=None, waiter=None, clock=time.time, receipt_timeout_s=30.0,
-                 allowed_tools=None):
+                 allowed_tools=None,
+                 browser_enabled: bool = False, browser_network_enabled: bool = False,
+                 browser_allowed_origins=(), browser_resolver=None):
         self.delivery = delivery
         self.node_id = node_id
         self.resource_id = resource_id
@@ -26,6 +30,10 @@ class RemoteToolBroker:
         self.clock = clock
         self.receipt_timeout_s = max(0.1, min(float(receipt_timeout_s), 300.0))
         self.allowed_tools = ToolBroker.TOOLS if allowed_tools is None else ToolBroker.TOOLS.intersection(allowed_tools)
+        self.browser_enabled = bool(browser_enabled)
+        self.browser_network_enabled = bool(browser_network_enabled)
+        self.browser_allowed_origins = tuple(browser_allowed_origins or ())
+        self.browser_resolver = browser_resolver
 
     def _event(self, kind: str, command_id: str, tool: str, **extra):
         payload = {"command_id": command_id, "node_id": self.node_id, "tool": tool, **extra}
@@ -36,15 +44,26 @@ class RemoteToolBroker:
             return ToolReceipt(command_id, "failed", {}, "unknown_tool")
         if tool not in self.allowed_tools:
             return ToolReceipt(command_id, "failed", {}, "tool_not_allowed")
+        if tool in BROWSER_TOOLS and not self.browser_enabled:
+            return ToolReceipt(command_id, "failed", {}, "browser_disabled")
         if not isinstance(arguments, Mapping):
             return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
         if not isinstance(command_id, str) or not command_id.startswith(self.run_id + ":step:"):
             return ToolReceipt(command_id, "failed", {}, "invalid_command_id")
         try:
             bounded = dict(arguments)
+            if tool in BROWSER_TOOLS:
+                bounded = validate_action(
+                    tool, bounded,
+                    network_enabled=self.browser_network_enabled,
+                    allowed_origins=self.browser_allowed_origins,
+                    resolver=self.browser_resolver,
+                )
             if len(json.dumps(bounded, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 64 * 1024:
                 return ToolReceipt(command_id, "failed", {}, "arguments_too_large")
             retry_class = "read_only" if tool in {"workspace.list", "workspace.read", "fleet.list_services", "service.get_health", "service.read_logs", "incident.get_evidence"} else "reconcile_before_retry"
+            if tool in BROWSER_TOOLS:
+                retry_class = "manual_only"
             command = PlatformCommand.create(
                 command_id=command_id, target_node=self.node_id, owner_id=owner_id,
                 action=f"tool.{tool}", resource_id=self.resource_id,
@@ -75,6 +94,8 @@ class RemoteToolBroker:
             if status in {"failed", "expired"}:
                 return ToolReceipt(command_id, "failed", result, inner_error or "remote_failed")
             return ToolReceipt(command_id, "unknown", {}, "receipt_unknown")
+        except BrowserPolicyError as exc:
+            return ToolReceipt(command_id, "failed", {}, exc.code)
         except Exception:
             self._event("node_receipt", command_id, tool, status="unknown")
             return ToolReceipt(command_id, "unknown", {}, "receipt_unknown")

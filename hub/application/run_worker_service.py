@@ -47,7 +47,9 @@ class LocalRunWorkerService:
                  diagnostics=None, secret_broker=None, provider_transport=None,
                  provider_network_enabled: bool = False,
                  remote_execution_enabled: bool = False, remote_delivery=None,
-                 remote_waiter=None, usage_meter=None, sandbox_launcher=None):
+                 remote_waiter=None, usage_meter=None, sandbox_launcher=None,
+                 browser_enabled: bool = False, browser_network_enabled: bool = False,
+                 browser_allowed_origins: tuple[str, ...] = (), browser_resolver=None):
         self.repository = repository
         self.run_events = run_events
         self.worker_id = worker_id or ("local-worker_" + secrets.token_hex(8))
@@ -61,10 +63,14 @@ class LocalRunWorkerService:
         self.diagnostics = diagnostics
         self.resource_leases = ResourceLeaseManager(clock=self.clock)
         self.remote_execution_enabled = bool(remote_execution_enabled)
+        self.browser_enabled = bool(browser_enabled)
         self.remote_delivery = remote_delivery
         self.remote_waiter = remote_waiter
         self.usage_meter = usage_meter
         self.sandbox_launcher = sandbox_launcher
+        self.browser_network_enabled = bool(browser_network_enabled)
+        self.browser_allowed_origins = tuple(browser_allowed_origins or ())
+        self.browser_resolver = browser_resolver
 
     def _finish(self, claim: dict[str, Any], state: str, *, text: str = "", usage=None) -> dict[str, Any]:
         return self.run_events.state(
@@ -141,6 +147,14 @@ class LocalRunWorkerService:
                 raise RuntimeError("remote_execution_disabled")
             if remote and self.remote_delivery is None:
                 raise RuntimeError("remote_delivery_unavailable")
+            remote_browser_enabled = False
+            if remote and self.browser_enabled:
+                node = self.repository.get_node(claim["owner_id"], execution_node_id)
+                capabilities = node.get("capabilities") if isinstance(node, dict) else {}
+                remote_browser_enabled = bool(
+                    node and node.get("enabled") and isinstance(capabilities, dict)
+                    and capabilities.get("browser.session")
+                )
             backend = SandboxBackend(Path(workspace["root_path"]), launcher=self.sandbox_launcher) if not remote else None
             provider_profile = None
             profile_id = config.get("model_profile_id")
@@ -171,6 +185,10 @@ class LocalRunWorkerService:
                     waiter=self.remote_waiter,
                     allowed_tools=allowed_tools,
                     event_sink=lambda kind, payload: self._event(claim, kind, payload),
+                    browser_enabled=remote_browser_enabled,
+                    browser_network_enabled=self.browser_network_enabled,
+                    browser_allowed_origins=self.browser_allowed_origins,
+                    browser_resolver=self.browser_resolver,
                 )
             else:
                 broker = ToolBroker(
@@ -210,7 +228,10 @@ class LocalRunWorkerService:
             result = worker.execute(
                 run_id=claim["run_id"], owner_id=claim["owner_id"],
                 epoch=lease["epoch"], messages=messages,
-                tools=ToolBroker.tool_definitions(allowed_tools), should_cancel=should_cancel,
+                tools=ToolBroker.tool_definitions(
+                    allowed_tools,
+                    browser_enabled=remote_browser_enabled),
+                should_cancel=should_cancel,
                 lease_id=lease_id, worker_id=self.worker_id,
                 attempt=int(claim.get("attempt") or 1),
             )

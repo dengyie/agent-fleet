@@ -7,6 +7,7 @@ from hub.bootstrap import create_app
 from hub.config import FleetConfig
 from hub.domain.platform_command import PlatformCommand
 from tools.platform.node_executor import (
+    BROWSER_TOOLS,
     SERVICE_LOGS_POSTCHECK_ACTION,
     SERVICE_POSTCHECK_ACTION,
     NodeToolExecutor,
@@ -107,6 +108,62 @@ def test_runtime_config_rejects_unknown_capabilities_and_redacts_manifest(tmp_pa
     }
     assert "secret" not in str(manifest)
     assert str(tmp_path) not in str(manifest)
+
+
+def test_node_runtime_does_not_advertise_browser_without_driver(tmp_path):
+    config = NodeRuntimeConfig(
+        node_id="node-a", credential="node-a:secret",
+        workspace_root=tmp_path / "workspace",
+        journal_path=tmp_path / "journal.db",
+        hub_url="https://hub.invalid", public_key=PUBLIC_KEY,
+        capabilities=frozenset({"browser.session"}), browser_enabled=True,
+    )
+    runtime = NodeRuntime(config, transport=object())
+
+    manifest = runtime.manifest()
+    assert manifest["browser"] == {
+        "enabled": False, "backend": "unavailable",
+    }
+    assert "browser.session" not in manifest["capabilities"]
+    assert not (runtime.executor.allowed_tools & BROWSER_TOOLS)
+
+    command = PlatformCommand.create(
+        command_id="browser-no-driver", target_node="node-a",
+        action="tool.browser.open", resource_id="workspace",
+        arguments={"url": "http://127.0.0.1:3000"},
+        retry_class="manual_only", expires_at=9_999_999_999,
+        run_id="run-a",
+    ).signed(PRIVATE_KEY).as_dict()
+    result = runtime.client.handle(command)
+    assert result["status"] == "failed"
+    assert result["result"]["error_code"] == "backend_unavailable"
+    assert runtime.journal.get("browser-no-driver")["state"] == "failed"
+
+
+def test_node_runtime_forces_browser_external_network_off_without_egress_proof(tmp_path):
+    from tools.platform.browser_backend import BrowserBackendError
+
+    class Driver:
+        def open(self, url):
+            raise AssertionError("external URL must be rejected before driver access")
+
+    config = NodeRuntimeConfig(
+        node_id="node-a", credential="node-a:secret",
+        workspace_root=tmp_path / "workspace",
+        journal_path=tmp_path / "journal.db",
+        hub_url="https://hub.invalid", public_key=PUBLIC_KEY,
+        capabilities=frozenset({"browser.session"}), browser_enabled=True,
+        browser_network_enabled=True,
+        browser_allowed_origins=("https://one.example",),
+        browser_driver_factory=Driver,
+    )
+    runtime = NodeRuntime(config, transport=object())
+
+    assert runtime.browser_backend.network_enabled is False
+    with pytest.raises(BrowserBackendError, match="network_disabled"):
+        runtime.browser_backend.execute(
+            "browser.open", {"url": "https://one.example/"}, run_id="run-a",
+        )
 
 
 class _Transport:

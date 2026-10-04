@@ -174,6 +174,9 @@ _PLATFORM_WORKER_MAX_WORKSPACE_CONCURRENCY_ENV = "AGENT_FLEET_PLATFORM_WORKER_MA
 _PLATFORM_PROVIDER_NETWORK_ENABLE_ENV = "AGENT_FLEET_PLATFORM_PROVIDER_NETWORK_ENABLED"
 _PLATFORM_MEMORY_ENABLE_ENV = "AGENT_FLEET_PLATFORM_MEMORY_ENABLED"
 _PLATFORM_MEMORY_CONTEXT_ENABLE_ENV = "AGENT_FLEET_PLATFORM_MEMORY_CONTEXT_ENABLED"
+_PLATFORM_BROWSER_ENABLE_ENV = "AGENT_FLEET_PLATFORM_BROWSER_ENABLED"
+_PLATFORM_BROWSER_NETWORK_ENABLE_ENV = "AGENT_FLEET_PLATFORM_BROWSER_NETWORK_ENABLED"
+_PLATFORM_BROWSER_ORIGINS_ENV = "AGENT_FLEET_PLATFORM_BROWSER_ALLOWED_ORIGINS"
 
 #: Optional per-release gate file, ``<FLEET_HOME>/fleet-gates.conf``, with
 #: ``AGENT_FLEET_*_ENABLED=1`` lines.  It is ONLY consulted when the matching
@@ -284,6 +287,8 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
              platform_worker_max_workspace_concurrency=None,
              platform_provider_network_enabled=None,
              platform_remote_execution_enabled=None,
+             platform_browser_enabled=None, platform_browser_network_enabled=None,
+             platform_browser_allowed_origins=None,
              platform_memory_enabled=None,
              platform_memory_context_enabled=None):
     """Compatibility wrapper around ``hub.bootstrap.create_app``.
@@ -385,6 +390,16 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
     platform_remote_execution_on = _feature_on(
         platform_remote_execution_enabled,
         env="AGENT_FLEET_PLATFORM_REMOTE_EXECUTION_ENABLED")
+    platform_browser_on = _feature_on(
+        platform_browser_enabled, env=_PLATFORM_BROWSER_ENABLE_ENV)
+    platform_browser_network_on = _feature_on(
+        platform_browser_network_enabled, env=_PLATFORM_BROWSER_NETWORK_ENABLE_ENV)
+    platform_browser_origins = _optional_setting(
+        platform_browser_allowed_origins, env=_PLATFORM_BROWSER_ORIGINS_ENV)
+    if isinstance(platform_browser_origins, str):
+        platform_browser_origins = [item.strip() for item in platform_browser_origins.split(",") if item.strip()]
+    elif not isinstance(platform_browser_origins, (list, tuple, set)):
+        platform_browser_origins = []
     platform_memory_on = _feature_on(
         platform_memory_enabled, env=_PLATFORM_MEMORY_ENABLE_ENV)
     platform_memory_context_on = _feature_on(
@@ -444,6 +459,9 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         platform_sandbox_launcher=sandbox_launcher,
         platform_provider_network_enabled=platform_provider_network_on,
         platform_remote_execution_enabled=platform_remote_execution_on,
+        platform_browser_enabled=platform_browser_on,
+        platform_browser_network_enabled=platform_browser_network_on,
+        platform_browser_allowed_origins=platform_browser_origins,
         platform_memory_enabled=platform_memory_on,
         platform_memory_context_enabled=platform_memory_context_on,
     )
@@ -454,6 +472,10 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
     app.config["ADOPTION_REPOSITORIES_ENABLED"] = bool(
         config.adoption_repositories_enabled)
     app.config["PLATFORM_ENABLED"] = bool(config.platform_enabled)
+    app.config["PLATFORM_BROWSER_ENABLED"] = bool(
+        getattr(config, "platform_browser_enabled", False))
+    app.config["PLATFORM_BROWSER_NETWORK_ENABLED"] = bool(
+        getattr(config, "platform_browser_network_enabled", False))
     app.config["PLATFORM_MEMORY_ENABLED"] = bool(
         getattr(config, "platform_memory_enabled", False))
     app.config["PLATFORM_MEMORY_CONTEXT_ENABLED"] = bool(

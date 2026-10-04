@@ -98,7 +98,8 @@ class Transport:
         opener = self._opener(use_proxy)
         try:
             with self._open(opener, req, timeout) as resp:
-                raw = resp.read().decode("utf-8") if resp.read else ""
+                body = resp.read() if hasattr(resp, "read") else b""
+                raw = body.decode("utf-8", errors="replace") if body else ""
                 payload = json.loads(raw) if raw else {}
                 if not isinstance(payload, dict):
                     payload = {"_raw": payload}
@@ -162,6 +163,21 @@ class Transport:
         return 0, {"error": last_err or "transport_failed"}, last_err
 
     # -- 公共入口 -----------------------------------------------------------
+
+    def post_bytes(self, url: str, body: bytes, headers: dict[str, str],
+                   timeout: float | None = None):
+        """POST binary data using the configured transport policy."""
+        if not isinstance(body, bytes):
+            raise TypeError("body must be bytes")
+        req_headers = dict(headers or {})
+        req_headers.setdefault("Content-Type", "application/octet-stream")
+        req = urllib.request.Request(url, data=body, headers=req_headers,
+                                     method="POST")
+        eff_timeout = self._timeout if timeout is None else float(timeout)
+        if eff_timeout <= 0:
+            eff_timeout = self._timeout
+        status, payload, _ = self._post(req, eff_timeout)
+        return status, payload
 
     def post_json(self, url: str, body: Any | None, headers: dict[str, str],
                   timeout: float | None = None):

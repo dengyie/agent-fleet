@@ -3,8 +3,20 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import time
+from typing import Any
 
 from hub.domain.platform_command import args_hash, verify_command
+
+
+class BrowserSessionSyncError(RuntimeError):
+    """Bounded session sync failure with an explicit cleanup outcome."""
+
+    def __init__(self, *, sync_error: Exception, cleanup_error: Exception | None = None):
+        self.code = "browser_session_sync_failed"
+        self.sync_error = sync_error
+        self.cleanup_error = cleanup_error
+        self.cleanup_failed = cleanup_error is not None
+        super().__init__(self.code)
 
 
 class NodeClient:
@@ -39,6 +51,123 @@ class NodeClient:
             raise ValueError("hub_url must use http or https")
         return self.transport.post_json(url, body, self._headers())
 
+    def _post_bytes(self, path, body: bytes, headers: Mapping[str, str]):
+        if self.transport is None:
+            from tools.transport import Transport
+            self.transport = Transport()
+        url = self.hub_url + path
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("hub_url must use http or https")
+        merged = dict(self._headers())
+        merged.update({str(key): str(value) for key, value in headers.items()})
+        post_bytes = getattr(self.transport, "post_bytes", None)
+        if not callable(post_bytes):
+            raise RuntimeError("binary_transport_unavailable")
+        return post_bytes(url, body, merged)
+
+    @staticmethod
+    def _browser_screenshot(command: Mapping[str, Any]) -> bool:
+        return command.get("action") == "tool.browser.screenshot"
+
+    def _materialize_browser_session_result(
+        self, command: Mapping[str, Any], result: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        action = command.get("action")
+        if action not in {"tool.browser.open", "tool.browser.close"}:
+            return result
+        outer = result.get("result") if isinstance(result.get("result"), Mapping) else {}
+        session_id = outer.get("session_id") if isinstance(outer, Mapping) else None
+        state = outer.get("state") if isinstance(outer, Mapping) else None
+        if not isinstance(session_id, str) or state not in {"open", "closed"}:
+            return result
+        path = "/api/platform/v1/nodes/browser-sessions"
+        if action == "tool.browser.close":
+            path += "/" + session_id + "/close"
+        try:
+            status, payload = self._post(path, {
+                "command_id": command.get("command_id"),
+                "worker_id": self.worker_id,
+                **({"session_id": session_id, "backend": outer.get("backend", "cdp_local")}
+                   if action == "tool.browser.open" else {}),
+            })
+            if status != 200 or not isinstance(payload, Mapping) or not payload.get("ok"):
+                raise RuntimeError("browser_session_sync_failed")
+        except Exception as sync_error:
+            cleanup_error = None
+            if action == "tool.browser.open":
+                backend = getattr(self.executor, "browser_backend", None)
+                close_session = getattr(backend, "close_session", None)
+                if callable(close_session):
+                    try:
+                        close_session(session_id)
+                    except Exception as exc:
+                        cleanup_error = exc
+            failure = BrowserSessionSyncError(
+                sync_error=sync_error, cleanup_error=cleanup_error,
+            )
+            raise failure from sync_error
+        return result
+
+    def _materialize_browser_result(self, command: Mapping[str, Any], result: Mapping[str, Any]):
+        """Upload screenshot bytes before journal/receipt serialization."""
+        if not self._browser_screenshot(command):
+            return dict(result)
+        outer = result.get("result") if isinstance(result.get("result"), Mapping) else {}
+        raw = outer.get("result") if isinstance(outer, Mapping) else None
+        if not isinstance(raw, bytes):
+            return dict(result)
+        if not raw.startswith(b"\x89PNG\r\n\x1a\n") or len(raw) > 256 * 1024:
+            raise RuntimeError("browser_artifact_invalid")
+        command_id = command.get("command_id")
+        ticket_status, ticket_payload = self._post(
+            "/api/platform/v1/nodes/browser-artifact-tickets",
+            {"command_id": command_id, "worker_id": self.worker_id,
+             "idempotency_key": str(command_id) + ":screenshot"},
+        )
+        if ticket_status != 200 or not isinstance(ticket_payload, Mapping):
+            raise RuntimeError("browser_artifact_ticket_failed")
+        ticket = ticket_payload.get("ticket")
+        if not isinstance(ticket, Mapping):
+            raise RuntimeError("browser_artifact_ticket_failed")
+        ticket_id = ticket.get("ticket_id")
+        upload_token = ticket.get("upload_token")
+        artifact = ticket.get("artifact")
+        if not isinstance(ticket_id, str):
+            raise RuntimeError("browser_artifact_ticket_unavailable")
+        if ticket.get("state") == "consumed":
+            if not isinstance(artifact, Mapping):
+                raise RuntimeError("browser_artifact_ticket_unavailable")
+        elif not isinstance(upload_token, str):
+            raise RuntimeError("browser_artifact_ticket_unavailable")
+        if isinstance(artifact, Mapping):
+            safe_outer = dict(result)
+            safe_inner = dict(outer)
+            safe_inner.pop("result", None)
+            safe_inner["artifact"] = dict(artifact)
+            safe_outer["result"] = safe_inner
+            return safe_outer
+        upload_key = str(command_id) + ":screenshot"
+        status, payload = self._post_bytes(
+            "/api/platform/v1/nodes/browser-artifact-tickets/" + ticket_id + "/content",
+            raw,
+            {"Content-Type": "image/png",
+             "X-Platform-Artifact-Upload-Token": upload_token,
+             "X-Platform-Command-ID": str(command_id),
+             "X-Platform-Worker-ID": str(self.worker_id),
+             "X-Platform-Artifact-Idempotency-Key": upload_key},
+        )
+        if status != 200 or not isinstance(payload, Mapping) or not payload.get("ok"):
+            raise RuntimeError("browser_artifact_upload_failed")
+        artifact = payload.get("artifact")
+        if not isinstance(artifact, Mapping):
+            raise RuntimeError("browser_artifact_upload_failed")
+        safe_outer = dict(result)
+        safe_inner = dict(outer)
+        safe_inner.pop("result", None)
+        safe_inner["artifact"] = dict(artifact)
+        safe_outer["result"] = safe_inner
+        return safe_outer
+
     def _signature_ok(self, command: Mapping):
         if self.public_key is None:
             signature_ok = not self.require_signature
@@ -71,6 +200,9 @@ class NodeClient:
         self.journal.begin(command_id, now=self.clock())
         try:
             result = self.executor(command)
+            if isinstance(result, Mapping):
+                result = self._materialize_browser_session_result(command, result)
+                result = self._materialize_browser_result(command, result)
             execution_state = result.get("state") if isinstance(result, Mapping) else None
             status = execution_state if execution_state in {"succeeded", "failed", "unknown"} else "succeeded"
             self.journal.finish(command_id, status, result, now=self.clock())

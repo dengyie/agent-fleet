@@ -100,6 +100,7 @@ def create_app(
     legacy_task_bridge = None
     command_inspection = None
     command_postcheck = None
+    browser_repository = None
     if config.platform_enabled:
         from hub.application.defaults_service import DefaultsService
         from hub.infrastructure.platform_db import PlatformRepository
@@ -149,6 +150,12 @@ def create_app(
         if config.platform_artifact_root is None:
             raise RuntimeError("platform_enabled requires a platform_artifact_root")
         artifact_store = ArtifactStore(config.platform_artifact_root)
+        if getattr(config, "platform_browser_enabled", False):
+            from hub.infrastructure.browser_repository import BrowserRepository
+            browser_repository = (repositories or {}).get("browser")
+            if browser_repository is None:
+                browser_repository = BrowserRepository(config.platform_db)
+            browser_repository.init()
         if getattr(config, "execution_windows_enabled", False):
             from hub.infrastructure.execution_window_repository import ExecutionWindowRepository
             from hub.application.execution_window_service import ExecutionWindowService
@@ -340,6 +347,11 @@ def create_app(
                     config, "platform_remote_execution_enabled", False)),
                 remote_delivery=platform_delivery,
                 usage_meter=usage_repository,
+                browser_enabled=bool(getattr(config, "platform_browser_enabled", False)),
+                browser_network_enabled=bool(getattr(
+                    config, "platform_browser_network_enabled", False)),
+                browser_allowed_origins=tuple(getattr(
+                    config, "platform_browser_allowed_origins", ()) or ()),
             )
             if getattr(config, "platform_worker_scheduler_enabled", False):
                 from hub.application.run_scheduler_service import RunSchedulerService
@@ -555,6 +567,10 @@ def create_app(
         getattr(config, "platform_provider_network_enabled", False))
     app.config["PLATFORM_REMOTE_EXECUTION_ENABLED"] = bool(
         getattr(config, "platform_remote_execution_enabled", False))
+    app.config["PLATFORM_BROWSER_ENABLED"] = bool(
+        getattr(config, "platform_browser_enabled", False))
+    app.config["PLATFORM_BROWSER_NETWORK_ENABLED"] = bool(
+        getattr(config, "platform_browser_network_enabled", False))
     app.config["SERVICE_MONITORING_ENABLED"] = bool(config.service_monitoring_enabled)
     app.config["PLATFORM_SCHEDULES_ENABLED"] = bool(
         platform_schedule_service is not None)
@@ -633,6 +649,8 @@ def create_app(
     if platform_repository is not None:
         app.extensions["fleet"]["platform_repository"] = platform_repository
         app.extensions["fleet"]["platform_commands"] = command_repository
+        if browser_repository is not None:
+            app.extensions["fleet"]["repositories"]["browser"] = browser_repository
     if platform_scheduler_repository is not None:
         app.extensions["fleet"]["repositories"]["platform_scheduler"] = (
             platform_scheduler_repository)
