@@ -224,13 +224,13 @@ const [origin, taskId] = process.argv.slice(2);
     assert.equal(await page.getByRole('button', {name: '滚动到最新消息'}).isVisible(), false, 'latest-message anchor is already visible');
     await page.screenshot({path: path.join(output, 'assistant-mobile.png'), fullPage: true, animations: 'disabled'});
     await page.getByRole('button', {name:'工作面板', exact:true}).click();
-    assert.equal(await page.locator('.assistant-chat').evaluate(node => node.inert), true, 'mobile inspector blocks focus behind the overlay');
+    await input.evaluate(node => node.focus());
+    assert.equal(await input.evaluate(node => node === document.activeElement), false, 'mobile inspector blocks focus behind the overlay');
     await page.getByRole('tab', {name:'运行', exact:true}).click();
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await page.screenshot({path: path.join(output, 'assistant-mobile-panel.png'), fullPage: true, animations: 'disabled'});
     await page.keyboard.press('Escape');
     assert.equal(await page.locator('.assistant-inspector').isVisible(), false);
-    assert.equal(await page.locator('.assistant-chat').evaluate(node => node.inert), false);
     assert.equal(await page.locator('.inspector-toggle').evaluate(node => node === document.activeElement), true);
 
     for (const [route, ready] of [['/', '.healthbar'], ['/machine/studio-mac', '#task-create-form'], ['/task/' + taskId, '#route-view .panel'], ['/session/browser-session', '#route-view .panel'], ['/monitoring', '.monitoring-view']]) {

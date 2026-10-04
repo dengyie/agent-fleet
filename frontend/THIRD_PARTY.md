@@ -6,7 +6,7 @@ Selected Vanilla components are adapted from the user-requested [dengyie/awesome
 - `ChatPromptInput`: retained textarea sizing and IME handling; enhances application-owned form controls, does not clear drafts before server acceptance, and omits unsupported attachments.
 - `StreamMarkdown`: retained component contract; bundles marked and DOMPurify locally, uses a restricted sanitized fragment, and disables embedded images/HTML/style and non-HTTP links.
 - `ToolCallBadge`: retained disclosure and states; escapes all dynamic fields, localizes labels and exposes expanded state.
-- `AutoScrollAnchor`: retained scroll/follow behavior and UiIcon; supports the nearest `data-chat-scroll` container, cleans up scroll/resize listeners and scheduled frames, and respects reduced motion. Falls back to document scrolling on other surfaces.
+- `AutoScrollAnchor`: retained scroll/follow behavior and UiIcon; supports the nearest `data-chat-scroll` container, observes viewport size changes, cleans up listeners/observers and scheduled frames, and respects reduced motion. The assistant places its jump control in a non-scrolling viewport wrapper above the composer. Falls back to document scrolling on other surfaces.
 
 The selected awesome-ui revision contains no repository-wide license file; no broader license is inferred here. Reuse was explicitly requested by the repository owner. The original source URLs and revision are retained for audit and updates.
 

@@ -93,6 +93,10 @@ export function mountNavigation(route, store) {
   button.addEventListener('click', onMenu);
   backdrop.addEventListener('click', onBackdrop);
   function onKeydown(event) {
+    if (document.querySelector('dialog:modal')) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') event.preventDefault();
+      return;
+    }
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
       event.preventDefault();
       if (mobile.matches) toggle(true); else if (collapsed) setCollapsed(false);

@@ -61,4 +61,15 @@ Baseline: 126 tests passed, including both real Chromium acceptance journeys, be
 
 Visual inspection completed for fleet overview, assistant welcome/conversation/artifact preview, focused chat, dark theme, 390px mobile chat and mobile inspector. A mobile accessible-name failure was reproduced and fixed with an explicit label on the icon-only inspector toggle; the same browser journey now passes.
 
-Local preview: `http://127.0.0.1:8796/assistant`, bound to loopback with isolated temporary fixture data and a deterministic provider. No production service or remote repository is changed.
+Initial local preview: `http://127.0.0.1:8796/assistant`, bound to loopback with isolated temporary fixture data and a deterministic provider. The initial implementation did not change production or the remote repository.
+
+## Production review follow-up
+
+- [x] Reproduce all four findings in a real browser before fixing: hidden submission errors, modal/navigation focus competition, a jump control outside the message viewport, and hidden executed-model provenance.
+- [x] Place action errors beside the composer, preserve request IDs/drafts and exact uncertain-retry payloads, and leave running state intact after a rejected cancellation.
+- [x] Use native dialog modality to isolate the whole console; suppress navigation shortcuts while modal, restore focus on close/resize, and close the dialog on teardown. Keep keyboard cycling within the panel. Explicitly fill the desktop grid row instead of inheriting the dialog's content height.
+- [x] Position the jump control in a non-scrolling message viewport wrapper; observe viewport size changes and release the observer on disconnect. Remove fixed composer-height offsets.
+- [x] Show the executed model independently from next-turn selection, resolving disabled catalog entries too and retaining the profile ID when no label is available.
+- [x] Delete three CSS declarations unconditionally superseded by later rules, with unchanged computed styles.
+
+Verification: the four new browser scenarios initially failed at their intended assertions. After root fixes the frontend suite passed **192 tests**; visual inspection then identified native dialog desktop sizing, whose new assertion failed at `376.75 !== 782` before the height correction. All four complete regression scenarios now pass, including submission/cancel failures, mobile keyboard/pointer isolation, desktop/mobile resize, same-document auth teardown, single/multiline editor geometry, cancellation controls, and historical model visibility. Full release validation follows rebase onto the latest public main.

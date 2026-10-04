@@ -21,6 +21,7 @@ class AutoScrollAnchor extends HTMLElement {
       window.removeEventListener("resize", this._scrollHandler);
       cancelAnimationFrame(this._frame);
     }
+    this._resizeObserver?.disconnect();
   }
 
   attributeChangedCallback(name, oldValue, newValue) {
@@ -54,6 +55,10 @@ class AutoScrollAnchor extends HTMLElement {
 
     this.scrollRoot.addEventListener("scroll", this._scrollHandler, { passive: true });
     window.addEventListener("resize", this._scrollHandler, { passive: true });
+    if (this.scrollRoot !== window) {
+      this._resizeObserver = new ResizeObserver(this._scrollHandler);
+      this._resizeObserver.observe(this.scrollRoot);
+    }
     this._scrollHandler();
     btn.addEventListener("click", () => this.scrollToBottom());
   }

@@ -36,16 +36,22 @@ export function mountInspector(root, heading, inspector, groups) {
   });
   const narrow = window.matchMedia?.('(max-width: 1100px)');
   let open = !narrow?.matches;
+  let modal = false;
   function setOpen(value, restoreFocus = false) {
+    const nextModal = value && !!narrow?.matches;
+    if (inspector.open && (!value || modal !== nextModal)) inspector.close();
     open = value; inspector.hidden = !open;
+    modal = nextModal;
     root.setAttribute('data-inspector-open', String(open));
     toggle.setAttribute('aria-expanded', String(open));
-    const modal = open && !!narrow?.matches;
-    const chat = root.querySelector?.('.assistant-chat');
-    if (chat) chat.inert = modal;
-    heading.inert = modal;
     inspector.setAttribute('role', modal ? 'dialog' : 'complementary');
     inspector.setAttribute('aria-modal', String(modal));
+    // The browser owns modality across the entire console, including the
+    // global navigation and topbar; no partial or stale inert state to restore.
+    if (open && !inspector.open) {
+      if (modal) inspector.showModal();
+      else inspector.setAttribute('open', '');
+    }
     if (restoreFocus) toggle.focus();
   }
   function select(id, reveal = false) {
@@ -71,9 +77,12 @@ export function mountInspector(root, heading, inspector, groups) {
   });
   toggle.addEventListener('click', () => { setOpen(!open); if (open) entries.find(entry => !entry.panel.hidden).button.focus(); });
   close.addEventListener('click', () => setOpen(false, true));
+  inspector.addEventListener('cancel', event => { event.preventDefault(); setOpen(false, true); });
   inspector.addEventListener('keydown', event => {
-    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setOpen(false, true); }
-    if (event.key === 'Tab' && narrow?.matches && open) {
+    if (event.key === 'Escape' && !modal) { event.preventDefault(); event.stopPropagation(); setOpen(false, true); }
+    // Keep keyboard cycling in the panel instead of yielding to browser chrome.
+    // Native modality still owns background focus and pointer isolation.
+    if (event.key === 'Tab' && modal) {
       const focusable = [...inspector.querySelectorAll('button, a, input, select, textarea, summary, [tabindex="0"]')].filter(node => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length);
       const first = focusable[0], last = focusable[focusable.length - 1];
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
@@ -83,5 +92,5 @@ export function mountInspector(root, heading, inspector, groups) {
   const onResize = () => setOpen(!narrow.matches, narrow.matches && inspector.contains(document.activeElement));
   narrow?.addEventListener('change', onResize);
   select(entries[0].id); setOpen(open);
-  return { select, dispose: () => narrow?.removeEventListener('change', onResize) };
+  return { select, dispose: () => { narrow?.removeEventListener('change', onResize); setOpen(false); } };
 }

@@ -22,6 +22,26 @@ ROOT = Path(__file__).resolve().parents[1]
 OWNER = 'browser@example.test'
 
 
+@pytest.mark.parametrize('scenario', ['action-errors', 'modal', 'scroll', 'model'])
+def test_assistant_workspace_regressions(tmp_path, scenario):
+    if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
+        pytest.skip('Set FLEET_PLAYWRIGHT_MODULE to run Chromium acceptance')
+    app = create_app(FleetConfig.from_root(
+        tmp_path, frontend_dir=ROOT / 'frontend', dev_operator=OWNER,
+        platform_enabled=True,
+    ))
+    server = make_server('127.0.0.1', 0, app, threaded=True)
+    serving = Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    try:
+        result = subprocess.run(['node', str(ROOT / 'tests/fixtures/frontend/workspace_browser.cjs'),
+            f'http://127.0.0.1:{server.server_port}', scenario],
+            capture_output=True, text=True, timeout=60)
+        assert result.returncode == 0, result.stdout + result.stderr
+    finally:
+        server.shutdown(); server.server_close(); serving.join(5)
+
+
 def test_assistant_auth_in_real_browser(tmp_path):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE to run Chromium acceptance')
