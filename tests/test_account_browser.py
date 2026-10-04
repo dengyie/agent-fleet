@@ -26,13 +26,13 @@ def test_account_browser(tmp_path):
     app = create_app(FleetConfig.from_root(tmp_path, frontend_dir=ROOT / 'frontend', platform_enabled=True,
         accounts={'enabled': True, 'origin': 'http://127.0.0.1', 'registration': 'invite', 'sender': sender}))
     app.extensions['accounts'].clock = lambda: clock[0]
-    app.extensions['accounts'].invite('browser@example.test')
+    invite_code = app.extensions['accounts'].invite('browser@example.test')
     server = make_server('127.0.0.1', 0, app, threaded=True)
     origin = f'http://127.0.0.1:{server.server_port}'
     app.config['ACCOUNT_ORIGIN'] = origin
     thread = Thread(target=server.serve_forever, daemon=True); thread.start()
     try:
-        result = subprocess.run(['node', str(ROOT / 'tests/fixtures/frontend/accounts_browser.cjs'), origin, str(mailbox)],
+        result = subprocess.run(['node', str(ROOT / 'tests/fixtures/frontend/accounts_browser.cjs'), origin, str(mailbox), invite_code],
                                 capture_output=True, text=True, timeout=90)
         assert result.returncode == 0, result.stdout + result.stderr
     finally:

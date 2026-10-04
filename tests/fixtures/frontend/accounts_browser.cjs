@@ -1,7 +1,7 @@
 const {chromium} = require(process.env.FLEET_PLAYWRIGHT_MODULE);
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const [origin, mailbox] = process.argv.slice(2);
+const [origin, mailbox, inviteCode] = process.argv.slice(2);
 (async () => {
   const browser = await chromium.launch({channel: process.env.FLEET_BROWSER_CHANNEL || 'chrome', headless: true});
   try {
@@ -20,6 +20,9 @@ const [origin, mailbox] = process.argv.slice(2);
     await page.getByRole('button', {name: '注册账号', exact: true}).click();
     await page.getByLabel('邮箱', {exact: true}).fill('browser@example.test');
     await page.getByLabel('昵称', {exact: true}).fill('Browser');
+    if (inviteCode) {
+      await page.getByLabel('邀请码', {exact: true}).fill(inviteCode);
+    }
     await page.getByRole('button', {name: '发送验证码', exact: true}).click();
     await page.getByText('验证码请求已受理。请查看邮箱；若未收到，请稍后重试或联系管理员。', {exact: true}).waitFor();
     const code = JSON.parse(fs.readFileSync(mailbox, 'utf8')).at(-1)[2];
