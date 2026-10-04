@@ -15,6 +15,7 @@ import {
   closeExecutionWindow, getExecutionWindowEvents,
 } from '../api/platform.js';
 
+import { mountInspector } from './assistant/workspace.js';
 import { el, clear, showError, renderMessages, renderEvents, renderExecutionWindow, renderArtifacts, renderLegacyProjection, renderUnknownCommands, memoryReference, renderMemoryItems, renderSelectedMemoryItems } from './assistant/panels.js';
 function token() { if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID(); return 'turn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2); }
 
@@ -23,8 +24,8 @@ export function mountAssistant(target, options) {
   // The shell supplies its verified identity; legacy operators have no account.
   var canAdminister = !options.account || options.account.role === 'admin';
   var root = el('div', 'assistant-view');
-  var heading = el('div', 'assistant-heading'); var title = el('div'); title.appendChild(el('h1', null, '主助手')); title.appendChild(el('p', 'meta', '持久运行工作区')); heading.appendChild(title); var status = el('span', 'assistant-run-status', '准备中'); heading.appendChild(status); root.appendChild(heading);
-  var controls = el('div', 'assistant-controls'); var model = document.createElement('select'); var workspace = document.createElement('select'); model.setAttribute('aria-label', '模型'); workspace.setAttribute('aria-label', '工作区'); controls.appendChild(el('label', null, '模型')); controls.appendChild(model); controls.appendChild(el('label', null, '工作区')); controls.appendChild(workspace); root.appendChild(controls);
+  var heading = el('div', 'assistant-heading'); var title = el('div'); var conversationTitle = el('h1', null, '新对话'); title.appendChild(conversationTitle); title.appendChild(el('p', 'meta', 'Agent Fleet · 主助手')); heading.appendChild(title); var status = el('span', 'assistant-run-status', '准备中'); heading.appendChild(status); root.appendChild(heading);
+  var controls = el('div', 'assistant-controls'); var model = document.createElement('select'); var workspace = document.createElement('select'); model.setAttribute('aria-label', '模型'); workspace.setAttribute('aria-label', '工作区'); model.id = 'assistant-model'; workspace.id = 'assistant-workspace'; var modelLabel = el('label', null, '模型'); modelLabel.setAttribute('for', model.id); controls.appendChild(modelLabel); controls.appendChild(model); var workspaceLabel = el('label', null, '工作区'); workspaceLabel.setAttribute('for', workspace.id); controls.appendChild(workspaceLabel); controls.appendChild(workspace); root.appendChild(controls);
   var runModel = el('span', 'assistant-run-model meta', ''); controls.appendChild(runModel);
   var memorySection = el('section', 'assistant-memory-context'); memorySection.appendChild(el('h2', 'assistant-section-title', '记忆上下文'));
   var memoryControls = el('div', 'assistant-memory-controls'); var memoryEnabled = document.createElement('input'); memoryEnabled.type = 'checkbox'; memoryEnabled.id = 'assistant-memory-enabled';
@@ -41,29 +42,45 @@ export function mountAssistant(target, options) {
   function legacyField(label, type, maxLength) { var wrapper = el('label', 'assistant-legacy-field'); wrapper.appendChild(el('span', null, label)); var field = document.createElement(type === 'textarea' ? 'textarea' : 'input'); if (type !== 'textarea') field.type = type; if (maxLength) field.maxLength = maxLength; field.required = true; wrapper.appendChild(field); legacyForm.appendChild(wrapper); return field; }
   var legacyMachine = legacyField('机器', 'text', 64); var legacyAgent = legacyField('Agent 类型', 'text', 32); var legacyProject = legacyField('项目', 'text', 64); var legacyInstruction = legacyField('任务说明', 'textarea', 2000); var legacyConfirm = document.createElement('input'); legacyConfirm.type = 'checkbox'; var confirmLabel = el('label', 'assistant-legacy-confirm'); confirmLabel.appendChild(legacyConfirm); confirmLabel.appendChild(el('span', null, '确认执行')); legacyForm.appendChild(confirmLabel); var legacySubmit = document.createElement('button'); legacySubmit.type = 'button'; legacySubmit.className = 'button-secondary'; legacySubmit.textContent = '提交旧任务'; legacyForm.appendChild(legacySubmit); var legacyStatus = el('div', 'assistant-legacy-status meta'); var legacyDetails = el('div', 'assistant-legacy-details'); legacyForm.appendChild(legacyStatus); legacyForm.appendChild(legacyDetails); legacySection.appendChild(legacyForm);
   var unknownSection = el('section', 'assistant-unknown-section'); unknownSection.hidden = true; unknownSection.appendChild(el('h2', 'assistant-section-title', '待检查的未知命令')); var unknownHost = el('div', 'assistant-unknown-commands'); unknownSection.appendChild(unknownHost); root.appendChild(historySection); root.appendChild(messageHost); root.appendChild(artifactSection); root.appendChild(windowSection); root.appendChild(legacySection); root.appendChild(el('h2', 'assistant-section-title', '运行事件')); root.appendChild(eventHost); root.appendChild(unknownSection);
-  var composer = el('form', 'assistant-composer'); var input = document.createElement('textarea'); input.rows = 3; input.maxLength = 32768; input.placeholder = '描述要完成的工作'; var send = document.createElement('button'); send.type = 'submit'; send.appendChild(uiIcon('play', { size: 14 })); send.appendChild(document.createTextNode('运行')); composer.appendChild(input); composer.appendChild(send); var cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'button-secondary'; cancel.appendChild(uiIcon('x', { size: 14 })); cancel.appendChild(document.createTextNode('取消运行')); cancel.hidden = true; composer.appendChild(cancel); root.appendChild(composer);
+  var composer = el('form', 'assistant-composer'); var input = document.createElement('textarea'); input.rows = 2; input.maxLength = 32768; input.placeholder = '描述你的目标，让助手开始工作…'; var send = document.createElement('button'); send.type = 'submit'; send.appendChild(uiIcon('play', { size: 14 })); send.appendChild(document.createTextNode('运行')); composer.appendChild(input); composer.appendChild(send); var cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'button-secondary'; cancel.appendChild(uiIcon('x', { size: 14 })); cancel.appendChild(document.createTextNode('取消运行')); cancel.hidden = true; composer.appendChild(cancel); root.appendChild(composer);
   var chat = el('section', 'assistant-chat');
-  var initializationHost = el('div', 'assistant-initialization panel'); initializationHost.hidden = true; initializationHost.setAttribute('role', 'alert'); chat.appendChild(initializationHost);
-  var intro = el('div', 'assistant-intro'); intro.appendChild(uiIcon('sparkles', {size: 30})); intro.appendChild(el('h2', null, '今天，我们一起完成什么？')); intro.appendChild(el('p', null, '描述目标，选择工作区。助手的执行过程与产物会保留在这里。'));
+  var thread = el('div', 'assistant-thread'); thread.setAttribute('data-chat-scroll', ''); thread.setAttribute('aria-label', '对话消息'); thread.tabIndex = 0;
+  var initializationHost = el('div', 'assistant-initialization panel'); initializationHost.hidden = true; initializationHost.setAttribute('role', 'alert'); thread.appendChild(initializationHost);
+  var intro = el('div', 'assistant-intro'); intro.appendChild(uiIcon('sparkles', {size: 30})); intro.appendChild(el('p', 'assistant-welcome-label', '你的想法，从这里开始')); intro.appendChild(el('h2', null, '今天，我们一起完成什么？')); intro.appendChild(el('p', null, '从一个问题到一份交付，把想法变成进展。'));
   var suggestions = el('div', 'assistant-suggestions');
-  ['梳理工作区文件，生成一份项目摘要', '检查服务健康，列出需要关注的问题', '整理最近的工作，生成交付说明'].forEach(function (text) { var chip = el('button', null, text); chip.type = 'button'; chip.addEventListener('click', function () { if (!input.readOnly) { input.value = text; input.focus(); } }); suggestions.appendChild(chip); });
-  intro.appendChild(suggestions); chat.appendChild(intro); chat.appendChild(messageHost);
-  var scrollAnchor = el('auto-scroll-anchor'); chat.appendChild(scrollAnchor);
-  var prompt = el('chat-prompt-input'); composer.insertBefore(prompt, input); prompt.appendChild(input); prompt.appendChild(send); prompt.appendChild(cancel);
+  [
+    ['code', '了解一个项目', '梳理结构，快速进入工作状态', '梳理工作区文件，生成一份项目摘要'],
+    ['globe', '检查服务状态', '找到值得关注的问题', '检查服务健康，列出需要关注的问题'],
+    ['layers', '整理工作成果', '把最近的进展变成交付说明', '整理最近的工作，生成交付说明']
+  ].forEach(function (item) {
+    var chip = el('button', 'assistant-suggestion'); chip.type = 'button'; chip.appendChild(uiIcon(item[0], {size: 19}));
+    chip.appendChild(el('strong', null, item[1])); chip.appendChild(el('span', null, item[2]));
+    chip.addEventListener('click', function () { if (!input.readOnly) { input.value = item[3]; input.dispatchEvent(new Event('input')); input.focus(); } }); suggestions.appendChild(chip);
+  });
+  intro.appendChild(suggestions); thread.appendChild(intro); thread.appendChild(messageHost);
+  var scrollAnchor = el('auto-scroll-anchor'); thread.appendChild(scrollAnchor); chat.appendChild(thread);
+  var prompt = el('chat-prompt-input'); composer.insertBefore(prompt, input); prompt.appendChild(input);
+  var composerTools = el('div', 'composer-tools'); composerTools.appendChild(controls);
+  var composerActions = el('div', 'composer-actions'); composerActions.appendChild(cancel); composerActions.appendChild(send); composerTools.appendChild(composerActions); prompt.appendChild(composerTools);
   input.setAttribute('aria-label', '给助手的任务'); send.setAttribute('aria-label', '发送任务');
-  chat.appendChild(composer); chat.appendChild(el('p', 'composer-hint', 'Enter 发送 · Shift + Enter 换行 · 关闭页面后任务继续运行'));
+  var composerDock = el('div', 'composer-dock'); composerDock.appendChild(composer); composerDock.appendChild(el('p', 'composer-hint', 'Enter 发送 · Shift + Enter 换行 · 任务会在后台继续运行')); chat.appendChild(composerDock);
   var inspector = el('aside', 'assistant-inspector'); inspector.setAttribute('aria-label', '运行与产物');
-  function disclosure(section, label, open) { var detail = el('details', 'assistant-disclosure'); detail.open = !!open; detail.appendChild(el('summary', null, label)); detail.appendChild(section); inspector.appendChild(detail); }
-  disclosure(artifactSection, '工作区产物', true);
-  if (canAdminister) disclosure(windowSection, '执行窗口', true);
-  var eventSection = el('section'); eventSection.appendChild(eventHost); disclosure(eventSection, '运行记录', true);
-  if (canAdminister) disclosure(memorySection, '记忆上下文', false);
-  disclosure(historySection, '最近对话', false);
-  if (canAdminister) {
-    disclosure(legacySection, '关联任务', false);
-    inspector.appendChild(unknownSection);
-  }
-  clear(root); root.appendChild(heading); root.appendChild(controls); root.appendChild(chat); root.appendChild(inspector); target.appendChild(root);
+  function disclosure(section, label, open) { var detail = el('details', 'assistant-disclosure'); detail.open = !!open; detail.appendChild(el('summary', null, label)); detail.appendChild(section); return detail; }
+  var eventSection = el('section'); eventSection.appendChild(eventHost);
+  var executionSections = [];
+  if (canAdminister) executionSections.push(disclosure(windowSection, '执行窗口', true));
+  executionSections.push(disclosure(eventSection, '运行记录', true));
+  if (canAdminister) executionSections.push(unknownSection);
+  var contextSections = [];
+  if (canAdminister) contextSections.push(disclosure(memorySection, '记忆上下文', true));
+  contextSections.push(disclosure(historySection, '最近对话', true));
+  if (canAdminister) contextSections.push(disclosure(legacySection, '关联任务', false));
+  var inspectorUi = mountInspector(root, heading, inspector, [
+    {id: 'artifacts', title: '产物', sections: [artifactSection]},
+    {id: 'activity', title: '运行', sections: executionSections},
+    {id: 'context', title: '上下文', sections: contextSections}
+  ]);
+  clear(root); root.appendChild(heading); root.appendChild(chat); root.appendChild(inspector); target.appendChild(root);
   var conversationId = options.conversationId || null; var conversationWorkspaceId = null; var activeRunId = null; var latestRunId = null; var cursor = 0; var polling = false; var windowEventCursor = 0; var windowPolling = false; var windowState = { loading: false, error: null, window: null, mode: 'disconnected', events: [], holderId: token(), leaseToken: null, leaseExpiresAt: 0 };
   var disposed = false; var timers = new Set();
   function later(fn, delay) { if (disposed) return; var timer = setTimeout(function () { timers.delete(timer); if (!disposed) fn(); }, delay); timers.add(timer); }
@@ -74,6 +91,7 @@ export function mountAssistant(target, options) {
   function setStatus(text) {
     var names = {queued: '排队中', running: '运行中', waiting_node: '等待节点', waiting_approval: '等待审批', waiting_task: '等待任务', cancelling: '正在取消', succeeded: '已完成', failed: '执行失败', unknown: '结果待确认', cancelled: '已取消'};
     status.textContent = names[text] || text;
+    if (text === 'failed' || text === 'unknown') inspectorUi.select('activity', true);
     status.setAttribute('data-state', text); status.setAttribute('role', 'status');
     lockPendingTurn();
   }
@@ -86,7 +104,7 @@ export function mountAssistant(target, options) {
     input.readOnly = locked || !!activeRunId; model.disabled = locked || !catalogReady; workspace.disabled = locked || !catalogReady || !!conversationId;
     memoryEnabled.disabled = locked;
     send.disabled = submitting || !!activeRunId || !catalogReady;
-    send.textContent = pendingTurn && !submitting ? '重试提交' : '运行';
+    clear(send); send.appendChild(uiIcon('arrow-up', {size: 17})); send.appendChild(el('span', null, pendingTurn && !submitting ? '重试提交' : '发送'));
   }
   function setWindowState(next) {
     windowState = Object.assign({}, windowState, next || {});
@@ -311,6 +329,9 @@ export function mountAssistant(target, options) {
     if (!conversationId) return;
     var data = await getConversation(conversationId);
     var conversation = data.conversation || {};
+    var firstMessage = (Array.isArray(conversation.messages) ? conversation.messages : []).find(function (message) { return message.role === 'user'; });
+    conversationTitle.textContent = conversation.title || (firstMessage && firstMessage.content ? firstMessage.content.slice(0, 60) : '当前对话');
+    conversationTitle.title = conversationTitle.textContent;
     renderMessages(messageHost, conversation.messages); scrollAnchor.setAttribute('is-streaming', ''); intro.hidden = Boolean(conversation.messages && conversation.messages.length);
     var nextWorkspaceId = typeof conversation.workspace_id === 'string' ? conversation.workspace_id : null;
     if (conversationWorkspaceId !== nextWorkspaceId) {
@@ -457,5 +478,5 @@ export function mountAssistant(target, options) {
     }
   }
   initialize();
-  return function teardown() { disposed = true; timers.forEach(clearTimeout); timers.clear(); };
+  return function teardown() { disposed = true; inspectorUi.dispose(); timers.forEach(clearTimeout); timers.clear(); };
 }

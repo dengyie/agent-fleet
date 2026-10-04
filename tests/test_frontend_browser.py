@@ -100,6 +100,9 @@ def test_console_in_real_browser(tmp_path):
     repo.upsert_model(OWNER, {'profile_id': 'fixture', 'provider': 'deterministic', 'model': '本地验收模型'})
     repo.upsert_workspace(OWNER, {'workspace_id': 'workspace', 'name': '我的工作区', 'root_path': str(tmp_path / 'workspace')})
     repo.update_defaults(OWNER, {'model_profile_id': 'fixture', 'workspace_id': 'workspace'}, 0)
+    artifact = tmp_path / 'workspace-report.md'
+    artifact.write_text('# 工作区报告\n\n浏览器产物预览验收。', encoding='utf-8')
+    app.extensions['fleet']['services']['platform_artifacts'].put_file(OWNER, 'workspace', artifact)
     class Provider:
         def complete(self, messages, tools):
             if messages[-1].get('content') == 'diagnostic-failure':

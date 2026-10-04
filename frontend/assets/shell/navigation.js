@@ -38,12 +38,45 @@ export function mountNavigation(route, store) {
   const backdrop = document.getElementById('sidebar-backdrop');
   const button = document.getElementById('mobile-menu');
   const mobile = window.matchMedia('(max-width: 767px)');
+  const collapse = document.getElementById('sidebar-collapse');
+  const expand = document.getElementById('desktop-menu');
+  const search = document.getElementById('conversation-search');
+  const searchStatus = document.getElementById('conversation-search-status');
+  let collapsed = false;
+  try { collapsed = localStorage.getItem('fleet-sidebar-collapsed') === 'true'; } catch (_) {}
+  function applyCollapse() {
+    document.body.classList.toggle('sidebar-collapsed', collapsed && !mobile.matches);
+    sidebar.inert = mobile.matches ? !sidebar.classList.contains('open') : collapsed;
+  }
+  function setCollapsed(value) {
+    collapsed = value;
+    try { localStorage.setItem('fleet-sidebar-collapsed', String(value)); } catch (_) {}
+    applyCollapse();
+    (value ? expand : collapse).focus();
+  }
+  const onCollapse = () => mobile.matches ? toggle(false) : setCollapsed(true);
+  const onExpand = () => setCollapsed(false);
+  collapse.addEventListener('click', onCollapse);
+  expand.addEventListener('click', onExpand);
+  function filterHistory() {
+    const query = search.value.trim().toLocaleLowerCase();
+    const links = [...document.querySelectorAll('#sidebar-conversations a')];
+    let count = 0;
+    for (const link of links) {
+      link.hidden = !link.textContent.toLocaleLowerCase().includes(query);
+      if (!link.hidden) count++;
+    }
+    searchStatus.hidden = !query || !links.length;
+    searchStatus.textContent = count ? `找到 ${count} 条对话` : '没有匹配的对话';
+  }
+  search.addEventListener('input', filterHistory);
   function resetDrawer() {
     sidebar.classList.remove('open');
     sidebar.inert = mobile.matches;
     backdrop.hidden = true;
     button.setAttribute('aria-expanded', 'false');
     document.body.classList.remove('navigation-open');
+    applyCollapse();
   }
   resetDrawer();
   mobile.addEventListener('change', resetDrawer);
@@ -60,10 +93,16 @@ export function mountNavigation(route, store) {
   button.addEventListener('click', onMenu);
   backdrop.addEventListener('click', onBackdrop);
   function onKeydown(event) {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+      event.preventDefault();
+      if (mobile.matches) toggle(true); else if (collapsed) setCollapsed(false);
+      search.focus();
+      return;
+    }
     if (button.getAttribute('aria-expanded') !== 'true') return;
     if (event.key === 'Escape') toggle(false);
     if (event.key === 'Tab') {
-      const links = [...sidebar.querySelectorAll('a, button')];
+      const links = [...sidebar.querySelectorAll('a, button, input')].filter(node => !node.hidden && node.getClientRects().length);
       const first = links[0], last = links[links.length - 1];
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
@@ -88,12 +127,14 @@ export function mountNavigation(route, store) {
         if (resolveRoute().id === row.conversation_id) link.setAttribute('aria-current', 'page');
         list.appendChild(link);
       }
-      if (!list.childElementCount) list.textContent = '暂无 Hub 历史对话';
+      if (!list.childElementCount) { const empty = document.createElement('p'); empty.className = 'sidebar-empty'; empty.textContent = '新对话会保存在这里'; list.appendChild(empty); }
+      filterHistory();
     } catch (error) {
       if (disposed || request !== historyRequest) return;
       list.replaceChildren();
+      searchStatus.hidden = true;
       const message = document.createElement('p'); message.className = 'sidebar-empty';
-      message.textContent = error.status === 401 ? '登录后查看 Hub 历史对话' : '历史对话加载失败';
+      message.textContent = error.status === 401 ? '登录后查看最近对话' : '历史对话加载失败';
       const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = '重试';
       retry.addEventListener('click', refreshHistory);
       list.append(message, retry);
@@ -129,6 +170,9 @@ export function mountNavigation(route, store) {
   });
   return () => {
     disposed = true;
+    collapse.removeEventListener('click', onCollapse);
+    expand.removeEventListener('click', onExpand);
+    search.removeEventListener('input', filterHistory);
     window.removeEventListener('fleet-conversations-updated', refreshHistory);
     window.removeEventListener('focus', refreshHistory);
     unsubscribe();

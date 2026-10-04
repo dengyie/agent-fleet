@@ -86,7 +86,12 @@ export function renderArtifacts(host, state, onPreview) {
   if (state.loading) { host.appendChild(el('div', 'assistant-artifact-status meta', '加载中')); return; }
   if (state.error) { host.appendChild(el('div', 'assistant-artifact-status err', state.error)); return; }
   var artifacts = Array.isArray(state.artifacts) ? state.artifacts : [];
-  if (!artifacts.length) { host.appendChild(el('div', 'assistant-artifact-status meta', '暂无产物')); return; }
+  if (!artifacts.length) {
+    var empty = el('div', 'assistant-artifact-empty'); empty.appendChild(uiIcon('layers', {size: 28}));
+    empty.appendChild(el('strong', null, '工作成果，会出现在这里'));
+    empty.appendChild(el('p', null, '助手生成的文件将保存在工作区，你可以在这里预览和下载。'));
+    host.appendChild(empty); return;
+  }
   var rendered = 0;
   artifacts.forEach(function (artifact) {
     if (!artifact || typeof artifact !== 'object' || typeof artifact.artifact_id !== 'string' || !artifact.artifact_id || typeof artifact.name !== 'string' || !artifact.name) return;
@@ -94,7 +99,7 @@ export function renderArtifacts(host, state, onPreview) {
     try { href = getPlatformArtifactContentUrl(artifact.artifact_id, state.workspaceId); } catch (error) { return; }
     var row = el('div', 'assistant-artifact');
     var copy = el('div', 'assistant-artifact-copy');
-    copy.appendChild(el('strong', null, artifact.name));
+    var artifactTitle = el('div', 'assistant-artifact-title'); artifactTitle.appendChild(uiIcon('code', {size: 16})); artifactTitle.appendChild(el('strong', null, artifact.name)); copy.appendChild(artifactTitle);
     copy.appendChild(el('span', 'assistant-artifact-meta', formatArtifactSize(artifact.size) + ' · ' + (artifact.content_type || '文件')));
     if (typeof artifact.sha256 === 'string' && artifact.sha256) copy.appendChild(el('span', 'assistant-artifact-digest', 'SHA-256 ' + artifact.sha256.slice(0, 16)));
     row.appendChild(copy);
