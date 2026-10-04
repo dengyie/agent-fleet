@@ -11,8 +11,14 @@ export function mountAccountLogin(options, returnTo) {
   host.querySelectorAll('[data-login-icon]').forEach(slot => slot.replaceChildren(uiIcon(slot.dataset.loginIcon, {size: 18})));
   let mode = 'login';
   let busy = false;
+  let codeAttempts = 0;
+  let hcaptchaWidgetId = null;
+  let turnstileWidgetId = null;
+
   function render(message = '') {
     form.replaceChildren();
+    hcaptchaWidgetId = null;
+    turnstileWidgetId = null;
     title.textContent = {login: '登录工作空间', register: '创建账号', reset: '找回密码'}[mode];
     document.title = title.textContent + ' · Agent Fleet';
     const fields = {};
@@ -26,25 +32,95 @@ export function mountAccountLogin(options, returnTo) {
     };
     field('email', mode === 'login' ? '账号或邮箱' : '邮箱',
       mode === 'login' ? 'text' : 'email', mode === 'login' ? 'username' : 'email').maxLength = 254;
-    if (mode === 'register') field('name', '昵称', 'text', 'nickname').maxLength = 80;
+    if (mode === 'register') {
+      field('name', '昵称', 'text', 'nickname').maxLength = 80;
+      if (options.registration === 'invite') {
+        const inviteInput = field('invite_code', '邀请码', 'text', 'off');
+        inviteInput.maxLength = 64;
+        inviteInput.placeholder = '请输入管理员提供的邀请码（如 inv_...）';
+        const note = document.createElement('p');
+        note.className = 'account-hint';
+        note.textContent = '当前工作空间为邀请制，请向管理员索取一次性邀请码。';
+        form.append(note);
+      }
+    }
     if (mode !== 'login') {
       const code = field('code', '邮箱验证码', 'text', 'one-time-code'); code.pattern = '[0-9]{6}'; code.maxLength = 6; code.inputMode = 'numeric';
+      
+      const captchaWrapper = document.createElement('div');
+      captchaWrapper.className = 'account-captcha-container';
+      captchaWrapper.style.margin = '10px 0';
+      form.append(captchaWrapper);
+
+      const ensureHcaptcha = () => {
+        if (!options.hcaptcha_sitekey) return null;
+        if (typeof window.hcaptcha === 'undefined') {
+          status.textContent = '正在加载人机验证服务…若长时间未显示，请检查网络或关闭广告拦截插件。';
+          return null;
+        }
+        if (hcaptchaWidgetId !== null) return hcaptchaWidgetId;
+        const box = document.createElement('div');
+        box.id = 'hcaptcha-slot';
+        captchaWrapper.append(box);
+        try {
+          hcaptchaWidgetId = window.hcaptcha.render(box, {
+            sitekey: options.hcaptcha_sitekey,
+            size: 'normal',
+            theme: document.documentElement.getAttribute('data-resolved-theme') || 'light'
+          });
+          return hcaptchaWidgetId;
+        } catch (e) {
+          status.textContent = '人机验证组件渲染失败，请刷新页面重试';
+          return null;
+        }
+      };
+
       const send = document.createElement('button'); send.type = 'button'; send.textContent = '发送验证码';
       send.disabled = !options.mail_available;
       send.addEventListener('click', async () => {
         if (!fields.email.reportValidity() || busy) return;
+        if (mode === 'register' && options.registration === 'invite' && fields.invite_code && !fields.invite_code.reportValidity()) return;
+        
+        // If consecutive attempts reach 3 or more, proactively render hCaptcha
+        if (codeAttempts >= 2 && options.hcaptcha_sitekey) {
+          ensureHcaptcha();
+        }
+
         busy = true; send.disabled = true;
         try {
-          const response = await accountRequest('code', {email: fields.email.value, purpose: mode === 'register' ? 'register' : 'reset'});
+          const payload = {email: fields.email.value, purpose: mode === 'register' ? 'register' : 'reset'};
+          if (fields.invite_code && fields.invite_code.value.trim()) payload.invite_code = fields.invite_code.value.trim();
+          
+          if (hcaptchaWidgetId !== null && typeof window.hcaptcha !== 'undefined') {
+            const hresp = window.hcaptcha.getResponse(hcaptchaWidgetId);
+            if (hresp) payload.hcaptcha_response = hresp;
+          }
+          if (options.turnstile_sitekey && typeof window.turnstile !== 'undefined' && turnstileWidgetId !== null) {
+            const tresp = window.turnstile.getResponse(turnstileWidgetId);
+            if (tresp) payload.turnstile_response = tresp;
+          }
+
+          const response = await accountRequest('code', payload);
+          codeAttempts += 1;
           status.textContent = response.detail;
-        } catch (error) { status.textContent = error.detail || '验证码发送失败'; }
+          if (hcaptchaWidgetId !== null && typeof window.hcaptcha !== 'undefined') {
+            window.hcaptcha.reset(hcaptchaWidgetId);
+          }
+        } catch (error) {
+          codeAttempts += 1;
+          if (error.code === 'captcha_required' || error.code === 'invalid_captcha') {
+            ensureHcaptcha();
+            if (hcaptchaWidgetId !== null && typeof window.hcaptcha !== 'undefined') {
+              window.hcaptcha.reset(hcaptchaWidgetId);
+            }
+          }
+          status.textContent = error.detail || '验证码发送失败';
+        }
         finally { busy = false; send.disabled = !options.mail_available; }
       });
       form.append(send);
       if (!options.mail_available) {
-        const note = document.createElement('p'); note.textContent = '邮件服务尚未配置，请联系管理员。'; form.append(note);
-      } else if (mode === 'register' && options.registration === 'invite') {
-        const note = document.createElement('p'); note.textContent = '目前仅接受受邀邮箱注册，请先联系管理员。'; form.append(note);
+        const note = document.createElement('p'); note.className = 'account-hint'; note.textContent = '邮件服务尚未配置，请联系管理员。'; form.append(note);
       }
     }
     const password = field('password', mode === 'reset' ? '新密码' : '密码', 'password', mode === 'login' ? 'current-password' : 'new-password');

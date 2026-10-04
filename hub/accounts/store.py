@@ -70,7 +70,9 @@ class AccountStore:
                     expires REAL NOT NULL, attempts INTEGER NOT NULL,
                     PRIMARY KEY(email,purpose));
                 CREATE TABLE IF NOT EXISTS invitations (
-                    email TEXT PRIMARY KEY, expires REAL NOT NULL);
+                    code TEXT PRIMARY KEY, email TEXT, created REAL NOT NULL, expires REAL NOT NULL,
+                    claimed_by TEXT, claimed_at REAL);
+                CREATE INDEX IF NOT EXISTS invitations_email ON invitations(email);
                 CREATE TABLE IF NOT EXISTS limits (
                     key TEXT PRIMARY KEY, start REAL NOT NULL, count INTEGER NOT NULL);
             ''')
@@ -82,6 +84,22 @@ class AccountStore:
             if 'username' not in {row['name'] for row in db.execute('PRAGMA table_info(users)')}:
                 db.execute('ALTER TABLE users ADD COLUMN username TEXT')
             db.execute('CREATE UNIQUE INDEX IF NOT EXISTS users_username ON users(username)')
+            inv_cols = {row['name'] for row in db.execute('PRAGMA table_info(invitations)')}
+            if 'code' not in inv_cols:
+                # Migrate legacy email-primary-key invitations table to code-primary-key
+                db.execute('''
+                    CREATE TABLE IF NOT EXISTS invitations_new (
+                        code TEXT PRIMARY KEY, email TEXT, created REAL NOT NULL, expires REAL NOT NULL,
+                        claimed_by TEXT, claimed_at REAL)
+                ''')
+                now_init = self.clock()
+                for row in db.execute('SELECT email, expires FROM invitations').fetchall():
+                    legacy_code = 'inv_' + secrets.token_hex(8)
+                    db.execute('INSERT OR REPLACE INTO invitations_new VALUES (?,?,?,?,NULL,NULL)',
+                               (legacy_code, row['email'], now_init, row['expires']))
+                db.execute('DROP TABLE invitations')
+                db.execute('ALTER TABLE invitations_new RENAME TO invitations')
+                db.execute('CREATE INDEX IF NOT EXISTS invitations_email ON invitations(email)')
         self.path.chmod(0o600)
         self.dummy_hash = generate_password_hash(secrets.token_urlsafe(32), method='scrypt')
 
@@ -104,6 +122,18 @@ class AccountStore:
         with self.connect() as db:
             self._limit(db, key, maximum, window, self.clock())
 
+    def check_and_increment_limit(self, key, window):
+        now = self.clock()
+        with self.connect() as db:
+            db.execute('DELETE FROM limits WHERE start < ?', (now - 86400,))
+            row = db.execute('SELECT * FROM limits WHERE key=?', (key,)).fetchone()
+            if not row or row['start'] <= now - window:
+                db.execute('INSERT OR REPLACE INTO limits VALUES (?,?,1)', (key, now))
+                return 0
+            count = row['count']
+            db.execute('UPDATE limits SET count=count+1 WHERE key=?', (key,))
+            return count
+
     @staticmethod
     def _limit(db, key, maximum, window, now):
         db.execute('DELETE FROM limits WHERE start < ?', (now - 86400,))
@@ -119,12 +149,24 @@ class AccountStore:
     def public(row):
         return {k: row[k] for k in ('id', 'email', 'name', 'role', 'active', 'created', 'revision')}
 
-    def invite(self, email):
-        email = email_address(email)
+    def invite(self, email=None):
+        email_clean = email_address(email) if email else None
+        code = 'inv_' + secrets.token_hex(8)
+        now = self.clock()
         with self.connect() as db:
-            db.execute('INSERT OR REPLACE INTO invitations VALUES (?,?)', (email, self.clock() + 604800))
+            db.execute('INSERT OR REPLACE INTO invitations VALUES (?,?,?,?,NULL,NULL)',
+                       (code, email_clean, now, now + 604800))
+        return code
 
-    def issue_code(self, email, purpose, registration, sender):
+    def invitations(self):
+        with self.connect() as db:
+            now = self.clock()
+            rows = db.execute('SELECT code, email, created, expires, claimed_by, claimed_at '
+                              'FROM invitations WHERE expires > ? AND claimed_by IS NULL ORDER BY created DESC LIMIT 100',
+                              (now,)).fetchall()
+            return [{'code': r['code'], 'email': r['email'], 'created': r['created'], 'expires': r['expires']} for r in rows]
+
+    def issue_code(self, email, purpose, registration, sender, invite_code=None):
         email = email_address(email)
         if purpose not in ('register', 'reset'):
             fail('invalid_purpose', '验证码用途无效')
@@ -134,10 +176,37 @@ class AccountStore:
             now = self.clock()
             db.execute('DELETE FROM challenges WHERE expires<=?', (now,))
             user = db.execute('SELECT * FROM users WHERE email=?', (email,)).fetchone()
-            invitation = db.execute('SELECT 1 FROM invitations WHERE email=? AND expires>?', (email, now)).fetchone()
+            
+            # Check invitation eligibility
+            invitation = None
+            if purpose == 'register' and not user:
+                if registration == 'open':
+                    invitation = True
+                else:
+                    # Invite-only registration requires a valid, unclaimed, unexpired invite code
+                    cleaned_inv = (invite_code.strip() if isinstance(invite_code, str) else '')
+                    if cleaned_inv:
+                        inv_row = db.execute('SELECT * FROM invitations WHERE code=? AND expires>? AND claimed_by IS NULL',
+                                             (cleaned_inv, now)).fetchone()
+                        if inv_row and (not inv_row['email'] or inv_row['email'] == email):
+                            invitation = inv_row
+                    if not invitation:
+                        # Legacy fallback: check if email was explicitly invited
+                        inv_row = db.execute('SELECT * FROM invitations WHERE email=? AND expires>? AND claimed_by IS NULL',
+                                             (email, now)).fetchone()
+                        if inv_row:
+                            invitation = inv_row
+
             eligible = (purpose == 'reset' and user and user['active']) or (
-                purpose == 'register' and not user and (registration == 'open' or invitation))
+                purpose == 'register' and not user and bool(invitation))
             if eligible:
+                # If an open invitation was used without pre-bound email, lock it to this target email
+                # and limit code generations per invite token to prevent mass SMTP bombing
+                if purpose == 'register' and isinstance(invitation, sqlite3.Row):
+                    self._limit(db, 'mail-invite:' + invitation['code'], 5, 86400, now)
+                    if not invitation['email']:
+                        db.execute('UPDATE invitations SET email=? WHERE code=? AND email IS NULL',
+                                   (email, invitation['code']))
                 # Eligibility, both reservations and the new grant commit together.
                 self._limit(db, 'mail-minute:' + email, 1, 60, now)
                 self._limit(db, 'mail-day:' + email, 10, 86400, now)
@@ -151,7 +220,7 @@ class AccountStore:
                     db.execute('DELETE FROM challenges WHERE email=? AND purpose=? AND code=?', (email, purpose, hashed))
                 fail('mail_unavailable', '邮件暂时无法发送，请稍后重试', 503)
 
-    def complete_code(self, email, purpose, code, password, *, registration='invite', name=''):
+    def complete_code(self, email, purpose, code, password, *, registration='invite', name='', invite_code=None):
         email = email_address(email)
         hashed = password_hash(password)
         if not isinstance(code, str) or not re.fullmatch(r'\d{6}', code):
@@ -166,11 +235,30 @@ class AccountStore:
                 db.execute('UPDATE challenges SET attempts=attempts-1 WHERE email=? AND purpose=?', (email, purpose))
                 if check_password_hash(row['code'], code):
                     user = db.execute('SELECT * FROM users WHERE email=?', (email,)).fetchone()
-                    invitation = db.execute('SELECT 1 FROM invitations WHERE email=? AND expires>?', (email, now)).fetchone()
-                    if purpose == 'register' and not user and (registration == 'open' or invitation):
+                    
+                    invitation_code_to_consume = None
+                    if purpose == 'register' and not user:
+                        if registration == 'open':
+                            invitation_code_to_consume = True
+                        else:
+                            cleaned_inv = (invite_code.strip() if isinstance(invite_code, str) else '')
+                            if cleaned_inv:
+                                inv_row = db.execute('SELECT * FROM invitations WHERE code=? AND expires>? AND claimed_by IS NULL',
+                                                     (cleaned_inv, now)).fetchone()
+                                if inv_row and (not inv_row['email'] or inv_row['email'] == email):
+                                    invitation_code_to_consume = inv_row['code']
+                            if not invitation_code_to_consume:
+                                inv_row = db.execute('SELECT * FROM invitations WHERE email=? AND expires>? AND claimed_by IS NULL',
+                                                     (email, now)).fetchone()
+                                if inv_row:
+                                    invitation_code_to_consume = inv_row['code']
+
+                    if purpose == 'register' and not user and invitation_code_to_consume:
                         db.execute('INSERT INTO users (id,email,name,password,role,active,created) VALUES (?,?,?,?,?,1,?)',
                                    ('acct_' + uuid.uuid4().hex, email, name.strip() or email.split('@')[0], hashed, 'user', now))
-                        db.execute('DELETE FROM invitations WHERE email=?', (email,))
+                        if isinstance(invitation_code_to_consume, str):
+                            db.execute('UPDATE invitations SET claimed_by=?, claimed_at=? WHERE code=?',
+                                       (email, now, invitation_code_to_consume))
                         success = True
                     elif purpose == 'reset' and user and user['active']:
                         self._replace_password(db, user, hashed)

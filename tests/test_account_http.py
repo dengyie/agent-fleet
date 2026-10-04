@@ -72,6 +72,13 @@ def test_administrator_controls_and_revocation(account_app):
     app.extensions['accounts'].bootstrap_admin('admin@example.test', PASSWORD)
     admin, user = app.test_client(), app.test_client()
     assert post(admin, 'login', {'email': 'admin@example.test', 'password': PASSWORD}).status_code == 200
+    # Test admin invitations creation & list
+    inv_res = post(admin, 'invitations', {})
+    assert inv_res.status_code == 200 and 'code' in inv_res.json
+    code = inv_res.json['code']
+    list_res = admin.get('/api/accounts/invitations', base_url=ORIGIN)
+    assert list_res.status_code == 200 and len(list_res.json['invitations']) >= 1
+    assert any(i['code'] == code for i in list_res.json['invitations'])
     person = signup(user, mail, 'a@example.test').json['user']
     assert admin.get('/api/accounts/users', base_url=ORIGIN).status_code == 200
     assert post(admin, 'users/' + person['id'], {'active': False, 'revision': person['revision']}).status_code == 200
