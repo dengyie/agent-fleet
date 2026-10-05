@@ -208,14 +208,14 @@ def test_accepted_nonstream_read_failure_is_closed_and_never_retried(monkeypatch
     sent, closed, events = [], [], []
     class Accepted:
         status, headers = 200, {}
-        def read(self, size):
+        def read1(self, size):
             raise failure('body interrupted after HTTP 200')
         def close(self):
             closed.append(True)
     def send(*args, **kwargs):
         sent.append(True)
         return Accepted()
-    monkeypatch.setattr(adapter, 'urlopen', send)
+    monkeypatch.setattr(adapter, 'open_http', send)
     p = adapter.OpenAICompatibleProvider(model='fixture', endpoint='http://fixture/v1/chat/completions',
         api_key='fixture', allow_network=True, max_retries=2, sleeper=lambda _: None)
     with pytest.raises(ProviderError):

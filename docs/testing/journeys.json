@@ -112,7 +112,18 @@
         "tests/test_provider_contract_fidelity.py::test_provider_failure_keeps_safe_root_cause",
         "tests/test_provider_contract_fidelity.py::test_urllib_connection_and_body_causes_are_preserved",
         "tests/test_provider_contract_fidelity.py::test_parse_failure_keeps_cause_without_raw_payload",
-        "tests/test_provider_contract_fidelity.py::test_secret_resolution_keeps_cause_without_exposing_value"
+        "tests/test_provider_contract_fidelity.py::test_secret_resolution_keeps_cause_without_exposing_value",
+        "tests/test_provider_transport_boundaries.py::test_redirect_never_forwards_credentials_or_replays",
+        "tests/test_provider_transport_boundaries.py::test_chunked_done_finishes_before_http_eof_and_closes_socket",
+        "tests/test_provider_transport_boundaries.py::test_trickle_is_bounded_by_total_deadline_without_replay",
+        "tests/test_provider_transport_boundaries.py::test_worker_secret_failure_retains_safe_cause_chain",
+        "tests/test_provider_transport_boundaries.py::test_request_timeout_releases_scheduler_slot_and_next_run_executes",
+        "tests/test_http_transport.py::test_tls_verification_and_shutdown",
+        "tests/test_http_transport.py::test_https_downgrade_redirect_is_not_followed",
+        "tests/test_http_transport.py::test_system_proxy_and_connect_preserve_origin_credentials",
+        "tests/test_http_transport.py::test_unread_response_close_reclaims_socket_and_timer",
+        "tests/test_http_transport.py::test_dns_saturation_is_bounded_and_late_resolution_cannot_dispatch",
+        "tests/test_http_transport.py::test_tls_handshake_and_dns_share_deadline"
       ]
     },
     {
@@ -138,7 +149,8 @@
         "tests/test_platform_run_worker.py::test_expired_started_run_is_unknown_without_replaying_side_effect",
         "tests/test_platform_run_worker.py::test_slow_provider_keeps_both_leases_alive_and_cleans_heartbeat",
         "tests/test_run_lease_heartbeat.py::test_heartbeat_failure_is_fenced_and_thread_joins",
-        "tests/test_run_lease_heartbeat.py::test_heartbeat_close_before_start_is_safe"
+        "tests/test_run_lease_heartbeat.py::test_heartbeat_close_before_start_is_safe",
+        "tests/test_provider_transport_boundaries.py::test_request_timeout_releases_scheduler_slot_and_next_run_executes"
       ]
     },
     {
@@ -387,7 +399,13 @@
         "tests/test_auto_deploy.py::test_nginx_cutover_and_restore_keep_original_account_proxy_config",
         "tests/test_auto_deploy.py::test_public_probe_waits_for_nginx_reload_to_take_effect",
         "tests/test_auto_deploy.py::test_public_probe_has_one_deadline_and_rejects_late_success",
-        "tests/test_auto_deploy.py::test_ci_deploy_is_main_only_after_tests_and_same_run_packaging"
+        "tests/test_auto_deploy.py::test_ci_deploy_is_main_only_after_tests_and_same_run_packaging",
+        "tests/test_http_transport.py::test_tls_verification_and_shutdown",
+        "tests/test_http_transport.py::test_https_downgrade_redirect_is_not_followed",
+        "tests/test_http_transport.py::test_system_proxy_and_connect_preserve_origin_credentials",
+        "tests/test_http_transport.py::test_unread_response_close_reclaims_socket_and_timer",
+        "tests/test_http_transport.py::test_dns_saturation_is_bounded_and_late_resolution_cannot_dispatch",
+        "tests/test_http_transport.py::test_tls_handshake_and_dns_share_deadline"
       ]
     },
     {

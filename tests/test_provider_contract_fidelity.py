@@ -81,7 +81,7 @@ def test_urllib_connection_and_body_causes_are_preserved(
     class Accepted:
         status = 200
         headers: dict[str, str] = {}
-        def read(self, size: int) -> bytes:
+        def read1(self, size: int) -> bytes:
             raise failure
         def close(self) -> None:
             closed.append(True)
@@ -89,7 +89,7 @@ def test_urllib_connection_and_body_causes_are_preserved(
         if during_read:
             return Accepted()
         raise failure
-    monkeypatch.setattr(adapter, 'urlopen', send)
+    monkeypatch.setattr(adapter, 'open_http', send)
     p = OpenAICompatibleProvider(model='fixture', endpoint='http://fixture', api_key='fixture', allow_network=True)
     with pytest.raises(ProviderError) as caught:
         p.complete([], [], request_observer=lambda kind, data: events.append(data))

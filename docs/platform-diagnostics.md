@@ -14,6 +14,7 @@ Catalog and conversation recovery failures have separate messages, retain the re
 
 - HTTP responses include `X-Request-ID`; failed requests log the same ID, method, matched route and status without query strings or headers.
 - Provider failures preserve their safe error category, HTTP status, step and attempt in a single durable `run_unknown` event, the result message and a structured `platform_run_failure` log. Known upstream CPU/memory overload and `do_request_failed` codes are retained; arbitrary upstream messages are not.
+- Provider HTTP attempts reject redirects with `redirect_rejected` and never forward credentials to a redirect target. `timeout_s` is one total network deadline, including DNS, TCP/TLS, proxy CONNECT, headers and body; trickled bytes cannot prolong it. Deadline and network failures do not replay a possibly accepted POST. SSE `[DONE]` closes the response without waiting for HTTP EOF.
 - Unknown outcomes remain unknown and are not automatically replayed. Provider network uncertainty is distinct from accounting failures. A 503 does not prove whether the upstream performed chargeable work.
 - Logs retain exception types and bounded file/function/line locations, including explicit causes, without raw exception messages, prompts, provider response bodies or secrets.
 - Scheduler, heartbeat and background-worker exceptions are logged. Repeated scheduler tick failures back off up to 30 seconds and resume their normal interval after recovery.

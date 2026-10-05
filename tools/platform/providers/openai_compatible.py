@@ -10,17 +10,19 @@ from __future__ import annotations
 
 import codecs
 import json
+from http.client import HTTPException
 import math
 import os
 import re
-import socket
 import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Iterator, Mapping, Protocol
-from urllib.error import HTTPError, URLError
+from urllib.error import URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from tools.platform.http_transport import DeadlineResponse, open_http
 
 from .base import ModelResponse
 from .compatible import DeterministicProvider
@@ -44,7 +46,7 @@ PROVIDER_ERROR_CODES = frozenset({
     'provider_http_error', 'timeout', 'network_error', 'invalid_response',
     'response_too_large', 'provider_unavailable', 'provider_network_disabled',
     'provider_secret_missing', 'provider_secret_unavailable',
-    'provider_tools_invalid',
+    'provider_tools_invalid', 'redirect_rejected',
 })
 
 
@@ -117,51 +119,60 @@ class ProviderTransport(Protocol):
     ) -> TransportResponse: ...
 
 
+class _ResponseBody:
+    def __init__(self, response: DeadlineResponse) -> None:
+        self.response = response
+        self.total = 0
+
+    def __iter__(self) -> Iterator[bytes]:
+        return self
+
+    def __next__(self) -> bytes:
+        try:
+            chunk = self.response.read1(8192)
+        except (TimeoutError, OSError, URLError, HTTPException) as exc:
+            raise _transport_error(exc) from exc
+        if not chunk:
+            raise StopIteration
+        self.total += len(chunk)
+        if self.total > MAX_RESPONSE_BYTES:
+            raise ProviderError('response_too_large')
+        return chunk
+
+    def close(self) -> None:
+        self.response.close()
+
+
+def _transport_error(exc: Exception, *, status: int | None = None) -> ProviderError:
+    reason = exc.reason if isinstance(exc, URLError) else exc
+    # A POST may already have been accepted, even without response headers.
+    return ProviderError('timeout' if isinstance(reason, TimeoutError) else 'network_error', status=status)
+
+
 class UrllibTransport:
-    """Minimal production transport with bounded response iteration."""
+    """No redirect/replay; one deadline covers dispatch through response close."""
 
     def request(self, *, url: str, headers: Mapping[str, str], body: bytes,
                 timeout_s: float, stream: bool) -> TransportResponse:
         request = Request(url, data=body, headers=dict(headers), method="POST")
         try:
-            response = urlopen(request, timeout=timeout_s)
-        except HTTPError as exc:
-            # HTTPError is also a response.  Read only a bounded body; the
-            # provider never exposes it in the resulting error.
-            try:
-                payload = exc.read(MAX_RESPONSE_BYTES + 1)
-            except Exception:
-                payload = b""
-            finally:
-                exc.close()
-            return TransportResponse(int(exc.code), dict(exc.headers or {}), payload)
-        except (socket.timeout, TimeoutError) as exc:
-            raise ProviderError("timeout", retryable=True) from exc
-        except (URLError, OSError) as exc:
-            raise ProviderError("network_error", retryable=True) from exc
-
+            response = open_http(request, timeout_s=timeout_s)
+        except (TimeoutError, OSError, URLError, HTTPException) as exc:
+            raise _transport_error(exc) from exc
         headers_out = {str(k): str(v) for k, v in response.headers.items()}
-        # Return accepted responses before consuming their body. A read failure
-        # belongs to the parse boundary and must not enter the dispatch retry loop.
-        def chunks() -> Iterator[bytes]:
-            total = 0
+        if 300 <= response.status < 400:
+            response.close()
+            return TransportResponse(response.status, headers_out, b'')
+        if response.status >= 400:
             try:
-                while True:
-                    chunk = response.read(8192)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total > MAX_RESPONSE_BYTES:
-                        raise ProviderError("response_too_large")
-                    yield chunk
-            except (socket.timeout, TimeoutError) as exc:
-                raise ProviderError("timeout", retryable=True) from exc
-            except (URLError, OSError) as exc:
-                raise ProviderError("network_error", retryable=True) from exc
+                # Only allowlisted error codes are consumed, never raw messages.
+                payload = response.read(4097)
+                return TransportResponse(response.status, headers_out, payload)
+            except (TimeoutError, OSError, URLError, HTTPException) as exc:
+                raise _transport_error(exc, status=response.status) from exc
             finally:
                 response.close()
-
-        return TransportResponse(int(response.status), headers_out, chunks())
+        return TransportResponse(response.status, headers_out, _ResponseBody(response))
 
 
 def _bounded_timeout(value: Any) -> float:
@@ -526,7 +537,9 @@ class OpenAICompatibleProvider:
         status = int(getattr(response, 'status', 0) or 0)
         if 200 <= status < 300:
             return response
-        if status in (401, 403):
+        if 300 <= status < 400:
+            error = ProviderError('redirect_rejected', status=status)
+        elif status in (401, 403):
             error = ProviderError('auth_error', status=status)
         elif status == 429:
             error = ProviderError('rate_limit', retryable=True, status=status)

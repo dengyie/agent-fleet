@@ -8,12 +8,13 @@ import argparse
 import http.client
 import json
 from pathlib import Path
-from queue import Empty, Queue
 import secrets
-import socket
-from threading import Thread, Timer
 import time
 from urllib.parse import urlsplit, quote
+from urllib.error import URLError
+from urllib.request import Request
+
+from tools.platform.http_transport import open_http
 
 MAX_BYTES = 2 * 1024 * 1024
 
@@ -34,59 +35,6 @@ class AccountClient:
     def __init__(self, endpoint):
         self.endpoint = endpoint.rstrip('/')
         self.cookie = None
-        self._resolution = None
-
-    def _resolve(self, address, deadline):
-        remaining(deadline)
-        if self._resolution is None:
-            results = Queue(maxsize=1)
-            self._resolution = results
-
-            def resolve():
-                # getaddrinfo has no socket timeout. This worker only resolves
-                # names: a late result cannot connect or send an HTTP request.
-                try:
-                    result = socket.getaddrinfo(*address, 0, socket.SOCK_STREAM)
-                except Exception as exc:
-                    result = exc
-                results.put(result)
-
-            Thread(target=resolve, name='acceptance-dns', daemon=True).start()
-        try:
-            result = self._resolution.get(timeout=remaining(deadline))
-        except Empty:
-            # Reuse this pending lookup on the next request. Repeated model
-            # timeouts must not accumulate blocked resolver threads.
-            raise AcceptanceFailure('acceptance_timeout') from None
-        self._resolution = None
-        remaining(deadline)
-        if isinstance(result, Exception):
-            raise result
-        return result
-
-    def _connect_socket(self, address, deadline, source_address=None):
-        last_error = OSError('no resolved addresses')
-        for family, socktype, proto, _, sockaddr in self._resolve(address, deadline):
-            remaining(deadline)
-            sock = socket.socket(family, socktype, proto)
-            connected = False
-            try:
-                sock.settimeout(remaining(deadline))
-                if source_address:
-                    sock.bind(source_address)
-                sock.connect(sockaddr)
-                # HTTPSConnection uses this timeout for the entire TLS
-                # handshake, so it must exclude time spent resolving/connecting.
-                sock.settimeout(remaining(deadline))
-                connected = True
-                return sock
-            except OSError as exc:
-                last_error = exc
-            finally:
-                if not connected:
-                    sock.close()
-        remaining(deadline)
-        raise last_error
 
     def request(self, path, body=None, *, expected=200, deadline=None):
         request_deadline = time.monotonic() + 15.0
@@ -96,35 +44,11 @@ class AccountClient:
         headers = {'User-Agent': 'agent-fleet/1.0', 'Origin': self.endpoint, 'Content-Type': 'application/json'}
         if self.cookie:
             headers['Cookie'] = self.cookie
-        origin = urlsplit(self.endpoint)
-        connection_type = http.client.HTTPSConnection if origin.scheme == 'https' else http.client.HTTPConnection
-        connection = connection_type(origin.hostname, origin.port, timeout=budget)
-        # Replace only socket creation. Keep stdlib TLS certificate/hostname
-        # verification and HTTP parsing, with no automatic request retries.
-        connection._create_connection = lambda address, timeout, source_address: self._connect_socket(
-            address, request_deadline, source_address)
-        timer = None
+        request = Request(self.endpoint + path,
+                          data=None if body is None else json.dumps(body).encode(), headers=headers,
+                          method='GET' if body is None else 'POST')
         try:
-            connection.connect()
-            request_budget = remaining(request_deadline)
-            sock = connection.sock
-            sock.settimeout(request_budget)
-
-            def interrupt():
-                # Socket timeouts reset after successful reads. Shutdown also
-                # bounds peers that continuously trickle headers/body bytes.
-                try:
-                    sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-
-            timer = Timer(request_budget, interrupt)
-            timer.daemon = True
-            timer.start()
-            connection.request('GET' if body is None else 'POST', path,
-                               body=None if body is None else json.dumps(body).encode(), headers=headers)
-            response = connection.getresponse()  # Never follow redirects or replay requests.
-            with response:
+            with open_http(request, timeout_s=budget, use_proxy=False) as response:
                 raw = response.read(MAX_BYTES + 1)
                 remaining(request_deadline)
                 if response.status != expected:
@@ -142,16 +66,12 @@ class AccountClient:
             if exc.code == 'acceptance_timeout' and (deadline is None or time.monotonic() < deadline):
                 raise AcceptanceFailure('transport_unknown') from None
             raise
-        except (OSError, http.client.HTTPException):
+        except (OSError, URLError, http.client.HTTPException):
             if deadline is not None:
                 remaining(deadline)
             raise AcceptanceFailure('transport_unknown') from None
         except (ValueError, UnicodeError):
             raise AcceptanceFailure('invalid_response') from None
-        finally:
-            if timer is not None:
-                timer.cancel()
-            connection.close()
 
 
 def check_model(client, model, workspace, timeout):

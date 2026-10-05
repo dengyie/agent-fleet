@@ -22,6 +22,10 @@
 
 当前 `usage.provider_requests` 的预算账本仍表示模型循环的逻辑步骤数；HTTP尝试数看 `requests.length`。二者不应混为一个统计。当前 provider 是同步完整响应读取；等待时实时的是耗时和请求状态，不声称已实现逐 Token 网络推送或首 Token 时间。取消会等待已在途网络请求退出，再由运行边界处理；不会把“已请求取消”当作上游已取消。
 
+`provider_config.timeout_s`（默认 60 秒、范围 1–600 秒）是每次 HTTP 尝试的总网络截止时间，覆盖 DNS、逐地址 TCP、代理 CONNECT、TLS、响应头和响应体。持续到达的少量字节不能重置预算；截止中断 socket 并关闭响应与定时器，随后 Run 退出并释放调度槽。所有 3xx（包括相对跳转和 HTTPS 降级）返回 `redirect_rejected`，不能转发 Authorization 或自动重发。生产传输的超时/连接中断不自动重试，因为 POST 可能已被接受；明确 HTTP 429/暂时性错误仍按已有重试配置逐条记录。已接受响应的读取/解析失败始终不重放。
+
+流式传输按可用字节增量读取，收到 SSE `[DONE]` 即关闭响应，不等待 HTTP EOF 或攒满缓冲区。DNS 使用与发布验收共用的有界解析器：同一 host/port 共享正在进行的查询，进程最多 8 个查询；容量耗尽时等待也计入截止时间。系统 `getaddrinfo` 无可移植取消 API，迟到线程只能结束 DNS 解析，不能发送网络请求。没有添加后台 HTTP 执行线程或无界任务队列。
+
 JSON 与 SSE 的费用数字在协议解码时直接进入 `Decimal`，不能先经二进制浮点舍入；例如 `123456.123456123456` 必须原样保留。上游报告费用与配置费率最多 12 位小数、最大 1000000，越界在舍入前判断；对外金额使用十进制字符串。结构化工具参数中的十进制数转换为普通 JSON 数字；转换后非有限的值拒绝执行。
 
 使用现有纯值模块中的 `RequestUsage`、`Pricing`、`RequestCost` 和 `RequestMetadata` DTO 描述字段；请求生命周期各阶段可有字段缺失，历史数据不补造。连接、读取、JSON、SSE 和密钥解析的异常转换保留显式 cause，仅在现有最外层诊断入口记录安全类型与位置；不能记录原始异常正文。
@@ -45,6 +49,11 @@ JSON 与 SSE 的费用数字在协议解码时直接进入 `Decimal`，不能先
 | 金额精度 | Decimal计算、小额6位以上精度、0费用、非法单价、缺失细分、同价合并 | `test_decimal_pricing_and_missing_detail_are_explicit`、`test_equal_cache_rates_allow_cost_without_inventing_token_counts` |
 | 协议金额精度 | JSON/SSE直接解析高精度数字、极小值及0；上限与小数位校验先于舍入；嵌套工具参数保持可JSON序列化 | `test_wire_cost_retains_exact_decimal_digits`、`test_wire_cost_limits_apply_before_any_rounding`、`test_structured_argument_numbers_remain_plain_json_values` |
 | 异常根因 | 连接/读取的超时、OSError、URLError；JSON语法、SSE UTF-8、工具参数与巨大指数；密钥解析；显式cause可追踪且日志/事件无私密正文 | `tests/test_provider_contract_fidelity.py`；MODEL-02逐函数门禁 |
+| 重定向与认证 | 301/302/303/307/308、HTTPS降级不向目标发送请求；只留一次失败请求记录 | `test_redirect_never_forwards_credentials_or_replays`、`test_https_downgrade_redirect_is_not_followed` |
+| 总截止与资源 | 响应头/体滴流准时失败；TLS共享DNS后的剩余预算；未读取即关闭也释放socket/timer | `test_trickle_is_bounded_by_total_deadline_without_replay`、`test_tls_handshake_and_dns_share_deadline`、`test_unread_response_close_reclaims_socket_and_timer` |
+| DNS/代理/TLS | DNS饱和最多固定查询数，迟到不能请求；HTTP代理及HTTPS CONNECT认证隔离；证书和主机名校验 | `test_dns_saturation_is_bounded_and_late_resolution_cannot_dispatch`、`test_system_proxy_and_connect_preserve_origin_credentials`、`test_tls_verification_and_shutdown` |
+| SSE真实连接 | chunked响应发送DONE但不结束HTTP，客户端立即返回并关闭连接 | `test_chunked_done_finishes_before_http_eof_and_closes_socket` |
+| worker闭环 | Broker→Factory→worker日志保留类型/位置而无私密正文；超时后释放全局槽，下一Run成功 | `test_worker_secret_failure_retains_safe_cause_chain`、`test_request_timeout_releases_scheduler_slot_and_next_run_executes` |
 | HTTP重试 | 429后成功保存两次开始/结束，各自状态、序号、时间；未隐藏失败 | provider测试 + 真实浏览器测试 |
 | 协议和资源 | SSE usage尾帧、UTF-8逐字节切分、末帧无空行、DONE后停止读取并关闭、非完整输出不冒充成功、异常不重放 | `test_sse_*`、`test_stream_failure_is_recorded_closed_and_never_retried`、`test_accepted_nonstream_read_failure_is_closed_and_never_retried` |
 | 存储失败 | start持久化失败时不发请求，不因观察器失败触发网络重试 | `test_request_observer_failure_does_not_dispatch_or_replay` |
@@ -67,7 +76,8 @@ FLEET_PLAYWRIGHT_MODULE=/tmp/fleet-browser/node_modules/playwright \
 FLEET_BROWSER_CHANNEL=chromium FLEET_SCREENSHOTS=/tmp/fleet-test-evidence/browser \
 PYTHONPATH=. .venv/bin/python -m pytest tests/test_request_metadata.py \
   tests/test_request_metadata_api.py tests/test_provider_contract_fidelity.py \
-  tests/test_run_lease_heartbeat.py \
+  tests/test_provider_transport_boundaries.py tests/test_http_transport.py \
+  tests/test_acceptance_deadline.py tests/test_run_lease_heartbeat.py \
   tests/test_platform_run_worker.py tests/test_frontend_browser.py -q
 ```
 

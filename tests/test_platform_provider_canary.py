@@ -228,7 +228,7 @@ def test_real_urllib_retry_and_timeout_are_classified():
         with pytest.raises(ProviderError) as caught:
             timeout_provider.complete([], [])
         assert caught.value.code == "timeout"
-        assert caught.value.retryable is True
+        assert caught.value.retryable is False  # POST outcome is unknown; never replay a timeout.
 
 
 def test_worker_canary_uses_provider_gate_and_does_not_leak_secret(tmp_path, monkeypatch):

@@ -54,7 +54,7 @@ for row in matrix['journeys']:
 PY
 ```
 
-## 五项审查问题的固定回归入口
+## 审查问题的固定回归入口
 
 | 原故障 | 必须保持的结果 | 回归 selector（省略 `tests/`） |
 |---|---|---|
@@ -63,6 +63,8 @@ PY
 | 慢响应或截止后才到达 succeeded | 统一截止时间约束创建、提交、轮询、events、恢复；返回 acceptance_timeout/unconfirmed 并保留已知定位信息 | `test_acceptance_deadline.py::test_model_deadline_rejects_late_success_without_replay` |
 | `--lf` 缓存提前裁剪参数 | 与 require-journeys / journey-report 同用时退出 UsageError；普通局部调试可使用 | `test_journey_gate.py::test_last_failed_cache_cannot_hide_required_parameters` |
 | DNS/TCP/TLS 超过总预算 | DNS 不能迟到后发送请求；多地址连接共享预算；TLS 保留证书/主机名校验 | `test_acceptance_deadline.py` 中 DNS、TCP、TLS 用例 |
+
+HTTP传输边界的后续回归见[请求元数据矩阵](request-metadata.md)：两origin重定向、真实chunked DONE、响应头/体滴流、共享DNS上限与迟到隔离、代理CONNECT及TLS校验、未读响应关闭、worker异常链和超时后调度槽复用，均已加入 MODEL-02 / RUN-02 / RELEASE-01 的逐函数门禁。
 
 修改缺陷时先证明用例能识别坏行为：通过受控输入或在隔离工作树临时移除对应修复使其失败，再恢复并运行同一用例。新链路通过不能替代旧回归用例；不要修改失败断言来接受未完成的行为。
 

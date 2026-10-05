@@ -196,6 +196,9 @@ def test_tcp_address_attempts_share_remaining_budget(monkeypatch):
             time.sleep(min(.2, self.timeout))
             raise TimeoutError('unreachable address')
 
+        def shutdown(self, how):
+            return
+
         def close(self):
             closed.append(True)
 

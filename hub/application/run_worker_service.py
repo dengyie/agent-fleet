@@ -182,7 +182,7 @@ class LocalRunWorkerService:
             try:
                 provider = self.provider_factory(provider_profile)
             except ProviderUnavailable as exc:
-                raise RuntimeError(str(exc)) from None
+                raise RuntimeError(str(exc)) from exc
             if remote:
                 broker = RemoteToolBroker(
                     self.remote_delivery, node_id=execution_node_id,

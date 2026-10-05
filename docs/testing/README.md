@@ -45,7 +45,7 @@ macOS 已安装 Chrome 时可用 `FLEET_BROWSER_CHANNEL=chrome`，其余参数�
 
 ```bash
 PYTHONPATH=. .venv/bin/python -m pytest tests/test_full_flow.py -q
-PYTHONPATH=. .venv/bin/python -m pytest tests/test_platform_provider.py tests/test_platform_provider_canary.py -q
+PYTHONPATH=. .venv/bin/python -m pytest tests/test_platform_provider.py tests/test_platform_provider_canary.py tests/test_provider_transport_boundaries.py tests/test_http_transport.py -q
 PYTHONPATH=. .venv/bin/python -m pytest tests/test_account_smtp_transport.py tests/test_journey_gate.py -q
 PYTHONPATH=. .venv/bin/python -m pytest tests/test_acceptance_flow.py tests/test_platform_acceptance_check.py tests/test_acceptance_deadline.py -q
 # 浏览器测试仍需上面的 FLEET_PLAYWRIGHT_MODULE / FLEET_BROWSER_CHANNEL
