@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from tools.platform.request_metadata import RequestMetadata
 
 RUN_STATES = frozenset({
     "queued", "running", "waiting_node", "waiting_approval", "waiting_task",
@@ -22,7 +23,7 @@ class Run:
     cancel_requested: bool = False
     result_text: str = ""
     usage: dict[str, int] | None = None
-    requests: list[dict[str, Any]] | None = None
+    requests: list[RequestMetadata] | None = None
 
     def __post_init__(self):
         if self.state not in RUN_STATES:

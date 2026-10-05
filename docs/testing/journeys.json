@@ -108,7 +108,11 @@
       "tests": [
         "tests/test_full_flow.py::test_provider_fault_is_durable_visible_and_never_replayed",
         "tests/test_full_flow.py::test_real_transport_timeout_records_unknown_without_retry",
-        "tests/test_platform_diagnostics_regressions.py::test_provider_error_is_correlated_durable_and_visible_without_raw_body"
+        "tests/test_platform_diagnostics_regressions.py::test_provider_error_is_correlated_durable_and_visible_without_raw_body",
+        "tests/test_provider_contract_fidelity.py::test_provider_failure_keeps_safe_root_cause",
+        "tests/test_provider_contract_fidelity.py::test_urllib_connection_and_body_causes_are_preserved",
+        "tests/test_provider_contract_fidelity.py::test_parse_failure_keeps_cause_without_raw_payload",
+        "tests/test_provider_contract_fidelity.py::test_secret_resolution_keeps_cause_without_exposing_value"
       ]
     },
     {
@@ -188,7 +192,10 @@
         "tests/test_request_metadata.py::test_sse_truncated_partial_answer_is_not_success",
         "tests/test_request_metadata.py::test_equal_cache_rates_allow_cost_without_inventing_token_counts",
         "tests/test_request_metadata.py::test_gateway_cache_creation_alias_and_explicit_duration_totals",
-        "tests/test_request_metadata.py::test_unsupported_cache_tier_does_not_get_uniform_estimate"
+        "tests/test_request_metadata.py::test_unsupported_cache_tier_does_not_get_uniform_estimate",
+        "tests/test_provider_contract_fidelity.py::test_wire_cost_retains_exact_decimal_digits",
+        "tests/test_provider_contract_fidelity.py::test_wire_cost_limits_apply_before_any_rounding",
+        "tests/test_provider_contract_fidelity.py::test_structured_argument_numbers_remain_plain_json_values"
       ]
     },
     {

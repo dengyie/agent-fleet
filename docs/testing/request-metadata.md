@@ -1,6 +1,6 @@
 # 每次请求元数据：契约、测试与验收
 
-本页属于[全流程测试入口](README.md)，自动执行范围见[journeys.json](journeys.json)的 USAGE-01、RUN-02、UI-01；上线按[发布验收](release-acceptance.md)执行。例子中的数量和价格均为测试数据，不是生产定价。
+本页属于[全流程测试入口](README.md)，自动执行范围见[journeys.json](journeys.json)的 USAGE-01、MODEL-02、RUN-02、UI-01；上线按[发布验收](release-acceptance.md)执行。例子中的数量和价格均为测试数据，不是生产定价。
 
 ## 数据与界面契约
 
@@ -22,6 +22,10 @@
 
 当前 `usage.provider_requests` 的预算账本仍表示模型循环的逻辑步骤数；HTTP尝试数看 `requests.length`。二者不应混为一个统计。当前 provider 是同步完整响应读取；等待时实时的是耗时和请求状态，不声称已实现逐 Token 网络推送或首 Token 时间。取消会等待已在途网络请求退出，再由运行边界处理；不会把“已请求取消”当作上游已取消。
 
+JSON 与 SSE 的费用数字在协议解码时直接进入 `Decimal`，不能先经二进制浮点舍入；例如 `123456.123456123456` 必须原样保留。上游报告费用与配置费率最多 12 位小数、最大 1000000，越界在舍入前判断；对外金额使用十进制字符串。结构化工具参数中的十进制数转换为普通 JSON 数字；转换后非有限的值拒绝执行。
+
+使用现有纯值模块中的 `RequestUsage`、`Pricing`、`RequestCost` 和 `RequestMetadata` DTO 描述字段；请求生命周期各阶段可有字段缺失，历史数据不补造。连接、读取、JSON、SSE 和密钥解析的异常转换保留显式 cause，仅在现有最外层诊断入口记录安全类型与位置；不能记录原始异常正文。
+
 ## 单价配置
 
 管理员模型目录的 `provider_config.pricing` 支持严格的 USD 每百万 Token 配置。数字推荐用十进制字符串：
@@ -39,6 +43,8 @@
 | 正常响应 | 独立 Chat Completions fixture 五项 Token、实际/请求模型、USD小额费用、耗时、时间戳准确 | `test_request_metadata_preserves_five_categories_and_provider_cost` |
 | 零与缺失 | 显式0保持0；缺失不变0；部分usage、无cost | `test_unknown_usage_is_not_zero_and_each_retry_is_recorded`、`test_invalid_tokens_remain_unknown` |
 | 金额精度 | Decimal计算、小额6位以上精度、0费用、非法单价、缺失细分、同价合并 | `test_decimal_pricing_and_missing_detail_are_explicit`、`test_equal_cache_rates_allow_cost_without_inventing_token_counts` |
+| 协议金额精度 | JSON/SSE直接解析高精度数字、极小值及0；上限与小数位校验先于舍入；嵌套工具参数保持可JSON序列化 | `test_wire_cost_retains_exact_decimal_digits`、`test_wire_cost_limits_apply_before_any_rounding`、`test_structured_argument_numbers_remain_plain_json_values` |
+| 异常根因 | 连接/读取的超时、OSError、URLError；JSON语法、SSE UTF-8、工具参数与巨大指数；密钥解析；显式cause可追踪且日志/事件无私密正文 | `tests/test_provider_contract_fidelity.py`；MODEL-02逐函数门禁 |
 | HTTP重试 | 429后成功保存两次开始/结束，各自状态、序号、时间；未隐藏失败 | provider测试 + 真实浏览器测试 |
 | 协议和资源 | SSE usage尾帧、UTF-8逐字节切分、末帧无空行、DONE后停止读取并关闭、非完整输出不冒充成功、异常不重放 | `test_sse_*`、`test_stream_failure_is_recorded_closed_and_never_retried`、`test_accepted_nonstream_read_failure_is_closed_and_never_retried` |
 | 存储失败 | start持久化失败时不发请求，不因观察器失败触发网络重试 | `test_request_observer_failure_does_not_dispatch_or_replay` |
@@ -60,7 +66,8 @@
 FLEET_PLAYWRIGHT_MODULE=/tmp/fleet-browser/node_modules/playwright \
 FLEET_BROWSER_CHANNEL=chromium FLEET_SCREENSHOTS=/tmp/fleet-test-evidence/browser \
 PYTHONPATH=. .venv/bin/python -m pytest tests/test_request_metadata.py \
-  tests/test_request_metadata_api.py tests/test_run_lease_heartbeat.py \
+  tests/test_request_metadata_api.py tests/test_provider_contract_fidelity.py \
+  tests/test_run_lease_heartbeat.py \
   tests/test_platform_run_worker.py tests/test_frontend_browser.py -q
 ```
 

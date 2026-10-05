@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+from tools.platform.request_metadata import RequestMetadata, RequestObserver
 
 
 @dataclass(frozen=True)
@@ -19,11 +20,12 @@ class ModelResponse:
     usage: dict[str, int] | None = None
     tool_call_id: str | None = None
     finish_reason: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: RequestMetadata = field(default_factory=dict)
 
 
 class ModelProvider(Protocol):
-    def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], *, request_observer=None) -> ModelResponse: ...
+    def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], *,
+                 request_observer: RequestObserver | None = None) -> ModelResponse: ...
 
 
 __all__ = ["ModelProvider", "ModelResponse"]
