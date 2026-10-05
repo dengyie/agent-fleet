@@ -1,22 +1,64 @@
+import { renderRequestMetadata, tickRequestMetadata } from './request-metadata.js';
 import { uiIcon, pagePath } from '../../routes.js';
 import { getPlatformArtifactContentUrl } from '../../api/platform.js';
 
 export function el(tag, className, text) { var node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
 export function clear(node) { while (node && node.firstChild) node.removeChild(node.firstChild); }
 export function showError(host, error) { var text = (error && (error.detail || error.message || error.code)) || '平台请求失败'; if (error && error.requestId) text += ' · 请求编号 ' + error.requestId; host.appendChild(el('div', 'err', text)); }
-export function renderMessages(host, messages) {
-  clear(host);
-  (Array.isArray(messages) ? messages : []).forEach(function (message) {
-    var row = el('article', 'assistant-message ' + (message.role === 'user' ? 'user' : 'assistant'));
-    row.appendChild(el('span', 'assistant-message-role', message.role === 'user' ? '你' : 'Agent Fleet'));
-    var body = el('stream-markdown'); body.setAttribute('content', message.content || ''); body.textContent = message.content || ''; row.appendChild(body);
-    var copy = el('button', 'message-copy'); copy.type = 'button'; copy.title = '复制消息'; copy.setAttribute('aria-label', '复制消息'); copy.appendChild(uiIcon('copy', {size: 14}));
-    copy.addEventListener('click', async function () { try { await navigator.clipboard.writeText(message.content || ''); copy.setAttribute('aria-label', '已复制'); copy.title = '已复制'; } catch (_) { copy.title = '复制失败，请手动选择文本'; } });
-    row.appendChild(copy); host.appendChild(row);
+export function renderMessages(host, messages, runs = []) {
+  if (!host._messageRows) host._messageRows = new Map();
+  const source = Array.isArray(messages) ? messages : [];
+  const replies = new Map(source.filter(m => m.role !== 'user').map(m => [m.message_id, m]));
+  const byTrigger = new Map(runs.map(run => [run.trigger_message_id, run]));
+  const runReplies = new Set(runs.map(run => 'reply_' + run.run_id));
+  const projected = [];
+  source.forEach((message, index) => {
+    if (message.role !== 'user' && runReplies.has(message.message_id)) return;
+    projected.push({message, key: message.message_id || 'message-' + index});
+    const run = byTrigger.get(message.message_id);
+    if (!run) return;
+    const key = 'reply_' + run.run_id;
+    const reply = replies.get(key) || {role: 'assistant', content: run.result_text || '', message_id: key};
+    projected.push({message: reply, key, run});
   });
+  const keep = new Set();
+  projected.forEach(({message, key, run}, index) => {
+    keep.add(key);
+    let row = host._messageRows.get(key);
+    if (!row) {
+      row = el('article', 'assistant-message ' + (message.role === 'user' ? 'user' : 'assistant'));
+      row.appendChild(el('span', 'assistant-message-role', message.role === 'user' ? '你' : 'Agent Fleet'));
+      const body = el('stream-markdown'); row.appendChild(body);
+      const copy = el('button', 'message-copy'); copy.type = 'button'; copy.title = '复制消息'; copy.setAttribute('aria-label', '复制消息'); copy.appendChild(uiIcon('copy', {size: 14}));
+      copy.addEventListener('click', async function () { try { await navigator.clipboard.writeText(row._content || ''); copy.setAttribute('aria-label', '已复制'); copy.title = '已复制'; } catch (_) { copy.title = '复制失败，请手动选择文本'; } });
+      row.appendChild(copy);
+      const requests = el('div', 'message-requests'); row.appendChild(requests);
+      row._parts = {body, copy, requests}; host._messageRows.set(key, row);
+    }
+    row._runId = run?.run_id;
+    const content = message.content || '';
+    if (row._content !== content) {
+      row._content = content; row._parts.body.textContent = content; row._parts.body.setAttribute('content', content);
+    }
+    row._parts.copy.hidden = !content;
+    if (run) renderRequestMetadata(row._parts.requests, run.requests);
+    if (host.children[index] !== row) host.insertBefore(row, host.children[index] || null);
+  });
+  host._messageRows.forEach((row, key) => { if (!keep.has(key)) { host.removeChild(row); host._messageRows.delete(key); } });
+}
+export function updateRunRequests(host, run) {
+  host._messageRows?.forEach(row => {
+    if (row._runId === run.run_id) renderRequestMetadata(row._parts.requests, run.requests);
+  });
+}
+export function tickMessageRequests(host) {
+  let active = false;
+  host._messageRows?.forEach(row => { if (tickRequestMetadata(row._parts.requests)) active = true; });
+  return active;
 }
 export function renderEvents(host, events) {
   (Array.isArray(events) ? events : []).forEach(function (event) {
+    if (event.kind === 'provider_request_started' || event.kind === 'provider_request_finished') return;
     var payload = event.payload || {};
     if (event.kind === 'tool_call' || event.kind === 'tool_result') {
       var card = Array.from(host.children).find(function (node) { return node.getAttribute('data-command-id') === payload.command_id; });

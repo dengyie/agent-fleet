@@ -1,3 +1,4 @@
+import { updateRunRequests, tickMessageRequests } from './assistant/panels.js';
 /* Persistent assistant workspace: bounded DOM rendering and cursor recovery. */
 import { uiIcon, pagePath } from '../routes.js';
 import {
@@ -88,6 +89,16 @@ export function mountAssistant(target, options) {
   var conversationId = options.conversationId || null; var conversationWorkspaceId = null; var activeRunId = null; var latestRunId = null; var cursor = 0; var polling = false; var windowEventCursor = 0; var windowPolling = false; var windowState = { loading: false, error: null, window: null, mode: 'disconnected', events: [], holderId: token(), leaseToken: null, leaseExpiresAt: 0 };
   var disposed = false; var timers = new Set();
   function later(fn, delay) { if (disposed) return; var timer = setTimeout(function () { timers.delete(timer); if (!disposed) fn(); }, delay); timers.add(timer); }
+  var requestClockActive = false;
+  function startRequestClock() {
+    if (requestClockActive || disposed) return;
+    requestClockActive = true;
+    function tick() {
+      if (!disposed && tickMessageRequests(messageHost)) later(tick, 250);
+      else requestClockActive = false;
+    }
+    tick();
+  }
   var pendingTurn = null; var submitting = false; var catalogReady = false; var modelCatalog = [];
   var artifactState = { loading: false, error: null, artifacts: [], workspaceId: null, previewById: {} };
   var memoryState = { loading: false, error: null, items: [], selected: {}, order: [], maxItems: 8, maxBytes: 8192, query: '' }; var memoryRequestSequence = 0;
@@ -102,7 +113,7 @@ export function mountAssistant(target, options) {
   function showRunModel(run) {
     var profileId = run && run.config && run.config.model_profile_id;
     var profile = modelCatalog.find(function (row) { return row.profile_id === profileId; });
-    runModel.textContent = profileId ? '本次模型：' + ((profile && profile.model) || profileId) : '';
+    runModel.textContent = profileId ? '本次模型：' + ((run.config && run.config.model) || (profile && profile.model) || profileId) : '';
     runModel.hidden = !profileId;
   }
   function clearActionError() { clear(actionError); actionError.hidden = true; }
@@ -340,7 +351,7 @@ export function mountAssistant(target, options) {
     var firstMessage = (Array.isArray(conversation.messages) ? conversation.messages : []).find(function (message) { return message.role === 'user'; });
     conversationTitle.textContent = conversation.title || (firstMessage && firstMessage.content ? firstMessage.content.slice(0, 60) : '当前对话');
     conversationTitle.title = conversationTitle.textContent;
-    renderMessages(messageHost, conversation.messages); scrollAnchor.setAttribute('is-streaming', ''); intro.hidden = Boolean(conversation.messages && conversation.messages.length);
+    renderMessages(messageHost, conversation.messages, conversation.runs || []); startRequestClock(); scrollAnchor.setAttribute('is-streaming', ''); intro.hidden = Boolean(conversation.messages && conversation.messages.length);
     var nextWorkspaceId = typeof conversation.workspace_id === 'string' ? conversation.workspace_id : null;
     if (conversationWorkspaceId !== nextWorkspaceId) {
       conversationWorkspaceId = nextWorkspaceId;
@@ -371,6 +382,7 @@ export function mountAssistant(target, options) {
       if (disposed) return;
       var run = runData.run || runData;
       showRunModel(run); setStatus(run.state || 'unknown');
+      updateRunRequests(messageHost, run); startRequestClock();
       var eventData = await getRunEvents(runId, cursor);
       if (disposed) return;
       var events = eventData.events || [];

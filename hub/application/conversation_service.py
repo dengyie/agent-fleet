@@ -106,6 +106,7 @@ class ConversationService:
                     cancel_requested=run.get("cancel_requested", False),
                     result_text=run.get("result_text", ""),
                     usage=run.get("usage") or {},
+                    requests=run.get("requests") or [],
                 ).public()
                 for run in row.get("runs", [])
             ]
@@ -244,6 +245,7 @@ class RunService:
                 cancel_requested=row["cancel_requested"],
                 result_text=row.get("result_text", ""),
                 usage=row.get("usage", {}),
+                requests=row.get("requests", []),
             ).public() | {"ok": True}
         except ApplicationError:
             raise
@@ -261,6 +263,7 @@ class RunService:
                 cancel_requested=row["cancel_requested"],
                 result_text=row.get("result_text", ""),
                 usage=row.get("usage", {}),
+                requests=row.get("requests", []),
             ).public() | {"ok": True}
         except Exception as exc:
             if isinstance(exc, ApplicationError):

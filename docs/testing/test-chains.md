@@ -1,5 +1,7 @@
 # 测试链路、回归与证据核验
 
+请求级模型、五项 Token、耗时、费用来源、重试与交互验收详见[请求元数据测试矩阵](request-metadata.md)。
+
 本页说明测试如何串联，以及怎样核验“通过”的含义。[测试入口](README.md)提供环境安装和完整命令；[journeys.json](journeys.json)是必需 selector 的唯一清单；[外部验收](release-acceptance.md)定义真实服务的交付证据。
 
 ## 从用户操作到持久化结果

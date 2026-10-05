@@ -80,7 +80,7 @@ def test_account_assistant_permissions_and_core_flows(tmp_path, role):
         return response
 
     class Provider:
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             if messages[-1].get('content') == 'cancel this run':
                 if not cancelled.wait(15):
                     raise RuntimeError('browser did not cancel the running task')

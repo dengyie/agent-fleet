@@ -54,7 +54,7 @@ def test_worker_claims_and_finishes_local_run_with_events(tmp_path):
     client = app.test_client()
     assert client.get(f"/api/platform/v1/runs/{run['run_id']}").get_json()["state"] == "succeeded"
     events = client.get(f"/api/platform/v1/runs/{run['run_id']}/events").get_json()["events"]
-    assert [event["kind"] for event in events] == ["run_started", "tool_call", "tool_result", "run_finished"]
+    assert [event["kind"] for event in events] == ["run_started", "provider_request_started", "provider_request_finished", "tool_call", "tool_result", "provider_request_started", "provider_request_finished", "run_finished"]
 
 
 @pytest.mark.parametrize('remote', [False, True])
@@ -86,7 +86,7 @@ def test_acceptance_policy_is_frozen_and_enforced_by_new_worker(tmp_path, remote
     declarations, commands = [], []
 
     class Provider:
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             declarations.append([item['name'] for item in tools])
             if len(declarations) > 1:
                 return ModelResponse(kind='final', text='done')
@@ -162,7 +162,7 @@ def test_worker_injects_frozen_memory_and_journals_redacted_evidence(tmp_path):
         def __init__(self):
             self.messages = []
 
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             self.messages.append(messages)
             return ModelResponse(kind="final", text="done")
 
@@ -210,7 +210,7 @@ def test_worker_uses_snapshot_after_live_memory_changes(tmp_path):
     class Provider:
         def __init__(self): self.messages = []
 
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             self.messages.append(messages)
             return ModelResponse(kind="final", text="done")
 
@@ -239,7 +239,7 @@ def test_worker_artifact_is_listed_and_downloadable_in_conversation_workspace(tm
         def __init__(self):
             self.calls = 0
 
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             self.calls += 1
             if self.calls == 1:
                 return ModelResponse(
@@ -376,7 +376,7 @@ def test_cancel_is_observed_before_next_model_step(tmp_path):
             self.repository = repository
             self.calls = 0
 
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             self.calls += 1
             if self.calls == 1:
                 self.repository.cancel_run(OWNER, run["run_id"], now=2)
@@ -409,7 +409,7 @@ def test_remote_browser_tools_require_node_session_capability(tmp_path):
     )
 
     class Provider:
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             assert not any(item["name"].startswith("browser.") for item in tools)
             return ModelResponse(kind="tool_call", tool="browser.open",
                                  arguments={"url": "http://localhost:3000"})
@@ -460,7 +460,7 @@ def test_remote_run_uses_node_delivery_without_local_filesystem(tmp_path):
         def __init__(self):
             self.calls = 0
 
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             self.calls += 1
             if self.calls == 1:
                 return ModelResponse(kind="tool_call", tool="workspace.read",
@@ -510,7 +510,7 @@ def test_remote_unknown_receipt_finishes_run_unknown_without_replay(tmp_path):
                                       "execution_node_id": "node-remote"}, now=1)
 
     class Provider:
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             return ModelResponse(kind="tool_call", tool="workspace.write",
                                  arguments={"path": "report.md", "content": "x"})
 
@@ -543,7 +543,7 @@ def test_default_worker_rejects_unsandboxed_host_exec(tmp_path):
     outside.write_text('host-only-sentinel')
 
     class Provider:
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             if len(messages) > 1:
                 return ModelResponse(kind='final', text=str(messages[-1]))
             return ModelResponse(kind='tool_call', tool='workspace.exec',
@@ -583,7 +583,7 @@ def test_expired_started_run_is_unknown_without_replaying_side_effect(tmp_path, 
         monkeypatch.setattr(artifacts, 'put_file', publish_then_die)
 
     class Provider:
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             if any(m['role'] == 'tool' for m in messages):
                 raise SystemExit('process died after artifact publication')
             return ModelResponse(kind='tool_call', tool='workspace.artifact',
@@ -628,7 +628,7 @@ def test_queued_turns_use_trigger_cutoff_and_durable_assistant_history(tmp_path)
     captured = []
 
     class Provider:
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             captured.append([(m['role'], m['content']) for m in messages])
             return ModelResponse(kind='final', text='ANSWER-' + messages[-1]['content'])
 
@@ -672,7 +672,7 @@ def test_sandbox_worker_can_list_workspace_root_without_exec_launcher(tmp_path):
     _queued(app)
 
     class Provider:
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             if any(m['role'] == 'tool' for m in messages):
                 return ModelResponse(kind='final', text='listed')
             return ModelResponse(kind='tool_call', tool='workspace.list', arguments={})
@@ -697,3 +697,25 @@ def test_sandbox_launcher_is_explicitly_wired_from_environment(tmp_path, monkeyp
         web.make_app(ingest_token="test-token", platform_enabled=True, platform_worker_enabled=True)
     with pytest.raises(ValueError, match='argv list'):
         FleetConfig.from_root(tmp_path, platform_sandbox_launcher='sh')
+
+
+def test_slow_provider_keeps_both_leases_alive_and_cleans_heartbeat(tmp_path):
+    import threading
+    import time
+    from tools.platform.providers.base import ModelResponse
+    app = _app(tmp_path, worker=True)
+    repo = _catalog(app, tmp_path)
+    run = _queued(app)
+    worker = app.extensions['fleet']['services']['platform_worker']
+    worker.lease_s = 5
+
+    class SlowProvider:
+        def complete(self, messages, tools, *, request_observer=None):
+            time.sleep(5.3)
+            return ModelResponse(kind='final', text='slow but complete')
+
+    worker.provider_factory = lambda profile: SlowProvider()
+    result = worker.run_once(OWNER)
+    assert result['state'] == 'succeeded'
+    assert repo.get_run(OWNER, run['run_id'])['result_text'] == 'slow but complete'
+    assert not any(t.name.startswith('run-lease-') for t in threading.enumerate())

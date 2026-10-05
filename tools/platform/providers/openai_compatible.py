@@ -8,6 +8,7 @@ uses the small stdlib urllib transport below.
 """
 from __future__ import annotations
 
+import codecs
 import json
 import math
 import os
@@ -22,6 +23,8 @@ from urllib.request import Request, urlopen
 
 from .base import ModelResponse
 from .compatible import DeterministicProvider
+from .observation import RequestObservation
+from tools.platform.request_metadata import normalized_tokens, request_cost, token_count
 
 
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -112,7 +115,7 @@ class ProviderTransport(Protocol):
 
 
 class UrllibTransport:
-    """Minimal production transport with bounded non-streaming reads."""
+    """Minimal production transport with bounded response iteration."""
 
     def request(self, *, url, headers, body, timeout_s, stream):
         request = Request(url, data=body, headers=dict(headers), method="POST")
@@ -125,6 +128,8 @@ class UrllibTransport:
                 payload = exc.read(MAX_RESPONSE_BYTES + 1)
             except Exception:
                 payload = b""
+            finally:
+                exc.close()
             return TransportResponse(int(exc.code), dict(exc.headers or {}), payload)
         except (socket.timeout, TimeoutError):
             raise ProviderError("timeout", retryable=True) from None
@@ -132,13 +137,8 @@ class UrllibTransport:
             raise ProviderError("network_error", retryable=True) from None
 
         headers_out = {str(k): str(v) for k, v in response.headers.items()}
-        if not stream:
-            try:
-                payload = response.read(MAX_RESPONSE_BYTES + 1)
-            finally:
-                response.close()
-            return TransportResponse(int(response.status), headers_out, payload)
-
+        # Return accepted responses before consuming their body. A read failure
+        # belongs to the parse boundary and must not enter the dispatch retry loop.
         def chunks():
             total = 0
             try:
@@ -216,21 +216,47 @@ def _usage(payload: Mapping[str, Any]) -> dict[str, int] | None:
     raw = payload.get("usage")
     if not isinstance(raw, Mapping):
         return None
-    result: dict[str, int] = {}
+    result = {}
     for source, target in (("prompt_tokens", "input_tokens"), ("completion_tokens", "output_tokens"), ("total_tokens", "total_tokens")):
-        value = raw.get(source)
-        if isinstance(value, bool):
-            continue
-        try:
-            number = int(value)
-        except (TypeError, ValueError):
-            continue
-        if 0 <= number <= 10_000_000:
+        number = token_count(raw.get(source))
+        if number is not None:
             result[target] = number
-    if "input_tokens" in result or "output_tokens" in result:
-        result.setdefault("input_tokens", 0)
-        result.setdefault("output_tokens", 0)
     return result or None
+
+
+def _metadata(payload, pricing=None):
+    raw = payload.get('usage')
+    raw = raw if isinstance(raw, Mapping) else {}
+    prompt = raw.get('prompt_tokens_details')
+    output = raw.get('completion_tokens_details')
+    prompt = prompt if isinstance(prompt, Mapping) else {}
+    output = output if isinstance(output, Mapping) else {}
+    cache_write = prompt.get('cache_write_tokens', prompt.get('cached_creation_tokens', raw.get('cache_creation_input_tokens')))
+    if cache_write is None:
+        five = token_count(raw.get('claude_cache_creation_5_m_tokens'))
+        hour = token_count(raw.get('claude_cache_creation_1_h_tokens'))
+        if five is not None and hour is not None:
+            cache_write = five + hour
+    usage = normalized_tokens({**(_usage(payload) or {}),
+        'cache_read_tokens': prompt.get('cached_tokens', raw.get('prompt_cache_hit_tokens')),
+        'cache_write_tokens': cache_write,
+        'reasoning_tokens': output.get('reasoning_tokens')})
+    data = {'usage': usage, 'cost': request_cost(usage, reported=raw.get('cost'), pricing=pricing)}
+    reason = None
+    if (token_count(raw.get('claude_cache_creation_1_h_tokens')) or 0) > 0:
+        reason = 'unsupported_cache_tier'
+    if any((token_count(details.get(key)) or 0) > 0 for details in (prompt, output) for key in ('audio_tokens', 'image_tokens')):
+        reason = 'unsupported_modality'
+    if reason and (data['cost'] is None or data['cost']['source'] != 'provider'):
+        data['cost'] = None
+        data['cost_unavailable_reason'] = reason
+    for key, maximum in (('model', 160), ('id', 256)):
+        value = payload.get(key)
+        if isinstance(value, str) and 0 < len(value) <= maximum and not any(ord(c) < 32 for c in value):
+            data['response_id' if key == 'id' else key] = value
+            if key == 'model':
+                data['response_model'] = value
+    return data
 
 
 def _arguments(raw: Any) -> dict[str, Any]:
@@ -364,14 +390,67 @@ def _json_payload(body: bytes) -> dict[str, Any]:
     return payload
 
 
+def _sse_payloads(body):
+    """Decode bounded SSE frames, including arbitrary UTF-8/TCP boundaries."""
+    chunks = [bytes(body)] if isinstance(body, (bytes, bytearray)) else body
+    decoder = codecs.getincrementaldecoder('utf-8')()
+    buffer = ''
+    total_bytes = events = 0
+
+    def decode_event(event):
+        data = '\n'.join(line[5:].lstrip() for line in event.splitlines() if line.startswith('data:'))
+        if data == '[DONE]':
+            return None
+        return _json_payload(data.encode('utf-8')) if data else {}
+
+    try:
+        for chunk in chunks:
+            if not isinstance(chunk, (bytes, bytearray)):
+                raise ProviderError('invalid_response')
+            total_bytes += len(chunk)
+            if total_bytes > MAX_RESPONSE_BYTES:
+                raise ProviderError('response_too_large')
+            buffer += decoder.decode(bytes(chunk))
+            while True:
+                separator = re.search(r'\r?\n\r?\n', buffer)
+                if separator is None:
+                    break
+                event, buffer = buffer[:separator.start()], buffer[separator.end():]
+                events += 1
+                if events > MAX_SSE_EVENTS:
+                    raise ProviderError('response_too_large')
+                payload = decode_event(event)
+                yield payload
+                if payload is None:
+                    return
+        buffer += decoder.decode(b'', final=True)
+        if buffer.strip():
+            if events >= MAX_SSE_EVENTS:
+                raise ProviderError('response_too_large')
+            yield decode_event(buffer)
+    except UnicodeDecodeError:
+        raise ProviderError('invalid_response') from None
+
+
+def _close_body(body):
+    close = getattr(body, 'close', None)
+    if callable(close):
+        close()
+
+
+def _finish_reason(value):
+    return value if value in ('stop', 'length', 'tool_calls', 'content_filter', 'function_call') else None
+
+
 class OpenAICompatibleProvider:
     def __init__(self, *, model: str, endpoint: str, api_key: str, transport: ProviderTransport | None = None,
                  timeout_s: float = 60.0, max_retries: int = 0, headers: Mapping[str, str] | None = None,
-                 stream: bool = False, sleeper=time.sleep, allow_network: bool = False):
+                 stream: bool = False, sleeper=time.sleep, allow_network: bool = False, pricing=None):
         if not isinstance(model, str) or not model or len(model) > 160:
             raise ProviderUnavailable("provider_model_missing")
         if not isinstance(api_key, str) or not api_key:
             raise ProviderUnavailable("provider_secret_missing")
+        self.pricing = pricing
         self.model = model
         self.endpoint = endpoint
         self.api_key = api_key
@@ -407,87 +486,101 @@ class OpenAICompatibleProvider:
             transport=transport, timeout_s=settings.get("timeout_s", 60.0),
             max_retries=settings.get("max_retries", 0), headers=_safe_headers(settings.get("headers")),
             stream=bool(settings.get("stream", False)), sleeper=sleeper,
-            allow_network=allow_network,
+            allow_network=allow_network, pricing=settings.get("pricing"),
         )
 
     def _request(self, body: bytes):
-        if not self.allow_network and self.transport.__class__ is UrllibTransport:
-            raise ProviderUnavailable("provider_network_disabled")
         headers = {
             "Accept": "text/event-stream" if self.stream else "application/json",
-            "Content-Type": "application/json",
-            "User-Agent": "agent-fleet/1.0",
-            "Authorization": f"Bearer {self.api_key}",
-            **self.headers,
+            "Content-Type": "application/json", "User-Agent": "agent-fleet/1.0",
+            "Authorization": f"Bearer {self.api_key}", **self.headers,
         }
-        for attempt in range(self.max_retries + 1):
+        try:
+            response = self.transport.request(url=self.endpoint, headers=headers, body=body,
+                timeout_s=self.timeout_s, stream=self.stream)
+        except ProviderError:
+            raise
+        except TimeoutError:
+            raise ProviderError('timeout', retryable=True) from None
+        except Exception:
+            raise ProviderError('network_error', retryable=True) from None
+        status = int(getattr(response, 'status', 0) or 0)
+        if 200 <= status < 300:
+            return response
+        if status in (401, 403):
+            error = ProviderError('auth_error', status=status)
+        elif status == 429:
+            error = ProviderError('rate_limit', retryable=True, status=status)
+        elif status in TRANSIENT_STATUS:
+            error = ProviderError('transient_http', retryable=True, status=status)
+        elif 400 <= status < 500:
+            error = ProviderError('request_rejected', status=status)
+        else:
+            error = ProviderError('provider_http_error', retryable=True, status=status)
+        if isinstance(response.body, bytes) and len(response.body) <= 4096:
             try:
-                response = self.transport.request(
-                    url=self.endpoint, headers=headers, body=body,
-                    timeout_s=self.timeout_s, stream=self.stream,
-                )
+                body_error = json.loads(response.body).get('error', {})
+                upstream = body_error.get('code') if isinstance(body_error, dict) else None
+                if upstream in UPSTREAM_ERROR_CODES:
+                    error.upstream_code = upstream
+            except (ValueError, AttributeError, TypeError):
+                pass
+        _close_body(response.body)
+        raise error
+
+    def complete(self, messages, tools, *, request_observer=None) -> ModelResponse:
+        tool_names = _tool_name_map(tools)
+        if not self.allow_network and self.transport.__class__ is UrllibTransport:
+            raise ProviderUnavailable('provider_network_disabled')
+        payload = {"model": self.model, "messages": _messages(messages, tool_names),
+                   "tools": _tools(tools, tool_names), "stream": self.stream}
+        if self.stream:
+            payload['stream_options'] = {'include_usage': True}
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        for attempt in range(self.max_retries + 1):
+            observation = RequestObservation(request_observer, model=self.model,
+                provider='openai_compatible', index=attempt + 1,
+                parameters={'stream': self.stream, 'timeout_s': self.timeout_s})
+            try:
+                response = self._request(body)
             except ProviderError as exc:
+                observation.finish(error=exc, http_status=exc.status)
                 if exc.retryable and attempt < self.max_retries:
                     self.sleeper(min(2.0, 0.1 * (2 ** attempt)))
                     continue
                 raise
-            except (TimeoutError,):
-                error = ProviderError("timeout", retryable=True)
-                if attempt < self.max_retries:
-                    self.sleeper(min(2.0, 0.1 * (2 ** attempt)))
-                    continue
+            # Once a response body is being consumed, failure is ambiguous and
+            # must never automatically replay an already accepted request.
+            try:
+                result = self._parse_response(response, tool_names)
+            except ProviderError as exc:
+                observation.finish(error=exc, http_status=response.status)
+                raise
+            except (TimeoutError, OSError) as exc:
+                error = ProviderError('timeout' if isinstance(exc, TimeoutError) else 'network_error')
+                observation.finish(error=error, http_status=response.status)
                 raise error from None
-            except Exception:
-                error = ProviderError("network_error", retryable=True)
-                if attempt < self.max_retries:
-                    self.sleeper(min(2.0, 0.1 * (2 ** attempt)))
-                    continue
-                raise error from None
-            status = int(getattr(response, "status", 0) or 0)
-            if 200 <= status < 300:
-                return response
-            if status in (401, 403):
-                error = ProviderError("auth_error", status=status)
-            elif status == 429:
-                error = ProviderError("rate_limit", retryable=True, status=status)
-            elif status in TRANSIENT_STATUS:
-                error = ProviderError("transient_http", retryable=True, status=status)
-            elif 400 <= status < 500:
-                error = ProviderError("request_rejected", status=status)
-            else:
-                error = ProviderError("provider_http_error", retryable=True, status=status)
-            if isinstance(response.body, bytes) and len(response.body) <= 4096:
-                try:
-                    body_error = json.loads(response.body).get('error', {})
-                    upstream = body_error.get('code') if isinstance(body_error, dict) else None
-                    if upstream in UPSTREAM_ERROR_CODES:
-                        error.upstream_code = upstream
-                except (ValueError, AttributeError, TypeError):
-                    pass
-            if error.retryable and attempt < self.max_retries:
-                self.sleeper(min(2.0, 0.1 * (2 ** attempt)))
-                continue
-            raise error
-        raise ProviderError("provider_unavailable")
+            finally:
+                _close_body(response.body)
+            observation.finish(metadata={**result.metadata, 'finish_reason': result.finish_reason},
+                               http_status=response.status)
+            return result
+        raise ProviderError('provider_unavailable')
 
-    def complete(self, messages, tools) -> ModelResponse:
-        tool_names = _tool_name_map(tools)
-        payload = {
-            "model": self.model,
-            "messages": _messages(messages, tool_names),
-            "tools": _tools(tools, tool_names),
-            "stream": self.stream,
-        }
-        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        response = self._request(body)
+    def _parse_response(self, response, tool_names):
         if self.stream:
             return self._parse_sse(response.body, tool_names)
         raw = response.body
         if not isinstance(raw, (bytes, bytearray)):
-            try:
-                raw = b"".join(raw)
-            except Exception:
-                raise ProviderError("invalid_response") from None
+            pieces, total = [], 0
+            for chunk in raw:
+                if not isinstance(chunk, (bytes, bytearray)):
+                    raise ProviderError('invalid_response')
+                total += len(chunk)
+                if total > MAX_RESPONSE_BYTES:
+                    raise ProviderError('response_too_large')
+                pieces.append(chunk)
+            raw = b''.join(pieces)
         payload = _json_payload(bytes(raw))
         choices = payload.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
@@ -499,88 +592,66 @@ class OpenAICompatibleProvider:
         usage = _usage(payload)
         tool = _tool_response(message, usage, tool_names=tool_names)
         if tool is not None:
-            return ModelResponse(**{**tool.__dict__, "finish_reason": choice.get("finish_reason")})
+            return ModelResponse(**{**tool.__dict__, "finish_reason": _finish_reason(choice.get("finish_reason")), "metadata": _metadata(payload, self.pricing)})
         text = message.get("content")
         if not isinstance(text, str):
             raise ProviderError("invalid_response")
         return ModelResponse(kind="final", text=text[:MAX_TEXT_CHARS], usage=usage,
-                             finish_reason=str(choice.get("finish_reason")) if choice.get("finish_reason") else None)
+                             finish_reason=_finish_reason(choice.get("finish_reason")), metadata=_metadata(payload, self.pricing))
 
     def _parse_sse(self, body: bytes | Iterable[bytes], tool_names: Mapping[str, str]) -> ModelResponse:
-        if isinstance(body, (bytes, bytearray)):
-            chunks = [bytes(body)]
-        else:
-            chunks = body
-        buffer = ""
-        text_parts: list[str] = []
-        tool_name = ""
-        tool_id = None
-        arguments = ""
-        usage = None
-        finish_reason = None
-        events = 0
-        try:
-            for chunk in chunks:
-                if not isinstance(chunk, (bytes, bytearray)):
-                    raise ProviderError("invalid_response")
-                buffer += bytes(chunk).decode("utf-8")
-                if len(buffer.encode("utf-8")) > MAX_RESPONSE_BYTES:
-                    raise ProviderError("response_too_large")
-                while "\n\n" in buffer or "\r\n\r\n" in buffer:
-                    separator = "\r\n\r\n" if "\r\n\r\n" in buffer and ("\n\n" not in buffer or buffer.index("\r\n\r\n") < buffer.index("\n\n")) else "\n\n"
-                    event, buffer = buffer.split(separator, 1)
-                    events += 1
-                    if events > MAX_SSE_EVENTS:
-                        raise ProviderError("response_too_large")
-                    data = "\n".join(line[5:].lstrip() for line in event.splitlines() if line.startswith("data:"))
-                    if not data or data == "[DONE]":
-                        continue
-                    payload = _json_payload(data.encode("utf-8"))
-                    usage = _usage(payload) or usage
-                    choices = payload.get("choices")
-                    if not isinstance(choices, list) or not choices:
-                        continue
-                    choice = choices[0]
-                    if not isinstance(choice, Mapping):
-                        raise ProviderError("invalid_response")
-                    finish_reason = choice.get("finish_reason") or finish_reason
-                    delta = choice.get("delta")
-                    if not isinstance(delta, Mapping):
-                        continue
-                    content = delta.get("content")
-                    if isinstance(content, str):
-                        text_parts.append(content)
-                    calls = delta.get("tool_calls")
-                    if isinstance(calls, list) and calls:
-                        call = calls[0]
-                        if not isinstance(call, Mapping):
-                            raise ProviderError("invalid_response")
-                        tool_id = tool_id or call.get("id")
-                        function = call.get("function")
-                        if isinstance(function, Mapping):
-                            if isinstance(function.get("name"), str):
-                                tool_name += function["name"]
-                            if isinstance(function.get("arguments"), str):
-                                arguments += function["arguments"]
-            if buffer.strip():
-                # A final event without a blank line is common when a proxy
-                # closes immediately after ``[DONE]``; parse it the same way.
-                data = "\n".join(line[5:].lstrip() for line in buffer.splitlines() if line.startswith("data:"))
-                if data and data != "[DONE]":
-                    payload = _json_payload(data.encode("utf-8"))
-                    usage = _usage(payload) or usage
-        except UnicodeDecodeError:
-            raise ProviderError("invalid_response") from None
+        metadata_payload = {}
+        text_parts = []
+        tool_name, arguments = '', ''
+        tool_id = finish_reason = None
+        completed = False
+        usage = {}
+        for payload in _sse_payloads(body):
+            if payload is None:
+                completed = True
+                break
+            for key in ('model', 'id'):
+                if payload.get(key) is not None:
+                    metadata_payload[key] = payload[key]
+            if isinstance(payload.get('usage'), Mapping):
+                metadata_payload.setdefault('usage', {}).update(payload['usage'])
+                usage.update(_usage(payload) or {})
+            choices = payload.get('choices')
+            if not isinstance(choices, list) or not choices:
+                continue
+            choice = choices[0]
+            if not isinstance(choice, Mapping):
+                raise ProviderError('invalid_response')
+            finish_reason = _finish_reason(choice.get('finish_reason')) or finish_reason
+            delta = choice.get('delta')
+            if not isinstance(delta, Mapping):
+                continue
+            if isinstance(delta.get('content'), str):
+                text_parts.append(delta['content'])
+            calls = delta.get('tool_calls')
+            if isinstance(calls, list) and calls:
+                call = calls[0]
+                if not isinstance(call, Mapping):
+                    raise ProviderError('invalid_response')
+                tool_id = tool_id or call.get('id')
+                function = call.get('function')
+                if isinstance(function, Mapping):
+                    if isinstance(function.get('name'), str):
+                        tool_name += function['name']
+                    if isinstance(function.get('arguments'), str):
+                        arguments += function['arguments']
+        if not completed and not finish_reason:
+            raise ProviderError('invalid_response')
+        metadata = _metadata(metadata_payload, self.pricing)
         if tool_name:
-            return ModelResponse(kind="tool_call", text="".join(text_parts)[:MAX_TEXT_CHARS],
-                                 tool=_internal_tool_name(tool_name, tool_names),
-                                 arguments=_arguments(arguments or "{}"), usage=usage,
-                                 tool_call_id=str(tool_id)[:256] if tool_id else None,
-                                 finish_reason=str(finish_reason) if finish_reason else None)
+            return ModelResponse(kind='tool_call', text=''.join(text_parts)[:MAX_TEXT_CHARS],
+                tool=_internal_tool_name(tool_name, tool_names), arguments=_arguments(arguments or '{}'),
+                usage=usage or None, tool_call_id=str(tool_id)[:256] if tool_id else None,
+                finish_reason=finish_reason, metadata=metadata)
         if not text_parts:
-            raise ProviderError("invalid_response")
-        return ModelResponse(kind="final", text="".join(text_parts)[:MAX_TEXT_CHARS], usage=usage,
-                             finish_reason=str(finish_reason) if finish_reason else None)
+            raise ProviderError('invalid_response')
+        return ModelResponse(kind='final', text=''.join(text_parts)[:MAX_TEXT_CHARS],
+            usage=usage or None, finish_reason=finish_reason, metadata=metadata)
 
 
 class ProviderFactory:

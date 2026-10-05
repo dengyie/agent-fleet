@@ -6,7 +6,7 @@ one structured tool call, and normalized usage cross into the execution loop.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
@@ -19,10 +19,11 @@ class ModelResponse:
     usage: dict[str, int] | None = None
     tool_call_id: str | None = None
     finish_reason: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class ModelProvider(Protocol):
-    def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ModelResponse: ...
+    def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], *, request_observer=None) -> ModelResponse: ...
 
 
 __all__ = ["ModelProvider", "ModelResponse"]

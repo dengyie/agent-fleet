@@ -17,7 +17,7 @@ class CountingProvider:
         self.responses = list(responses)
         self.calls = 0
 
-    def complete(self, messages, tools):
+    def complete(self, messages, tools, *, request_observer=None):
         self.calls += 1
         return self.responses.pop(0)
 
@@ -97,7 +97,7 @@ def test_provider_exception_is_counted_as_unknown_before_worker_rethrows(tmp_pat
     meter.init()
 
     class BrokenProvider:
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             raise RuntimeError("transport failed")
 
     runtime = NativeAssistantRuntime(
@@ -114,7 +114,7 @@ def test_invalid_provider_usage_is_counted_as_unknown_and_releases_reservation(t
     meter.init()
 
     class BrokenUsageProvider:
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             return ModelResponse(kind="final", text="ok", usage={"input_tokens": "not-a-number"})
 
     runtime = NativeAssistantRuntime(
@@ -141,7 +141,7 @@ def test_usage_is_preserved_when_tool_execution_fails_after_model_call(tmp_path)
     meter.init()
 
     class Provider:
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             return ModelResponse(kind="tool_call", tool="workspace.exec", arguments={"argv": ["forbidden"]}, usage={"input_tokens": 2, "output_tokens": 3})
 
     result = LocalRunWorkerService(
@@ -167,7 +167,7 @@ def test_worker_marks_provider_boundary_exception_unknown(tmp_path):
     meter.init()
 
     class BrokenProvider:
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             raise RuntimeError("transport failed")
 
     result = LocalRunWorkerService(

@@ -82,7 +82,9 @@ def test_acceptance_http_chain_closes_report_and_node_journal(chain_target, caps
     events = client.request('/api/platform/v1/runs/' + row['run_id'] + '/events')['events']
     middle = ['node_command_queued', 'node_receipt'] if node else []
     assert [e['kind'] for e in events] == [
-        'run_started', 'tool_call', *middle, 'tool_result', 'run_finished',
+        'run_started', 'provider_request_started', 'provider_request_finished',
+        'tool_call', *middle, 'tool_result', 'provider_request_started',
+        'provider_request_finished', 'run_finished',
     ]
     if node:
         assert list(hub.workspace.iterdir()) == []  # Distinct node filesystem was listed.

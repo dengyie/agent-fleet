@@ -131,7 +131,10 @@
       "tests": [
         "tests/test_platform_run_worker.py::test_two_workers_only_one_claims_a_queued_run",
         "tests/test_platform_run_scheduler.py::test_scheduler_parallel_slots_count_across_process_instances",
-        "tests/test_platform_run_worker.py::test_expired_started_run_is_unknown_without_replaying_side_effect"
+        "tests/test_platform_run_worker.py::test_expired_started_run_is_unknown_without_replaying_side_effect",
+        "tests/test_platform_run_worker.py::test_slow_provider_keeps_both_leases_alive_and_cleans_heartbeat",
+        "tests/test_run_lease_heartbeat.py::test_heartbeat_failure_is_fenced_and_thread_joins",
+        "tests/test_run_lease_heartbeat.py::test_heartbeat_close_before_start_is_safe"
       ]
     },
     {
@@ -162,12 +165,30 @@
       "id": "USAGE-01",
       "title": "用量预算与异常记账",
       "layer": "integration",
-      "acceptance": "预算拒绝发生在模型前；同一步记账幂等；未知请求计入用量并释放预留",
+      "acceptance": "预算拒绝发生在模型前；同一步记账幂等；未知请求计入用量并释放预留；请求级五项Token/耗时/价格来源准确、重试分别记录、刷新恢复及跨用户隔离",
       "boundary": "disposable Hub; external services simulated",
       "tests": [
         "tests/test_platform_usage.py::test_admission_and_settlement_are_idempotent_for_same_provider_step",
         "tests/test_platform_usage.py::test_runtime_limit_hit_does_not_call_provider",
-        "tests/test_platform_usage.py::test_invalid_provider_usage_is_counted_as_unknown_and_releases_reservation"
+        "tests/test_platform_usage.py::test_invalid_provider_usage_is_counted_as_unknown_and_releases_reservation",
+        "tests/test_request_metadata_api.py::test_requests_survive_restart_and_are_owner_scoped",
+        "tests/test_request_metadata_api.py::test_pending_terminal_unknown_and_projection_queries_are_batched",
+        "tests/test_request_metadata_api.py::test_model_pricing_is_validated_and_frozen",
+        "tests/test_request_metadata.py::test_request_metadata_preserves_five_categories_and_provider_cost",
+        "tests/test_request_metadata.py::test_unknown_usage_is_not_zero_and_each_retry_is_recorded",
+        "tests/test_request_metadata.py::test_invalid_tokens_remain_unknown",
+        "tests/test_request_metadata.py::test_decimal_pricing_and_missing_detail_are_explicit",
+        "tests/test_request_metadata.py::test_sse_utf8_split_usage_tail_and_iterator_closed",
+        "tests/test_request_metadata.py::test_stream_failure_is_recorded_closed_and_never_retried",
+        "tests/test_request_metadata.py::test_accepted_nonstream_read_failure_is_closed_and_never_retried",
+        "tests/test_request_metadata.py::test_request_observer_failure_does_not_dispatch_or_replay",
+        "tests/test_request_metadata.py::test_request_timing_uses_monotonic_clock",
+        "tests/test_request_metadata.py::test_sse_final_event_without_blank_line_is_not_dropped",
+        "tests/test_request_metadata.py::test_sse_done_stops_consumption_and_closes_instead_of_waiting",
+        "tests/test_request_metadata.py::test_sse_truncated_partial_answer_is_not_success",
+        "tests/test_request_metadata.py::test_equal_cache_rates_allow_cost_without_inventing_token_counts",
+        "tests/test_request_metadata.py::test_gateway_cache_creation_alias_and_explicit_duration_totals",
+        "tests/test_request_metadata.py::test_unsupported_cache_tier_does_not_get_uniform_estimate"
       ]
     },
     {
@@ -300,7 +321,8 @@
       "boundary": "disposable Hub; external services simulated",
       "tests": [
         "tests/test_frontend_browser.py::test_console_in_real_browser",
-        "tests/test_frontend_browser.py::test_assistant_workspace_regressions"
+        "tests/test_frontend_browser.py::test_assistant_workspace_regressions",
+        "tests/test_frontend_browser.py::test_request_metadata_in_real_browser"
       ]
     },
     {

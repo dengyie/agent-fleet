@@ -20,3 +20,7 @@ The sanitizer is required because model output and tool responses are untrusted 
 ## Workspace design references (2026-10-05)
 
 The shell and assistant layout were independently implemented after inspecting the authenticated browser DOM and deployed CSS/JavaScript of [PromptQL](https://prompt.ql.app/project/promptql-community/promptql-playground/bot/c2b89889-c88c-4aeb-a522-b5feef3eb3c3) and [Windhub](https://chat.windhub.cc/chat). PromptQL informed the independent artifact/operation panel; Windhub informed warm neutral surfaces, history navigation, centered conversation and composer controls. No application bundles, branding, conversation contents or account data from those sites are included.
+
+Request metadata follows Windhub's compact model/token/duration/cost/time hierarchy and disclosure motion. The five token categories were verified from its accessible labels and cost breakdown. The implementation uses native details, stable DOM updates and the existing UiIcon library; no reference application code or user chat data is copied.
+
+Metadata-specific icon geometry is from Tabler Icons revision `96593940f6ec5cfc8078c0e023a181f0778f87e9` (MIT), bundled in UiIcon with `assets/vendor/tabler-LICENSE`; no icon runtime or CDN dependency.

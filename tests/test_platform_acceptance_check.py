@@ -78,7 +78,7 @@ def test_acceptance_denies_tools_before_side_effects(release_target, capsys, mon
     monkeypatch.setattr(SandboxBackend, 'execute', execute)
 
     class Provider:
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             declarations.append([item['name'] for item in tools])
             return ModelResponse(kind='tool_call', tool=tool, arguments=arguments)
 

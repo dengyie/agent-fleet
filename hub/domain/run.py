@@ -22,6 +22,7 @@ class Run:
     cancel_requested: bool = False
     result_text: str = ""
     usage: dict[str, int] | None = None
+    requests: list[dict[str, Any]] | None = None
 
     def __post_init__(self):
         if self.state not in RUN_STATES:
@@ -33,6 +34,9 @@ class Run:
             "workspace_id": self.config_snapshot.get("workspace_id"),
             "execution_node_id": self.config_snapshot.get("execution_node_id"),
         }
+        frozen = self.config_snapshot.get('provider_snapshot') or {}
+        config['model'] = frozen.get('model')
+        config['provider'] = frozen.get('provider')
         memory = self.config_snapshot.get("memory_context")
         if isinstance(memory, dict):
             config["memory_context"] = {
@@ -45,6 +49,8 @@ class Run:
             }
         return {
             "run_id": self.run_id,
+            "trigger_message_id": self.trigger_message_id,
+            "requests": self.requests or [],
             "conversation_id": self.conversation_id,
             "state": self.state,
             "config": config,

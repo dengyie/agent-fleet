@@ -33,8 +33,7 @@ from hub.diagnostics import log_failure
 logger = logging.getLogger(__name__)
 
 
-class RunLeaseLost(RuntimeError):
-    pass
+from hub.application.run_lease_heartbeat import LeaseHeartbeat, RunLeaseLost
 
 
 class LocalRunWorkerService:
@@ -106,6 +105,7 @@ class LocalRunWorkerService:
         lease = None
         resource_id = None
         lease_owner = None
+        heartbeat = None
         try:
             config = claim.get("config_snapshot") or {}
             policy = config.get("tool_policy")
@@ -126,7 +126,7 @@ class LocalRunWorkerService:
             lease_owner = f"{claim['owner_id']}:{claim['run_id']}:{claim['attempt']}"
             lease = leases.acquire(resource_id, lease_owner, ttl_s=self.lease_s)
 
-            def should_cancel():
+            def renew_leases():
                 now = float(self.clock())
                 if not self.repository.renew_run_lease(
                     claim["owner_id"], claim["run_id"], lease_id=lease_id,
@@ -136,6 +136,11 @@ class LocalRunWorkerService:
                 self.resource_leases.renew(
                     resource_id, lease_owner, lease["epoch"], ttl_s=self.lease_s,
                 )
+            heartbeat = LeaseHeartbeat(renew_leases, interval=self.lease_s / 3, name=claim['run_id'])
+            heartbeat.start()
+
+            def should_cancel():
+                heartbeat.pulse()
                 return self.repository.run_cancel_requested(
                     claim["owner_id"], claim["run_id"], lease_id=lease_id,
                 )
@@ -290,6 +295,8 @@ class LocalRunWorkerService:
             except Exception:
                 return {"run_id": claim["run_id"], "state": "lease_lost", "attempt": claim["attempt"]}
         finally:
+            if heartbeat is not None:
+                heartbeat.close()
             if lease is not None and resource_id is not None and lease_owner is not None:
                 try:
                     self.resource_leases.release(resource_id, lease_owner, lease["epoch"])
