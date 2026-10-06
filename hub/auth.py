@@ -183,6 +183,7 @@ def require_supervisor(view):
         if identity is None:
             return _forbidden()
         return view(*args, **kwargs)
+    wrapper._fleet_machine_auth = True
     return wrapper
 
 
@@ -221,6 +222,7 @@ def require_platform_node(view):
         if extract_platform_node_identity() is None:
             return _forbidden()
         return view(*args, **kwargs)
+    wrapper._fleet_machine_auth = True
     return wrapper
 
 
@@ -268,6 +270,10 @@ def extract_operator_identity(req=None) -> str | None:
 
     携带 foreign-domain header 时永不回退 DEV_OPERATOR（auth-domain 互斥）。
     """
+    if current_app.config.get("ACCOUNTS_ENABLED"):
+        from hub.accounts.http import account_identity
+        user = account_identity(request if req is None else req)
+        return user["id"] if user else None
     if req is not None:
         email = req.headers.get(_CF_EMAIL_HEADER, "").strip()
         if email:
@@ -330,6 +336,7 @@ def require_ingest_token(view):
             if not hmac.compare_digest(got, token):
                 return _forbidden()
         return view(*args, **kwargs)
+    wrapper._fleet_machine_auth = True
     return wrapper
 
 
@@ -355,6 +362,7 @@ def require_runner(view):
         if identity is None:
             return _forbidden()
         return view(*args, **kwargs)
+    wrapper._fleet_machine_auth = True
     return wrapper
 
 

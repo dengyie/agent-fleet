@@ -157,7 +157,7 @@ class ToolBroker:
 
     def __init__(self, backend, leases, *, resource_id: str, artifact_store=None,
                  diagnostics=None, lease_owner_id: str | None = None,
-                 artifact_workspace_id: str | None = None,
+                 artifact_workspace_id: str | None = None, allowed_tools=None,
                  browser_backend=None, browser_enabled: bool = False,
                  browser_submit_enabled: bool = False):
         self.backend = backend
@@ -167,23 +167,27 @@ class ToolBroker:
         self.artifact_store = artifact_store
         self.diagnostics = diagnostics
         self.lease_owner_id = lease_owner_id
+        self.allowed_tools = self.TOOLS if allowed_tools is None else self.TOOLS.intersection(allowed_tools)
         self.browser_backend = browser_backend
         self.browser_enabled = bool(browser_enabled)
         self.browser_submit_enabled = bool(browser_submit_enabled)
 
     @classmethod
-    def tool_definitions(cls, *, browser_enabled: bool = False,
+    def tool_definitions(cls, allowed_tools=None, *, browser_enabled: bool = False,
                          browser_submit_enabled: bool = False):
         definitions = [dict(item) for item in cls._BASE_TOOL_DEFINITIONS]
         if browser_enabled:
             definitions.extend(dict(item) for item in cls._BROWSER_TOOL_DEFINITIONS)
             if browser_submit_enabled:
                 definitions.append(dict(cls._SUBMIT_TOOL_DEFINITION))
-        return definitions
+        allowed = cls.TOOLS if allowed_tools is None else cls.TOOLS.intersection(allowed_tools)
+        return [item for item in definitions if item["name"] in allowed]
 
     def execute(self, *, command_id: str, tool: str, arguments: dict, owner_id: str, epoch: int) -> ToolReceipt:
         if tool not in self.TOOLS:
             return ToolReceipt(command_id, "failed", {}, "unknown_tool")
+        if tool not in self.allowed_tools:
+            return ToolReceipt(command_id, "failed", {}, "tool_not_allowed")
         if not self.leases.validate(self.resource_id, self.lease_owner_id or owner_id, epoch):
             return ToolReceipt(command_id, "failed", {}, "lease_mismatch")
         if not isinstance(arguments, dict):

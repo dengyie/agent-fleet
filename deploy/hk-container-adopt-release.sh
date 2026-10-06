@@ -46,7 +46,7 @@ pid=$(su -s /bin/bash -c "
 " "$FLEET_USER")
 
 [[ -n "$pid" ]] || { echo "release process not found" >&2; exit 2; }
-python3 -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8790/api/status", timeout=3).read()'
+python3 -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8790/healthz", timeout=3).read()'
 
 rollback_live() {
     case "$FLEET_LIVE_MODE" in

@@ -90,7 +90,7 @@ def test_worker_node_http_receipt_closes_remote_run_without_local_side_effect(tm
         def __init__(self):
             self.calls = 0
 
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             self.calls += 1
             if self.calls == 1:
                 return ModelResponse(kind="tool_call", tool="workspace.read", arguments={"path": "report.md"})
@@ -275,7 +275,7 @@ class _OpenThenProvider:
         self.messages = []
         self._second_call = second_call
 
-    def complete(self, messages, tools):
+    def complete(self, messages, tools, *, request_observer=None):
         self.messages.append(list(messages))
         if not any(m["role"] == "tool" for m in messages):
             return ModelResponse(kind="tool_call", tool="browser.open",
@@ -491,7 +491,7 @@ class _OpenSubmitThenFinal:
     def __init__(self):
         self.messages = []
 
-    def complete(self, messages, tools):
+    def complete(self, messages, tools, *, request_observer=None):
         self.messages.append(list(messages))
         if not any(m["role"] == "tool" for m in messages):
             return ModelResponse(kind="tool_call", tool="browser.open",
@@ -688,7 +688,7 @@ def test_browser_submit_consumes_through_production_service_assembly(tmp_path):
         def __init__(self):
             self.messages = []
 
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             self.messages.append(list(messages))
             if not any(m["role"] == "tool" for m in messages):
                 return ModelResponse(kind="tool_call", tool="browser.open",

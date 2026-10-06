@@ -75,7 +75,7 @@ EOF
   ENDPOINT="http://127.0.0.1:8799"
   ready=0
   for _ in {1..30}; do
-    if curl -sf "$ENDPOINT/api/status" >/dev/null 2>&1; then ready=1; break; fi
+    if curl -sf "$ENDPOINT/healthz" >/dev/null 2>&1; then ready=1; break; fi
     sleep 0.3
   done
   [ "$ready" = 1 ] || fail "hub 未就绪（见 $WORK/hub.log）"

@@ -93,7 +93,7 @@ def test_cancellation_does_not_hide_unknown_remote_write(tmp_path):
     runtime = NodeRuntime(NodeRuntimeConfig(node_id='node-review', credential='node-review:fixture', workspace_root=tmp_path/'node-workspace', journal_path=tmp_path/'journal.db', hub_url='https://hub.invalid', public_key=public, capabilities=frozenset({'workspace.write'})))
     worker = fleet['services']['platform_worker']
     class Provider:
-        def complete(self, messages, tools):
+        def complete(self, messages, tools, *, request_observer=None):
             return ModelResponse(kind='tool_call', tool='workspace.write', arguments={'path':'published.txt','content':'side effect happened'})
     class LostReceipt:
         def wait_for_receipt(self, command_id, *, timeout_s):

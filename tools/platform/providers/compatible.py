@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from .base import ModelResponse
+from .observation import RequestObservation
+from tools.platform.request_metadata import normalized_tokens
 
 
 class DeterministicProvider:
@@ -10,7 +12,13 @@ class DeterministicProvider:
         self.tool_name = tool_name
         self.calls = 0
 
-    def complete(self, messages, tools):
+    def complete(self, messages, tools, *, request_observer=None):
+        observation = RequestObservation(request_observer, model='deterministic', provider='deterministic')
+        result = self._complete(messages, tools)
+        observation.finish(metadata={'usage': normalized_tokens(result.usage)})
+        return result
+
+    def _complete(self, messages, tools):
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(

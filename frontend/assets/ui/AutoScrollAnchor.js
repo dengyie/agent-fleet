@@ -9,6 +9,7 @@ class AutoScrollAnchor extends HTMLElement {
   }
 
   connectedCallback() {
+    this.scrollRoot = this.closest("[data-chat-scroll]") || window;
     this.isAtBottom = true;
     this.render();
     this.bindEvents();
@@ -16,13 +17,17 @@ class AutoScrollAnchor extends HTMLElement {
 
   disconnectedCallback() {
     if (this._scrollHandler) {
-      window.removeEventListener("scroll", this._scrollHandler);
+      this.scrollRoot.removeEventListener("scroll", this._scrollHandler);
+      window.removeEventListener("resize", this._scrollHandler);
+      cancelAnimationFrame(this._frame);
     }
+    this._resizeObserver?.disconnect();
   }
 
   attributeChangedCallback(name, oldValue, newValue) {
     if (name === "is-streaming" && newValue !== null && this.isAtBottom) {
-      this.scrollToBottom();
+      cancelAnimationFrame(this._frame);
+      this._frame = requestAnimationFrame(() => this.scrollToBottom());
     }
   }
 
@@ -38,20 +43,33 @@ class AutoScrollAnchor extends HTMLElement {
   bindEvents() {
     const btn = this.querySelector("#back-to-bottom");
     this._scrollHandler = () => {
-      // The inspector can extend below the conversation on narrow screens.
-      // Follow the actual message anchor, not the bottom of the document.
+      // Follow the conversation viewport; retain document fallback for other hosts.
       const anchor = this.querySelector("#anchor").getBoundingClientRect();
-      this.isAtBottom = anchor.top >= 0 && anchor.bottom <= window.innerHeight;
+      if (this.scrollRoot === window) {
+        this.isAtBottom = anchor.top >= 0 && anchor.bottom <= window.innerHeight;
+      } else {
+        this.isAtBottom = this.scrollRoot.scrollHeight - this.scrollRoot.scrollTop - this.scrollRoot.clientHeight < 72;
+      }
       btn.classList.toggle("hidden", this.isAtBottom);
     };
 
-    window.addEventListener("scroll", this._scrollHandler, { passive: true });
+    this.scrollRoot.addEventListener("scroll", this._scrollHandler, { passive: true });
+    window.addEventListener("resize", this._scrollHandler, { passive: true });
+    if (this.scrollRoot !== window) {
+      this._resizeObserver = new ResizeObserver(this._scrollHandler);
+      this._resizeObserver.observe(this.scrollRoot);
+    }
     this._scrollHandler();
     btn.addEventListener("click", () => this.scrollToBottom());
   }
 
   scrollToBottom() {
-    this.querySelector("#anchor")?.scrollIntoView({ behavior: "smooth" });
+    const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth';
+    if (this.scrollRoot && this.scrollRoot !== window) {
+      this.scrollRoot.scrollTo({ top: this.scrollRoot.scrollHeight, behavior });
+    } else {
+      this.querySelector("#anchor")?.scrollIntoView({ behavior, block: "end" });
+    }
   }
 }
 

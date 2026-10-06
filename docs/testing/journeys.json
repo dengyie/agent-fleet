@@ -1,0 +1,448 @@
+{
+  "schema_version": 1,
+  "scope": "Supported repository workflows; see external checks for boundaries not proven by CI.",
+  "journeys": [
+    {
+      "id": "AUTH-01",
+      "title": "登录、页面守卫与退出",
+      "layer": "browser",
+      "acceptance": "匿名不能进入功能页；账密登录后可进入；退出和返回不能恢复失效会话",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_account_browser.py::test_account_browser",
+        "tests/test_account_browser.py::test_account_switch_clears_previous_identity"
+      ]
+    },
+    {
+      "id": "AUTH-02",
+      "title": "邀请注册与邮箱验证码",
+      "layer": "integration",
+      "acceptance": "未邀请不发码；错误/过期/复用验证码失败；邀请注册成功且不同用户互相隔离",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_full_flow.py::test_invitation_registration_recovery_and_owner_isolation",
+        "tests/test_accounts.py::test_codes_expire_and_failed_attempts_persist",
+        "tests/test_accounts.py::test_registration_is_verified_and_code_is_single_use"
+      ]
+    },
+    {
+      "id": "AUTH-03",
+      "title": "密码、角色和管理员管理",
+      "layer": "integration",
+      "acceptance": "改密/重置/停用撤销全部旧会话；并发角色修改不得失去最后管理员",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_accounts.py::test_reset_and_password_change_revoke_all_sessions",
+        "tests/test_account_review_regressions.py::test_simultaneous_admin_demotion_preserves_one_admin",
+        "tests/test_account_username.py::test_username_does_not_bypass_disabled_account"
+      ]
+    },
+    {
+      "id": "AUTH-04",
+      "title": "鉴权、CSRF及限流",
+      "layer": "integration",
+      "acceptance": "跨身份/机器凭据/伪造来源请求拒绝；转发头不能绕过登录限流",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_account_http.py::test_csrf_edge_identity_and_role_boundaries",
+        "tests/test_account_review_regressions.py::test_untrusted_forwarding_headers_cannot_evade_limits",
+        "tests/test_account_credential_limits.py::test_verified_replacement_allows_new_password_after_lockout",
+        "tests/test_acceptance_flow.py::test_acceptance_route_enforces_account_owner_origin_and_policy"
+      ]
+    },
+    {
+      "id": "MAIL-01",
+      "title": "SMTP与one-mail传输",
+      "layer": "integration",
+      "acceptance": "真实TLS/STARTTLS、认证和MIME可投递；证书拒绝/投递错误不得重试或记成功",
+      "boundary": "loopback TLS SMTP; mocked one-mail HTTPS response; real mailbox requires MAIL-LIVE",
+      "tests": [
+        "tests/test_account_smtp_transport.py::test_smtp_real_tls_authentication_and_mime_delivery",
+        "tests/test_account_smtp_transport.py::test_smtp_rejection_is_not_success_or_automatically_retried",
+        "tests/test_account_smtp_transport.py::test_smtp_untrusted_certificate_is_rejected_before_delivery",
+        "tests/test_account_mail.py::test_failure_does_not_retry_or_accept_ambiguous_delivery"
+      ]
+    },
+    {
+      "id": "ASSIST-01",
+      "title": "浏览器到模型与产物的完整流程",
+      "layer": "browser",
+      "acceptance": "真实账号Cookie/调度器/模型HTTP/四步工具调用；关闭标签后恢复回复；下载字节正确；502可见；退出后拒绝访问",
+      "boundary": "real browser + Hub + HTTP adapter; only model service scripted",
+      "tests": [
+        "tests/test_full_flow_browser.py::test_browser_account_model_tool_artifact_and_failure_journey"
+      ]
+    },
+    {
+      "id": "ASSIST-02",
+      "title": "持久化、幂等和进程重建",
+      "layer": "integration",
+      "acceptance": "写文件/读取/发布产物/最终回复均成立；重复提交只建一个Run；新app读取旧账号、事件和结果",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_full_flow.py::test_account_to_real_http_tools_artifact_and_restart",
+        "tests/test_platform_run_worker.py::test_queued_turns_use_trigger_cutoff_and_durable_assistant_history",
+        "tests/test_acceptance_flow.py::test_acceptance_http_idempotency_cannot_cross_policy",
+        "tests/test_acceptance_flow.py::test_acceptance_queued_policy_survives_hub_restart",
+        "tests/test_acceptance_flow.py::test_accepted_response_timeout_recovers_unique_run_by_token"
+      ]
+    },
+    {
+      "id": "MODEL-01",
+      "title": "工具协议与流式响应",
+      "layer": "contract",
+      "acceptance": "非法点分工具名在独立服务上失败；别名冲突拒绝；JSON与SSE工具名还原正确",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_full_flow.py::test_strict_provider_rejects_the_production_dotted_tool_regression",
+        "tests/test_platform_provider.py::test_invalid_or_ambiguous_tool_names_fail_before_network",
+        "tests/test_platform_provider_canary.py::test_real_urllib_sse_canary_handles_fragmented_tool_call"
+      ]
+    },
+    {
+      "id": "MODEL-02",
+      "title": "模型异常、超时及错误证据",
+      "layer": "integration",
+      "acceptance": "401/429/500/502/503/坏JSON/未知工具成为可恢复查询的unknown；不泄漏上游正文、不自动重放",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_full_flow.py::test_provider_fault_is_durable_visible_and_never_replayed",
+        "tests/test_full_flow.py::test_real_transport_timeout_records_unknown_without_retry",
+        "tests/test_platform_diagnostics_regressions.py::test_provider_error_is_correlated_durable_and_visible_without_raw_body",
+        "tests/test_provider_contract_fidelity.py::test_provider_failure_keeps_safe_root_cause",
+        "tests/test_provider_contract_fidelity.py::test_urllib_connection_and_body_causes_are_preserved",
+        "tests/test_provider_contract_fidelity.py::test_parse_failure_keeps_cause_without_raw_payload",
+        "tests/test_provider_contract_fidelity.py::test_secret_resolution_keeps_cause_without_exposing_value",
+        "tests/test_provider_transport_boundaries.py::test_redirect_never_forwards_credentials_or_replays",
+        "tests/test_provider_transport_boundaries.py::test_chunked_done_finishes_before_http_eof_and_closes_socket",
+        "tests/test_provider_transport_boundaries.py::test_trickle_is_bounded_by_total_deadline_without_replay",
+        "tests/test_provider_transport_boundaries.py::test_worker_secret_failure_retains_safe_cause_chain",
+        "tests/test_provider_transport_boundaries.py::test_request_timeout_releases_scheduler_slot_and_next_run_executes",
+        "tests/test_http_transport.py::test_tls_verification_and_shutdown",
+        "tests/test_http_transport.py::test_https_downgrade_redirect_is_not_followed",
+        "tests/test_http_transport.py::test_system_proxy_and_connect_preserve_origin_credentials",
+        "tests/test_http_transport.py::test_unread_response_close_reclaims_socket_and_timer",
+        "tests/test_http_transport.py::test_dns_saturation_is_bounded_and_late_resolution_cannot_dispatch",
+        "tests/test_http_transport.py::test_tls_handshake_and_dns_share_deadline"
+      ]
+    },
+    {
+      "id": "RUN-01",
+      "title": "排队与运行中的取消",
+      "layer": "integration",
+      "acceptance": "排队取消零模型请求；运行取消后无工具副作用；用户可看到cancelled",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_full_flow.py::test_running_and_queued_cancellation_have_no_tool_side_effects",
+        "tests/test_account_browser.py::test_account_assistant_permissions_and_core_flows"
+      ]
+    },
+    {
+      "id": "RUN-02",
+      "title": "并发、租约和崩溃恢复",
+      "layer": "integration",
+      "acceptance": "单Run只认领一次；全局/工作区并发上限跨实例有效；已开始但租约过期的Run保持unknown",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_platform_run_worker.py::test_two_workers_only_one_claims_a_queued_run",
+        "tests/test_platform_run_scheduler.py::test_scheduler_parallel_slots_count_across_process_instances",
+        "tests/test_platform_run_worker.py::test_expired_started_run_is_unknown_without_replaying_side_effect",
+        "tests/test_platform_run_worker.py::test_slow_provider_keeps_both_leases_alive_and_cleans_heartbeat",
+        "tests/test_run_lease_heartbeat.py::test_heartbeat_failure_is_fenced_and_thread_joins",
+        "tests/test_run_lease_heartbeat.py::test_heartbeat_close_before_start_is_safe",
+        "tests/test_provider_transport_boundaries.py::test_request_timeout_releases_scheduler_slot_and_next_run_executes"
+      ]
+    },
+    {
+      "id": "CONFIG-01",
+      "title": "模型工作区选择与配置快照",
+      "layer": "integration",
+      "acceptance": "跨用户引用拒绝；运行配置被冻结；修改目录不改变已接受的请求；配置就绪不等于模型连通",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_platform_defaults.py::test_defaults_use_revision_and_reject_cross_owner_reference",
+        "tests/test_platform_conversation.py::test_run_snapshot_freezes_non_secret_provider_settings",
+        "tests/test_platform_readiness.py::test_readiness_checks_owner_secret_and_workspace_without_calling_provider"
+      ]
+    },
+    {
+      "id": "FILES-01",
+      "title": "工作区、沙箱和产物安全",
+      "layer": "integration",
+      "acceptance": "越界写入失败；主机命令不可绕过沙箱；产物内容和哈希一致，跨用户和篡改文件拒绝",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_full_flow.py::test_tool_failure_prevents_final_success_and_path_escape",
+        "tests/test_platform_run_worker.py::test_default_worker_rejects_unsandboxed_host_exec",
+        "tests/test_platform_artifact_routes.py::test_artifact_http_api_is_operator_scoped_and_integrity_checked"
+      ]
+    },
+    {
+      "id": "USAGE-01",
+      "title": "用量预算与异常记账",
+      "layer": "integration",
+      "acceptance": "预算拒绝发生在模型前；同一步记账幂等；未知请求计入用量并释放预留；请求级五项Token/耗时/价格来源准确、重试分别记录、刷新恢复及跨用户隔离",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_platform_usage.py::test_admission_and_settlement_are_idempotent_for_same_provider_step",
+        "tests/test_platform_usage.py::test_runtime_limit_hit_does_not_call_provider",
+        "tests/test_platform_usage.py::test_invalid_provider_usage_is_counted_as_unknown_and_releases_reservation",
+        "tests/test_request_metadata_api.py::test_requests_survive_restart_and_are_owner_scoped",
+        "tests/test_request_metadata_api.py::test_pending_terminal_unknown_and_projection_queries_are_batched",
+        "tests/test_request_metadata_api.py::test_model_pricing_is_validated_and_frozen",
+        "tests/test_request_metadata.py::test_request_metadata_preserves_five_categories_and_provider_cost",
+        "tests/test_request_metadata.py::test_unknown_usage_is_not_zero_and_each_retry_is_recorded",
+        "tests/test_request_metadata.py::test_invalid_tokens_remain_unknown",
+        "tests/test_request_metadata.py::test_decimal_pricing_and_missing_detail_are_explicit",
+        "tests/test_request_metadata.py::test_sse_utf8_split_usage_tail_and_iterator_closed",
+        "tests/test_request_metadata.py::test_stream_failure_is_recorded_closed_and_never_retried",
+        "tests/test_request_metadata.py::test_accepted_nonstream_read_failure_is_closed_and_never_retried",
+        "tests/test_request_metadata.py::test_request_observer_failure_does_not_dispatch_or_replay",
+        "tests/test_request_metadata.py::test_request_timing_uses_monotonic_clock",
+        "tests/test_request_metadata.py::test_sse_final_event_without_blank_line_is_not_dropped",
+        "tests/test_request_metadata.py::test_sse_done_stops_consumption_and_closes_instead_of_waiting",
+        "tests/test_request_metadata.py::test_sse_truncated_partial_answer_is_not_success",
+        "tests/test_request_metadata.py::test_equal_cache_rates_allow_cost_without_inventing_token_counts",
+        "tests/test_request_metadata.py::test_gateway_cache_creation_alias_and_explicit_duration_totals",
+        "tests/test_request_metadata.py::test_unsupported_cache_tier_does_not_get_uniform_estimate",
+        "tests/test_provider_contract_fidelity.py::test_wire_cost_retains_exact_decimal_digits",
+        "tests/test_provider_contract_fidelity.py::test_wire_cost_limits_apply_before_any_rounding",
+        "tests/test_provider_contract_fidelity.py::test_structured_argument_numbers_remain_plain_json_values"
+      ]
+    },
+    {
+      "id": "NODE-01",
+      "title": "远程节点投递、回执和幂等",
+      "layer": "integration",
+      "acceptance": "签名/节点/租约均校验；节点执行回执闭合Run；重复投递不重复执行；崩溃未知不得重放",
+      "boundary": "loopback account/provider/node HTTP plus separate journal/executor filesystem; signed command checks use injected transport; actual host requires NODE-LIVE",
+      "tests": [
+        "tests/test_platform_node_http_e2e.py::test_worker_node_http_receipt_closes_remote_run_without_local_side_effect",
+        "tests/test_platform_delivery.py::test_node_crash_recovery_is_unknown_until_reconciliation",
+        "tests/test_platform_delivery.py::test_delivery_signs_commands_and_strict_repository_rejects_unsigned",
+        "tests/test_acceptance_flow.py::test_acceptance_http_chain_closes_report_and_node_journal",
+        "tests/test_acceptance_flow.py::test_adversarial_wire_tool_cannot_reach_local_or_remote_backend"
+      ]
+    },
+    {
+      "id": "WINDOW-01",
+      "title": "执行窗口连接及租约",
+      "layer": "integration",
+      "acceptance": "票据一次性且到期失效；写入租约互斥；关闭/重连/查询均有owner边界",
+      "boundary": "window control API; no claim of real PTY/browser attachment",
+      "tests": [
+        "tests/test_platform_execution_windows.py::test_execution_window_http_lifecycle_and_redaction",
+        "tests/test_platform_execution_windows.py::test_writer_lease_is_exclusive_fenced_and_releasable"
+      ]
+    },
+    {
+      "id": "MEMORY-01",
+      "title": "记忆管理和显式注入",
+      "layer": "integration",
+      "acceptance": "CRUD/搜索有owner与revision边界；必须显式选择；冻结内容不随后续编辑变化",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_platform_memory.py::test_memory_http_crud_search_and_revision_fence",
+        "tests/test_platform_run_worker.py::test_worker_uses_snapshot_after_live_memory_changes",
+        "tests/test_account_browser.py::test_account_assistant_permissions_and_core_flows"
+      ]
+    },
+    {
+      "id": "MONITOR-01",
+      "title": "监控、健康证据及事件",
+      "layer": "integration",
+      "acceptance": "过期/异常优先级准确；重复故障去重；连续健康证据才关闭事件；请求探针防SSRF",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_platform_service_health.py::test_health_aggregation_has_stale_and_unhealthy_precedence",
+        "tests/test_platform_incidents.py::test_repeated_fingerprint_is_one_open_incident_and_owner_scoped",
+        "tests/test_platform_incidents.py::test_two_consecutive_healthy_samples_close_and_failure_resets_streak",
+        "tests/test_platform_http_probe_scheduling.py::test_policy_rejects_private_dns_and_allows_loopback_only_with_explicit_override"
+      ]
+    },
+    {
+      "id": "ACTION-01",
+      "title": "只读诊断和审批操作",
+      "layer": "integration",
+      "acceptance": "inspect无任意参数；restart必须有一次性审批；owner和资源版本校验阻止过期执行",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_platform_service_actions.py::test_restart_requires_approval_and_is_one_time",
+        "tests/test_platform_service_actions.py::test_version_fence_and_owner_scope",
+        "tests/test_platform_service_actions.py::test_inspect_command_is_read_only_and_rejects_user_arguments"
+      ]
+    },
+    {
+      "id": "SCHEDULE-01",
+      "title": "定时任务和重复触发",
+      "layer": "integration",
+      "acceptance": "过期触发按策略处理；重叠合并不重复执行；失败退避；接口拒绝非只读任务",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_platform_schedules.py::test_schedule_service_overlap_coalesces_without_duplicate_executor_call",
+        "tests/test_platform_schedules.py::test_schedule_service_skips_old_occurrences_or_catches_up_once",
+        "tests/test_platform_schedules.py::test_schedule_api_rejects_unbounded_or_mutating_inputs"
+      ]
+    },
+    {
+      "id": "SESSION-01",
+      "title": "CLI会话采集与补丁交付",
+      "layer": "integration",
+      "acceptance": "临时runner完成任务后Hub必须持有正文；缺失采集即失败；真实补丁可应用",
+      "boundary": "disposable CLI executable; actual installed agents require NODE-LIVE",
+      "tests": [
+        "tests/test_smoke_failure_evidence.py::test_smoke_verifies_uploaded_conversation",
+        "tests/test_smoke_failure_evidence.py::test_smoke_rejects_successful_task_when_conversation_upload_is_disabled"
+      ]
+    },
+    {
+      "id": "SSE-01",
+      "title": "实时重连、分页与撤销",
+      "layer": "integration",
+      "acceptance": "重连补全所有事件分页且无重复；会话撤销后现有流不得继续泄漏内容",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_review_sse.py::test_stream_replays_all_pages_before_live_events",
+        "tests/test_review_sse.py::test_stream_deduplicates_subscription_watermark_overlap",
+        "tests/test_account_http.py::test_stream_stops_after_session_revocation"
+      ]
+    },
+    {
+      "id": "ADOPT-01",
+      "title": "会话接管与撤销",
+      "layer": "integration",
+      "acceptance": "接管回执升级状态；撤销或目录漂移只能脱离，不能杀死外部会话",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_adoption_e2e.py::test_adopted_receipt_promotes_and_observes",
+        "tests/test_adoption_e2e.py::test_revoke_detaches_without_signal",
+        "tests/test_adoption_e2e.py::test_drift_revokes_and_never_terminates"
+      ]
+    },
+    {
+      "id": "BACKUP-01",
+      "title": "一致备份、加密和恢复",
+      "layer": "integration",
+      "acceptance": "SQLite在线快照与产物一致；空产物可恢复；错误密钥、篡改、路径穿越和覆盖现有目录拒绝",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_platform_backup.py::test_backup_round_trip_uses_online_sqlite_copy_and_artifact_inventory",
+        "tests/test_platform_backup_encrypted.py::test_encrypted_backup_round_trip_with_empty_artifact_root",
+        "tests/test_platform_backup_encrypted.py::test_encrypted_backup_rejects_wrong_key_key_id_and_ciphertext_tamper",
+        "tests/test_platform_backup.py::test_existing_restore_destination_is_never_overwritten"
+      ]
+    },
+    {
+      "id": "UI-01",
+      "title": "控制台页面和文本渲染",
+      "layer": "browser",
+      "acceptance": "节点/任务/会话/监控页面可操作；历史分页、长文本、Markdown和恶意HTML不破坏页面；助手错误可见、弹层隔离、编辑器滚动边界和实际模型展示正确",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_frontend_browser.py::test_console_in_real_browser",
+        "tests/test_frontend_browser.py::test_assistant_workspace_regressions",
+        "tests/test_frontend_browser.py::test_request_metadata_in_real_browser"
+      ]
+    },
+    {
+      "id": "RELEASE-01",
+      "title": "发布探活与验收CLI",
+      "layer": "integration",
+      "acceptance": "真实账号验收入口固定只读权限；本地/节点HTTP回执、工具、最终回复、恢复和退出闭环；逾期不通过；未知提交按token定位且不重发；旧服务不回退普通入口",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_account_liveness.py::test_both_guardians_probe_real_account_hub_without_credentials",
+        "tests/test_platform_acceptance_check.py::test_release_cli_requires_real_tool_final_reply_and_revocation",
+        "tests/test_platform_acceptance_check.py::test_release_cli_http_failure_does_not_retry_or_report_success",
+        "tests/test_platform_acceptance_check.py::test_release_cli_all_models_reports_each_failure_and_keeps_testing",
+        "tests/test_platform_acceptance_check.py::test_release_cli_timeout_preserves_queued_run_without_resubmission",
+        "tests/test_platform_acceptance_check.py::test_release_cli_manifest_is_checked_before_login",
+        "tests/test_platform_acceptance_check.py::test_release_cli_does_not_forward_credentials_on_redirect",
+        "tests/test_platform_acceptance_check.py::test_release_cli_not_ready_cannot_create_runs",
+        "tests/test_platform_acceptance_check.py::test_release_cli_malformed_credentials_produce_failed_evidence",
+        "tests/test_platform_acceptance_check.py::test_release_cli_rejects_unexpected_writing_tools",
+        "tests/test_platform_acceptance_check.py::test_acceptance_denies_tools_before_side_effects",
+        "tests/test_platform_run_worker.py::test_acceptance_policy_is_frozen_and_enforced_by_new_worker",
+        "tests/test_platform_run_worker.py::test_acceptance_cannot_reuse_unrestricted_turn_token",
+        "tests/test_acceptance_deadline.py::test_model_deadline_rejects_late_success_without_replay",
+        "tests/test_acceptance_deadline.py::test_model_completes_within_deadline",
+        "tests/test_acceptance_deadline.py::test_dns_deadline_preserves_known_ids_without_late_requests",
+        "tests/test_acceptance_deadline.py::test_repeated_dns_timeouts_keep_only_one_pending_resolver",
+        "tests/test_acceptance_deadline.py::test_tcp_address_attempts_share_remaining_budget",
+        "tests/test_acceptance_deadline.py::test_tls_handshake_uses_budget_left_after_dns",
+        "tests/test_acceptance_deadline.py::test_deadline_connection_preserves_tls_verification",
+        "tests/test_platform_acceptance_check.py::test_release_cli_invalid_credentials_cannot_create_runs",
+        "tests/test_platform_acceptance_check.py::test_release_cli_private_credentials_and_catalog_are_required",
+        "tests/test_platform_acceptance_check.py::test_release_cli_rejects_unsafe_endpoint_before_login",
+        "tests/test_acceptance_flow.py::test_acceptance_http_chain_closes_report_and_node_journal",
+        "tests/test_acceptance_flow.py::test_adversarial_wire_tool_cannot_reach_local_or_remote_backend",
+        "tests/test_acceptance_flow.py::test_acceptance_route_enforces_account_owner_origin_and_policy",
+        "tests/test_acceptance_flow.py::test_acceptance_http_idempotency_cannot_cross_policy",
+        "tests/test_acceptance_flow.py::test_acceptance_queued_policy_survives_hub_restart",
+        "tests/test_acceptance_flow.py::test_accepted_response_timeout_recovers_unique_run_by_token",
+        "tests/test_acceptance_flow.py::test_legacy_hub_does_not_fallback_to_unrestricted_turn",
+        "tests/test_auto_deploy.py::test_deployment_preserves_live_inode_runtime_and_creates_consistent_backup",
+        "tests/test_auto_deploy.py::test_check_only_never_stops_or_changes_live",
+        "tests/test_auto_deploy.py::test_failed_health_rolls_back_code_but_never_restores_old_database",
+        "tests/test_auto_deploy.py::test_partial_copy_is_rolled_back",
+        "tests/test_auto_deploy.py::test_failed_rollback_blocks_later_deployments",
+        "tests/test_auto_deploy.py::test_commit_failure_restores_last_success_and_allows_retry",
+        "tests/test_auto_deploy.py::test_failed_rollback_metadata_still_closes_admissions",
+        "tests/test_auto_deploy.py::test_invalid_bundles_cannot_enter_host_hooks",
+        "tests/test_auto_deploy.py::test_archive_rejects_traversal_links_and_runtime_paths",
+        "tests/test_auto_deploy.py::test_stale_run_cannot_replace_newer_release",
+        "tests/test_auto_deploy.py::test_task_arriving_before_maintenance_is_not_terminated",
+        "tests/test_auto_deploy.py::test_ssh_receiver_rejects_shell_and_unbounded_inputs",
+        "tests/test_auto_deploy.py::test_upload_checks_length_and_digest",
+        "tests/test_auto_deploy.py::test_receiver_failures_never_report_success_or_leave_partial_upload",
+        "tests/test_auto_deploy.py::test_bundle_roundtrip_keeps_same_run_frontend_and_backend",
+        "tests/test_auto_deploy.py::test_nginx_cutover_and_restore_keep_original_account_proxy_config",
+        "tests/test_auto_deploy.py::test_public_probe_waits_for_nginx_reload_to_take_effect",
+        "tests/test_auto_deploy.py::test_public_probe_has_one_deadline_and_rejects_late_success",
+        "tests/test_auto_deploy.py::test_ci_deploy_is_main_only_after_tests_and_same_run_packaging",
+        "tests/test_http_transport.py::test_tls_verification_and_shutdown",
+        "tests/test_http_transport.py::test_https_downgrade_redirect_is_not_followed",
+        "tests/test_http_transport.py::test_system_proxy_and_connect_preserve_origin_credentials",
+        "tests/test_http_transport.py::test_unread_response_close_reclaims_socket_and_timer",
+        "tests/test_http_transport.py::test_dns_saturation_is_bounded_and_late_resolution_cannot_dispatch",
+        "tests/test_http_transport.py::test_tls_handshake_and_dns_share_deadline"
+      ]
+    },
+    {
+      "id": "GATE-01",
+      "title": "全流程门禁自身",
+      "layer": "contract",
+      "acceptance": "必需用例缺失、跳过、xfail、部分参数跳过、teardown失败均阻断CI；只有全部通过才能算覆盖",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_journey_gate.py::test_required_journeys_use_real_collected_results",
+        "tests/test_journey_gate.py::test_deselected_required_parameter_cannot_count_as_full_coverage",
+        "tests/test_journey_gate.py::test_hidden_failing_parameter_cannot_pass_journey",
+        "tests/test_journey_gate.py::test_last_failed_cache_cannot_hide_required_parameters",
+        "tests/test_journey_gate.py::test_missing_matrix_cannot_silently_disable_gate"
+      ]
+    }
+  ],
+  "external_checks": [
+    {
+      "id": "MODEL-LIVE",
+      "acceptance": "Each enabled model must complete an actual read-only workspace tool call, final reply and conversation recovery using account cookies.",
+      "command": "python -m tools.platform.acceptance_check --endpoint ORIGIN --credentials-file PRIVATE_JSON --workspace ID --all-models --expected-release SHA --report evidence/release.json"
+    },
+    {
+      "id": "MAIL-LIVE",
+      "acceptance": "An explicitly designated mailbox receives the invitation registration and reset codes; both are accepted once and revoke old sessions. Provider acceptance alone is not mailbox delivery.",
+      "procedure": "release-acceptance.md#mail-live"
+    },
+    {
+      "id": "NODE-LIVE",
+      "acceptance": "Each enabled real runtime/remote node must complete its approved fixture task, exact artifact and reconnect/revocation checks. Disabled or unconfigured surfaces are not passed.",
+      "procedure": "release-acceptance.md#node-live"
+    },
+    {
+      "id": "DEPLOY-LIVE",
+      "acceptance": "Release hashes, account guards, one guardian/worker, TLS/static resources and browser recovery match the deployed artifact; rollback tested in an isolated environment.",
+      "procedure": "release-acceptance.md#deploy-live"
+    }
+  ]
+}

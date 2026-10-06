@@ -7,6 +7,9 @@ class Element {
   appendChild(child) { if (child.parentNode) child.parentNode.removeChild(child); child.parentNode = this; this.children.push(child); return child; }
   insertBefore(child, before) { if (child.parentNode) child.parentNode.removeChild(child); child.parentNode = this; this.children.splice(this.children.indexOf(before), 0, child); return child; }
   getAttribute(key) { return this.attributes[key]; }
+  get open() { return 'open' in this.attributes; }
+  set open(value) { if (value) this.attributes.open = ''; else delete this.attributes.open; }
+  close() { delete this.attributes.open; }
   removeChild(child) { this.children.splice(this.children.indexOf(child), 1); child.parentNode = null; }
   get options() { return this.children; }
   get firstChild() { return this.children[0] || null; }

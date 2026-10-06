@@ -18,6 +18,7 @@ class RemoteToolBroker:
 
     def __init__(self, delivery, *, node_id: str, resource_id: str, run_id: str,
                  event_sink=None, waiter=None, clock=time.time, receipt_timeout_s=30.0,
+                 allowed_tools=None,
                  browser_enabled: bool = False, browser_network_enabled: bool = False,
                  browser_allowed_origins=(), browser_resolver=None,
                  browser_submit_enabled: bool = False, submit_approvals=None):
@@ -29,6 +30,7 @@ class RemoteToolBroker:
         self.waiter = waiter
         self.clock = clock
         self.receipt_timeout_s = max(0.1, min(float(receipt_timeout_s), 300.0))
+        self.allowed_tools = ToolBroker.TOOLS if allowed_tools is None else ToolBroker.TOOLS.intersection(allowed_tools)
         self.browser_enabled = bool(browser_enabled)
         self.browser_network_enabled = bool(browser_network_enabled)
         self.browser_allowed_origins = tuple(browser_allowed_origins or ())
@@ -43,6 +45,8 @@ class RemoteToolBroker:
     def execute(self, *, command_id: str, tool: str, arguments: dict, owner_id: str, epoch: int) -> ToolReceipt:
         if tool not in ToolBroker.TOOLS:
             return ToolReceipt(command_id, "failed", {}, "unknown_tool")
+        if tool not in self.allowed_tools:
+            return ToolReceipt(command_id, "failed", {}, "tool_not_allowed")
         if tool in BROWSER_TOOLS and not self.browser_enabled:
             return ToolReceipt(command_id, "failed", {}, "browser_disabled")
         if tool == "browser.submit" and (not self.browser_submit_enabled or self.submit_approvals is None):

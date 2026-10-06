@@ -162,6 +162,12 @@ def create_app(
         if config.platform_artifact_root is None:
             raise RuntimeError("platform_enabled requires a platform_artifact_root")
         artifact_store = ArtifactStore(config.platform_artifact_root)
+        if getattr(config, "platform_browser_enabled", False):
+            from hub.infrastructure.browser_repository import BrowserRepository
+            browser_repository = (repositories or {}).get("browser")
+            if browser_repository is None:
+                browser_repository = BrowserRepository(config.platform_db)
+            browser_repository.init()
         if getattr(config, "execution_windows_enabled", False):
             from hub.infrastructure.execution_window_repository import ExecutionWindowRepository
             from hub.application.execution_window_service import ExecutionWindowService
@@ -734,6 +740,9 @@ def create_app(
         app.extensions["fleet"]["services"]["control_router"] = control_router
     if adoption_service is not None:
         app.extensions["fleet"]["services"]["adoptions"] = adoption_service
+
+    from hub.accounts.http import init_accounts
+    init_accounts(app, config)
 
     from hub.http.operator_routes import bp as operator_bp
     app.register_blueprint(operator_bp)

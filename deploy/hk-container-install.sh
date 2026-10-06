@@ -193,7 +193,7 @@ start_probe_loop() {
 wait_for_status() {
     local attempts=30
     while (( attempts > 0 )); do
-        if python3 -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:'"$web_port"'/api/status", timeout=2).read()' \
+        if python3 -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:'"$web_port"'/healthz", timeout=2).read()' \
             >/dev/null 2>&1; then
             return 0
         fi

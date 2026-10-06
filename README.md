@@ -129,6 +129,12 @@ python3 tools/agent-self-report.py \
 
 ---
 
+## 测试与发布验收
+
+完整测试入口：[全流程测试与质量门禁](docs/testing/README.md)。[可执行流程矩阵](docs/testing/journeys.json)绑定必需用例；[测试链路与证据核验](docs/testing/test-chains.md)提供阶段断言、审查回归和可复制命令。CI 在打包前检查实际执行结果，缺失、跳过或失败均阻断。真实模型、邮件和节点按[发布验收手册](docs/testing/release-acceptance.md)分别验证。
+
+main 在测试、前后端打包通过后进入[自动部署](deploy/auto-deploy.md)，使用 production 环境的受限 SSH 入口，保留运行数据与配置，探活失败时回滚代码和前端。PR 不部署，也不读取部署凭据。
+
 ## 📖 进阶文档
 
 - [系统架构详解 (Architecture v3)](docs/architecture-v3.md)
@@ -141,3 +147,7 @@ python3 tools/agent-self-report.py \
 ## 📄 License
 
 本项目基于 [MIT License](LICENSE) 开源。欢迎 Star、Issue 与 Pull Request！
+
+### 账号体系（通过配置启用）
+
+支持邮箱验证码注册、邮箱密码登录、密码找回、个人资料、会话撤销及管理员账号管理。配置接口、权限边界和现有数据归属限制见 [账号管理说明](docs/account-management.md)。

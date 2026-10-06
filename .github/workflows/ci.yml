@@ -32,7 +32,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest
+          pip install -r requirements-test.txt
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -45,7 +45,9 @@ jobs:
           FLEET_PLAYWRIGHT_MODULE="$RUNNER_TEMP/fleet-browser/node_modules/playwright" \
           FLEET_SCREENSHOTS="$RUNNER_TEMP/fleet-test-evidence/browser" \
           FLEET_BROWSER_CHANNEL=chromium PYTHONPATH=. python -m pytest tests -q \
-            --junitxml="$RUNNER_TEMP/fleet-test-evidence/results.xml"
+            --junitxml="$RUNNER_TEMP/fleet-test-evidence/results.xml" \
+            --require-journeys \
+            --journey-report="$RUNNER_TEMP/fleet-test-evidence/journeys.json"
       - name: Preserve test evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -91,6 +93,7 @@ jobs:
           path: out/frontend/
           retention-days: 14
           if-no-files-found: error
+
   deploy:
     needs: [test, package]
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
