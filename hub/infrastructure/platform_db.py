@@ -12,8 +12,6 @@ import hmac
 import secrets
 import sqlite3
 import time
-from hub.domain.request_metadata import project_requests
-
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -710,7 +708,6 @@ class PlatformRepository:
             conversation = self._row_conversation(row)
             conversation["messages"] = self._conversation_messages(conn, owner_id, conversation_id)
             conversation["runs"] = [self._row_run(item) for item in conn.execute("SELECT r.* FROM runs r JOIN messages m ON m.message_id=r.trigger_message_id WHERE r.owner_id=? AND r.conversation_id=? ORDER BY m.turn_sequence", (owner_id, conversation_id)).fetchall()]
-            self._attach_requests(conn, owner_id, conversation["runs"], conversation_id=conversation_id)
             return conversation
         except (PlatformValidationError, sqlite3.Error):
             raise PlatformRepositoryError("platform_store") from None
@@ -1074,23 +1071,6 @@ class PlatformRepository:
         finally:
             if conn is not None: conn.close()
 
-    @staticmethod
-    def _attach_requests(conn, owner_id, runs, *, conversation_id=None, run_id=None):
-        # One indexed query for the entire conversation, never one per message.
-        rows = conn.execute(
-            "SELECT e.run_id,e.kind,e.payload FROM run_events e JOIN runs r ON r.run_id=e.run_id "
-            "WHERE r.owner_id=? AND " + ("r.conversation_id=?" if conversation_id else "r.run_id=?") +
-            " AND e.kind IN ('provider_request_started','provider_request_finished') ORDER BY e.run_id,e.sequence",
-            (owner_id, conversation_id or run_id)).fetchall()
-        grouped = {}
-        for row in rows:
-            grouped.setdefault(row['run_id'], []).append({'kind': row['kind'], 'payload': _decode(row['payload'])})
-        for run in runs:
-            run['requests'] = project_requests(grouped.get(run['run_id'], []), run['state'])
-            for request in run['requests']:
-                if request.get('status') == 'running':
-                    request['elapsed_ms'] = max(0, round((time.time() - request['started_at']) * 1000))
-
     def get_run(self, owner_id: str, run_id: str) -> dict[str, Any] | None:
         owner_id = validate_owner_id(owner_id)
         run_id = validate_id(run_id, "run_id")
@@ -1098,11 +1078,7 @@ class PlatformRepository:
         try:
             conn = self._connect()
             row = conn.execute("SELECT * FROM runs WHERE owner_id=? AND run_id=?", (owner_id, run_id)).fetchone()
-            if row is None:
-                return None
-            result = self._row_run(row)
-            self._attach_requests(conn, owner_id, [result], run_id=run_id)
-            return result
+            return self._row_run(row) if row else None
         except (PlatformValidationError, sqlite3.Error):
             raise PlatformRepositoryError("platform_store") from None
         finally:

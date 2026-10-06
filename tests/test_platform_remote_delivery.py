@@ -236,3 +236,104 @@ def test_node_tool_executor_backend_interruption_is_unknown_in_journal(tmp_path)
     result = client.handle(_command("cmd-unknown").as_dict())
     assert result["status"] == "unknown"
     assert journal.get("cmd-unknown")["state"] == "unknown"
+
+
+class _FakeApprovals:
+    def __init__(self, approval_id="approval-1", error=None):
+        self.approval_id = approval_id
+        self.error = error
+        self.calls = []
+
+    def consume_submit_approval(self, owner_id, run_id, *, session_id, selector,
+                                command_id, now):
+        self.calls.append({"owner_id": owner_id, "run_id": run_id,
+                           "session_id": session_id, "selector": selector,
+                           "command_id": command_id, "now": now})
+        if self.error is not None:
+            raise self.error
+        return self.approval_id
+
+
+def _submit_broker(approvals, *, submit_enabled=True):
+    queued = []
+
+    class Delivery:
+        def enqueue(self, command, *, idempotency_key=None):
+            queued.append(command)
+            return command.as_dict() | {"status": "queued", "result": None}
+
+        def wait_for_receipt(self, command_id, *, timeout_s=30.0):
+            return {"command_id": command_id, "status": "succeeded", "result": {}}
+
+    broker = RemoteToolBroker(
+        Delivery(), node_id="node-remote", resource_id="workspace-remote",
+        run_id="run-remote", browser_enabled=True,
+        browser_submit_enabled=submit_enabled, submit_approvals=approvals,
+    )
+    return broker, queued
+
+
+def test_remote_tool_broker_consumes_approval_before_submit_enqueue():
+    approvals = _FakeApprovals()
+    broker, queued = _submit_broker(approvals)
+
+    receipt = broker.execute(
+        command_id="run-remote:step:s1", tool="browser.submit",
+        arguments={"session_id": "s" * 24, "selector": "#go"},
+        owner_id="owner@example.test", epoch=1,
+    )
+
+    assert receipt.state == "succeeded"
+    assert len(queued) == 1
+    assert queued[0].arguments["approval_id"] == "approval-1"
+    assert queued[0].action == "tool.browser.submit"
+    assert queued[0].retry_class == "manual_only"
+    assert approvals.calls == [{
+        "owner_id": "owner@example.test", "run_id": "run-remote",
+        "session_id": "s" * 24, "selector": "#go",
+        "command_id": "run-remote:step:s1", "now": approvals.calls[0]["now"],
+    }]
+
+
+def test_remote_tool_broker_submit_requires_gate_and_maps_approval_codes():
+    approvals = _FakeApprovals()
+    broker, queued = _submit_broker(approvals, submit_enabled=False)
+    receipt = broker.execute(
+        command_id="run-remote:step:s2", tool="browser.submit",
+        arguments={"session_id": "s" * 24, "selector": "#go"},
+        owner_id="owner@example.test", epoch=1,
+    )
+    assert receipt.state == "failed"
+    assert receipt.error_code == "submit_disabled"
+    assert approvals.calls == [] and queued == []
+
+    for error, expected in (
+        (type("E", (Exception,), {"code": "approval_required"})(), "approval_required"),
+        (type("E", (Exception,), {"code": "approval_expired"})(), "approval_expired"),
+        (type("E", (Exception,), {"code": "approval_consumed"})(), "approval_consumed"),
+        (type("E", (Exception,), {"code": "approval_revoked"})(), "approval_revoked"),
+        (type("E", (Exception,), {"code": "approval_limit"})(), "approval_limit"),
+    ):
+        failing = _FakeApprovals(error=error)
+        failing_broker, failing_queued = _submit_broker(failing)
+        failing_receipt = failing_broker.execute(
+            command_id="run-remote:step:s3", tool="browser.submit",
+            arguments={"session_id": "s" * 24, "selector": "#go"},
+            owner_id="owner@example.test", epoch=1,
+        )
+        assert failing_receipt.state == "failed"
+        assert failing_receipt.error_code == expected
+        assert failing_queued == []
+
+
+def test_remote_tool_broker_submit_without_approvals_store_is_disabled():
+    approvals = None
+    broker, queued = _submit_broker(approvals)
+    receipt = broker.execute(
+        command_id="run-remote:step:s4", tool="browser.submit",
+        arguments={"session_id": "s" * 24, "selector": "#go"},
+        owner_id="owner@example.test", epoch=1,
+    )
+    assert receipt.state == "failed"
+    assert receipt.error_code == "submit_disabled"
+    assert queued == []

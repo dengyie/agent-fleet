@@ -58,7 +58,7 @@ class TestAgentFleetGuardian(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(status, 200)
         mock_exec.assert_called_once()
-        self.assertEqual(mock_exec.call_args.args[-1], 'http://127.0.0.1:8790/healthz')
+        self.assertEqual(mock_exec.call_args.args[-1], 'http://127.0.0.1:8790/api/status')
 
     @patch("hub.agent_fleet_guardian.asyncio.create_subprocess_exec")
     async def test_check_health_failure(self, mock_exec):

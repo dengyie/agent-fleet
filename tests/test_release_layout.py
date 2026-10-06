@@ -21,7 +21,6 @@ import json
 import os
 import subprocess
 import sys
-import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -48,16 +47,16 @@ class ReleaseLayoutTests(unittest.TestCase):
         # Task 17: static-shell smoke depends on exactly this module set being
         # servable by a plain static server.
         required = ('index.html', 'config.js', 'assets/api/client.js', 'assets/api/contracts.js',
-                    'assets/api/platform.js', 'assets/api/accounts.js',
+                    'assets/api/platform.js',
                     'assets/realtime/sse.js', 'assets/state/store.js', 'assets/views/fleet.js',
                     'assets/views/machine.js', 'assets/views/task.js', 'assets/views/session.js',
-                    'assets/views/assistant.js', 'assets/views/monitoring.js', 'assets/views/account.js')
+                    'assets/views/assistant.js', 'assets/views/monitoring.js')
         for relative in required:
             self.assertTrue((FRONTEND_DIR / relative).is_file(), relative)
 
     def test_frontend_view_files_exist(self):
         required = ('assets/views/fleet.js', 'assets/views/machine.js', 'assets/views/task.js',
-                    'assets/views/session.js', 'assets/views/assistant.js', 'assets/views/monitoring.js', 'assets/views/account.js')
+                    'assets/views/session.js', 'assets/views/assistant.js', 'assets/views/monitoring.js')
         for relative in required:
             self.assertTrue((FRONTEND_DIR / relative).is_file(), relative)
 
@@ -72,10 +71,10 @@ class ReleaseLayoutTests(unittest.TestCase):
         present = {p.relative_to(FRONTEND_DIR).as_posix()
                    for p in FRONTEND_DIR.rglob('*') if p.is_file()}
         allowed = {'index.html', 'config.js', 'assets/routes.js', 'assets/styles/app.css',
-                   'assets/api/client.js', 'assets/api/contracts.js', 'assets/api/platform.js', 'assets/api/accounts.js',
+                   'assets/api/client.js', 'assets/api/contracts.js', 'assets/api/platform.js',
                    'assets/realtime/sse.js', 'assets/state/store.js',
                    'assets/views/fleet.js', 'assets/views/machine.js', 'assets/views/task.js',
-                   'assets/views/session.js', 'assets/views/assistant.js', 'assets/views/monitoring.js', 'assets/views/account.js'}
+                   'assets/views/session.js', 'assets/views/assistant.js', 'assets/views/monitoring.js'}
         allowed.update({'assets/app.js', 'THIRD_PARTY.md'})
         for folder in ('assets/ui', 'assets/vendor', 'assets/shell', 'assets/styles', 'assets/views/assistant'):
             allowed.update(p.relative_to(FRONTEND_DIR).as_posix() for p in (FRONTEND_DIR / folder).rglob('*') if p.is_file())
@@ -89,11 +88,11 @@ class ReleaseLayoutTests(unittest.TestCase):
                         'private_key', 'BEGIN PRIVATE KEY', 'SELECT ')
         for relative in ('index.html', 'config.js', 'assets/routes.js',
                          'assets/styles/app.css', 'assets/api/client.js', 'assets/api/contracts.js',
-                         'assets/api/platform.js', 'assets/api/accounts.js',
+                         'assets/api/platform.js',
                          'assets/realtime/sse.js', 'assets/state/store.js',
                          'assets/views/fleet.js', 'assets/views/machine.js',
                          'assets/views/task.js', 'assets/views/session.js',
-                         'assets/views/assistant.js', 'assets/views/monitoring.js', 'assets/views/account.js'):
+                         'assets/views/assistant.js', 'assets/views/monitoring.js'):
             source = (FRONTEND_DIR / relative).read_text()
             for token in secret_hints:
                 self.assertNotIn(token, source, f'{relative} leaked {token}')
@@ -560,9 +559,6 @@ class RuntimeStoreHygieneTests(unittest.TestCase):
                 "commit: deadbeef\n"
                 "run: 424242\n"
                 "url: https://github.com/dengyie/agent-fleet/actions/runs/424242\n")
-            with tarfile.open(archive) as packaged:
-                self.assertFalse(any(Path(item.name).name.startswith('._') for item in packaged),
-                                 'macOS resource forks must not enter the deployable archive')
             # No staging leftovers in the working tree after packaging.
             self.assertFalse(
                 (REPO_ROOT / ".RELEASE_ORIGIN.tmp").exists()

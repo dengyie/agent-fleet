@@ -113,6 +113,7 @@ class FleetConfig:
     # policy are independent and remain disabled unless explicitly enabled.
     platform_browser_enabled: bool = False
     platform_browser_network_enabled: bool = False
+    platform_browser_submit_enabled: bool = False
     platform_browser_allowed_origins: tuple[str, ...] = ()
     # Usage telemetry is available with the platform store; admission is
     # opt-in during the staged rollout.
@@ -193,6 +194,7 @@ class FleetConfig:
         platform_remote_execution_enabled: bool = False,
         platform_browser_enabled: bool = False,
         platform_browser_network_enabled: bool = False,
+        platform_browser_submit_enabled: bool = False,
         platform_browser_allowed_origins: tuple[str, ...] | list[str] | None = None,
         platform_usage_limits_enabled: bool = False,
         platform_memory_enabled: bool = False,
@@ -386,6 +388,9 @@ class FleetConfig:
                 platform_browser_enabled and platform_enabled),
             platform_browser_network_enabled=bool(
                 platform_browser_network_enabled and platform_enabled
+                and platform_browser_enabled),
+            platform_browser_submit_enabled=bool(
+                platform_browser_submit_enabled and platform_enabled
                 and platform_browser_enabled),
             platform_browser_allowed_origins=browser_origins,
             platform_usage_limits_enabled=bool(

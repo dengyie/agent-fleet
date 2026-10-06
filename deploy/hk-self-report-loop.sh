@@ -111,7 +111,7 @@ web_process_matches() {
 # Health check function
 health_check() {
   local status
-  status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://127.0.0.1:${web_port}/healthz" 2>/dev/null) || status="000"
+  status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://127.0.0.1:${web_port}/api/status" 2>/dev/null) || status="000"
   echo "$status"
 }
 

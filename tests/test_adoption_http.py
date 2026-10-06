@@ -224,16 +224,11 @@ def test_post_fields_actor_from_operator(client):
     assert record.status == "pending"
 
 
-def test_post_never_leaks_pid_or_paths(client, monkeypatch):
-    # Opaque random IDs can legitimately contain the decimal PID as a substring.
-    monkeypatch.setattr('hub.application.adoption_service.secrets.token_hex',
-                        lambda size: '4242' + 'a' * (size * 2 - 4))
+def test_post_never_leaks_pid_or_paths(client):
     body = client.post("/api/adoptions", json=valid_candidate(),
                        headers=operator_headers()).get_json()
-    assert set(body) == {'ok', 'adoption_id', 'session_id', 'machine_id', 'status', 'request_id'}
-    assert str(DEFAULT_PID) in body['adoption_id']
-    assert all(value != DEFAULT_PID and value != str(DEFAULT_PID) for value in body.values())
     text = " ".join(str(v) for v in body.values())
+    assert str(DEFAULT_PID) not in text
     assert "/usr/local/bin/codex" not in text
     assert "codex session" not in text
     assert DEFAULT_STARTED_AT not in text

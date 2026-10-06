@@ -12,16 +12,3 @@
 .login-footnote { display: flex; align-items: center; justify-content: center; gap: 7px; margin-top: 28px; font-size: 11px; color: var(--text-3); }
 .login-footnote span { display: inline-flex; }
 @media (max-width: 480px) { .login-card { padding: 28px 24px; } }
-
-.account-field { margin: 16px 0; }
-.account-links { display: flex; gap: 12px; margin-top: 16px; }
-.account-panel { padding: 24px; margin: 20px 0; }
-.account-panel form { display: grid; gap: 16px; max-width: 460px; margin-top: 20px; }
-.account-panel label { display: grid; gap: 8px; }
-.account-panel input { min-width: 0; width: 100%; padding: 10px; }
-.account-row { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--border); }
-.account-row span { flex: 1; min-width: 180px; overflow-wrap: anywhere; }
-.account-hint { margin: 8px 0; font-size: 13px; color: var(--accent, #3b82f6); line-height: 1.5; }
-.invite-code-card { display: flex; align-items: center; gap: 12px; margin: 12px 0 16px; padding: 12px 16px; background: var(--bg-2, rgba(255,255,255,0.05)); border: 1px dashed var(--border); border-radius: 8px; }
-.invite-code-card strong { font-family: monospace; font-size: 16px; color: var(--text-1); letter-spacing: 0.5px; }
-

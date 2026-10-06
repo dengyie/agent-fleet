@@ -16,8 +16,10 @@ MAX_SCROLL = 2000
 _ALLOWED_TOOLS = frozenset({
     "browser.open", "browser.navigate", "browser.snapshot", "browser.screenshot",
     "browser.click", "browser.type", "browser.scroll", "browser.back", "browser.close",
+    "browser.submit",
 })
-_SENSITIVE_MARKERS = ("password", "passwd", "token", "secret", "credential", "cookie", "authorization", "api_key")
+SENSITIVE_MARKERS = ("password", "passwd", "token", "secret", "credential", "cookie", "authorization", "api_key")
+_SENSITIVE_MARKERS = SENSITIVE_MARKERS
 
 
 class BrowserPolicyError(ValueError):
@@ -99,6 +101,15 @@ def validate_url(value: object, *, network_enabled: bool = False, allowed_origin
     return value
 
 
+def validate_selector(selector: object) -> str:
+    if (not isinstance(selector, str) or not selector or len(selector) > MAX_SELECTOR
+            or re.search(r"[\x00-\x1f\x7f]", selector)):
+        raise BrowserPolicyError("invalid_selector")
+    if any(marker in selector.lower() for marker in _SENSITIVE_MARKERS):
+        raise BrowserPolicyError("sensitive_field_forbidden")
+    return selector
+
+
 def validate_action(tool: object, arguments: object, *, network_enabled: bool = False,
                     allowed_origins=(), resolver=None) -> dict:
     if tool not in _ALLOWED_TOOLS:
@@ -110,6 +121,7 @@ def validate_action(tool: object, arguments: object, *, network_enabled: bool = 
         "browser.snapshot": set(), "browser.screenshot": set(),
         "browser.click": {"selector"}, "browser.type": {"selector", "text"},
         "browser.scroll": {"delta_y"}, "browser.back": set(), "browser.close": set(),
+        "browser.submit": {"selector", "approval_id"},
     }[tool]
     allowed = set(allowed)
     if tool != "browser.open":
@@ -125,13 +137,12 @@ def validate_action(tool: object, arguments: object, *, network_enabled: bool = 
         result["url"] = validate_url(
             arguments.get("url"), network_enabled=network_enabled,
             allowed_origins=allowed_origins, resolver=resolver)
-    if tool in {"browser.click", "browser.type"}:
-        selector = arguments.get("selector")
-        if not isinstance(selector, str) or not selector or len(selector) > MAX_SELECTOR or re.search(r"[\x00-\x1f\x7f]", selector):
-            raise BrowserPolicyError("invalid_selector")
-        if any(marker in selector.lower() for marker in _SENSITIVE_MARKERS):
-            raise BrowserPolicyError("sensitive_field_forbidden")
-        result["selector"] = selector
+    if tool in {"browser.click", "browser.type", "browser.submit"}:
+        result["selector"] = validate_selector(arguments.get("selector"))
+    if tool == "browser.submit" and "approval_id" in arguments:
+        approval_id = arguments.get("approval_id")
+        if not isinstance(approval_id, str) or not 16 <= len(approval_id) <= 128:
+            raise BrowserPolicyError("invalid_approval")
     if tool == "browser.type":
         text = arguments.get("text")
         if not isinstance(text, str) or len(text.encode("utf-8")) > MAX_TEXT:
@@ -144,4 +155,4 @@ def validate_action(tool: object, arguments: object, *, network_enabled: bool = 
     return result
 
 
-__all__ = ["BrowserPolicyError", "validate_action", "validate_url"]
+__all__ = ["SENSITIVE_MARKERS", "BrowserPolicyError", "validate_action", "validate_selector", "validate_url"]

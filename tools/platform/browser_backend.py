@@ -49,12 +49,14 @@ class LocalBrowserBackend:
     _MAX_RESULT_ITEMS = 256
     _MAX_RESULT_NODES = 2048
 
-    def __init__(self, driver_factory=None, *, clock=time.time, network_enabled=False, allowed_origins=()):
+    def __init__(self, driver_factory=None, *, clock=time.time, network_enabled=False,
+                 allowed_origins=(), submit_enabled=False):
         self.driver_factory = driver_factory
         self.available = callable(driver_factory)
         self.clock = clock
         self.network_enabled = bool(network_enabled)
         self.allowed_origins = tuple(allowed_origins or ())
+        self.submit_enabled = bool(submit_enabled)
         self._sessions: dict[str, Any] = {}
 
     @classmethod
@@ -138,6 +140,8 @@ class LocalBrowserBackend:
         driver = entry["driver"] if entry is not None else None
         if driver is None:
             raise BrowserBackendError("session_not_found")
+        if tool == "browser.submit" and not self.submit_enabled:
+            raise BrowserBackendError("submit_disabled")
         try:
             if tool == "browser.navigate": result = driver.navigate(args["url"])
             elif tool == "browser.snapshot": result = driver.snapshot()
@@ -146,6 +150,7 @@ class LocalBrowserBackend:
             elif tool == "browser.type": result = driver.type(args["selector"], args["text"])
             elif tool == "browser.scroll": result = driver.scroll(args["delta_y"])
             elif tool == "browser.back": result = driver.back()
+            elif tool == "browser.submit": result = driver.submit(args["selector"])
             elif tool == "browser.close":
                 driver.close()
                 self._sessions.pop(session_id, None)
@@ -161,7 +166,10 @@ class LocalBrowserBackend:
             max_bytes=(self._MAX_SCREENSHOT_BYTES
                        if tool == "browser.screenshot" else self._MAX_RESULT_BYTES),
         )
-        return {"session_id": session_id, "result": result}
+        payload = {"session_id": session_id, "result": result}
+        if tool == "browser.submit" and "approval_id" in args:
+            payload["approval_id"] = args["approval_id"]
+        return payload
 
     def close_session(self, session_id: str) -> None:
         entry = self._sessions.get(session_id)

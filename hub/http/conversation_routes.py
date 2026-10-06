@@ -14,6 +14,14 @@ def _services():
     return services["conversations"], services["runs"], services["run_events"]
 
 
+def _approvals():
+    services = current_app.extensions.get("fleet", {}).get("services", {})
+    service = services.get("submit_approvals")
+    if service is None:
+        raise ApplicationError("submit_disabled", "审批提交能力未启用", 404)
+    return service
+
+
 def _body():
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
@@ -64,16 +72,6 @@ def get_conversation(conversation_id):
 @bp.post("/conversations/<conversation_id>/turns")
 @require_operator
 def append_turn(conversation_id):
-    return _append_turn(conversation_id)
-
-
-@bp.post("/conversations/<conversation_id>/acceptance-turns")
-@require_operator
-def append_acceptance_turn(conversation_id):
-    return _append_turn(conversation_id, acceptance=True)
-
-
-def _append_turn(conversation_id, *, acceptance=False):
     def _turn():
         body = _body()
         if "memory_context" in body and body["memory_context"] is not None \
@@ -87,7 +85,6 @@ def _append_turn(conversation_id, *, acceptance=False):
             overrides=body.get("overrides") or {},
             memory_context=body.get("memory_context")
             if "memory_context" in body else None,
-            acceptance=acceptance,
         )), 202
     return _call(_turn)
 
@@ -117,6 +114,43 @@ def get_run_events(run_id):
             limit=request.args.get("limit", 100),
         ))
     return _call(_events)
+
+
+@bp.post("/runs/<run_id>/browser-approvals")
+@require_operator
+def grant_browser_approval(run_id):
+    def _grant():
+        body = _body()
+        selector = body.get("selector")
+        session_id = body.get("session_id")
+        if not isinstance(selector, str) or not isinstance(session_id, str):
+            raise ApplicationError("invalid_selector", "selector 与 session_id 必填", 400)
+        idempotency_key = body.get("idempotency_key")
+        if idempotency_key is not None and not isinstance(idempotency_key, str):
+            raise ApplicationError("invalid_id", "idempotency_key 不合法", 400)
+        return jsonify(_approvals().grant(
+            g.operator, run_id, session_id=session_id, selector=selector,
+            idempotency_key=idempotency_key,
+        ))
+    return _call(_grant)
+
+
+@bp.delete("/runs/<run_id>/browser-approvals/<approval_id>")
+@require_operator
+def revoke_browser_approval(run_id, approval_id):
+    return _call(lambda: jsonify(
+        _approvals().revoke(g.operator, approval_id, run_id=run_id)))
+
+
+@bp.get("/runs/<run_id>/browser-approvals/<approval_id>")
+@require_operator
+def get_browser_approval(run_id, approval_id):
+    def _get():
+        approval = _approvals().get(g.operator, approval_id)
+        if approval.get("approval", {}).get("run_id") != run_id:
+            raise ApplicationError("approval_not_found", "审批不存在", 404)
+        return jsonify(approval)
+    return _call(_get)
 
 
 __all__ = ["bp"]

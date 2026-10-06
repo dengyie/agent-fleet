@@ -489,3 +489,58 @@ def test_signed_command_cannot_bypass_empty_node_capabilities(tmp_path):
     )
     assert runtime.client.handle(command.signed(PRIVATE_KEY).as_dict())['status'] == 'failed'
     assert not (tmp_path / 'workspace' / 'denied.txt').exists()
+
+
+def test_node_runtime_submit_gate_requires_browser_and_default_off(tmp_path):
+    from tools.platform.browser_backend import BrowserBackendError
+
+    class Driver:
+        def __init__(self):
+            self.submits = []
+
+        def open(self, _url):
+            return None
+
+        def submit(self, selector):
+            self.submits.append(selector)
+            return {"state": "submitted"}
+
+    with pytest.raises(ValueError, match="browser submit requires browser"):
+        NodeRuntimeConfig(
+            node_id="node-a", credential="node-a:secret",
+            workspace_root=tmp_path / "workspace",
+            journal_path=tmp_path / "journal.db",
+            hub_url="https://hub.invalid", public_key=PUBLIC_KEY,
+            capabilities=frozenset(), browser_enabled=False,
+            browser_submit_enabled=True,
+        )
+
+    config = NodeRuntimeConfig(
+        node_id="node-a", credential="node-a:secret",
+        workspace_root=tmp_path / "workspace",
+        journal_path=tmp_path / "journal.db",
+        hub_url="https://hub.invalid", public_key=PUBLIC_KEY,
+        capabilities=frozenset({"browser.session"}), browser_enabled=True,
+        browser_driver_factory=Driver,
+    )
+    runtime = NodeRuntime(config, transport=object())
+    assert "browser.submit" not in runtime.executor.allowed_tools
+    assert runtime.browser_backend.submit_enabled is False
+
+    submit_config = NodeRuntimeConfig(
+        node_id="node-a", credential="node-a:secret",
+        workspace_root=tmp_path / "workspace-submit",
+        journal_path=tmp_path / "journal-submit.db",
+        hub_url="https://hub.invalid", public_key=PUBLIC_KEY,
+        capabilities=frozenset({"browser.session"}), browser_enabled=True,
+        browser_submit_enabled=True, browser_driver_factory=Driver,
+    )
+    submit_runtime = NodeRuntime(submit_config, transport=object())
+    assert "browser.submit" in submit_runtime.executor.allowed_tools
+    assert submit_runtime.browser_backend.submit_enabled is True
+    opened = submit_runtime.browser_backend.execute(
+        "browser.open", {"url": "http://localhost:3000"}, run_id="run-a")
+    receipt = submit_runtime.browser_backend.execute(
+        "browser.submit",
+        {"session_id": opened["session_id"], "selector": "#go"}, run_id="run-a")
+    assert receipt["result"] == {"state": "submitted"}

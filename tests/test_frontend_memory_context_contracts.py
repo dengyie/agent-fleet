@@ -63,3 +63,9 @@ class TestAssistantMemoryContextContractTests:
         payload = source.split("payload.memory_context = {", 1)[1].split("};", 1)[0]
         assert "content:" not in payload
         assert "var references = (Array.isArray(data.memories) ? data.memories : []).map(memoryReference).filter(Boolean);" in source
+
+    def test_assistant_memory_context_has_explicit_opt_in_gate(self):
+        source = (ASSISTANT_VIEW.read_text() + (ROOT / 'frontend/assets/views/assistant/panels.js').read_text())
+        assert "memoryEnabled.checked" in source
+        assert "if (memoryEnabled.checked && selectedIds.length)" in source
+        assert "selectedMemoryIds" in source

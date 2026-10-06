@@ -8,7 +8,6 @@ from collections.abc import Mapping
 from hub.application.task_service import ApplicationError
 from hub.domain.conversation import UserTurn
 from hub.domain.run import Run
-from hub.domain.platform import ACCEPTANCE_TOOL_POLICY
 from hub.application.platform_memory_context_service import (
     PlatformMemoryContextError,
 )
@@ -106,7 +105,6 @@ class ConversationService:
                     cancel_requested=run.get("cancel_requested", False),
                     result_text=run.get("result_text", ""),
                     usage=run.get("usage") or {},
-                    requests=run.get("requests") or [],
                 ).public()
                 for run in row.get("runs", [])
             ]
@@ -144,15 +142,8 @@ class ConversationService:
         }
 
     def turn(self, owner_id: str, conversation_id: str, *, text: str, client_token: str,
-             overrides: Mapping | None = None, memory_context: Mapping | None = None,
-             acceptance: bool = False) -> dict:
+             overrides: Mapping | None = None, memory_context: Mapping | None = None) -> dict:
         owner_id = self._owner(owner_id)
-        expected_policy = ACCEPTANCE_TOOL_POLICY if acceptance else None
-
-        def verify_policy(run):
-            if (run.get("config_snapshot") or {}).get("tool_policy") != expected_policy:
-                raise ApplicationError("idempotency_conflict", "幂等键对应的执行权限不同", 409)
-
         try:
             turn = UserTurn.from_input(text, client_token)
             conversation = self.repository.get_conversation(owner_id, conversation_id)
@@ -170,7 +161,6 @@ class ConversationService:
                             if item["trigger_message_id"] == prior["message_id"]), None)
                 if run is None:
                     raise ApplicationError("run_not_found", "运行不存在", 404)
-                verify_policy(run)
                 return self._turn_response(owner_id, conversation_id, {
                     "created": False, "message": prior, "run": run,
                 })
@@ -192,10 +182,6 @@ class ConversationService:
                 workspace=workspace_defaults,
                 overrides=overrides or {},
             )
-            if acceptance:
-                # Only the dedicated server route selects this fixed policy.
-                # Client defaults/overrides cannot widen it or silently opt out.
-                snapshot["tool_policy"] = ACCEPTANCE_TOOL_POLICY
             if memory_context is not None:
                 if not isinstance(memory_context, Mapping):
                     raise ApplicationError("invalid_memory_context", "memory_context 必须是 JSON 对象", 400)
@@ -216,8 +202,6 @@ class ConversationService:
                 text=turn.text, client_token=turn.client_token,
                 config_snapshot=snapshot, now=float(self.clock()),
             )
-            # A concurrent submission may have won after the initial lookup.
-            verify_policy(result["run"])
             return self._turn_response(owner_id, conversation_id, result)
         except ApplicationError:
             raise
@@ -228,8 +212,9 @@ class ConversationService:
 
 
 class RunService:
-    def __init__(self, repository, *, clock=time.time):
+    def __init__(self, repository, *, browser_repository=None, clock=time.time):
         self.repository = repository
+        self.browser_repository = browser_repository
         self.clock = clock
 
     def get(self, owner_id: str, run_id: str) -> dict:
@@ -245,7 +230,6 @@ class RunService:
                 cancel_requested=row["cancel_requested"],
                 result_text=row.get("result_text", ""),
                 usage=row.get("usage", {}),
-                requests=row.get("requests", []),
             ).public() | {"ok": True}
         except ApplicationError:
             raise
@@ -255,7 +239,14 @@ class RunService:
     def cancel(self, owner_id: str, run_id: str) -> dict:
         try:
             owner_id = validate_owner_id(owner_id)
-            row = self.repository.cancel_run(owner_id, validate_id(run_id, "run_id"), now=float(self.clock()))
+            run_id = validate_id(run_id, "run_id")
+            if self.browser_repository is not None:
+                # Terminalize approvals before the cancel commits: expiring
+                # grants for a run that then fails to cancel is the fail-safe
+                # direction (owner re-grants), and a sweep failure surfaces
+                # instead of leaving active approvals behind a cancelling run.
+                self.browser_repository.expire_run_submit_approvals(owner_id, run_id)
+            row = self.repository.cancel_run(owner_id, run_id, now=float(self.clock()))
             return Run(
                 run_id=row["run_id"], conversation_id=row["conversation_id"],
                 owner_id=row["owner_id"], trigger_message_id=row["trigger_message_id"],
@@ -263,7 +254,6 @@ class RunService:
                 cancel_requested=row["cancel_requested"],
                 result_text=row.get("result_text", ""),
                 usage=row.get("usage", {}),
-                requests=row.get("requests", []),
             ).public() | {"ok": True}
         except Exception as exc:
             if isinstance(exc, ApplicationError):
@@ -271,4 +261,93 @@ class RunService:
             raise ConversationService._translate(exc) from None
 
 
-__all__ = ["ConversationService", "RunService"]
+class SubmitApprovalService:
+    """Owner-scoped approvals for approval-gated browser.submit dispatches."""
+
+    def __init__(self, browser_repository, *, clock=time.time):
+        self.repository = browser_repository
+        self.clock = clock
+
+    @staticmethod
+    def _translate(exc: Exception) -> ApplicationError:
+        code = getattr(exc, "code", "browser_store")
+        status = {
+            "invalid_selector": 400, "invalid_id": 400, "invalid_owner": 400,
+            "session_not_found": 404, "approval_not_found": 404,
+            "approval_limit": 429, "approval_idempotency_conflict": 409,
+            "approval_required": 409, "approval_expired": 409,
+            "approval_consumed": 409, "approval_revoked": 409,
+        }.get(code, 503)
+        detail = {
+            "invalid_selector": "selector 不合法",
+            "session_not_found": "浏览器会话不存在或已结束",
+            "approval_not_found": "审批不存在",
+            "approval_limit": "审批数量或频率超出限制",
+            "approval_idempotency_conflict": "审批幂等键对应的请求内容不同",
+            "approval_required": "没有可用的有效审批",
+            "approval_expired": "审批已过期",
+            "approval_consumed": "审批已被使用",
+            "approval_revoked": "审批已被撤销",
+            "browser_store": "审批存储不可用",
+        }.get(code, "审批操作失败")
+        return ApplicationError(code, detail, status)
+
+    def grant(self, owner_id: str, run_id: str, *, session_id: str, selector: str,
+              idempotency_key: str | None = None) -> dict:
+        try:
+            session = self.repository.get_session(owner_id, session_id)
+            if session is None or session.get("run_id") != run_id or session.get("state") != "open":
+                raise ApplicationError("session_not_found", "浏览器会话不存在或已结束", 404)
+            # node_id comes from the durable session row, never from the
+            # request body, so the approval is bound to the actual target node.
+            approval = self.repository.grant_submit_approval(
+                owner_id, workspace_id=session["workspace_id"], run_id=run_id,
+                node_id=session["node_id"], session_id=session_id, selector=selector,
+                idempotency_key=idempotency_key, now=float(self.clock()),
+            )
+            return {"ok": True, "approval": approval}
+        except ApplicationError:
+            raise
+        except Exception as exc:
+            raise self._translate(exc) from None
+
+    def revoke(self, owner_id: str, approval_id: str, *,
+               run_id: str | None = None) -> dict:
+        try:
+            # Run scope is enforced by the repository query, so a wrong-run
+            # revoke fails without mutating the approval.
+            approval = self.repository.revoke_submit_approval(
+                owner_id, approval_id, run_id=run_id)
+            return {"ok": True, "approval": approval}
+        except Exception as exc:
+            raise self._translate(exc) from None
+
+    def get(self, owner_id: str, approval_id: str) -> dict:
+        try:
+            approval = self.repository.get_submit_approval(owner_id, approval_id)
+            if approval is None:
+                raise ApplicationError("approval_not_found", "审批不存在", 404)
+            return {"ok": True, "approval": approval}
+        except ApplicationError:
+            raise
+        except Exception as exc:
+            raise self._translate(exc) from None
+
+    def consume_submit_approval(self, owner_id: str, run_id: str, *,
+                                session_id: str, selector: str,
+                                command_id: str, now: float | None = None) -> str:
+        """Broker-side atomic consumption. Stable BrowserRepositoryError codes
+        (approval_required/expired/consumed/revoked) surface unchanged so the
+        remote broker can map them to bounded failed receipts."""
+        return self.repository.consume_submit_approval(
+            owner_id, run_id, session_id=session_id, selector=selector,
+            command_id=command_id, now=now,
+        )
+
+    def expire_run_submit_approvals(self, owner_id: str, run_id: str,
+                                    *, now: float | None = None) -> int:
+        """Terminalize active approvals when their run reaches a terminal state."""
+        return self.repository.expire_run_submit_approvals(owner_id, run_id, now=now)
+
+
+__all__ = ["ConversationService", "RunService", "SubmitApprovalService"]

@@ -38,8 +38,8 @@ redact() {
 }
 
 printf '=== status codes (no bodies) ===\n'
-curl -sS -o /dev/null -w 'public=%{http_code}\n' "${HUB_PUBLIC_URL}/healthz" || printf 'public=000\n'
-curl -sS -o /dev/null -w 'loopback=%{http_code}\n' --connect-timeout 3 http://127.0.0.1:8790/healthz || printf 'loopback=000\n'
+curl -sS -o /dev/null -w 'public=%{http_code}\n' "${HUB_PUBLIC_URL}/api/status" || printf 'public=000\n'
+curl -sS -o /dev/null -w 'loopback=%{http_code}\n' --connect-timeout 3 http://127.0.0.1:8790/api/status || printf 'loopback=000\n'
 
 printf '=== nginx upstream (server_name from HUB_PUBLIC_URL host) ===\n'
 if command -v nginx >/dev/null 2>&1; then

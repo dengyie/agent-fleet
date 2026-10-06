@@ -10,15 +10,23 @@ import ssl
 import threading
 import time
 from functools import partial
-from urllib.parse import urldefrag, urljoin, urlsplit
+from urllib.parse import quote_plus, urldefrag, urljoin, urlsplit
 
 from tools.platform.browser_url import canonical_url, normalize_origin
+from tools.platform.browser_policy import SENSITIVE_MARKERS
 
 
 class BrowserTransportError(RuntimeError):
     def __init__(self, code: str):
         self.code = code
         super().__init__(code)
+
+
+_SUBMIT_CONTENT_TYPE = "application/x-www-form-urlencoded"
+_MAX_SUBMIT_FIELDS = 64
+_MAX_SUBMIT_FIELD_NAME = 128
+_MAX_SUBMIT_FIELD_VALUE = 4096
+_MAX_SUBMIT_BODY_BYTES = 16 * 1024
 
 
 _REDIRECTS = {301, 302, 303, 307, 308}
@@ -176,6 +184,31 @@ def _parse_url(value: str, allowed_origins: frozenset[tuple[str, str, int]], res
     if scheme == "https" and len(classifications) > 1:
         raise BrowserTransportError("origin_forbidden")
     return parsed, tuple(addresses)
+
+
+def _validate_submit_fields(fields) -> bytes:
+    """Serialize the bounded urlencoded POST body, fail-closed before any I/O."""
+    if not isinstance(fields, dict):
+        raise BrowserTransportError("invalid_arguments")
+    if not fields or len(fields) > _MAX_SUBMIT_FIELDS:
+        raise BrowserTransportError("request_too_large")
+    items = []
+    total = 0
+    for name, value in fields.items():
+        if not isinstance(name, str) or not isinstance(value, str) or not name:
+            raise BrowserTransportError("invalid_arguments")
+        if any(marker in name.lower() for marker in SENSITIVE_MARKERS):
+            raise BrowserTransportError("sensitive_field_forbidden")
+        if (len(name.encode("utf-8")) > _MAX_SUBMIT_FIELD_NAME
+                or len(value.encode("utf-8")) > _MAX_SUBMIT_FIELD_VALUE
+                or any(ord(char) < 0x20 or ord(char) == 0x7f for char in name + value)):
+            raise BrowserTransportError("request_too_large")
+        encoded = quote_plus(name) + "=" + quote_plus(value)
+        total += len(encoded) + 1
+        items.append(encoded)
+    if total - 1 > _MAX_SUBMIT_BODY_BYTES:
+        raise BrowserTransportError("request_too_large")
+    return "&".join(items).encode("ascii")
 
 
 class _PinnedHTTPConnection(http.client.HTTPConnection):
@@ -481,7 +514,18 @@ class PinnedBrowserTransport:
         method = method.upper() if isinstance(method, str) else ""
         if method not in {"GET", "HEAD"}:
             raise BrowserTransportError("method_forbidden")
-        request_headers = self._request_headers(headers)
+        return self._exchange(url, method=method, headers=self._request_headers(headers),
+                              body=None, follow_redirects=True)
+
+    def submit_form(self, url: str, fields) -> tuple[int, dict[str, str], bytes]:
+        """The only POST entry; the general request path stays GET/HEAD-only."""
+        body = _validate_submit_fields(fields)
+        return self._exchange(url, method="POST",
+                              headers={"Content-Type": _SUBMIT_CONTENT_TYPE},
+                              body=body, follow_redirects=False)
+
+    def _exchange(self, url: str, *, method: str, headers: dict[str, str],
+                  body: bytes | None, follow_redirects: bool) -> tuple[int, dict[str, str], bytes]:
         self._enter()
         deadline = self.clock() + self.timeout_s
         if not math.isfinite(deadline) or deadline <= self.clock():
@@ -490,8 +534,9 @@ class PinnedBrowserTransport:
             raise BrowserTransportError("timeout")
         visited = set()
         current = url
+        hops = (self.max_redirects + 1) if follow_redirects else 1
         try:
-            for hop in range(self.max_redirects + 1):
+            for hop in range(hops):
                 parsed, addresses = _parse_url(
                     current, self.allowed_origins, self.resolver,
                     fixture_loopback=self.fixture_loopback,
@@ -532,7 +577,7 @@ class PinnedBrowserTransport:
                     path = parsed.path or "/"
                     if parsed.query:
                         path += "?" + parsed.query
-                    connection.request(method, path, headers=request_headers)
+                    connection.request(method, path, body=body, headers=headers)
                     if deadline - self.clock() <= 0:
                         raise BrowserTransportError("timeout")
                     response = connection.getresponse()
@@ -554,6 +599,10 @@ class PinnedBrowserTransport:
                     locations = [value for name, value in response_headers
                                  if name.lower() == "location"]
                     if response.status in _REDIRECTS:
+                        if not follow_redirects:
+                            # The approved POST is never replayed or rewritten:
+                            # no 307/308 body resend, no 301/302/303 method change.
+                            raise BrowserTransportError("redirect_denied")
                         redirect_body = _read_bounded(
                             response, limit=64 * 1024, deadline=deadline,
                             clock=self.clock, connection=connection,
@@ -592,7 +641,7 @@ class PinnedBrowserTransport:
                         if next_origin not in self.allowed_origins:
                             raise BrowserTransportError("origin_forbidden")
                         if next_origin != _origin(parsed):
-                            request_headers = {}
+                            headers = {}
                         current = next_url
                         continue
                     body = (b"" if method == "HEAD" else _read_bounded(

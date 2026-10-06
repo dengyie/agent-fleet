@@ -335,3 +335,71 @@ def test_browser_session_sync_failure_retains_cleanup_failure_without_leaking_de
     assert caught.value.cleanup_error is cleanup_error
     assert str(caught.value) == "browser_session_sync_failed"
     assert "driver-private-cleanup-detail" not in str(caught.value)
+
+
+def test_submit_policy_screens_selector_and_arguments():
+    from tools.platform.browser_policy import BrowserPolicyError, validate_action
+
+    result = validate_action("browser.submit", {"session_id": "s" * 24, "selector": "#go"})
+    assert result == {"session_id": "s" * 24, "selector": "#go"}
+
+    with pytest.raises(BrowserPolicyError, match="sensitive_field_forbidden"):
+        validate_action("browser.submit", {"session_id": "s" * 24, "selector": "#password"})
+    with pytest.raises(BrowserPolicyError, match="invalid_selector"):
+        validate_action("browser.submit", {"session_id": "s" * 24, "selector": ""})
+    with pytest.raises(BrowserPolicyError, match="invalid_arguments"):
+        validate_action(
+            "browser.submit", {"session_id": "s" * 24, "selector": "#go", "url": "x"})
+
+
+def test_submit_requires_gate_and_dispatches_to_driver_submit():
+    class Driver:
+        def __init__(self):
+            self.submits = []
+
+        def open(self, _url):
+            return None
+
+        def submit(self, selector):
+            self.submits.append(selector)
+            return {"clicked": True}
+
+    driver = Driver()
+    gated = LocalBrowserBackend(lambda: driver, network_enabled=False)
+    opened = gated.execute("browser.open", {"url": "http://localhost:3000"}, run_id="run-a")
+    with pytest.raises(BrowserBackendError, match="submit_disabled"):
+        gated.execute(
+            "browser.submit",
+            {"session_id": opened["session_id"], "selector": "#go"}, run_id="run-a")
+    assert driver.submits == []
+
+    enabled = LocalBrowserBackend(lambda: driver, network_enabled=False, submit_enabled=True)
+    opened = enabled.execute("browser.open", {"url": "http://localhost:3000"}, run_id="run-a")
+    receipt = enabled.execute(
+        "browser.submit",
+        {"session_id": opened["session_id"], "selector": "#go"}, run_id="run-a")
+    assert receipt["result"] == {"clicked": True}
+    assert driver.submits == ["#go"]
+
+
+def test_submit_after_dispatch_failure_is_unknown_and_run_bound():
+    class Driver:
+        def open(self, _url):
+            return None
+
+        def submit(self, _selector):
+            raise RuntimeError("driver-private-submit-failure")
+
+    backend = LocalBrowserBackend(Driver, network_enabled=False, submit_enabled=True)
+    opened = backend.execute("browser.open", {"url": "http://localhost:3000"}, run_id="run-a")
+    with pytest.raises(BrowserExecutionError, match="backend_interrupted"):
+        backend.execute(
+            "browser.submit",
+            {"session_id": opened["session_id"], "selector": "#go"}, run_id="run-a")
+
+    other = LocalBrowserBackend(Driver, network_enabled=False, submit_enabled=True)
+    opened = other.execute("browser.open", {"url": "http://localhost:3000"}, run_id="run-a")
+    with pytest.raises(BrowserBackendError, match="session_not_found"):
+        other.execute(
+            "browser.submit",
+            {"session_id": opened["session_id"], "selector": "#go"}, run_id="run-b")

@@ -53,6 +53,7 @@ class NodeRuntimeConfig:
     sandbox_launcher: tuple[str, ...] = ()
     browser_enabled: bool = False
     browser_network_enabled: bool = False
+    browser_submit_enabled: bool = False
     browser_allowed_origins: tuple[str, ...] = ()
     browser_driver_factory: Any | None = field(default=None, repr=False, compare=False)
 
@@ -85,6 +86,8 @@ class NodeRuntimeConfig:
             raise ValueError("unknown capability")
         if self.browser_network_enabled and not self.browser_enabled:
             raise ValueError("browser network requires browser capability")
+        if self.browser_submit_enabled and not self.browser_enabled:
+            raise ValueError("browser submit requires browser capability")
         origins = tuple(self.browser_allowed_origins or ())
         if any(not isinstance(origin, str) or len(origin) > 512 for origin in origins):
             raise ValueError("invalid browser origins")
@@ -136,6 +139,7 @@ class NodeRuntime:
                 # No supported driver proves all-socket egress enforcement yet.
                 network_enabled=False,
                 allowed_origins=config.browser_allowed_origins,
+                submit_enabled=config.browser_submit_enabled,
             )
         service_executor = (
             ServiceActionExecutor(path_prefix=config.service_path_prefix)
@@ -152,6 +156,7 @@ class NodeRuntime:
                 browser_available
                 and BROWSER_SESSION_CAPABILITY in config.capabilities
                 and capability in BROWSER_TOOLS
+                and (capability != "browser.submit" or config.browser_submit_enabled)
             )
         )
         allowed_postchecks = frozenset(

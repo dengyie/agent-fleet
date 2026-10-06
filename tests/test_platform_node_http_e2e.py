@@ -18,10 +18,11 @@ OWNER = "owner@example.test"
 PNG = b"\x89PNG\r\n\x1a\nfixture-screenshot"
 
 
-def _app(tmp_path: Path, *, browser=False):
+def _app(tmp_path: Path, *, browser=False, submit=False):
     return create_app(FleetConfig.from_root(
         tmp_path, ingest_token="ingest", dev_operator=OWNER,
         platform_enabled=True, platform_browser_enabled=browser,
+        platform_browser_submit_enabled=submit,
     ))
 
 
@@ -31,17 +32,20 @@ class FlaskTransport:
     def __init__(self, client):
         self.client = client
         self.requests = []
+        self.responses = []
 
     def post_json(self, url, body, headers):
         path = "/" + url.split("/", 3)[-1]
         self.requests.append((path, dict(body), dict(headers)))
         response = self.client.post(path, json=body, headers=headers)
+        self.responses.append((path, response.get_json()))
         return response.status_code, response.get_json()
 
     def post_bytes(self, url, body, headers):
         path = "/" + url.split("/", 3)[-1]
         self.requests.append((path, bytes(body), dict(headers)))
         response = self.client.post(path, data=body, headers=headers)
+        self.responses.append((path, response.get_json()))
         return response.status_code, response.get_json()
 
 
@@ -86,7 +90,7 @@ def test_worker_node_http_receipt_closes_remote_run_without_local_side_effect(tm
         def __init__(self):
             self.calls = 0
 
-        def complete(self, messages, tools, *, request_observer=None):
+        def complete(self, messages, tools):
             self.calls += 1
             if self.calls == 1:
                 return ModelResponse(kind="tool_call", tool="workspace.read", arguments={"path": "report.md"})
@@ -197,8 +201,8 @@ def test_browser_screenshot_uses_node_ticket_and_artifact_metadata(tmp_path):
     assert "X-Agent-Fleet-Token" not in upload_headers
 
 
-def _browser_run_app(tmp_path):
-    app = _app(tmp_path, browser=True)
+def _browser_run_app(tmp_path, *, submit=False):
+    app = _app(tmp_path, browser=True, submit=submit)
     repo = app.extensions["fleet"]["platform_repository"]
     repo.upsert_node(OWNER, {
         "node_id": "node-browser-run", "label": "Browser run",
@@ -216,7 +220,8 @@ def _browser_run_app(tmp_path):
     return app, repo, credential
 
 
-def _browser_run_worker(app, repo, credential, tmp_path, *, driver_factory, provider):
+def _browser_run_worker(app, repo, credential, tmp_path, *, driver_factory, provider,
+                        submit=False):
     delivery = app.extensions["fleet"]["services"]["platform_delivery"]
     journal = NodeJournal(tmp_path / "browser-run-journal.db")
     journal.init()
@@ -225,7 +230,9 @@ def _browser_run_worker(app, repo, credential, tmp_path, *, driver_factory, prov
         journal,
         executor=NodeToolExecutor(
             None, allowed_tools=BROWSER_TOOLS,
-            browser_backend=LocalBrowserBackend(driver_factory, network_enabled=False),
+            browser_backend=LocalBrowserBackend(
+                driver_factory, network_enabled=False,
+                submit_enabled=submit),
             browser_enabled=True,
         ),
         node_id="node-browser-run", credential=credential,
@@ -247,6 +254,8 @@ def _browser_run_worker(app, repo, credential, tmp_path, *, driver_factory, prov
         worker_id="browser-run-hub-worker", provider_factory=lambda profile: provider,
         remote_execution_enabled=True, remote_delivery=DeliveryBridge(),
         browser_enabled=True,
+        browser_submit_enabled=submit,
+        submit_approvals=app.extensions["fleet"]["services"].get("submit_approvals"),
     )
     return worker, node, journal, transport
 
@@ -266,7 +275,7 @@ class _OpenThenProvider:
         self.messages = []
         self._second_call = second_call
 
-    def complete(self, messages, tools, *, request_observer=None):
+    def complete(self, messages, tools):
         self.messages.append(list(messages))
         if not any(m["role"] == "tool" for m in messages):
             return ModelResponse(kind="tool_call", tool="browser.open",
@@ -274,7 +283,7 @@ class _OpenThenProvider:
         return self._second_call(messages)
 
 
-def test_browser_dispatch_failure_markers_stay_off_hub_boundaries(tmp_path):
+def test_browser_dispatch_failure_markers_stay_off_hub_boundaries(tmp_path, caplog):
     markers = (
         "https://203.0.113.77/private?token=url-marker", "redirect-location-marker",
         "response-body-marker", "tls-detail-marker",
@@ -303,6 +312,8 @@ def test_browser_dispatch_failure_markers_stay_off_hub_boundaries(tmp_path):
         provider=provider,
     )
 
+    import logging
+    caplog.set_level(logging.DEBUG)
     result = worker.run_once(OWNER)
 
     assert result["state"] == "unknown"
@@ -314,8 +325,10 @@ def test_browser_dispatch_failure_markers_stay_off_hub_boundaries(tmp_path):
         "hub_command_rows": str(delivery.repository.get("run-leak:step:1"))
         + str(delivery.repository.get("run-leak:step:2")),
         "wire_requests": str(transport.requests),
+        "hub_response_bodies": str(transport.responses),
         "run_row": str(repo.get_run(OWNER, "run-leak")),
         "node_journal": str(journal.get("run-leak:step:2")),
+        "captured_logs": caplog.text,
     }
     for name, text in surfaces.items():
         assert all(marker not in text for marker in markers), name
@@ -377,7 +390,7 @@ def test_browser_success_content_flows_only_through_approved_planes(tmp_path):
     assert repo.get_run(OWNER, "run-page")["result_text"] == "done-page"
 
 
-def test_browser_screenshot_pixels_stay_out_of_hub_metadata_planes(tmp_path):
+def test_browser_screenshot_pixels_stay_out_of_hub_metadata_planes(tmp_path, caplog):
     png = b"\x89PNG\r\n\x1a\n" + b"screenshot-pixel-marker" + b"\x00" * 16
 
     class Driver:
@@ -405,11 +418,15 @@ def test_browser_screenshot_pixels_stay_out_of_hub_metadata_planes(tmp_path):
         provider=provider,
     )
 
+    import logging
+    caplog.set_level(logging.DEBUG)
     result = worker.run_once(OWNER)
 
     assert result["state"] == "succeeded"
     delivery = app.extensions["fleet"]["services"]["platform_delivery"]
     events = app.extensions["fleet"]["services"]["run_events"].list(OWNER, "run-shot")["events"]
+    artifacts = app.extensions["fleet"]["services"]["platform_artifacts"].list(
+        OWNER, "browser-workspace")
     metadata_surfaces = {
         "run_events": str(events),
         "model_transcript": str(provider.messages),
@@ -417,7 +434,11 @@ def test_browser_screenshot_pixels_stay_out_of_hub_metadata_planes(tmp_path):
         "receipt_and_ticket_posts": str(
             [body for path, body, _headers in transport.requests
              if path.endswith(("/nodes/receipts", "/browser-artifact-tickets"))]),
+        "artifact_registry_row": str(artifacts),
+        "hub_response_bodies": str(transport.responses),
+        "run_row": str(repo.get_run(OWNER, "run-shot")),
         "node_journal": str(journal.get("run-shot:step:2")),
+        "captured_logs": caplog.text,
     }
     for name, text in metadata_surfaces.items():
         assert "screenshot-pixel-marker" not in text, name
@@ -429,11 +450,290 @@ def test_browser_screenshot_pixels_stay_out_of_hub_metadata_planes(tmp_path):
     artifact_meta = command_row["result"]["result"]["artifact"]
     assert artifact_meta["content_type"] == "image/png"
     # Approved content plane: the artifact store keeps the exact uploaded bytes.
-    artifacts = app.extensions["fleet"]["services"]["platform_artifacts"].list(
-        OWNER, "browser-workspace")
     assert len(artifacts) == 1
     assert app.extensions["fleet"]["services"]["platform_artifacts"].read(
         OWNER, "browser-workspace", artifacts[0]["artifact_id"]) == png
+
+
+class _OwnerApprovesAfterDenial:
+    """Stands in for the owner: grants on the first approval_required denial.
+
+    Deliberately keeps the production ``SubmitApprovalService`` wired into the
+    worker and only uses its public grant/consume methods, so the real
+    assembly (broker -> service -> repository) stays under test.
+    """
+
+    def __init__(self, service):
+        self.service = service
+        self.denials = 0
+
+    def consume_submit_approval(self, owner_id, run_id, *, session_id, selector,
+                                command_id, now):
+        try:
+            return self.service.consume_submit_approval(
+                owner_id, run_id, session_id=session_id, selector=selector,
+                command_id=command_id, now=now)
+        except Exception as exc:
+            if getattr(exc, "code", None) != "approval_required":
+                raise
+            self.denials += 1
+            self.service.grant(owner_id, run_id, session_id=session_id,
+                               selector=selector)
+            return self.service.consume_submit_approval(
+                owner_id, run_id, session_id=session_id, selector=selector,
+                command_id=command_id, now=now)
+
+    def expire_run_submit_approvals(self, owner_id, run_id, *, now=None):
+        return self.service.expire_run_submit_approvals(owner_id, run_id, now=now)
+
+
+class _OpenSubmitThenFinal:
+    def __init__(self):
+        self.messages = []
+
+    def complete(self, messages, tools):
+        self.messages.append(list(messages))
+        if not any(m["role"] == "tool" for m in messages):
+            return ModelResponse(kind="tool_call", tool="browser.open",
+                                 arguments={"url": "http://localhost:3000"})
+        if not any(m.get("tool") == "browser.submit" for m in messages):
+            return ModelResponse(
+                kind="tool_call", tool="browser.submit",
+                arguments={"session_id": messages[-1]["result"]["session_id"],
+                           "selector": "#checkout-go"})
+        return ModelResponse(kind="final", text="submit-done")
+
+
+def test_browser_submit_is_approval_gated_and_single_use(tmp_path):
+    class SubmitDriver:
+        def __init__(self):
+            self.submits = []
+
+        def open(self, _url):
+            return None
+
+        def submit(self, selector):
+            self.submits.append(selector)
+            return {"state": "submitted"}
+
+        def close(self):
+            return None
+
+    driver = SubmitDriver()
+    app, repo, credential = _browser_run_app(tmp_path, submit=True)
+    _append_browser_turn(repo, run_id="run-submit-e2e", client_token="submit-e2e")
+
+    provider = _OpenSubmitThenFinal()
+    worker, _node, _journal, _transport = _browser_run_worker(
+        app, repo, credential, tmp_path, driver_factory=lambda: driver,
+        provider=provider, submit=True,
+    )
+    approvals = _OwnerApprovesAfterDenial(
+        app.extensions["fleet"]["services"]["submit_approvals"])
+    worker.submit_approvals = approvals
+
+    result = worker.run_once(OWNER)
+
+    assert result["state"] == "succeeded"
+    # The first consume attempt found no approval; the owner stand-in granted
+    # once, then the retry succeeded — one grant, one dispatch, one selector.
+    assert approvals.denials == 1
+    assert driver.submits == ["#checkout-go"]
+    tool_message = next(m for m in provider.messages[-1]
+                        if m.get("tool") == "browser.submit")
+    assert tool_message["result"]["result"] == {"state": "submitted"}
+    # The durable command carries the approval id it consumed.
+    delivery = app.extensions["fleet"]["services"]["platform_delivery"]
+    command_row = delivery.repository.get("run-submit-e2e:step:2")
+    assert command_row["arguments"]["approval_id"]
+    stored = app.extensions["fleet"]["repositories"]["browser"].get_submit_approval(
+        OWNER, command_row["arguments"]["approval_id"])
+    assert stored["state"] == "consumed"
+    assert stored["consumed_command_id"] == "run-submit-e2e:step:2"
+    assert stored["selector"] == "#checkout-go"
+    assert stored["node_id"] == "node-browser-run"
+    # Single use: a second submit for the same selector needs a fresh grant.
+    import pytest
+    from hub.infrastructure.browser_repository import BrowserRepositoryError
+    session_id = tool_message["result"]["session_id"]
+    with pytest.raises(BrowserRepositoryError) as err:
+        app.extensions["fleet"]["repositories"]["browser"].consume_submit_approval(
+            OWNER, "run-submit-e2e", session_id=session_id, selector="#checkout-go",
+            command_id="cmd-again", now=stored["consumed_at"] + 1,
+        )
+    assert err.value.code == "approval_required"
+    # Run events carry status only, never the page-bound selector or approval id.
+    events = app.extensions["fleet"]["services"]["run_events"].list(
+        OWNER, "run-submit-e2e")["events"]
+    tool_result = next(e["payload"] for e in events
+                       if e["kind"] == "tool_result" and e["payload"]["step"] == 2)
+    assert tool_result["state"] == "succeeded"
+    # Node journal and wire receipt record the opaque approval_id.
+    journal_row = _journal.get("run-submit-e2e:step:2")
+    assert journal_row["result"]["result"]["approval_id"] == command_row["arguments"]["approval_id"]
+    receipt_post = next(body for path, body, _headers in _transport.requests
+                        if path.endswith("/nodes/receipts") and body.get("command_id") == "run-submit-e2e:step:2")
+    assert receipt_post["result"]["result"]["approval_id"] == command_row["arguments"]["approval_id"]
+
+
+def test_browser_submit_markers_stay_off_metadata_planes(tmp_path, caplog):
+    markers = (
+        "synthetic-form-field-marker",
+        "synthetic-page-content-marker",
+        "sensitive-card-number-marker",
+        "driver-submit-exception-marker",
+    )
+    cause = RuntimeError(" ".join(markers))
+
+    class FailingSubmitDriver:
+        def __init__(self):
+            self.submits = []
+
+        def open(self, _url):
+            return None
+
+        def submit(self, selector):
+            self.submits.append(selector)
+            raise cause
+
+        def close(self):
+            return None
+
+    driver = FailingSubmitDriver()
+    app, repo, credential = _browser_run_app(tmp_path, submit=True)
+    _append_browser_turn(repo, run_id="run-submit-leak", client_token="submit-leak-e2e")
+
+    provider = _OpenSubmitThenFinal()
+    worker, _node, journal, transport = _browser_run_worker(
+        app, repo, credential, tmp_path, driver_factory=lambda: driver,
+        provider=provider, submit=True,
+    )
+    approvals = _OwnerApprovesAfterDenial(
+        app.extensions["fleet"]["services"]["submit_approvals"])
+    worker.submit_approvals = approvals
+
+    import logging
+    caplog.set_level(logging.DEBUG)
+    result = worker.run_once(OWNER)
+
+    # After-dispatch driver failure yields unknown state
+    assert result["state"] == "unknown"
+    assert driver.submits == ["#checkout-go"]
+
+    delivery = app.extensions["fleet"]["services"]["platform_delivery"]
+    events = app.extensions["fleet"]["services"]["run_events"].list(OWNER, "run-submit-leak")["events"]
+    artifacts = app.extensions["fleet"]["services"]["platform_artifacts"].list(
+        OWNER, "browser-workspace")
+    metadata_surfaces = {
+        "run_events": str(events),
+        "model_transcript": str(provider.messages),
+        "hub_command_rows": str(delivery.repository.get("run-submit-leak:step:1"))
+        + str(delivery.repository.get("run-submit-leak:step:2")),
+        "wire_requests": str(transport.requests),
+        "hub_response_bodies": str(transport.responses),
+        "run_row": str(repo.get_run(OWNER, "run-submit-leak")),
+        "node_journal": str(journal.get("run-submit-leak:step:2")),
+        "artifact_registry_row": str(artifacts),
+        "captured_logs": caplog.text,
+    }
+    for name, text in metadata_surfaces.items():
+        assert all(marker not in text for marker in markers), name
+
+    # Approval was consumed before dispatch and stays consumed (fail-safe direction)
+    command_row = delivery.repository.get("run-submit-leak:step:2")
+    approval_id = command_row["arguments"]["approval_id"]
+    assert approval_id
+    stored = app.extensions["fleet"]["repositories"]["browser"].get_submit_approval(
+        OWNER, approval_id)
+    assert stored["state"] == "consumed"
+    assert stored["consumed_command_id"] == "run-submit-leak:step:2"
+
+    # Run events carry status only, never page content or selector
+    tool_call = next(e["payload"] for e in events
+                     if e["kind"] == "tool_call" and e["payload"]["step"] == 2)
+    assert tool_call["argument_keys"] == ["selector", "session_id"]
+    tool_result = next(e["payload"] for e in events
+                       if e["kind"] == "tool_result" and e["payload"]["step"] == 2)
+    assert tool_result["state"] == "unknown"
+    assert tool_result["error_code"] == "receipt_unknown"
+
+
+def test_browser_submit_consumes_through_production_service_assembly(tmp_path):
+    """No test double anywhere: the worker keeps the bootstrap-wired
+    SubmitApprovalService, the owner grants through its public grant method
+    between the open and submit steps, and the broker consumes through the
+    real service layer (broker -> service -> repository)."""
+    class SubmitDriver:
+        def __init__(self):
+            self.submits = []
+
+        def open(self, _url):
+            return None
+
+        def submit(self, selector):
+            self.submits.append(selector)
+            return {"state": "submitted"}
+
+        def close(self):
+            return None
+
+    driver = SubmitDriver()
+    app, repo, credential = _browser_run_app(tmp_path, submit=True)
+    _append_browser_turn(repo, run_id="run-submit-real", client_token="submit-real")
+    service = app.extensions["fleet"]["services"]["submit_approvals"]
+
+    granted = {}
+
+    class OwnerGrantsOnOpen:
+        def __init__(self):
+            self.messages = []
+
+        def complete(self, messages, tools):
+            self.messages.append(list(messages))
+            if not any(m["role"] == "tool" for m in messages):
+                return ModelResponse(kind="tool_call", tool="browser.open",
+                                     arguments={"url": "http://localhost:3000"})
+            if not any(m.get("tool") == "browser.submit" for m in messages):
+                # The owner watches the open receipt and approves before the
+                # submit step is dispatched — through the production service.
+                open_receipt = next(m for m in messages if m.get("tool") == "browser.open")
+                session_id = open_receipt["result"]["session_id"]
+                granted["approval"] = service.grant(
+                    OWNER, "run-submit-real", session_id=session_id,
+                    selector="#checkout-go")
+                return ModelResponse(
+                    kind="tool_call", tool="browser.submit",
+                    arguments={"session_id": session_id,
+                               "selector": "#checkout-go"})
+            return ModelResponse(kind="final", text="submit-done")
+
+    provider = OwnerGrantsOnOpen()
+    worker, _node, journal, _transport = _browser_run_worker(
+        app, repo, credential, tmp_path, driver_factory=lambda: driver,
+        provider=provider, submit=True,
+    )
+    # The bootstrap-wired production service stays in place (no override).
+    assert worker.submit_approvals is service
+
+    result = worker.run_once(OWNER)
+
+    assert result["state"] == "succeeded"
+    assert driver.submits == ["#checkout-go"]
+    approval_id = granted["approval"]["approval"]["approval_id"]
+    delivery = app.extensions["fleet"]["services"]["platform_delivery"]
+    command_row = delivery.repository.get("run-submit-real:step:2")
+    # The broker consumed through the service and bound the same approval.
+    assert command_row["arguments"]["approval_id"] == approval_id
+    browser_repo = app.extensions["fleet"]["repositories"]["browser"]
+    stored = browser_repo.get_submit_approval(OWNER, approval_id)
+    assert stored["state"] == "consumed"
+    assert stored["consumed_command_id"] == "run-submit-real:step:2"
+    assert stored["selector"] == "#checkout-go"
+    # The node journal carries the same opaque approval id end to end.
+    journal_row = journal.get("run-submit-real:step:2")
+    assert journal_row["result"]["result"]["approval_id"] == approval_id
+    # Run terminalization expires nothing that was already consumed.
+    assert service.expire_run_submit_approvals(OWNER, "run-submit-real") == 0
 
 
 

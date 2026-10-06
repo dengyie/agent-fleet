@@ -123,7 +123,7 @@ def test_scheduler_parallel_slots_count_across_process_instances(tmp_path):
     release = threading.Event()
 
     class BlockingProvider:
-        def complete(self, messages, tools, *, request_observer=None):
+        def complete(self, messages, tools):
             entered.set()
             release.wait(2)
             return ModelResponse(kind="final", text="done")

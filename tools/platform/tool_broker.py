@@ -149,11 +149,17 @@ class ToolBroker:
          'parameters': {'type': 'object', 'properties': {'session_id': {'type': 'string'}},
                         'required': ['session_id'], 'additionalProperties': False}},
     )
+    _SUBMIT_TOOL_DEFINITION = {'name': 'browser.submit', 'risk': 'write', 'scope_kind': 'browser',
+         'description': 'Submit the form enclosing an approved selector after owner approval.',
+         'parameters': {'type': 'object', 'properties': {
+             'session_id': {'type': 'string'}, 'selector': {'type': 'string'}},
+                        'required': ['session_id', 'selector'], 'additionalProperties': False}}
 
     def __init__(self, backend, leases, *, resource_id: str, artifact_store=None,
                  diagnostics=None, lease_owner_id: str | None = None,
-                 artifact_workspace_id: str | None = None, allowed_tools=None,
-                 browser_backend=None, browser_enabled: bool = False):
+                 artifact_workspace_id: str | None = None,
+                 browser_backend=None, browser_enabled: bool = False,
+                 browser_submit_enabled: bool = False):
         self.backend = backend
         self.leases = leases
         self.resource_id = resource_id
@@ -163,21 +169,21 @@ class ToolBroker:
         self.lease_owner_id = lease_owner_id
         self.browser_backend = browser_backend
         self.browser_enabled = bool(browser_enabled)
-        self.allowed_tools = self.TOOLS if allowed_tools is None else self.TOOLS.intersection(allowed_tools)
+        self.browser_submit_enabled = bool(browser_submit_enabled)
 
     @classmethod
-    def tool_definitions(cls, allowed_tools=None, *, browser_enabled: bool = False):
+    def tool_definitions(cls, *, browser_enabled: bool = False,
+                         browser_submit_enabled: bool = False):
         definitions = [dict(item) for item in cls._BASE_TOOL_DEFINITIONS]
         if browser_enabled:
             definitions.extend(dict(item) for item in cls._BROWSER_TOOL_DEFINITIONS)
-        allowed = cls.TOOLS if allowed_tools is None else cls.TOOLS.intersection(allowed_tools)
-        return [item for item in definitions if item["name"] in allowed]
+            if browser_submit_enabled:
+                definitions.append(dict(cls._SUBMIT_TOOL_DEFINITION))
+        return definitions
 
     def execute(self, *, command_id: str, tool: str, arguments: dict, owner_id: str, epoch: int) -> ToolReceipt:
         if tool not in self.TOOLS:
             return ToolReceipt(command_id, "failed", {}, "unknown_tool")
-        if tool not in self.allowed_tools:
-            return ToolReceipt(command_id, "failed", {}, "tool_not_allowed")
         if not self.leases.validate(self.resource_id, self.lease_owner_id or owner_id, epoch):
             return ToolReceipt(command_id, "failed", {}, "lease_mismatch")
         if not isinstance(arguments, dict):
@@ -185,6 +191,8 @@ class ToolBroker:
         if tool in BROWSER_TOOLS:
             if not self.browser_enabled or self.browser_backend is None:
                 return ToolReceipt(command_id, "failed", {}, "browser_disabled")
+            if tool == "browser.submit" and not self.browser_submit_enabled:
+                return ToolReceipt(command_id, "failed", {}, "submit_disabled")
             try:
                 result = self.browser_backend.execute(tool, dict(arguments))
             except BrowserBackendError as exc:

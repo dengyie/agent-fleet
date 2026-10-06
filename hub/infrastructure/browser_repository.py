@@ -12,6 +12,8 @@ from typing import Any
 
 from platform_schema import validate_id, validate_owner_id
 
+from tools.platform.browser_policy import validate_selector
+
 
 class BrowserRepositoryError(RuntimeError):
     def __init__(self, code: str):
@@ -24,6 +26,11 @@ class BrowserRepositoryError(RuntimeError):
 
 _SESSION_STATES = frozenset({"open", "closing", "closed", "unknown"})
 _TICKET_STATES = frozenset({"issued", "uploading", "consumed"})
+_APPROVAL_STATES = frozenset({"active", "consumed", "expired", "revoked"})
+_APPROVAL_TTL_S = 300.0
+_MAX_ACTIVE_APPROVALS_PER_SESSION = 4
+_MAX_ACTIVE_APPROVALS_PER_RUN = 16
+_MAX_APPROVALS_PER_WORKSPACE_HOUR = 64
 
 
 def _bounded(value: Any, field: str, limit: int = 128) -> str:
@@ -94,6 +101,25 @@ class BrowserRepository:
                     ON browser_artifact_tickets(expires_at, state);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_artifact_ticket_idempotency
                     ON browser_artifact_tickets(owner_id, command_id, idempotency_key);
+                CREATE TABLE IF NOT EXISTS browser_submit_approvals (
+                    approval_id TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    selector TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    granted_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    consumed_at REAL,
+                    consumed_command_id TEXT,
+                    idempotency_key TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_browser_submit_approvals_scope
+                    ON browser_submit_approvals(owner_id, run_id, session_id, selector, state);
+                CREATE INDEX IF NOT EXISTS idx_browser_submit_approvals_rate
+                    ON browser_submit_approvals(workspace_id, granted_at);
             """)
         except sqlite3.Error:
             raise BrowserRepositoryError("browser_store") from None
@@ -181,20 +207,41 @@ class BrowserRepository:
         conn = None
         try:
             conn = self._connect()
+            conn.execute("BEGIN IMMEDIATE")
             cur = conn.execute(
                 "UPDATE browser_sessions SET state=?,updated_at=?,closed_at=? WHERE owner_id=? AND session_id=? AND state NOT IN ('closed','unknown')",
                 (state, timestamp, timestamp, owner_id, session_id),
             )
+            if cur.rowcount == 1:
+                # Close-time sweep: active approvals for this session cannot
+                # be consumed afterwards, so terminalize them in the same
+                # transaction as the session state change.
+                conn.execute(
+                    "UPDATE browser_submit_approvals SET state='expired' "
+                    "WHERE session_id=? AND owner_id=? AND state='active'",
+                    (session_id, owner_id),
+                )
             row = conn.execute(
                 "SELECT * FROM browser_sessions WHERE owner_id=? AND session_id=?",
                 (owner_id, session_id),
             ).fetchone()
             if row is None:
                 raise BrowserRepositoryError("session_not_found")
+            conn.execute("COMMIT")
             return self._session_row(row)
         except BrowserRepositoryError:
+            if conn is not None:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
             raise
         except sqlite3.Error:
+            if conn is not None:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
             raise BrowserRepositoryError("browser_store") from None
         finally:
             if conn is not None:
@@ -427,6 +474,273 @@ class BrowserRepository:
                 "UPDATE browser_artifact_tickets SET state='issued',upload_started_at=NULL WHERE ticket_id=? AND state='uploading'",
                 (ticket_id,),
             )
+        except sqlite3.Error:
+            raise BrowserRepositoryError("browser_store") from None
+        finally:
+            if conn is not None:
+                conn.close()
+
+    @staticmethod
+    def _approval_row(row) -> dict[str, Any]:
+        return {key: row[key] for key in (
+            "approval_id", "owner_id", "workspace_id", "run_id", "node_id",
+            "session_id", "selector", "state", "granted_at", "expires_at",
+            "consumed_at", "consumed_command_id",
+        )}
+
+    def grant_submit_approval(self, owner_id: str, *, workspace_id: str, run_id: str,
+                              node_id: str, session_id: str, selector: str,
+                              idempotency_key: str | None = None,
+                              now: float | None = None) -> dict[str, Any]:
+        owner_id = validate_owner_id(owner_id)
+        for value, field in ((workspace_id, "workspace_id"), (run_id, "run_id"),
+                             (node_id, "node_id"), (session_id, "session_id")):
+            validate_id(value, field)
+        try:
+            selector = validate_selector(selector)
+        except ValueError:
+            raise BrowserRepositoryError("invalid_selector") from None
+        idempotency_key = (
+            _bounded(idempotency_key, "idempotency_key", 256) if idempotency_key else None
+        )
+        timestamp = float(self.clock() if now is None else now)
+        conn = None
+        try:
+            conn = self._connect()
+            conn.execute("BEGIN IMMEDIATE")
+            # Lazy TTL sweep inside the same transaction: expired-but-still-
+            # active rows must not consume the per-session/per-run budgets.
+            conn.execute(
+                "UPDATE browser_submit_approvals SET state='expired' "
+                "WHERE state='active' AND expires_at<=?",
+                (timestamp,),
+            )
+            session = conn.execute(
+                "SELECT state FROM browser_sessions WHERE owner_id=? AND session_id=?",
+                (owner_id, session_id),
+            ).fetchone()
+            if session is None or session["state"] not in {"open", "closing"}:
+                conn.execute("ROLLBACK")
+                raise BrowserRepositoryError("session_not_found")
+            if idempotency_key:
+                prior = conn.execute(
+                    "SELECT * FROM browser_submit_approvals WHERE owner_id=? AND run_id=? AND idempotency_key=?",
+                    (owner_id, run_id, idempotency_key),
+                ).fetchone()
+                if prior:
+                    if (prior["workspace_id"] != workspace_id or prior["session_id"] != session_id
+                            or prior["selector"] != selector):
+                        conn.execute("ROLLBACK")
+                        raise BrowserRepositoryError("approval_idempotency_conflict")
+                    conn.execute("COMMIT")
+                    return self._approval_row(prior)
+            hour_ago = timestamp - 3600.0
+            grants = conn.execute(
+                "SELECT COUNT(*) AS n FROM browser_submit_approvals WHERE workspace_id=? AND granted_at>?",
+                (workspace_id, hour_ago),
+            ).fetchone()["n"]
+            if grants >= _MAX_APPROVALS_PER_WORKSPACE_HOUR:
+                conn.execute("ROLLBACK")
+                raise BrowserRepositoryError("approval_limit")
+            active_run = conn.execute(
+                "SELECT COUNT(*) AS n FROM browser_submit_approvals WHERE owner_id=? AND run_id=? AND state='active'",
+                (owner_id, run_id),
+            ).fetchone()["n"]
+            if active_run >= _MAX_ACTIVE_APPROVALS_PER_RUN:
+                conn.execute("ROLLBACK")
+                raise BrowserRepositoryError("approval_limit")
+            active_session = conn.execute(
+                "SELECT COUNT(*) AS n FROM browser_submit_approvals WHERE owner_id=? AND session_id=? AND state='active'",
+                (owner_id, session_id),
+            ).fetchone()["n"]
+            if active_session >= _MAX_ACTIVE_APPROVALS_PER_SESSION:
+                conn.execute("ROLLBACK")
+                raise BrowserRepositoryError("approval_limit")
+            approval_id = secrets.token_urlsafe(18)
+            conn.execute(
+                "INSERT INTO browser_submit_approvals(approval_id,owner_id,workspace_id,run_id,node_id,session_id,selector,state,granted_at,expires_at,idempotency_key) "
+                "VALUES(?,?,?,?,?,?,?,'active',?,?,?)",
+                (approval_id, owner_id, workspace_id, run_id, node_id, session_id,
+                 selector, timestamp, timestamp + _APPROVAL_TTL_S, idempotency_key),
+            )
+            row = conn.execute(
+                "SELECT * FROM browser_submit_approvals WHERE approval_id=?", (approval_id,)
+            ).fetchone()
+            conn.execute("COMMIT")
+            return self._approval_row(row)
+        except BrowserRepositoryError:
+            if conn is not None:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+            raise
+        except sqlite3.Error:
+            if conn is not None:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+            raise BrowserRepositoryError("browser_store") from None
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def consume_submit_approval(self, owner_id: str, run_id: str, *, session_id: str,
+                                selector: str, command_id: str,
+                                now: float | None = None) -> str:
+        """Atomically consume one active approval; return its opaque id."""
+        owner_id = validate_owner_id(owner_id)
+        run_id = validate_id(run_id, "run_id")
+        session_id = _bounded(session_id, "session_id")
+        command_id = _bounded(command_id, "command_id")
+        try:
+            selector = validate_selector(selector)
+        except ValueError:
+            raise BrowserRepositoryError("invalid_selector") from None
+        timestamp = float(self.clock() if now is None else now)
+        conn = None
+        try:
+            conn = self._connect()
+            conn.execute("BEGIN IMMEDIATE")
+            # Prefer an unexpired active row over a stale one: consuming the
+            # oldest active row when it has already lapsed would surface
+            # approval_expired even though a later grant is still valid.
+            row = conn.execute(
+                "SELECT approval_id,expires_at,state FROM browser_submit_approvals "
+                "WHERE owner_id=? AND run_id=? AND session_id=? AND selector=? AND state='active' "
+                "ORDER BY (expires_at > ?) DESC, granted_at LIMIT 1",
+                (owner_id, run_id, session_id, selector, timestamp),
+            ).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                raise BrowserRepositoryError("approval_required")
+            if timestamp >= float(row["expires_at"]):
+                conn.execute(
+                    "UPDATE browser_submit_approvals SET state='expired' WHERE approval_id=? AND state='active'",
+                    (row["approval_id"],),
+                )
+                conn.execute("COMMIT")
+                raise BrowserRepositoryError("approval_expired")
+            updated = conn.execute(
+                "UPDATE browser_submit_approvals SET state='consumed',consumed_at=?,consumed_command_id=? "
+                "WHERE approval_id=? AND state='active'",
+                (timestamp, command_id, row["approval_id"]),
+            ).rowcount
+            if updated != 1:
+                conn.execute("ROLLBACK")
+                raise BrowserRepositoryError("approval_consumed")
+            conn.execute("COMMIT")
+            return row["approval_id"]
+        except BrowserRepositoryError:
+            raise
+        except sqlite3.Error:
+            raise BrowserRepositoryError("browser_store") from None
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def revoke_submit_approval(self, owner_id: str, approval_id: str,
+                               *, run_id: str | None = None) -> dict[str, Any]:
+        owner_id = validate_owner_id(owner_id)
+        approval_id = _bounded(approval_id, "approval_id")
+        conn = None
+        try:
+            conn = self._connect()
+            conn.execute("BEGIN IMMEDIATE")
+            query = "SELECT * FROM browser_submit_approvals WHERE owner_id=? AND approval_id=?"
+            params = [owner_id, approval_id]
+            if run_id is not None:
+                query += " AND run_id=?"
+                params.append(validate_id(run_id, "run_id"))
+            row = conn.execute(query, params).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                raise BrowserRepositoryError("approval_not_found")
+            if row["state"] == "active":
+                conn.execute(
+                    "UPDATE browser_submit_approvals SET state='revoked' WHERE approval_id=?",
+                    (approval_id,),
+                )
+                row = conn.execute(
+                    "SELECT * FROM browser_submit_approvals WHERE approval_id=?", (approval_id,)
+                ).fetchone()
+            conn.execute("COMMIT")
+            return self._approval_row(row)
+        except BrowserRepositoryError:
+            if conn is not None:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+            raise
+        except sqlite3.Error:
+            if conn is not None:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+            raise BrowserRepositoryError("browser_store") from None
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def get_submit_approval(self, owner_id: str, approval_id: str) -> dict[str, Any] | None:
+        owner_id = validate_owner_id(owner_id)
+        approval_id = _bounded(approval_id, "approval_id")
+        conn = None
+        try:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT * FROM browser_submit_approvals WHERE owner_id=? AND approval_id=?",
+                (owner_id, approval_id),
+            ).fetchone()
+            return self._approval_row(row) if row else None
+        except BrowserRepositoryError:
+            raise
+        except sqlite3.Error:
+            raise BrowserRepositoryError("browser_store") from None
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def expire_submit_approvals(self, *, now: float | None = None) -> int:
+        """Terminalize active approvals whose TTL has passed."""
+        timestamp = float(self.clock() if now is None else now)
+        conn = None
+        try:
+            conn = self._connect()
+            conn.execute("BEGIN IMMEDIATE")
+            cur = conn.execute(
+                "UPDATE browser_submit_approvals SET state='expired' "
+                "WHERE state='active' AND expires_at<=?",
+                (timestamp,),
+            )
+            conn.execute("COMMIT")
+            return cur.rowcount
+        except sqlite3.Error:
+            raise BrowserRepositoryError("browser_store") from None
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def expire_run_submit_approvals(self, owner_id: str, run_id: str,
+                                    *, now: float | None = None) -> int:
+        """Terminalize active approvals when their run ends or is cancelled."""
+        owner_id = validate_owner_id(owner_id)
+        run_id = validate_id(run_id, "run_id")
+        timestamp = float(self.clock() if now is None else now)
+        conn = None
+        try:
+            conn = self._connect()
+            conn.execute("BEGIN IMMEDIATE")
+            cur = conn.execute(
+                "UPDATE browser_submit_approvals SET state='expired' "
+                "WHERE owner_id=? AND run_id=? AND state='active'",
+                (owner_id, run_id),
+            )
+            conn.execute("COMMIT")
+            return cur.rowcount
         except sqlite3.Error:
             raise BrowserRepositoryError("browser_store") from None
         finally:

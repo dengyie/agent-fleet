@@ -101,6 +101,7 @@ def create_app(
     command_inspection = None
     command_postcheck = None
     browser_repository = None
+    submit_approval_service = None
     if config.platform_enabled:
         from hub.application.defaults_service import DefaultsService
         from hub.infrastructure.platform_db import PlatformRepository
@@ -144,18 +145,23 @@ def create_app(
         if config.service_monitoring_enabled:
             from hub.infrastructure.service_repository import ServiceRepository
             from hub.application.service_health_service import ServiceHealthService
-        conversation_service = ConversationService(platform_repository, platform_service)
-        run_service = RunService(platform_repository)
-        run_event_service = RunEventService(platform_repository)
-        if config.platform_artifact_root is None:
-            raise RuntimeError("platform_enabled requires a platform_artifact_root")
-        artifact_store = ArtifactStore(config.platform_artifact_root)
         if getattr(config, "platform_browser_enabled", False):
             from hub.infrastructure.browser_repository import BrowserRepository
             browser_repository = (repositories or {}).get("browser")
             if browser_repository is None:
                 browser_repository = BrowserRepository(config.platform_db)
             browser_repository.init()
+            if getattr(config, "platform_browser_submit_enabled", False):
+                from hub.application.conversation_service import SubmitApprovalService
+                submit_approval_service = SubmitApprovalService(
+                    browser_repository)
+        conversation_service = ConversationService(platform_repository, platform_service)
+        run_service = RunService(platform_repository,
+                                 browser_repository=browser_repository)
+        run_event_service = RunEventService(platform_repository)
+        if config.platform_artifact_root is None:
+            raise RuntimeError("platform_enabled requires a platform_artifact_root")
+        artifact_store = ArtifactStore(config.platform_artifact_root)
         if getattr(config, "execution_windows_enabled", False):
             from hub.infrastructure.execution_window_repository import ExecutionWindowRepository
             from hub.application.execution_window_service import ExecutionWindowService
@@ -352,6 +358,9 @@ def create_app(
                     config, "platform_browser_network_enabled", False)),
                 browser_allowed_origins=tuple(getattr(
                     config, "platform_browser_allowed_origins", ()) or ()),
+                browser_submit_enabled=bool(getattr(
+                    config, "platform_browser_submit_enabled", False)),
+                submit_approvals=submit_approval_service,
             )
             if getattr(config, "platform_worker_scheduler_enabled", False):
                 from hub.application.run_scheduler_service import RunSchedulerService
@@ -651,6 +660,8 @@ def create_app(
         app.extensions["fleet"]["platform_commands"] = command_repository
         if browser_repository is not None:
             app.extensions["fleet"]["repositories"]["browser"] = browser_repository
+        if submit_approval_service is not None:
+            app.extensions["fleet"]["services"]["submit_approvals"] = submit_approval_service
     if platform_scheduler_repository is not None:
         app.extensions["fleet"]["repositories"]["platform_scheduler"] = (
             platform_scheduler_repository)
@@ -723,9 +734,6 @@ def create_app(
         app.extensions["fleet"]["services"]["control_router"] = control_router
     if adoption_service is not None:
         app.extensions["fleet"]["services"]["adoptions"] = adoption_service
-
-    from hub.accounts.http import init_accounts
-    init_accounts(app, config)
 
     from hub.http.operator_routes import bp as operator_bp
     app.register_blueprint(operator_bp)

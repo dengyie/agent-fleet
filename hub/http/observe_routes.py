@@ -130,14 +130,6 @@ def api_scan():
     return jsonify({"ok": True, "message": "scan triggered (async)"})
 
 
-@bp.get('/healthz')
-def liveness():
-    """Credential-free process liveness; never return fleet or account data."""
-    response = jsonify(status='ok')
-    response.headers['Cache-Control'] = 'no-store'
-    return response
-
-
 @bp.route("/api/status")
 def api_status():
     payload = dict(_observe_service().status())

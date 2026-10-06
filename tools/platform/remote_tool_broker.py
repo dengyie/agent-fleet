@@ -18,9 +18,9 @@ class RemoteToolBroker:
 
     def __init__(self, delivery, *, node_id: str, resource_id: str, run_id: str,
                  event_sink=None, waiter=None, clock=time.time, receipt_timeout_s=30.0,
-                 allowed_tools=None,
                  browser_enabled: bool = False, browser_network_enabled: bool = False,
-                 browser_allowed_origins=(), browser_resolver=None):
+                 browser_allowed_origins=(), browser_resolver=None,
+                 browser_submit_enabled: bool = False, submit_approvals=None):
         self.delivery = delivery
         self.node_id = node_id
         self.resource_id = resource_id
@@ -29,11 +29,12 @@ class RemoteToolBroker:
         self.waiter = waiter
         self.clock = clock
         self.receipt_timeout_s = max(0.1, min(float(receipt_timeout_s), 300.0))
-        self.allowed_tools = ToolBroker.TOOLS if allowed_tools is None else ToolBroker.TOOLS.intersection(allowed_tools)
         self.browser_enabled = bool(browser_enabled)
         self.browser_network_enabled = bool(browser_network_enabled)
         self.browser_allowed_origins = tuple(browser_allowed_origins or ())
         self.browser_resolver = browser_resolver
+        self.browser_submit_enabled = bool(browser_submit_enabled)
+        self.submit_approvals = submit_approvals
 
     def _event(self, kind: str, command_id: str, tool: str, **extra):
         payload = {"command_id": command_id, "node_id": self.node_id, "tool": tool, **extra}
@@ -42,10 +43,10 @@ class RemoteToolBroker:
     def execute(self, *, command_id: str, tool: str, arguments: dict, owner_id: str, epoch: int) -> ToolReceipt:
         if tool not in ToolBroker.TOOLS:
             return ToolReceipt(command_id, "failed", {}, "unknown_tool")
-        if tool not in self.allowed_tools:
-            return ToolReceipt(command_id, "failed", {}, "tool_not_allowed")
         if tool in BROWSER_TOOLS and not self.browser_enabled:
             return ToolReceipt(command_id, "failed", {}, "browser_disabled")
+        if tool == "browser.submit" and (not self.browser_submit_enabled or self.submit_approvals is None):
+            return ToolReceipt(command_id, "failed", {}, "submit_disabled")
         if not isinstance(arguments, Mapping):
             return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
         if not isinstance(command_id, str) or not command_id.startswith(self.run_id + ":step:"):
@@ -59,6 +60,22 @@ class RemoteToolBroker:
                     allowed_origins=self.browser_allowed_origins,
                     resolver=self.browser_resolver,
                 )
+            if tool == "browser.submit":
+                # Approval consumption is atomic on the durable row and
+                # precedes command creation; a later undelivered command
+                # leaves the approval consumed (the fail-safe direction).
+                try:
+                    bounded["approval_id"] = self.submit_approvals.consume_submit_approval(
+                        owner_id, self.run_id,
+                        session_id=bounded["session_id"],
+                        selector=bounded["selector"],
+                        command_id=command_id, now=float(self.clock()),
+                    )
+                except Exception as exc:
+                    code = getattr(exc, "code", None)
+                    if isinstance(code, str) and code:
+                        return ToolReceipt(command_id, "failed", {}, code)
+                    raise
             if len(json.dumps(bounded, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 64 * 1024:
                 return ToolReceipt(command_id, "failed", {}, "arguments_too_large")
             retry_class = "read_only" if tool in {"workspace.list", "workspace.read", "fleet.list_services", "service.get_health", "service.read_logs", "incident.get_evidence"} else "reconcile_before_retry"
@@ -96,7 +113,14 @@ class RemoteToolBroker:
             return ToolReceipt(command_id, "unknown", {}, "receipt_unknown")
         except BrowserPolicyError as exc:
             return ToolReceipt(command_id, "failed", {}, exc.code)
-        except Exception:
+        except Exception as exc:
+            # A non-active approval can still be present when the stored row is
+            # consumed/revoked under another selector match window; surface its
+            # stable code instead of generic unknown so the retry stays manual.
+            approval_codes = {"approval_expired", "approval_consumed", "approval_revoked"}
+            code = getattr(exc, "code", None)
+            if isinstance(code, str) and code in approval_codes:
+                return ToolReceipt(command_id, "failed", {}, code)
             self._event("node_receipt", command_id, tool, status="unknown")
             return ToolReceipt(command_id, "unknown", {}, "receipt_unknown")
 

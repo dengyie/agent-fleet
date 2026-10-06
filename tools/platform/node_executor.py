@@ -11,6 +11,7 @@ from .browser_backend import BrowserBackendError, BrowserExecutionError
 BROWSER_TOOLS = frozenset({
     "browser.open", "browser.navigate", "browser.snapshot", "browser.screenshot",
     "browser.click", "browser.type", "browser.scroll", "browser.back", "browser.close",
+    "browser.submit",
 })
 BROWSER_SESSION_CAPABILITY = "browser.session"
 NODE_TOOLS = frozenset({

@@ -12,7 +12,17 @@ import time
 from .base import RuntimeLimits, UsageSummary, WorkerResult
 from ..providers.openai_compatible import ProviderError
 
-from hub.infrastructure.usage_repository import UsageLimitExceeded, normalize_usage
+try:
+    from hub.infrastructure.usage_repository import UsageLimitExceeded, normalize_usage
+except Exception:  # pragma: no cover - runtime remains importable in node-only tools
+    UsageLimitExceeded = RuntimeError
+
+    def normalize_usage(value):
+        value = value or {}
+        input_tokens = int(value.get("input_tokens", 0) or 0)
+        output_tokens = int(value.get("output_tokens", 0) or 0)
+        return {"input_tokens": input_tokens, "output_tokens": output_tokens,
+                "total_tokens": int(value.get("total_tokens", input_tokens + output_tokens) or 0)}
 
 
 class ProviderBoundaryUnknown(RuntimeError):
@@ -55,8 +65,7 @@ class NativeAssistantRuntime:
                 except UsageLimitExceeded:
                     return self._result("failed", "模型预算已用尽。", step - 1, input_tokens, output_tokens, measured_total_tokens, provider_requests)
             try:
-                response = self.provider.complete(transcript, tools, request_observer=lambda kind, data:
-                    event_sink(kind, {**data, 'step': step, 'attempt': attempt}))
+                response = self.provider.complete(transcript, tools)
             except Exception as exc:
                 diagnostic = exc.diagnostic() if isinstance(exc, ProviderError) else {'provider_error': 'provider_exception'}
                 diagnostic.update({'step': step, 'attempt': attempt, 'phase': 'provider_call'})

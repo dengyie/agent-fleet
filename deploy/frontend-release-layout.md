@@ -13,7 +13,7 @@
 
 `hub/http/pages.py` 只提供可选静态托管，不读取业务状态、不注入 HTML 数据。完整源码下，默认 `serve_frontend=True`，本地运行即可预览；生产独立后端显式使用 `--no-serve-frontend`。需要 Flask 托管另一目录时，指定 `--serve-frontend --frontend-dir <release-directory>`。
 
-旧 `frontend_cutover` 配置和 `--frontend-cutover` 参数已经删除。升级启动配置时必须同步替换；删除前端目录不会恢复旧 SSR 页面。生产安装脚本和守护进程统一启动 API-only 服务，并通过独立 `/healthz` 检查进程存活（不暴露业务数据，也不代表平台配置就绪），避免首页 404 引发重启循环。
+旧 `frontend_cutover` 配置和 `--frontend-cutover` 参数已经删除。升级启动配置时必须同步替换；删除前端目录不会恢复旧 SSR 页面。生产安装脚本和守护进程统一启动 API-only 服务，并通过 `/api/status` 检查健康，避免首页 404 引发重启循环。
 
 ## 2. 前端目录与代码职责
 

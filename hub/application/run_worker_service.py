@@ -25,7 +25,6 @@ from hub.application.platform_memory_context_service import (
 )
 from tools.platform.tool_broker import ToolBroker
 from tools.platform.remote_tool_broker import RemoteToolBroker
-from hub.domain.platform import ACCEPTANCE_TOOL_POLICY
 
 
 from hub.diagnostics import log_failure
@@ -33,7 +32,8 @@ from hub.diagnostics import log_failure
 logger = logging.getLogger(__name__)
 
 
-from hub.application.run_lease_heartbeat import LeaseHeartbeat, RunLeaseLost
+class RunLeaseLost(RuntimeError):
+    pass
 
 
 class LocalRunWorkerService:
@@ -48,7 +48,8 @@ class LocalRunWorkerService:
                  remote_execution_enabled: bool = False, remote_delivery=None,
                  remote_waiter=None, usage_meter=None, sandbox_launcher=None,
                  browser_enabled: bool = False, browser_network_enabled: bool = False,
-                 browser_allowed_origins: tuple[str, ...] = (), browser_resolver=None):
+                 browser_allowed_origins: tuple[str, ...] = (), browser_resolver=None,
+                 browser_submit_enabled: bool = False, submit_approvals=None):
         self.repository = repository
         self.run_events = run_events
         self.worker_id = worker_id or ("local-worker_" + secrets.token_hex(8))
@@ -70,8 +71,21 @@ class LocalRunWorkerService:
         self.browser_network_enabled = bool(browser_network_enabled)
         self.browser_allowed_origins = tuple(browser_allowed_origins or ())
         self.browser_resolver = browser_resolver
+        self.browser_submit_enabled = bool(browser_submit_enabled)
+        self.submit_approvals = submit_approvals
 
     def _finish(self, claim: dict[str, Any], state: str, *, text: str = "", usage=None) -> dict[str, Any]:
+        # Run termination is deterministic: once this Run leaves the queue
+        # (succeeded/failed/unknown/cancelled), any approval it still holds
+        # can no longer be dispatched, so expire it to free the budgets.
+        if self.submit_approvals is not None:
+            try:
+                self.submit_approvals.expire_run_submit_approvals(
+                    claim["owner_id"], claim["run_id"])
+            except Exception:
+                logger.exception("platform_submit_approval_sweep_failed",
+                                 extra={"run_id": claim["run_id"],
+                                        "worker_id": self.worker_id})
         return self.run_events.state(
             claim["owner_id"], claim["run_id"], state, result_text=text,
             usage=usage,
@@ -105,13 +119,8 @@ class LocalRunWorkerService:
         lease = None
         resource_id = None
         lease_owner = None
-        heartbeat = None
         try:
             config = claim.get("config_snapshot") or {}
-            policy = config.get("tool_policy")
-            if policy not in (None, ACCEPTANCE_TOOL_POLICY):
-                raise RuntimeError("tool_policy_unavailable")
-            allowed_tools = frozenset({"workspace.list"}) if policy == ACCEPTANCE_TOOL_POLICY else None
             workspace_id = config.get("workspace_id") or claim.get("conversation_workspace_id")
             if not workspace_id:
                 raise RuntimeError("workspace_unavailable")
@@ -126,7 +135,7 @@ class LocalRunWorkerService:
             lease_owner = f"{claim['owner_id']}:{claim['run_id']}:{claim['attempt']}"
             lease = leases.acquire(resource_id, lease_owner, ttl_s=self.lease_s)
 
-            def renew_leases():
+            def should_cancel():
                 now = float(self.clock())
                 if not self.repository.renew_run_lease(
                     claim["owner_id"], claim["run_id"], lease_id=lease_id,
@@ -136,11 +145,6 @@ class LocalRunWorkerService:
                 self.resource_leases.renew(
                     resource_id, lease_owner, lease["epoch"], ttl_s=self.lease_s,
                 )
-            heartbeat = LeaseHeartbeat(renew_leases, interval=self.lease_s / 3, name=claim['run_id'])
-            heartbeat.start()
-
-            def should_cancel():
-                heartbeat.pulse()
                 return self.repository.run_cancel_requested(
                     claim["owner_id"], claim["run_id"], lease_id=lease_id,
                 )
@@ -182,18 +186,20 @@ class LocalRunWorkerService:
             try:
                 provider = self.provider_factory(provider_profile)
             except ProviderUnavailable as exc:
-                raise RuntimeError(str(exc)) from exc
+                raise RuntimeError(str(exc)) from None
             if remote:
                 broker = RemoteToolBroker(
                     self.remote_delivery, node_id=execution_node_id,
                     resource_id=workspace["workspace_id"], run_id=claim["run_id"],
                     waiter=self.remote_waiter,
-                    allowed_tools=allowed_tools,
                     event_sink=lambda kind, payload: self._event(claim, kind, payload),
                     browser_enabled=remote_browser_enabled,
                     browser_network_enabled=self.browser_network_enabled,
                     browser_allowed_origins=self.browser_allowed_origins,
                     browser_resolver=self.browser_resolver,
+                    browser_submit_enabled=(
+                        self.browser_submit_enabled and remote_browser_enabled),
+                    submit_approvals=self.submit_approvals,
                 )
             else:
                 broker = ToolBroker(
@@ -201,7 +207,6 @@ class LocalRunWorkerService:
                     lease_owner_id=lease_owner, artifact_store=self.artifact_store,
                     diagnostics=self.diagnostics,
                     artifact_workspace_id=workspace["workspace_id"],
-                    allowed_tools=allowed_tools,
                 )
             runtime = NativeAssistantRuntime(
                 provider, broker, limits=self.limits,
@@ -234,9 +239,10 @@ class LocalRunWorkerService:
                 run_id=claim["run_id"], owner_id=claim["owner_id"],
                 epoch=lease["epoch"], messages=messages,
                 tools=ToolBroker.tool_definitions(
-                    allowed_tools,
-                    browser_enabled=remote_browser_enabled),
-                should_cancel=should_cancel,
+                    browser_enabled=remote_browser_enabled,
+                    browser_submit_enabled=(
+                        self.browser_submit_enabled and remote_browser_enabled)),
+                    should_cancel=should_cancel,
                 lease_id=lease_id, worker_id=self.worker_id,
                 attempt=int(claim.get("attempt") or 1),
             )
@@ -295,8 +301,6 @@ class LocalRunWorkerService:
             except Exception:
                 return {"run_id": claim["run_id"], "state": "lease_lost", "attempt": claim["attempt"]}
         finally:
-            if heartbeat is not None:
-                heartbeat.close()
             if lease is not None and resource_id is not None and lease_owner is not None:
                 try:
                     self.resource_leases.release(resource_id, lease_owner, lease["epoch"])

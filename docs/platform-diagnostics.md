@@ -2,19 +2,25 @@
 
 A healthy `/api/status` only proves the observation API responds. It does not prove that the assistant's routes, defaults, model credential or worker are configured.
 
-The authoritative testing entry is [Full-flow tests and gates](testing/README.md), with the executable [journey matrix](testing/journeys.json) and [external release acceptance](testing/release-acceptance.md). CI must run `--require-journeys`; skipped browser tests or missing selectors do not qualify as a passing release.
+Before accepting a platform deployment, run from the checked-out release:
 
-Current account-mode deployments use username/email and password login with a server-validated HttpOnly session cookie. Every function page validates `GET /api/operator/session` before loading business data; missing/revoked sessions return to `/login`. Registration uses invited email verification, and password changes/resets revoke old sessions. The historical operator-token readiness CLI does not authenticate an account-mode deployment; use `python -m tools.platform.acceptance_check` with a protected credentials file as documented in the release guide.
+```sh
+# Set AGENT_FLEET_OPERATOR_TOKEN through the deployment secret mechanism.
+python -m tools.platform.readiness_check --endpoint https://fleet.example.com
+```
 
-Readiness only proves configuration. The release acceptance command separately checks actual model execution, tool results, final reply, conversation recovery and logout for each selected model. It creates labeled read-only test conversations and does not replay unknown runs. Real mailbox delivery and remote node execution require their own recorded verification.
+This read-only command fails for missing routes, authentication, disabled workers, an empty/default catalog or missing provider credentials/workspace directories. `/api/platform/v1/readiness` is owner scoped. `configuration_ready` is explicitly not a claim that a scheduler thread is alive, a remote node is reachable, the model gateway is healthy, or every selectable model works. Remote workspaces require separate node verification. After it passes, submit a labeled canary, verify its terminal state and actual file/artifact, and reopen the conversation. Never mark an HTTP 202 receipt as task completion.
 
 ## Failure evidence
+
+All console function pages validate `GET /api/operator/session` before mounting views, fetching business data or starting SSE. This endpoint reuses the edge-authenticated operator boundary and works with task/platform gates disabled. `/login` is the dedicated entry page; missing or expired authentication redirects there and clears the tab's token. A token's presence in sessionStorage is never proof of authentication. The shared HTTP client also redirects on any API 401, including non-JSON edge responses. Page focus and back/forward restoration revalidate the session.
+
+Successful sign-in returns only to a recognized same-origin function page, preserving its query and fragment; unsafe return URLs fall back to `/assistant`. Logout hides the console, stops SSE and returns to login. Resource-level 403 responses stay on the current page; a session-check outage hides functions and offers retry without discarding credentials. The former login dialog and view-specific login buttons have been removed. Tokens remain scoped to the current browser session. The UI gate complements the existing server-side API authorization; public observation/ingest/runner API contracts remain separate.
 
 Catalog and conversation recovery failures have separate messages, retain the request ID when available and offer an explicit retry. Submission stays disabled until the catalog and saved conversation state are loaded. Diagnose the failing request's HTTP status and request ID before changing server configuration.
 
 - HTTP responses include `X-Request-ID`; failed requests log the same ID, method, matched route and status without query strings or headers.
 - Provider failures preserve their safe error category, HTTP status, step and attempt in a single durable `run_unknown` event, the result message and a structured `platform_run_failure` log. Known upstream CPU/memory overload and `do_request_failed` codes are retained; arbitrary upstream messages are not.
-- Provider HTTP attempts reject redirects with `redirect_rejected` and never forward credentials to a redirect target. `timeout_s` is one total network deadline, including DNS, TCP/TLS, proxy CONNECT, headers and body; trickled bytes cannot prolong it. Deadline and network failures do not replay a possibly accepted POST. SSE `[DONE]` closes the response without waiting for HTTP EOF.
 - Unknown outcomes remain unknown and are not automatically replayed. Provider network uncertainty is distinct from accounting failures. A 503 does not prove whether the upstream performed chargeable work.
 - Logs retain exception types and bounded file/function/line locations, including explicit causes, without raw exception messages, prompts, provider response bodies or secrets.
 - Scheduler, heartbeat and background-worker exceptions are logged. Repeated scheduler tick failures back off up to 30 seconds and resume their normal interval after recovery.
@@ -25,7 +31,7 @@ Catalog and conversation recovery failures have separate messages, retain the re
 
 The provider fault matrix uses a real local HTTP server returning 403/429/503 and checks the entire worker → event API → durable result/log chain. A separate HTTP tool-contract test validates parameter schemas, writes an actual file and checks the second model request. Browser coverage verifies that HTTP 503 remains visible after reload. Readiness and smoke-failure tests verify nonzero exit and retained evidence, rather than merely checking source strings.
 
-Account browser tests use real account cookies and verify registration, password login/change/recovery, role boundaries, logout and account switching. The full-flow browser test additionally crosses the real scheduler and OpenAI-compatible HTTP adapter, executes four workspace tools, downloads the generated artifact and restores success/failure after page closure. Separate legacy identity tests apply only when account mode is disabled.
+The assistant authentication browser fixture disables developer identity fallback and maps a test token at a local proxy boundary. It verifies all function-page guards, zero business requests before validation, real anonymous/invalid-token 401s, safe return URLs, saved conversation restoration, logout/back navigation, non-JSON API 401 redirects, explicit 503 retries and distinct 403 handling.
 
 No test suite guarantees the absence of all production failures. Production gateway overload, credentials, feature gates and installed agent versions must still be checked against the deployed release.
 

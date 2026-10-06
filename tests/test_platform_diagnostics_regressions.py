@@ -70,7 +70,7 @@ def test_provider_error_is_correlated_durable_and_visible_without_raw_body(tmp_p
 
 def test_unexpected_provider_exception_retains_location_not_secret(tmp_path, caplog):
     class Broken:
-        def complete(self, *_, request_observer=None):
+        def complete(self, *_):
             raise ValueError(SECRET)
     _, client, worker, run = setup_run(tmp_path, Broken())
     result = worker.run_once(OWNER)
@@ -130,7 +130,7 @@ def test_accounting_failure_preserves_original_boundary(provider_fails, caplog):
     from types import SimpleNamespace
     from tools.platform.runtime.native import NativeAssistantRuntime, ProviderBoundaryUnknown
     class Provider:
-        def complete(self, *_, request_observer=None):
+        def complete(self, *_):
             if provider_fails:
                 raise ProviderError('transient_http', retryable=True, status=503)
             return SimpleNamespace(usage={})

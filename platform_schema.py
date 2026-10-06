@@ -9,8 +9,6 @@ import re
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from tools.platform.request_metadata import validate_pricing
-
 MAX_ID = 128
 MAX_NAME = 120
 MAX_PROVIDER = 80
@@ -99,7 +97,7 @@ def validate_model_profile(data: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(provider_config, Mapping):
         raise PlatformValidationError("invalid_model", "provider 配置不合法")
     normalized_config: dict[str, Any] = {}
-    allowed_config = {"endpoint", "base_url", "timeout_s", "max_retries", "stream", "headers", "pricing"}
+    allowed_config = {"endpoint", "base_url", "timeout_s", "max_retries", "stream", "headers"}
     if any(not isinstance(key, str) or key not in allowed_config for key in provider_config):
         raise PlatformValidationError("invalid_model", "provider 配置不合法")
     for key in ("endpoint", "base_url"):
@@ -130,11 +128,6 @@ def validate_model_profile(data: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(provider_config["stream"], bool):
             raise PlatformValidationError("invalid_model", "provider stream 不合法")
         normalized_config["stream"] = provider_config["stream"]
-    if "pricing" in provider_config:
-        try:
-            normalized_config["pricing"] = validate_pricing(provider_config["pricing"])
-        except ValueError:
-            raise PlatformValidationError("invalid_model", "USD 单价配置不合法") from None
     if "headers" in provider_config:
         headers = provider_config["headers"]
         if not isinstance(headers, Mapping) or len(headers) > 32:

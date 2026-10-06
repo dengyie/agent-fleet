@@ -7,9 +7,6 @@ from typing import Any, Mapping
 from platform_schema import validate_id, validate_owner_id
 
 
-ACCEPTANCE_TOOL_POLICY = "acceptance_read_only"
-
-
 @dataclass(frozen=True)
 class RunConfigSnapshot:
     owner_id: str

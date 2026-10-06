@@ -176,6 +176,7 @@ _PLATFORM_MEMORY_ENABLE_ENV = "AGENT_FLEET_PLATFORM_MEMORY_ENABLED"
 _PLATFORM_MEMORY_CONTEXT_ENABLE_ENV = "AGENT_FLEET_PLATFORM_MEMORY_CONTEXT_ENABLED"
 _PLATFORM_BROWSER_ENABLE_ENV = "AGENT_FLEET_PLATFORM_BROWSER_ENABLED"
 _PLATFORM_BROWSER_NETWORK_ENABLE_ENV = "AGENT_FLEET_PLATFORM_BROWSER_NETWORK_ENABLED"
+_PLATFORM_BROWSER_SUBMIT_ENABLE_ENV = "AGENT_FLEET_PLATFORM_BROWSER_SUBMIT_ENABLED"
 _PLATFORM_BROWSER_ORIGINS_ENV = "AGENT_FLEET_PLATFORM_BROWSER_ALLOWED_ORIGINS"
 
 #: Optional per-release gate file, ``<FLEET_HOME>/fleet-gates.conf``, with
@@ -288,6 +289,7 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
              platform_provider_network_enabled=None,
              platform_remote_execution_enabled=None,
              platform_browser_enabled=None, platform_browser_network_enabled=None,
+             platform_browser_submit_enabled=None,
              platform_browser_allowed_origins=None,
              platform_memory_enabled=None,
              platform_memory_context_enabled=None):
@@ -394,6 +396,8 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         platform_browser_enabled, env=_PLATFORM_BROWSER_ENABLE_ENV)
     platform_browser_network_on = _feature_on(
         platform_browser_network_enabled, env=_PLATFORM_BROWSER_NETWORK_ENABLE_ENV)
+    platform_browser_submit_on = _feature_on(
+        platform_browser_submit_enabled, env=_PLATFORM_BROWSER_SUBMIT_ENABLE_ENV)
     platform_browser_origins = _optional_setting(
         platform_browser_allowed_origins, env=_PLATFORM_BROWSER_ORIGINS_ENV)
     if isinstance(platform_browser_origins, str):
@@ -461,6 +465,7 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         platform_remote_execution_enabled=platform_remote_execution_on,
         platform_browser_enabled=platform_browser_on,
         platform_browser_network_enabled=platform_browser_network_on,
+        platform_browser_submit_enabled=platform_browser_submit_on,
         platform_browser_allowed_origins=platform_browser_origins,
         platform_memory_enabled=platform_memory_on,
         platform_memory_context_enabled=platform_memory_context_on,
@@ -476,6 +481,8 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         getattr(config, "platform_browser_enabled", False))
     app.config["PLATFORM_BROWSER_NETWORK_ENABLED"] = bool(
         getattr(config, "platform_browser_network_enabled", False))
+    app.config["PLATFORM_BROWSER_SUBMIT_ENABLED"] = bool(
+        getattr(config, "platform_browser_submit_enabled", False))
     app.config["PLATFORM_MEMORY_ENABLED"] = bool(
         getattr(config, "platform_memory_enabled", False))
     app.config["PLATFORM_MEMORY_CONTEXT_ENABLED"] = bool(
