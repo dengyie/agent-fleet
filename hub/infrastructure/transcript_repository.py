@@ -375,6 +375,10 @@ class TranscriptRepository:
 
         conn = self._connect()
         try:
+            # Serialize duplicate/sequence/quota admission with the writes
+            # that publish this event.  In particular, the per-session raw
+            # byte budget must not be checked against a stale concurrent view.
+            conn.execute("BEGIN IMMEDIATE")
             # Duplicate check against the redacted stream (the write key),
             # scoped per session so two sessions may share an event_id.
             existing = conn.execute(
@@ -382,6 +386,7 @@ class TranscriptRepository:
                 (session_id, event_id),
             ).fetchone()
             if existing:
+                conn.rollback()
                 return IngestResult("duplicate", event_id=event_id,
                                     reason=None, raw_written=False)
 
@@ -424,10 +429,12 @@ class TranscriptRepository:
                     # plaintext.
                     status = "gap" if is_gap else "accepted"
                     self._persist_redacted(conn, clean, redacted)
+                    conn.commit()
                     return IngestResult(status, event_id=event_id,
                                         reason="raw_write_failed",
                                         raw_written=False)
                 if projected > self._max_raw_bytes:
+                    conn.rollback()
                     if quality == "best_effort":
                         return IngestResult(
                             "gap", event_id=event_id,
@@ -457,9 +464,12 @@ class TranscriptRepository:
                     raw_written = False
 
             status = "gap" if is_gap else "accepted"
+            conn.commit()
             return IngestResult(status, event_id=event_id,
                                 reason=reason, raw_written=raw_written)
         finally:
+            if conn.in_transaction:
+                conn.rollback()
             conn.close()
 
     # -- redacted read ----------------------------------------------------------------

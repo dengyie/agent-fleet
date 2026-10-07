@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+import zlib
 
 from flask import Blueprint, current_app, g, jsonify, request
 
@@ -10,6 +11,7 @@ from hub.auth import require_platform_node
 from hub.http.errors import ApplicationError, error_response
 from hub.infrastructure.platform_db import PlatformRepositoryError
 from hub.infrastructure.browser_repository import BrowserRepositoryError
+from hub.infrastructure.execution_window_repository import ExecutionWindowRepositoryError
 from tools.platform.artifacts import ArtifactError
 
 bp = Blueprint("platform_nodes", __name__, url_prefix="/api/platform/v1/nodes")
@@ -84,7 +86,8 @@ def _call(fn):
             "artifact_idempotency_conflict": 409, "artifact_ticket_state": 409,
             "artifact_lease_mismatch": 409, "artifact_lease_expired": 409,
             "artifact_command_expired": 409,
-            "invalid_content_type": 415, "artifact_too_large": 413,
+            "invalid_content_type": 415, "invalid_png": 415, "artifact_too_large": 413,
+            "session_scope": 409, "frame_scope": 409, "frame_dimensions": 415,
             "invalid_hash": 400, "invalid_size": 400,
         }.get(exc.code, 503)
         detail = {
@@ -94,7 +97,9 @@ def _call(fn):
             "artifact_idempotency_conflict": "上传幂等键冲突", "artifact_ticket_state": "上传票据状态不合法",
             "artifact_lease_mismatch": "命令租约不匹配", "artifact_lease_expired": "命令租约已过期",
             "artifact_command_expired": "命令已过期",
-            "invalid_content_type": "文件类型不合法", "artifact_too_large": "文件超出大小限制",
+            "invalid_content_type": "文件类型不合法", "invalid_png": "PNG 图像头不合法",
+            "artifact_too_large": "文件超出大小限制", "session_scope": "浏览器会话作用域不匹配",
+            "frame_scope": "画面事件作用域不匹配", "frame_dimensions": "画面尺寸超出限制",
             "invalid_hash": "文件校验值不合法", "invalid_size": "文件大小不合法",
         }.get(exc.code, "平台存储不可用")
         return error_response(ApplicationError(exc.code, detail, status))
@@ -179,6 +184,97 @@ def _browser_session_command(command_id, worker_id, action, session_id=None):
         if arguments.get("session_id") != session_id:
             raise ApplicationError("browser_session_scope", "浏览器会话作用域不匹配", 409)
     return command
+
+
+def _png_dimensions(raw: bytes) -> tuple[int, int]:
+    if (len(raw) < 33 or raw[8:12] != b"\x00\x00\x00\r"
+            or raw[12:16] != b"IHDR"
+            or (zlib.crc32(raw[12:29]) & 0xffffffff) != int.from_bytes(raw[29:33], "big")):
+        raise ApplicationError("invalid_png", "PNG 图像头不合法", 415)
+    width = int.from_bytes(raw[16:20], "big")
+    height = int.from_bytes(raw[20:24], "big")
+    if not 1 <= width <= 4096 or not 1 <= height <= 4096 or width * height > 16_777_216:
+        raise ApplicationError("invalid_png", "PNG 图像尺寸超出限制", 415)
+    bit_depth, color_type, compression, filtering, interlace = raw[24:29]
+    channels_by_type = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
+    valid_depths = {
+        0: {1, 2, 4, 8, 16}, 2: {8, 16}, 3: {1, 2, 4, 8},
+        4: {8, 16}, 6: {8, 16},
+    }
+    channels = channels_by_type.get(color_type)
+    if (channels is None or bit_depth not in valid_depths[color_type]
+            or compression != 0 or filtering != 0 or interlace not in (0, 1)):
+        raise ApplicationError("invalid_png", "PNG 图像头不合法", 415)
+
+    def pass_size(length: int, start: int, step: int) -> int:
+        return max(0, (length - start + step - 1) // step)
+
+    if interlace:
+        passes = ((0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8),
+                  (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2),
+                  (0, 1, 1, 2))
+    else:
+        passes = ((0, 0, 1, 1),)
+    expected_decoded = 0
+    for x_start, y_start, x_step, y_step in passes:
+        pass_width = pass_size(width, x_start, x_step)
+        pass_height = pass_size(height, y_start, y_step)
+        if pass_width and pass_height:
+            row_bytes = (pass_width * channels * bit_depth + 7) // 8
+            expected_decoded += (row_bytes + 1) * pass_height
+    offset = 8
+    seen_header = False
+    seen_data = False
+    seen_end = False
+    idat_parts = []
+    while offset + 12 <= len(raw):
+        length = int.from_bytes(raw[offset:offset + 4], "big")
+        end = offset + 12 + length
+        if end > len(raw):
+            break
+        kind = raw[offset + 4:offset + 8]
+        payload = raw[offset + 8:offset + 8 + length]
+        checksum = int.from_bytes(raw[offset + 8 + length:end], "big")
+        if (zlib.crc32(kind + payload) & 0xffffffff) != checksum:
+            raise ApplicationError("invalid_png", "PNG 图像数据校验失败", 415)
+        if offset == 8:
+            if kind != b"IHDR" or length != 13:
+                raise ApplicationError("invalid_png", "PNG 图像头不合法", 415)
+            seen_header = True
+        elif kind == b"IDAT":
+            seen_data = True
+            idat_parts.append(payload)
+        elif kind == b"IEND":
+            if length != 0 or end != len(raw):
+                raise ApplicationError("invalid_png", "PNG 图像结束块不合法", 415)
+            seen_end = True
+            break
+        offset = end
+    if not (seen_header and seen_data and seen_end):
+        raise ApplicationError("invalid_png", "PNG 图像数据不完整", 415)
+    # Validate the bounded zlib stream without retaining decoded pixel rows.
+    try:
+        decoder = zlib.decompressobj()
+        decoded_size = 0
+        for part in idat_parts:
+            pending = part
+            while pending:
+                decoded = decoder.decompress(
+                    pending, min(64 * 1024, expected_decoded - decoded_size + 1),
+                )
+                decoded_size += len(decoded)
+                if (decoded_size > expected_decoded or decoder.unused_data
+                        or (not decoded and decoder.unconsumed_tail == pending)):
+                    raise ValueError("invalid PNG IDAT stream")
+                pending = decoder.unconsumed_tail
+                if decoder.eof and pending:
+                    raise ValueError("trailing PNG IDAT data")
+        if (not decoder.eof or decoder.unused_data or decoder.unconsumed_tail
+                or decoded_size != expected_decoded):
+            raise ValueError("incomplete PNG IDAT stream")
+    except (ValueError, zlib.error):
+        raise ApplicationError("invalid_png", "PNG 图像数据压缩流不合法", 415) from None
+    return width, height
 
 
 @bp.post("/browser-sessions")
@@ -267,6 +363,9 @@ def issue_browser_artifact_ticket():
             raise ApplicationError("artifact_command_expired", "命令已过期", 409)
         run_id = command.get("run_id")
         arguments = command.get("arguments") or {}
+        session_id = arguments.get("session_id") if isinstance(arguments, dict) else None
+        if not isinstance(session_id, str) or not session_id:
+            raise ApplicationError("artifact_scope_unavailable", "浏览器会话作用域不可用", 409)
         workspace_id = command.get("resource_id")
         if not isinstance(run_id, str) or not isinstance(workspace_id, str):
             raise ApplicationError("artifact_scope_unavailable", "命令作用域不可用", 409)
@@ -275,6 +374,9 @@ def issue_browser_artifact_ticket():
             g.platform_node_owner, workspace_id=workspace_id, run_id=run_id,
             node_id=g.platform_node_id, command_id=command_id,
             expires_at=expires_at, idempotency_key=idempotency_key,
+            session_id=session_id,
+            capture_frame=(current_app.extensions.get("fleet", {}).get(
+                "repositories", {}).get("execution_windows") is not None),
         )
         if ticket.get("state") == "consumed" and ticket.get("artifact_id"):
             artifact = _artifact_store().get(
@@ -322,7 +424,9 @@ def upload_browser_artifact(ticket_id):
             workspace_id=command.get("resource_id"), run_id=command.get("run_id"),
             node_id=g.platform_node_id, command_id=command_id,
             idempotency_key=idempotency_key,
+            session_id=(command.get("arguments") or {}).get("session_id"),
         )
+        dimensions = _png_dimensions(raw) if ticket_scope["window_id"] else None
         if ticket_scope["expires_at"] <= time.time():
             raise BrowserRepositoryError("artifact_ticket_expired")
         if ticket_scope["state"] == "consumed":
@@ -358,9 +462,27 @@ def upload_browser_artifact(ticket_id):
             )
             if artifact["sha256"] != digest or artifact["size"] != len(raw):
                 raise ArtifactError("artifact_corrupt")
+            def publish_frame(connection, consumed_ticket, frame_dimensions):
+                execution_windows = current_app.extensions.get("fleet", {}).get(
+                    "repositories", {}).get("execution_windows")
+                if execution_windows is None:
+                    raise BrowserRepositoryError("frame_scope")
+                try:
+                    execution_windows.append_browser_frame_event(
+                        connection, owner_id=consumed_ticket["owner_id"],
+                        ticket_id=consumed_ticket["ticket_id"],
+                        artifact_id=consumed_ticket["artifact_id"],
+                        sha256=consumed_ticket["sha256"], width=frame_dimensions[0],
+                        height=frame_dimensions[1],
+                    )
+                except ExecutionWindowRepositoryError as exc:
+                    raise BrowserRepositoryError(exc.code) from exc
+
             repo.complete_artifact_upload(
                 ticket_id, sha256=digest, size=len(raw),
                 artifact_id=artifact["artifact_id"],
+                frame_publisher=publish_frame if dimensions is not None else None,
+                frame_dimensions=dimensions,
             )
             return jsonify({"ok": True, "artifact": artifact})
         except Exception:

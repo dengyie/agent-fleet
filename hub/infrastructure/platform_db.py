@@ -39,10 +39,14 @@ class PlatformRepositoryError(RuntimeError):
 
 def _json(value: Any) -> str:
     try:
-        result = json.dumps(value or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    except (TypeError, ValueError):
-        raise PlatformRepositoryError("invalid_value") from None
-    if len(result.encode("utf-8")) > MAX_JSON_BYTES:
+        result = json.dumps(
+            value or {}, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        )
+        encoded_size = len(result.encode("utf-8"))
+    except (TypeError, ValueError) as exc:
+        raise PlatformRepositoryError("invalid_value") from exc
+    if encoded_size > MAX_JSON_BYTES:
         raise PlatformRepositoryError("value_too_large")
     return result
 
@@ -645,6 +649,8 @@ class PlatformRepository:
     def create_conversation(self, owner_id: str, conversation_id: str, *, title: str, workspace_id: str | None, overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
         owner_id = validate_owner_id(owner_id)
         conversation_id = validate_id(conversation_id, "conversation_id")
+        if overrides is not None and not isinstance(overrides, Mapping):
+            raise PlatformRepositoryError("invalid_value")
         if workspace_id is not None:
             workspace_id = validate_id(workspace_id, "workspace_id")
         conn = None
@@ -654,7 +660,7 @@ class PlatformRepository:
                 row = conn.execute("SELECT enabled FROM workspaces WHERE owner_id=? AND workspace_id=?", (owner_id, workspace_id)).fetchone()
                 if not row or not bool(row["enabled"]):
                     raise PlatformRepositoryError("reference_forbidden")
-            conn.execute("INSERT INTO conversations(conversation_id,owner_id,title,workspace_id,overrides,revision) VALUES(?,?,?,?,?,0)", (conversation_id, owner_id, str(title or "")[:120], workspace_id, _json(overrides or {})))
+            conn.execute("INSERT INTO conversations(conversation_id,owner_id,title,workspace_id,overrides,revision) VALUES(?,?,?,?,?,0)", (conversation_id, owner_id, str(title or "")[:120], workspace_id, _json({} if overrides is None else overrides)))
             row = conn.execute("SELECT * FROM conversations WHERE conversation_id=?", (conversation_id,)).fetchone()
             return self._row_conversation(row)
         except PlatformRepositoryError:
@@ -1088,7 +1094,7 @@ class PlatformRepository:
         for run in runs:
             run['requests'] = project_requests(grouped.get(run['run_id'], []), run['state'])
             for request in run['requests']:
-                if request.get('status') == 'running':
+                if request.get('status') == 'running' and 'started_at' in request:
                     request['elapsed_ms'] = max(0, round((time.time() - request['started_at']) * 1000))
 
     def get_run(self, owner_id: str, run_id: str) -> dict[str, Any] | None:

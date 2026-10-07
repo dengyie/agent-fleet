@@ -20,8 +20,8 @@ class PlatformMemoryService:
     def _owner(owner_id: str) -> str:
         try:
             return validate_owner_id(owner_id)
-        except ValueError:
-            raise ApplicationError("invalid_owner", "owner_id 不合法", 400) from None
+        except ValueError as exc:
+            raise ApplicationError("invalid_owner", "owner_id 不合法", 400) from exc
 
     @staticmethod
     def _translate(exc: Exception) -> ApplicationError:
@@ -32,6 +32,7 @@ class PlatformMemoryService:
             "revision_conflict": 409,
             "memory_search_unavailable": 503,
             "memory_store": 503,
+            "memory_store_corrupt": 503,
         }.get(code, 400)
         details = {
             "memory_not_found": "记忆不存在",
@@ -39,6 +40,7 @@ class PlatformMemoryService:
             "revision_conflict": "记忆已被更新，请重新读取",
             "memory_search_unavailable": "记忆搜索不可用",
             "memory_store": "记忆存储不可用",
+            "memory_store_corrupt": "记忆存储不可用",
         }
         return ApplicationError(code, details.get(code, "记忆参数不合法"), status)
 
@@ -46,7 +48,7 @@ class PlatformMemoryService:
         try:
             return fn(*args, **kwargs)
         except PlatformMemoryRepositoryError as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
     def create(self, owner_id: str, data: Mapping) -> dict:
         return {"ok": True, "memory": self._call(

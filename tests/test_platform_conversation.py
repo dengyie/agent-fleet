@@ -1,5 +1,12 @@
+import json
+import sqlite3
+
+import pytest
+
+from hub.application.task_service import ApplicationError
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
+from hub.infrastructure.platform_db import PlatformRepositoryError
 
 
 def _app(tmp_path, *, memory=False, memory_context=False):
@@ -9,6 +16,145 @@ def _app(tmp_path, *, memory=False, memory_context=False):
         platform_memory_enabled=memory,
         platform_memory_context_enabled=memory_context,
     ))
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_conversation_rejects_non_finite_overrides_before_persistence(tmp_path, value):
+    app = _app(tmp_path)
+    response = app.test_client().post(
+        "/api/platform/v1/conversations",
+        json={"overrides": {"metric": value}},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "invalid_value"
+    assert "NaN" not in response.get_data(as_text=True)
+    repository = app.extensions["fleet"]["platform_repository"]
+    with sqlite3.connect(repository.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 0
+
+
+def test_platform_repository_preserves_json_encoding_cause(tmp_path):
+    app = _app(tmp_path)
+    repository = app.extensions["fleet"]["platform_repository"]
+
+    with pytest.raises(PlatformRepositoryError) as rejected:
+        repository.create_conversation(
+            "owner@example.test", "conv_invalid_json", title="",
+            workspace_id=None, overrides={"metric": float("nan")},
+        )
+
+    assert rejected.value.code == "invalid_value"
+    assert isinstance(rejected.value.__cause__, ValueError)
+
+
+@pytest.mark.parametrize("overrides", [[], "", 0, False])
+def test_platform_repository_rejects_non_mapping_overrides_before_writes(
+    tmp_path, overrides,
+):
+    app = _app(tmp_path)
+    repository = app.extensions["fleet"]["platform_repository"]
+
+    with pytest.raises(PlatformRepositoryError) as rejected:
+        repository.create_conversation(
+            "owner@example.test", "conv_invalid_overrides", title="",
+            workspace_id=None, overrides=overrides,
+        )
+
+    assert rejected.value.code == "invalid_value"
+    with sqlite3.connect(repository.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 0
+
+
+def test_conversation_service_preserves_repository_error_chain(tmp_path):
+    app = _app(tmp_path)
+    service = app.extensions["fleet"]["services"]["conversations"]
+
+    with pytest.raises(ApplicationError) as rejected:
+        service.create("owner@example.test", overrides={"metric": float("nan")})
+
+    assert rejected.value.code == "invalid_value"
+    assert isinstance(rejected.value.__cause__, PlatformRepositoryError)
+    assert isinstance(rejected.value.__cause__.__cause__, ValueError)
+
+
+def test_conversation_rejects_invalid_unicode_override_before_persistence(tmp_path):
+    app = _app(tmp_path)
+    body = json.dumps(
+        {"overrides": {"text": "\ud800"}}, ensure_ascii=True,
+    ).encode("utf-8")
+    response = app.test_client().post(
+        "/api/platform/v1/conversations", data=body,
+        content_type="application/json",
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "invalid_value"
+    repository = app.extensions["fleet"]["platform_repository"]
+    with sqlite3.connect(repository.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("overrides", [[], "", 0, False, None])
+def test_conversation_rejects_falsey_non_object_overrides(tmp_path, overrides):
+    app = _app(tmp_path)
+    response = app.test_client().post(
+        "/api/platform/v1/conversations", json={"overrides": overrides},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "invalid_value"
+    repository = app.extensions["fleet"]["platform_repository"]
+    with sqlite3.connect(repository.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("overrides", [[], "", 0, False, None])
+def test_turn_rejects_falsey_non_object_overrides(tmp_path, overrides):
+    app = _app(tmp_path)
+    client = app.test_client()
+    conversation = client.post("/api/platform/v1/conversations", json={})
+    conversation_id = conversation.get_json()["conversation"]["conversation_id"]
+
+    response = client.post(
+        f"/api/platform/v1/conversations/{conversation_id}/turns",
+        json={"text": "hello", "client_token": "invalid-overrides",
+              "overrides": overrides},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "invalid_value"
+    repository = app.extensions["fleet"]["platform_repository"]
+    with sqlite3.connect(repository.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("overrides", [[], "", 0, False])
+@pytest.mark.parametrize("operation", ["create", "turn"])
+def test_conversation_service_rejects_non_mapping_overrides_before_writes(
+    tmp_path, operation, overrides,
+):
+    app = _app(tmp_path)
+    service = app.extensions["fleet"]["services"]["conversations"]
+    if operation == "turn":
+        conversation = service.create("owner@example.test")
+        conversation_id = conversation["conversation"]["conversation_id"]
+        invoke = lambda: service.turn(
+            "owner@example.test", conversation_id, text="hello",
+            client_token="invalid-overrides", overrides=overrides,
+        )
+    else:
+        invoke = lambda: service.create("owner@example.test", overrides=overrides)
+
+    with pytest.raises(ApplicationError) as rejected:
+        invoke()
+
+    assert rejected.value.code == "invalid_value"
+    repository = app.extensions["fleet"]["platform_repository"]
+    with sqlite3.connect(repository.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+        if operation == "create":
+            assert conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 0
 
 
 def test_turn_is_idempotent_and_run_config_is_frozen(tmp_path):

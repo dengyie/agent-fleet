@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import math
 import secrets
 import time
 from typing import Any
 
 from .browser_policy import BrowserPolicyError, validate_action
+from hub.domain.browser_submit import opaque_browser_id
+from .browser_transport import _submit_scope
 
 
 @dataclass(frozen=True)
@@ -50,18 +54,19 @@ class LocalBrowserBackend:
     _MAX_RESULT_NODES = 2048
 
     def __init__(self, driver_factory=None, *, clock=time.time, network_enabled=False,
-                 allowed_origins=(), submit_enabled=False):
+                 allowed_origins=(), resolver=None, submit_enabled=False):
         self.driver_factory = driver_factory
         self.available = callable(driver_factory)
         self.clock = clock
         self.network_enabled = bool(network_enabled)
         self.allowed_origins = tuple(allowed_origins or ())
+        self.resolver = resolver
         self.submit_enabled = bool(submit_enabled)
         self._sessions: dict[str, Any] = {}
 
     @classmethod
     def _validate_result(cls, value: Any, *, max_bytes: int, depth: int = 0,
-                         budget: list[int] | None = None) -> None:
+                         budget: list[int] | None = None, allow_binary: bool = False) -> None:
         if budget is None:
             budget = [0, 0]
 
@@ -74,42 +79,60 @@ class LocalBrowserBackend:
         if depth > cls._MAX_RESULT_DEPTH:
             raise BrowserBackendError("result_too_large")
         if isinstance(value, str):
-            size = len(value.encode("utf-8"))
-            if size > max_bytes:
+            if len(value) > max_bytes:
                 raise BrowserBackendError("result_too_large")
-            charge(size)
+            try:
+                charge(len(json.dumps(value, ensure_ascii=False).encode("utf-8")))
+            except UnicodeError as exc:
+                raise BrowserBackendError("invalid_backend_receipt") from exc
             return
         if isinstance(value, bytes):
+            if not allow_binary or depth != 0:
+                raise BrowserBackendError("invalid_backend_receipt")
             if len(value) > max_bytes:
                 raise BrowserBackendError("result_too_large")
             charge(len(value))
             return
         if value is None or isinstance(value, (bool, int, float)):
-            charge(8)
+            if isinstance(value, int) and not -(2**53 - 1) <= value <= 2**53 - 1:
+                raise BrowserBackendError("invalid_backend_receipt")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise BrowserBackendError("invalid_backend_receipt")
+            charge(len(json.dumps(value, allow_nan=False)))
             return
         if isinstance(value, dict):
             if len(value) > cls._MAX_RESULT_ITEMS:
                 raise BrowserBackendError("result_too_large")
-            charge(2)
+            charge(2 + max(0, len(value) - 1) + len(value))
             for key, item in value.items():
-                if not isinstance(key, str) or len(key.encode("utf-8")) > 512:
+                if not isinstance(key, str):
+                    raise BrowserBackendError("invalid_backend_receipt")
+                if len(key) > 512:
                     raise BrowserBackendError("result_too_large")
-                charge(len(key.encode("utf-8")) + 4)
+                try:
+                    key_bytes = len(key.encode("utf-8"))
+                except UnicodeError as exc:
+                    raise BrowserBackendError("invalid_backend_receipt") from exc
+                if key_bytes > 512:
+                    raise BrowserBackendError("result_too_large")
+                cls._validate_result(key, max_bytes=max_bytes, depth=depth, budget=budget)
                 cls._validate_result(item, max_bytes=max_bytes, depth=depth + 1, budget=budget)
             return
         if isinstance(value, (list, tuple)):
             if len(value) > cls._MAX_RESULT_ITEMS:
                 raise BrowserBackendError("result_too_large")
-            charge(2)
+            charge(2 + max(0, len(value) - 1))
             for item in value:
                 cls._validate_result(item, max_bytes=max_bytes, depth=depth + 1, budget=budget)
             return
         raise BrowserBackendError("invalid_backend_receipt")
 
-    def execute(self, tool: str, arguments: dict, *, run_id: str | None = None) -> dict:
+    def execute(self, tool: str, arguments: dict, *, run_id: str | None = None,
+                approval_id: str | None = None) -> dict:
         try:
             args = validate_action(tool, arguments, network_enabled=self.network_enabled,
-                                   allowed_origins=self.allowed_origins)
+                                   allowed_origins=self.allowed_origins,
+                                   resolver=self.resolver)
         except BrowserPolicyError as exc:
             raise BrowserBackendError(exc.code) from None
         session_id = args.pop("session_id", None)
@@ -140,8 +163,15 @@ class LocalBrowserBackend:
         driver = entry["driver"] if entry is not None else None
         if driver is None:
             raise BrowserBackendError("session_not_found")
-        if tool == "browser.submit" and not self.submit_enabled:
-            raise BrowserBackendError("submit_disabled")
+        if tool == "browser.submit":
+            if not self.submit_enabled:
+                raise BrowserBackendError("submit_disabled")
+            try:
+                opaque_browser_id(approval_id, "approval")
+            except ValueError as exc:
+                raise BrowserBackendError("approval_required") from exc
+            if not callable(getattr(driver, "submit", None)):
+                raise BrowserBackendError("backend_failed")
         try:
             if tool == "browser.navigate": result = driver.navigate(args["url"])
             elif tool == "browser.snapshot": result = driver.snapshot()
@@ -150,7 +180,9 @@ class LocalBrowserBackend:
             elif tool == "browser.type": result = driver.type(args["selector"], args["text"])
             elif tool == "browser.scroll": result = driver.scroll(args["delta_y"])
             elif tool == "browser.back": result = driver.back()
-            elif tool == "browser.submit": result = driver.submit(args["selector"])
+            elif tool == "browser.submit":
+                with _submit_scope():
+                    result = driver.submit(args["selector"])
             elif tool == "browser.close":
                 driver.close()
                 self._sessions.pop(session_id, None)
@@ -161,15 +193,15 @@ class LocalBrowserBackend:
             raise
         except Exception as exc:
             raise BrowserExecutionError() from exc
+        if tool == "browser.screenshot" and (not isinstance(result, bytes) or not result.startswith(b"\x89PNG\r\n\x1a\n")):
+            raise BrowserBackendError("invalid_backend_receipt")
         self._validate_result(
             result,
             max_bytes=(self._MAX_SCREENSHOT_BYTES
                        if tool == "browser.screenshot" else self._MAX_RESULT_BYTES),
+            allow_binary=tool == "browser.screenshot",
         )
-        payload = {"session_id": session_id, "result": result}
-        if tool == "browser.submit" and "approval_id" in args:
-            payload["approval_id"] = args["approval_id"]
-        return payload
+        return {"session_id": session_id, "result": result, **({"approval_id": approval_id} if tool == "browser.submit" else {})}
 
     def close_session(self, session_id: str) -> None:
         entry = self._sessions.get(session_id)

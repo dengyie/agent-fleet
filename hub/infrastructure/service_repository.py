@@ -19,6 +19,10 @@ from platform_schema import validate_id, validate_owner_id
 MAX_DETAIL_BYTES = 64 * 1024
 
 
+def _reject_json_constant(token: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {token}")
+
+
 def _safe_rollback(conn) -> None:
     if conn is None:
         return
@@ -89,7 +93,10 @@ class ServiceRepository:
     @staticmethod
     def _json(value: Any) -> str:
         try:
-            encoded = json.dumps({} if value is None else value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            encoded = json.dumps(
+                {} if value is None else value, ensure_ascii=True, sort_keys=True,
+                separators=(",", ":"), allow_nan=False,
+            )
         except (TypeError, ValueError):
             raise ServiceRepositoryError("invalid_evidence_detail") from None
         if len(encoded.encode("utf-8")) > MAX_DETAIL_BYTES:
@@ -99,18 +106,22 @@ class ServiceRepository:
     @staticmethod
     def _decode(value: str | None) -> dict[str, Any]:
         try:
-            decoded = json.loads(value or "{}")
-        except (TypeError, ValueError):
-            return {}
-        return dict(decoded) if isinstance(decoded, Mapping) else {}
+            decoded = json.loads(value or "{}", parse_constant=_reject_json_constant)
+            if not isinstance(decoded, Mapping):
+                raise ValueError("expected object")
+            return dict(decoded)
+        except (TypeError, ValueError) as exc:
+            raise ServiceRepositoryError("service_store") from exc
 
     @staticmethod
     def _decode_list(value: str | None) -> list[str]:
         try:
-            decoded = json.loads(value or "[]")
-        except (TypeError, ValueError):
-            return []
-        return [item for item in decoded if isinstance(item, str)] if isinstance(decoded, list) else []
+            decoded = json.loads(value or "[]", parse_constant=_reject_json_constant)
+            if not isinstance(decoded, list) or any(not isinstance(item, str) for item in decoded):
+                raise ValueError("expected string array")
+            return decoded
+        except (TypeError, ValueError) as exc:
+            raise ServiceRepositoryError("service_store") from exc
 
     @classmethod
     def _service_row(cls, row) -> dict[str, Any]:

@@ -74,6 +74,7 @@ def create_app(
     platform_delivery = None
     conversation_service = None
     run_service = None
+    submit_approval_service = None
     run_event_service = None
     artifact_store = None
     service_health = None
@@ -131,10 +132,15 @@ def create_app(
         command_signing_key = getattr(config, "platform_command_signing_raw", None)
         if command_signing_key is None:
             command_signing_key = load_platform_command_signing_key()
+        browser_write_guard = None
+        if getattr(config, "execution_windows_enabled", False):
+            from hub.infrastructure.execution_window_repository import ExecutionWindowRepository
+            browser_write_guard = ExecutionWindowRepository.assert_browser_write_allowed
         platform_delivery = CommandDeliveryService(
             command_repository,
             signing_key=command_signing_key,
             require_signature=bool(getattr(config, "platform_require_command_signature", False)),
+            browser_write_guard=browser_write_guard,
         )
         command_inspection = CommandInspectionService(command_repository)
         command_postcheck = CommandPostcheckService(command_repository, platform_delivery)
@@ -154,7 +160,7 @@ def create_app(
             if getattr(config, "platform_browser_submit_enabled", False):
                 from hub.application.conversation_service import SubmitApprovalService
                 submit_approval_service = SubmitApprovalService(
-                    browser_repository)
+                    browser_repository, platform_repository)
         conversation_service = ConversationService(platform_repository, platform_service)
         run_service = RunService(platform_repository,
                                  browser_repository=browser_repository)
@@ -162,12 +168,6 @@ def create_app(
         if config.platform_artifact_root is None:
             raise RuntimeError("platform_enabled requires a platform_artifact_root")
         artifact_store = ArtifactStore(config.platform_artifact_root)
-        if getattr(config, "platform_browser_enabled", False):
-            from hub.infrastructure.browser_repository import BrowserRepository
-            browser_repository = (repositories or {}).get("browser")
-            if browser_repository is None:
-                browser_repository = BrowserRepository(config.platform_db)
-            browser_repository.init()
         if getattr(config, "execution_windows_enabled", False):
             from hub.infrastructure.execution_window_repository import ExecutionWindowRepository
             from hub.application.execution_window_service import ExecutionWindowService
@@ -584,6 +584,7 @@ def create_app(
         getattr(config, "platform_remote_execution_enabled", False))
     app.config["PLATFORM_BROWSER_ENABLED"] = bool(
         getattr(config, "platform_browser_enabled", False))
+    app.config["PLATFORM_BROWSER_SUBMIT_ENABLED"] = bool(getattr(config, "platform_browser_submit_enabled", False))
     app.config["PLATFORM_BROWSER_NETWORK_ENABLED"] = bool(
         getattr(config, "platform_browser_network_enabled", False))
     app.config["SERVICE_MONITORING_ENABLED"] = bool(config.service_monitoring_enabled)
@@ -675,6 +676,8 @@ def create_app(
         app.extensions["fleet"]["services"]["platform_defaults"] = platform_service
         app.extensions["fleet"]["services"]["conversations"] = conversation_service
         app.extensions["fleet"]["services"]["runs"] = run_service
+        if submit_approval_service is not None:
+            app.extensions["fleet"]["services"]["submit_approvals"] = submit_approval_service
         app.extensions["fleet"]["services"]["run_events"] = run_event_service
         if usage_repository is not None:
             app.extensions["fleet"]["services"]["usage_repository"] = usage_repository

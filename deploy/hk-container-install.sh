@@ -116,7 +116,7 @@ probe_process_matches() {
 
 stop_probe_loop() {
     local expected_cwd=${1:-$live}
-    local pids=() pid proc_dir alive existing
+    local pids=() pid proc_dir existing result result_code expected_uid file_pid=""
     append_probe_pid() {
         local candidate=$1
         for existing in "${pids[@]}"; do
@@ -128,8 +128,8 @@ stop_probe_loop() {
     # trap after a replacement loop has already written a new PID. Scan the
     # process table as well so a failed stop can never leave duplicate probes.
     if [[ -s "$probe_pid_file" ]]; then
-        pid=$(cat "$probe_pid_file" 2>/dev/null || true)
-        probe_process_matches "$pid" "$expected_cwd" && append_probe_pid "$pid"
+        file_pid=$(cat "$probe_pid_file" 2>/dev/null || true)
+        probe_process_matches "$file_pid" "$expected_cwd" && append_probe_pid "$file_pid"
     fi
     for proc_dir in /proc/[0-9]*; do
         pid=${proc_dir##*/}
@@ -137,30 +137,28 @@ stop_probe_loop() {
         append_probe_pid "$pid"
     done
     for pid in "${pids[@]}"; do
-        probe_process_matches "$pid" "$expected_cwd" || continue
-        kill -0 "$pid" 2>/dev/null && kill -TERM "$pid" 2>/dev/null || true
-    done
-    for _ in $(seq 1 20); do
-        alive=0
-        for pid in "${pids[@]}"; do
-            if kill -0 "$pid" 2>/dev/null; then
-                alive=1
-                break
+        expected_uid=$(id -u "$FLEET_USER")
+        if result=$(python3 "$release/deploy/hk-web-process-control.py" \
+            "$pid" "$expected_cwd" "$expected_uid" probe api_only 2>&1); then
+            [[ "$result" == stopped || "$result" == absent ]] || {
+                echo "process stop returned unexpected status" >&2
+                return 1
+            }
+        else
+            result_code=$?
+            if (( result_code != 3 )); then
+                echo "failed to stop probe process: $result" >&2
+                return 1
             fi
-        done
-        if (( alive == 0 )); then
-            break
         fi
-        sleep 0.25
     done
-    # A guardian may be blocked in a child sleep or network call. Once the
-    # bounded grace period expires, kill the exact matching PIDs before a new
-    # loop starts; otherwise both loops race on the shared PID file.
-    for pid in "${pids[@]}"; do
-        probe_process_matches "$pid" "$expected_cwd" || continue
-        kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+    for proc_dir in /proc/[0-9]*; do
+        pid=${proc_dir##*/}
+        if probe_process_matches "$pid" "$expected_cwd"; then
+            echo "probe process remained after pidfd stop: $pid" >&2
+            return 1
+        fi
     done
-    rm -f "$probe_pid_file"
 }
 
 start_probe_loop() {
@@ -183,7 +181,6 @@ start_probe_loop() {
             if probe_process_matches "$probe_pid" "$target"; then
                 return 0
             fi
-            rm -f "$probe_pid_file"
         fi
         sleep 0.25
     done
@@ -244,29 +241,63 @@ rollback_live() {
 
 rollback() {
     local rc=$?
+    local rollback_hub_stopped=1 candidate_probe_stopped=1 hub_state_rc
     if (( rc == 0 )); then
         return
     fi
     echo "DEPLOY_FAILED rc=$rc; rolling back" >&2
-    if [[ -n "$new_pid" ]] && kill -0 "$new_pid" 2>/dev/null; then
-        kill -TERM "$new_pid" 2>/dev/null || true
-        for _ in $(seq 1 20); do
-            kill -0 "$new_pid" 2>/dev/null || break
-            sleep 0.25
-        done
-        kill -0 "$new_pid" 2>/dev/null && kill -KILL "$new_pid" 2>/dev/null || true
+    if [[ "$new_pid" =~ ^[0-9]+$ ]]; then
+        local rollback_uid rollback_stop
+        rollback_uid=$(id -u "$FLEET_USER")
+        if rollback_stop=$(python3 "$release/deploy/hk-web-process-control.py" \
+            "$new_pid" "$live" "$rollback_uid" web allow_existing 2>&1); then
+            if [[ "$rollback_stop" != stopped && "$rollback_stop" != absent ]]; then
+                rollback_hub_stopped=0
+                echo "rollback returned unexpected candidate hub status: $rollback_stop" >&2
+            fi
+        else
+            local rollback_stop_rc=$?
+            if (( rollback_stop_rc != 3 )); then
+                rollback_hub_stopped=0
+                echo "rollback could not stop candidate hub through pidfd: $rollback_stop" >&2
+            fi
+        fi
     fi
     if (( switched == 1 )); then
+        # The candidate probe may have started before a later health or cleanup
+        # step failed. Stop it while the live path still identifies that tree.
+        if (( probe_stopped == 1 )); then
+            local candidate_cwd
+            candidate_cwd=$(readlink -f "$live" 2>/dev/null || true)
+            if [[ -z "$candidate_cwd" ]] || ! stop_probe_loop "$candidate_cwd"; then
+                candidate_probe_stopped=0
+                echo "rollback could not stop candidate probe through pidfd" >&2
+            fi
+        fi
         rollback_live
         # A cutover can fail before the old process is stopped (for example
         # if the rsync-free copy fails halfway through).  Do not start a
         # second listener while that process is still serving the restored
         # tree; only recreate it after the old process is gone.
-        if (( old_stopped == 1 )) || ! kill -0 "$old_pid" 2>/dev/null; then
-            start_hub "$live" restore
-            wait_for_status || echo "ROLLBACK_UNHEALTHY" >&2
+        if (( rollback_hub_stopped == 1 )); then
+            if (( old_stopped == 1 )); then
+                start_hub "$live" restore
+                wait_for_status || echo "ROLLBACK_UNHEALTHY" >&2
+            elif hub_pid_for_cwd "$live" allow_existing >/dev/null 2>&1; then
+                :
+            else
+                hub_state_rc=$?
+                if (( hub_state_rc == 1 )); then
+                    start_hub "$live" restore
+                    wait_for_status || echo "ROLLBACK_UNHEALTHY" >&2
+                else
+                    echo "ROLLBACK_START_SKIPPED ambiguous restored hub process state" >&2
+                fi
+            fi
+        else
+            echo "ROLLBACK_START_SKIPPED process stop was not confirmed" >&2
         fi
-        if (( probe_stopped == 1 )); then
+        if (( probe_stopped == 1 && candidate_probe_stopped == 1 )); then
             start_probe_loop "$live" || true
         fi
     fi
@@ -341,12 +372,13 @@ switch_live
 
 stop_probe_loop "$probe_cwd"
 probe_stopped=1
-kill -TERM "$old_pid"
-for _ in $(seq 1 20); do
-    kill -0 "$old_pid" 2>/dev/null || break
-    sleep 0.25
-done
-kill -0 "$old_pid" 2>/dev/null && kill -KILL "$old_pid"
+old_uid=$(id -u "$FLEET_USER")
+stop_result=$(python3 "$release/deploy/hk-web-process-control.py" \
+    "$old_pid" "$probe_cwd" "$old_uid" web allow_existing)
+[[ "$stop_result" == stopped || "$stop_result" == absent ]] || {
+    echo "web process stop was not confirmed" >&2
+    exit 1
+}
 old_stopped=1
 
 start_hub "$live"

@@ -86,8 +86,8 @@ class NodeRuntimeConfig:
             raise ValueError("unknown capability")
         if self.browser_network_enabled and not self.browser_enabled:
             raise ValueError("browser network requires browser capability")
-        if self.browser_submit_enabled and not self.browser_enabled:
-            raise ValueError("browser submit requires browser capability")
+        if self.browser_submit_enabled and not (self.browser_enabled and self.browser_network_enabled):
+            raise ValueError("browser submit requires browser capability and network gate")
         origins = tuple(self.browser_allowed_origins or ())
         if any(not isinstance(origin, str) or len(origin) > 512 for origin in origins):
             raise ValueError("invalid browser origins")
@@ -192,9 +192,10 @@ class NodeRuntime:
             "node_id": self.config.node_id,
             "worker_id": self.config.worker_id,
             "capabilities": {
-                name: True for name in sorted(self.config.capabilities)
-                if name != BROWSER_SESSION_CAPABILITY
-                or (self.browser_backend is not None and self.browser_backend.available)
+                **{name: True for name in sorted(self.config.capabilities)
+                   if name != BROWSER_SESSION_CAPABILITY
+                   or (self.browser_backend is not None and self.browser_backend.available)},
+                **({"browser.submit": True} if "browser.submit" in self.executor.allowed_tools else {}),
             },
             **({"browser": {
                     "enabled": bool(self.browser_backend and self.browser_backend.available),

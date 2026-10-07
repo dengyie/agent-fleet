@@ -12,14 +12,14 @@
 #
 set -Eeuo pipefail
 
-here=$(cd "$(dirname "$0")" && pwd)
+here=$(cd "$(dirname "$0")" && pwd -P)
 # shellcheck source=fleet-identity.sh
 . "$here/fleet-identity.sh"
 require_fleet_home
 export HOME=$FLEET_HOME
 
 # Configuration
-repo_root=$(cd "$(dirname "$0")/.." && pwd)
+repo_root=$(cd "$(dirname "$0")/.." && pwd -P)
 report_interval=${AGENT_FLEET_REPORT_INTERVAL:-120}
 health_check_interval=${AGENT_FLEET_HEALTH_CHECK_INTERVAL:-20}
 failure_threshold=${AGENT_FLEET_FAILURE_THRESHOLD:-3}
@@ -61,8 +61,17 @@ acquire_probe_lock() {
 }
 
 cleanup_probe_state() {
-  if [[ -n "$sleep_pid" ]] && kill -0 "$sleep_pid" 2>/dev/null; then
-    kill "$sleep_pid" 2>/dev/null || true
+  if [[ "$sleep_pid" =~ ^[0-9]+$ ]]; then
+    local stop_result stop_rc
+    if stop_result=$(python3 "$repo_root/deploy/hk-web-process-control.py" \
+      "$sleep_pid" "$repo_root" "$(id -u)" sleep "child:$$" 2>&1); then
+      if [[ "$stop_result" != stopped && "$stop_result" != absent ]]; then
+        log WARN "Unexpected sleep child stop result: $stop_result"
+      fi
+    else
+      stop_rc=$?
+      log WARN "Could not stop sleep child $sleep_pid (exit=$stop_rc): $stop_result"
+    fi
   fi
   # An older process must never remove a newer process's PID file.
   if [[ -f "$pid_file" ]] && [[ "$(cat "$pid_file" 2>/dev/null || true)" == "$$" ]]; then
@@ -116,32 +125,47 @@ health_check() {
 }
 
 # Restart web service function
+stop_web_process() {
+  local pid=$1 expected_cwd=${2:-$repo_root} result result_code expected_uid
+  expected_uid=$(id -u)
+  if result=$(python3 "$here/hk-web-process-control.py" "$pid" "$expected_cwd" "$expected_uid" web allow_existing 2>&1); then
+    case "$result" in
+      stopped) log INFO "Stopped old web process $pid" ;;
+      absent) log INFO "Old web process $pid already exited" ;;
+      *) log ERROR "Unexpected process-control result for PID $pid: $result"; return 1 ;;
+    esac
+    return 0
+  else
+    result_code=$?
+  fi
+
+  if (( result_code == 3 )); then
+    log WARN "Ignoring stale or mismatched web PID $pid"
+    return 2
+  fi
+  log ERROR "Failed to stop web process $pid: $result"
+  return 1
+}
+
 restart_web() {
   log WARN "Restarting web service"
 
-  # Kill old process
+  # The pidfd helper binds validation and signaling to one process instance.
   if [[ -s "$web_pid_file" ]]; then
-    local old_pid=$(cat "$web_pid_file")
-    if ! web_process_matches "$old_pid" "$repo_root" allow_existing; then
-      log WARN "Ignoring stale or mismatched web PID $old_pid"
-      rm -f "$web_pid_file"
-    elif kill -0 "$old_pid" 2>/dev/null; then
-      log INFO "Killing old web process $old_pid"
-      kill "$old_pid" 2>/dev/null || true
-      sleep 2
-
-      # Force kill if still alive
-      if web_process_matches "$old_pid" "$repo_root" allow_existing; then
-        log WARN "Process $old_pid still alive, sending SIGKILL"
-        kill -9 "$old_pid" 2>/dev/null || true
-        sleep 1
+    local old_pid stop_result
+    if ! old_pid=$(cat "$web_pid_file" 2>/dev/null); then
+      log ERROR "Unable to read web PID file"
+      return 1
+    fi
+    if [[ "$old_pid" =~ ^[0-9]+$ ]]; then
+      if stop_web_process "$old_pid" "$repo_root"; then
+        :
+      else
+        stop_result=$?
+        (( stop_result == 2 )) || return 1
       fi
-
-      # Verify killed
-      if kill -0 "$old_pid" 2>/dev/null; then
-        log ERROR "Failed to kill process $old_pid"
-        return 1
-      fi
+    else
+      log WARN "Ignoring invalid web PID file"
     fi
   fi
 
@@ -160,7 +184,7 @@ restart_web() {
 
   # Verify started (wait 2s then check)
   sleep 2
-  if ! kill -0 "$new_pid" 2>/dev/null || ! web_process_matches "$new_pid"; then
+  if ! web_process_matches "$new_pid"; then
     log ERROR "Web process $new_pid died immediately after start"
     return 1
   fi

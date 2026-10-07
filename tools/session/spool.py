@@ -39,12 +39,19 @@ from __future__ import annotations
 import json
 import os
 import struct
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from session_schema import validate_event
 from tools.session.crypto import AeadBox
+
+try:  # pragma: no cover - the fallback is exercised on non-POSIX hosts.
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None
 
 # Stable diagnostic codes (never raw paths / exception text / payloads).
 CODE_SEGMENT_BAD = "segment_corrupt"
@@ -60,6 +67,49 @@ MAX_EVENT_BYTES = 65536         # shared single-event bound (post-redaction)
 
 # Global AEAD associated data: binds every segment frame to this spool format.
 _AD = b"fleet-spool-v1"
+_QUOTA_LOCKS: dict[str, threading.RLock] = {}
+_QUOTA_LOCKS_GUARD = threading.Lock()
+
+
+def _thread_quota_lock(root: Path) -> threading.RLock:
+    key = str(root.resolve())
+    with _QUOTA_LOCKS_GUARD:
+        lock = _QUOTA_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _QUOTA_LOCKS[key] = lock
+        return lock
+
+
+@contextmanager
+def _quota_guard(root: Path):
+    """Serialize quota admission across sessions and processes.
+
+    The thread lock closes the same-process gap; the advisory file lock
+    extends the critical section to independently running bridge processes.
+    Only the short check/write/checkpoint window is held.
+    """
+    lock = _thread_quota_lock(root)
+    lock.acquire()
+    handle = None
+    try:
+        if fcntl is not None:
+            try:
+                handle = open(root / ".machine-quota.lock", "a+b")
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            except OSError as exc:
+                if handle is not None:
+                    handle.close()
+                    handle = None
+                raise SpoolError(CODE_SETUP) from exc
+        yield
+    finally:
+        if handle is not None:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
+        lock.release()
 
 
 def _now_rfc3339() -> str:
@@ -256,23 +306,24 @@ class LocalSpool:
         partial record.
         """
         clean = validate_event(event)  # raises ValueError on invalid
-        seq = self._next_sequence()
-        # The spool owns sequence assignment: the caller-supplied value (a
-        # best-effort redaction hint) never shapes the durable record.  The
-        # persisted body carries exactly the assigned sequence so replay
-        # ordering and the ack cursor stay consistent.
-        clean["sequence"] = seq
-        body = json.dumps(clean, ensure_ascii=True,
-                          separators=(",", ":")).encode("utf-8")
-        if not self._within_quota(_frame_footprint(len(body))):
-            return self._handle_overflow(clean, seq)
+        with _quota_guard(self._root):
+            seq = self._next_sequence()
+            # The spool owns sequence assignment: the caller-supplied value
+            # (a best-effort redaction hint) never shapes the durable record.
+            # The persisted body carries exactly the assigned sequence so
+            # replay ordering and the ack cursor stay consistent.
+            clean["sequence"] = seq
+            body = json.dumps(clean, ensure_ascii=True,
+                              separators=(",", ":")).encode("utf-8")
+            if not self._within_quota(_frame_footprint(len(body))):
+                return self._handle_overflow(clean, seq)
 
-        self._write_frame(seq, body)
-        self._last_sequence = seq
-        self._gap_signaled = False  # a new accepted event ends the gap run
-        self._maybe_rotate()
-        self._persist_checkpoint()
-        return AppendResult(sequence=seq, capture_blocked=False)
+            self._write_frame(seq, body)
+            self._last_sequence = seq
+            self._gap_signaled = False  # a new accepted event ends the gap run
+            self._maybe_rotate()
+            self._persist_checkpoint()
+            return AppendResult(sequence=seq, capture_blocked=False)
 
     def read_after(self, sequence: int, limit: int, max_bytes: int) -> list:
         """Unacknowledged records strictly after ``sequence``, bounded by
@@ -330,9 +381,8 @@ class LocalSpool:
 
     def rotate(self) -> None:
         """Seal the active segment atomically and open a fresh segment."""
-        self._seal_active()
-        self._seg_index += 1
-        self._open_active()
+        with _quota_guard(self._root):
+            self._rotate_unlocked()
 
     def checkpoint(self) -> dict:
         """Persist state durably and return a bounded status snapshot."""
@@ -634,7 +684,13 @@ class LocalSpool:
         except (OSError, AttributeError):
             current = 0
         if current >= self._segment_target:
-            self.rotate()
+            self._rotate_unlocked()
+
+    def _rotate_unlocked(self) -> None:
+        """Rotate while the caller already owns the quota guard."""
+        self._seal_active()
+        self._seg_index += 1
+        self._open_active()
 
     def _seal_active(self) -> None:
         w = self._open_writer

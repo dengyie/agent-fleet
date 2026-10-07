@@ -157,7 +157,9 @@ class DeploymentSafetyTests(unittest.TestCase):
         self.assertIn('old_stopped=0', install)
         self.assertIn('Do not start a', install)
         self.assertIn('deploy/hk-self-report-loop.sh', install)
-        self.assertIn('kill -KILL', install)
+        self.assertIn('hk-web-process-control.py', install)
+        self.assertNotIn('kill -KILL "$pid"', install)
+        self.assertNotIn('kill -TERM "$old_pid"', install)
         self.assertIn('probe_process_matches', install)
         self.assertIn('fleet_cp_tree_retry()', helper)
         self.assertIn('attempts < 5', helper)
@@ -206,7 +208,8 @@ class DeploymentSafetyTests(unittest.TestCase):
     def test_guardian_and_probe_allow_existing_only_for_existing_process(self):
         guardian = (REPO_ROOT / "hub" / "agent_fleet_guardian.py").read_text()
         loop = (REPO_ROOT / "deploy" / "hk-self-report-loop.sh").read_text()
-        self.assertIn("require_api_only=False", guardian)
+        self.assertIn('"web",\n                "allow_existing"', guardian)
+        self.assertNotIn("os.kill(old_pid", guardian)
         self.assertIn('mode=${3:-api_only}', loop)
         self.assertIn('allow_existing', loop)
 
@@ -518,6 +521,7 @@ class RuntimeStoreHygieneTests(unittest.TestCase):
         required = (
             "agent_profiles.py",
             "hub/web.py",
+            "deploy/hk-web-process-control.py",
             "tools/__init__.py",
             "tools/result_files.py",
             "tools/session/__init__.py",

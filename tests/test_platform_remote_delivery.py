@@ -1,7 +1,10 @@
 from pathlib import Path
+from dataclasses import replace
 
-from hub.infrastructure.command_repository import CommandRepository
-from hub.domain.platform_command import PlatformCommand
+import pytest
+
+from hub.infrastructure.command_repository import CommandRepository, CommandRepositoryError
+from hub.domain.platform_command import PlatformCommand, args_hash
 from tools.platform.backends.base import ToolReceipt
 from tools.platform.node_executor import NodeToolExecutor
 from tools.platform.node_client import NodeClient
@@ -37,6 +40,19 @@ def test_command_repository_marks_non_terminal_receipt_unknown_without_replay(tm
     assert replay["status"] == "unknown"
     assert replay["result"] == {"reason": "receipt_timeout"}
     assert repo.claim_for_node("node-remote", "worker-2") == []
+
+
+@pytest.mark.parametrize("value", [True, 1.0])
+def test_command_idempotency_preserves_json_argument_types(tmp_path, value):
+    repo = CommandRepository(tmp_path / "platform.db")
+    repo.init()
+    original = {"path": "report.md", "limit": 1}
+    first = replace(_command(), arguments=original, args_digest=args_hash(original))
+    repo.enqueue(first, idempotency_key="same-request")
+    changed = {**original, "limit": value}
+    second = replace(first, arguments=changed, args_digest=args_hash(changed))
+    with pytest.raises(CommandRepositoryError, match="idempotency_conflict"):
+        repo.enqueue(second, idempotency_key="same-request")
 
 
 def test_remote_tool_broker_enqueues_one_fixed_command_and_maps_receipt():
@@ -108,7 +124,7 @@ def test_remote_tool_broker_rejects_invalid_browser_arguments_before_enqueue():
     assert queued == []
 
 
-def test_remote_tool_broker_passes_valid_loopback_browser_arguments_to_node():
+def test_remote_tool_broker_rejects_loopback_even_when_allowlisted():
     queued = []
 
     class Delivery:
@@ -121,7 +137,8 @@ def test_remote_tool_broker_passes_valid_loopback_browser_arguments_to_node():
 
     broker = RemoteToolBroker(
         Delivery(), node_id="node-remote", resource_id="workspace-remote",
-        run_id="run-remote", browser_enabled=True,
+        run_id="run-remote", browser_enabled=True, browser_network_enabled=True,
+        browser_allowed_origins=("http://localhost:3000",),
     )
     receipt = broker.execute(
         command_id="run-remote:step:loopback", tool="browser.open",
@@ -129,9 +146,10 @@ def test_remote_tool_broker_passes_valid_loopback_browser_arguments_to_node():
         owner_id="owner@example.test", epoch=1,
     )
 
-    assert receipt.state == "succeeded"
-    assert len(queued) == 1
-    assert queued[0].arguments == {"url": "http://localhost:3000"}
+    assert receipt == ToolReceipt(
+        "run-remote:step:loopback", "failed", {}, "origin_forbidden",
+    )
+    assert queued == []
 
 
 def test_remote_tool_broker_allows_only_configured_global_external_origin():
@@ -258,22 +276,29 @@ def _submit_broker(approvals, *, submit_enabled=True):
     queued = []
 
     class Delivery:
-        def enqueue(self, command, *, idempotency_key=None):
-            queued.append(command)
-            return command.as_dict() | {"status": "queued", "result": None}
+        def enqueue_submit(self, command, *, approvals, idempotency_key=None):
+            from dataclasses import replace
+            from hub.domain.platform_command import args_hash
+            approval_id = approvals.consume_submit_approval(
+                command.owner_id, command.run_id, session_id=command.arguments["session_id"],
+                selector=command.arguments["selector"], command_id=command.command_id, now=100.0)
+            arguments = {**command.arguments, "approval_id": approval_id}
+            admitted = replace(command, arguments=arguments, args_digest=args_hash(arguments))
+            queued.append(admitted)
+            return admitted.as_dict() | {"status": "queued", "result": None}
 
         def wait_for_receipt(self, command_id, *, timeout_s=30.0):
             return {"command_id": command_id, "status": "succeeded", "result": {}}
 
     broker = RemoteToolBroker(
         Delivery(), node_id="node-remote", resource_id="workspace-remote",
-        run_id="run-remote", browser_enabled=True,
+        run_id="run-remote", browser_enabled=True, browser_network_enabled=True,
         browser_submit_enabled=submit_enabled, submit_approvals=approvals,
     )
     return broker, queued
 
 
-def test_remote_tool_broker_consumes_approval_before_submit_enqueue():
+def test_remote_tool_broker_delegates_atomic_approval_consumption_to_enqueue():
     approvals = _FakeApprovals()
     broker, queued = _submit_broker(approvals)
 
@@ -288,11 +313,8 @@ def test_remote_tool_broker_consumes_approval_before_submit_enqueue():
     assert queued[0].arguments["approval_id"] == "approval-1"
     assert queued[0].action == "tool.browser.submit"
     assert queued[0].retry_class == "manual_only"
-    assert approvals.calls == [{
-        "owner_id": "owner@example.test", "run_id": "run-remote",
-        "session_id": "s" * 24, "selector": "#go",
-        "command_id": "run-remote:step:s1", "now": approvals.calls[0]["now"],
-    }]
+    assert len(approvals.calls) == 1
+    assert approvals.calls[0]["command_id"] == "run-remote:step:s1"
 
 
 def test_remote_tool_broker_submit_requires_gate_and_maps_approval_codes():

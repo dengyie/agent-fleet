@@ -35,7 +35,7 @@ class RemoteToolBroker:
         self.browser_network_enabled = bool(browser_network_enabled)
         self.browser_allowed_origins = tuple(browser_allowed_origins or ())
         self.browser_resolver = browser_resolver
-        self.browser_submit_enabled = bool(browser_submit_enabled)
+        self.browser_submit_enabled = bool(browser_submit_enabled and browser_enabled and browser_network_enabled)
         self.submit_approvals = submit_approvals
 
     def _event(self, kind: str, command_id: str, tool: str, **extra):
@@ -55,6 +55,7 @@ class RemoteToolBroker:
             return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
         if not isinstance(command_id, str) or not command_id.startswith(self.run_id + ":step:"):
             return ToolReceipt(command_id, "failed", {}, "invalid_command_id")
+        attribution = {}
         try:
             bounded = dict(arguments)
             if tool in BROWSER_TOOLS:
@@ -64,22 +65,6 @@ class RemoteToolBroker:
                     allowed_origins=self.browser_allowed_origins,
                     resolver=self.browser_resolver,
                 )
-            if tool == "browser.submit":
-                # Approval consumption is atomic on the durable row and
-                # precedes command creation; a later undelivered command
-                # leaves the approval consumed (the fail-safe direction).
-                try:
-                    bounded["approval_id"] = self.submit_approvals.consume_submit_approval(
-                        owner_id, self.run_id,
-                        session_id=bounded["session_id"],
-                        selector=bounded["selector"],
-                        command_id=command_id, now=float(self.clock()),
-                    )
-                except Exception as exc:
-                    code = getattr(exc, "code", None)
-                    if isinstance(code, str) and code:
-                        return ToolReceipt(command_id, "failed", {}, code)
-                    raise
             if len(json.dumps(bounded, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 64 * 1024:
                 return ToolReceipt(command_id, "failed", {}, "arguments_too_large")
             retry_class = "read_only" if tool in {"workspace.list", "workspace.read", "fleet.list_services", "service.get_health", "service.read_logs", "incident.get_evidence"} else "reconcile_before_retry"
@@ -92,8 +77,25 @@ class RemoteToolBroker:
                 expires_at=float(self.clock()) + min(self.receipt_timeout_s + 60.0, 3600.0),
                 run_id=self.run_id,
             )
-            self.delivery.enqueue(command, idempotency_key=command_id)
-            self._event("node_command_queued", command_id, tool)
+            if tool == "browser.submit":
+                try:
+                    admitted = self.delivery.enqueue_submit(command, approvals=self.submit_approvals, idempotency_key=command_id)
+                except Exception as exc:
+                    code = getattr(exc, "code", "command_store")
+                    allowed = {"approval_required", "approval_expired", "approval_consumed", "approval_revoked", "approval_limit",
+                               "session_not_found", "invalid_selector", "sensitive_field_forbidden", "command_signature_required",
+                               "idempotency_conflict", "command_conflict", "command_store", "browser_store",
+                               "writer_lease_active"}
+                    return ToolReceipt(command_id, "failed", {}, code if code in allowed else "command_store")
+                attribution = {"approval_id": admitted["arguments"]["approval_id"]}
+            else:
+                try:
+                    self.delivery.enqueue(command, idempotency_key=command_id)
+                except Exception as exc:
+                    if getattr(exc, "code", None) == "writer_lease_active":
+                        return ToolReceipt(command_id, "failed", {}, "writer_lease_active")
+                    raise
+            self._event("node_command_queued", command_id, tool, **attribution)
             waiter = self.waiter or self.delivery
             row = waiter.wait_for_receipt(command_id, timeout_s=self.receipt_timeout_s)
             status = row.get("status") if isinstance(row, Mapping) else None
@@ -107,26 +109,20 @@ class RemoteToolBroker:
                 result = inner_result
             else:
                 inner_error = None
-            self._event("node_receipt", command_id, tool, status=status)
+            self._event("node_receipt", command_id, tool, status=status, **attribution)
+            result = {**result, **attribution}
             if status == "succeeded":
                 return ToolReceipt(command_id, "succeeded", result)
             if status == "unknown":
-                return ToolReceipt(command_id, "unknown", {}, "receipt_unknown")
+                return ToolReceipt(command_id, "unknown", attribution, "receipt_unknown")
             if status in {"failed", "expired"}:
                 return ToolReceipt(command_id, "failed", result, inner_error or "remote_failed")
-            return ToolReceipt(command_id, "unknown", {}, "receipt_unknown")
+            return ToolReceipt(command_id, "unknown", attribution, "receipt_unknown")
         except BrowserPolicyError as exc:
             return ToolReceipt(command_id, "failed", {}, exc.code)
-        except Exception as exc:
-            # A non-active approval can still be present when the stored row is
-            # consumed/revoked under another selector match window; surface its
-            # stable code instead of generic unknown so the retry stays manual.
-            approval_codes = {"approval_expired", "approval_consumed", "approval_revoked"}
-            code = getattr(exc, "code", None)
-            if isinstance(code, str) and code in approval_codes:
-                return ToolReceipt(command_id, "failed", {}, code)
-            self._event("node_receipt", command_id, tool, status="unknown")
-            return ToolReceipt(command_id, "unknown", {}, "receipt_unknown")
+        except Exception:
+            self._event("node_receipt", command_id, tool, status="unknown", **attribution)
+            return ToolReceipt(command_id, "unknown", attribution, "receipt_unknown")
 
 
 __all__ = ["RemoteToolBroker"]

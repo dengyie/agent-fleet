@@ -678,6 +678,153 @@ def test_operator_revoke_and_drift_share_one_detach(service, candidate):
                if c["action"] == "detach") == 1
 
 
+def test_control_admission_is_fenced_against_concurrent_revoke(service, candidate):
+    """A revoke cannot land between control admission and command enqueue."""
+    row = _adopted_record(service, candidate)
+    events = []
+    enqueue_entered = threading.Event()
+    release_enqueue = threading.Event()
+    revoke_seen = threading.Event()
+    revoke_started = threading.Event()
+
+    class BlockingSupervisor:
+        def __init__(self, inner):
+            self.inner = inner
+            self.commands = inner.commands
+
+        def enqueue(self, machine, session_id, attempt_id, action,
+                    reason_code, **kwargs):
+            if action == "pause_session":
+                enqueue_entered.set()
+                release_enqueue.wait(5)
+                events.append("control_enqueue")
+            return self.inner.enqueue(
+                machine, session_id, attempt_id, action, reason_code,
+                **kwargs)
+
+    class LoggingRepository:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def revoke_cas(self, session_id):
+            events.append("revoke_cas")
+            revoke_seen.set()
+            return self.inner.revoke_cas(session_id)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    service.supervisor = BlockingSupervisor(service.supervisor)
+    service.adoption_repo = LoggingRepository(service.adoption_repo)
+    control_result = {}
+    revoke_result = {}
+
+    def issue_control():
+        try:
+            control_result["value"] = service.control(
+                row.session_id, action="pause_session",
+                reason_code="operator", actor="op")
+        except BaseException as exc:  # pragma: no cover - diagnostic only
+            control_result["error"] = exc
+
+    def revoke():
+        revoke_started.set()
+        try:
+            service.revoke(row.session_id, "revoker")
+        except BaseException as exc:  # pragma: no cover - diagnostic only
+            revoke_result["error"] = exc
+
+    control_thread = threading.Thread(target=issue_control)
+    control_thread.start()
+    assert enqueue_entered.wait(5)
+    revoke_thread = threading.Thread(target=revoke)
+    revoke_thread.start()
+    assert revoke_started.wait(5)
+
+    # On the unfenced implementation the CAS runs while enqueue is blocked.
+    # With the admission fence it remains behind the service lock until the
+    # control command has been admitted.  Release either path deterministically.
+    revoke_seen.wait(0.2)
+    release_enqueue.set()
+    control_thread.join(5)
+    revoke_thread.join(5)
+
+    assert control_result.get("error") is None
+    assert revoke_result.get("error") is None
+    assert events == ["control_enqueue", "revoke_cas"]
+    assert service.adoption_repo.get(row.session_id).status == "revoked"
+    assert any(c["action"] == "pause_session"
+               for c in service.supervisor.commands)
+
+
+def test_exact_capture_admission_is_fenced_against_concurrent_revoke(
+        service, candidate):
+    row = _adopted_record(service, candidate)
+    events = []
+    update_entered = threading.Event()
+    release_update = threading.Event()
+    revoke_started = threading.Event()
+    revoke_seen = threading.Event()
+
+    class BlockingRepository:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def update_capture_quality(self, session_id, quality):
+            update_entered.set()
+            release_update.wait(5)
+            result = self.inner.update_capture_quality(session_id, quality)
+            events.append("capture_update")
+            return result
+
+        def revoke_cas(self, session_id):
+            events.append("revoke_cas")
+            revoke_seen.set()
+            return self.inner.revoke_cas(session_id)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    inner_repo = service.adoption_repo
+    service.adoption_repo = BlockingRepository(inner_repo)
+    upgrade_result = {}
+    revoke_result = {}
+
+    def upgrade():
+        try:
+            upgrade_result["value"] = service.upgrade_capture_exact(
+                row.session_id, "op")
+        except BaseException as exc:  # pragma: no cover - diagnostic only
+            upgrade_result["error"] = exc
+
+    def revoke():
+        revoke_started.set()
+        try:
+            service.revoke(row.session_id, "revoker")
+        except BaseException as exc:  # pragma: no cover - diagnostic only
+            revoke_result["error"] = exc
+
+    upgrade_thread = threading.Thread(target=upgrade)
+    upgrade_thread.start()
+    assert update_entered.wait(5)
+    revoke_thread = threading.Thread(target=revoke)
+    revoke_thread.start()
+    assert revoke_started.wait(5)
+    revoke_seen.wait(0.2)
+    release_update.set()
+    upgrade_thread.join(5)
+    revoke_thread.join(5)
+
+    assert upgrade_result.get("error") is None
+    assert revoke_result.get("error") is None
+    final = inner_repo.get(row.session_id)
+    assert final.status == "revoked"
+    assert final.capture_quality == "exact"
+    assert events == ["capture_update", "revoke_cas"]
+    assert sum(a["action"] == "capture_exact"
+               for a in service.transcripts.read_audit()) == 1
+
+
 def test_control_phase45_forwards_bounded_payload(service, candidate):
     row = _adopted_record(service, candidate)
     result = service.control(

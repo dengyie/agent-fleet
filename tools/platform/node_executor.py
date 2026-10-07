@@ -173,9 +173,13 @@ class NodeToolExecutor:
                 return {"state": "failed", "result": {}, "error_code": "invalid_arguments", "command_id": command_id}
             if not isinstance(arguments, Mapping):
                 return {"state": "failed", "result": {}, "error_code": "invalid_arguments", "command_id": command_id}
+            bounded = dict(arguments)
+            approval_options = {}
+            if tool == "browser.submit":
+                approval_options["approval_id"] = bounded.pop("approval_id", None)
             try:
                 receipt = self.browser_backend.execute(
-                    tool, dict(arguments), run_id=run_id,
+                    tool, bounded, run_id=run_id, **approval_options,
                 )
             except BrowserExecutionError:
                 raise

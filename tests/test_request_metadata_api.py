@@ -2,12 +2,15 @@
 import json
 import sqlite3
 
+import pytest
+
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
 from hub.infrastructure.platform_db import PlatformRepository
 from tools.platform.providers.openai_compatible import OpenAICompatibleProvider, TransportResponse
 
 OWNER = 'metadata@example.test'
+_MISSING = object()
 
 
 def setup(tmp_path):
@@ -73,6 +76,27 @@ def test_pending_terminal_unknown_and_projection_queries_are_batched(tmp_path, m
     assert all(x['status'] == 'unknown' and x.get('duration_ms') is None for x in requests)
     assert all('raw_body' not in x for x in requests)
     assert len([q for q in statements if 'FROM run_events e' in q]) == 1
+
+
+@pytest.mark.parametrize("started_at", [
+    pytest.param(_MISSING, id="missing"), None, "not-a-timestamp", True, [], 10**1000,
+])
+def test_active_request_with_invalid_start_time_does_not_break_run_projection(
+    tmp_path, started_at,
+):
+    _, repo, client, _, run = setup(tmp_path)
+    payload = {'attempt': 1, 'step': 1, 'request_index': 1, 'status': 'running'}
+    if started_at is not _MISSING:
+        payload['started_at'] = started_at
+    repo.append_run_event(OWNER, run['run_id'], 'provider_request_started', payload, now=1.0)
+
+    response = client.get(f"/api/platform/v1/runs/{run['run_id']}")
+
+    assert response.status_code == 200
+    request = response.get_json()['requests'][0]
+    assert request['status'] == 'running'
+    assert 'started_at' not in request
+    assert 'elapsed_ms' not in request
 
 
 def test_model_pricing_is_validated_and_frozen(tmp_path):

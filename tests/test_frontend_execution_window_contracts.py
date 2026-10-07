@@ -59,6 +59,21 @@ def test_assistant_uses_a_separate_window_cursor_and_recovery_flow():
     assert "activeRunId = null" not in close_block
 
 
+def test_assistant_requires_explicit_takeover_and_renders_latest_frame():
+    source = (ASSISTANT_VIEW.read_text() +
+             (ROOT / 'frontend/assets/views/assistant/panels.js').read_text() +
+             PLATFORM_API.read_text())
+    connect = source.split("async function doConnectExecutionWindow", 1)[-1].split(
+        "async function takeControl", 1,
+    )[0]
+    assert "acquireExecutionWindowWriter" not in connect
+    for value in (
+        "接管控制", "归还控制", "browser.frame", "assistant-window-frame-image",
+        "重试加载", "getExecutionWindowFrameUrl",
+    ):
+        assert value in source
+
+
 def test_assistant_window_is_dom_safe_and_does_not_cancel_on_close_or_unload():
     source = (ASSISTANT_VIEW.read_text() + (ROOT / 'frontend/assets/views/assistant/panels.js').read_text())
     assert "innerHTML" not in source

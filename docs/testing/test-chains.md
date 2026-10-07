@@ -10,6 +10,7 @@
 |---|---|---|---|
 | 账号生命周期 | 邀请 → 发码 → 注册 → 登录 → 改密/重置 → 撤销旧会话 → 停用 | `test_full_flow.py::test_invitation_registration_recovery_and_owner_isolation` 验证跨账号 404、旧 Cookie 失效；`test_accounts.py` 验证过期/重复验证码；浏览器验证守卫和退出 | AUTH-01…04、MAIL-01 |
 | 助手与产物 | 页面 → 账号 Cookie → 提交 → SQLite → scheduler → provider factory → 严格模型 HTTP → list/write/read/artifact → 最终回复 → 下载 → 刷新恢复 | `test_full_flow.py` 比较产物字节和 SHA-256、唯一 Run、重建 app 后的结果；`test_full_flow_browser.py` 验证关闭页面后继续完成、重新打开恢复、502 可见 | ASSIST-01…02、MODEL-01…02、FILES-01 |
+| Run workspace artifact | conversation 的冻结 workspace → `workspace.write` → `workspace.artifact` → ArtifactStore manifest → owner/workspace API list/download | `test_platform_run_worker.py::test_worker_artifact_is_listed_and_downloadable_in_conversation_workspace` 以真实 Flask/SQLite/worker 验证生成产物通过现有路由可见且下载字节一致 | FILES-01 |
 | 本地验收 | CLI 登录 → readiness → 专用 acceptance-turns → 冻结策略 → 新 worker → 模型 HTTP → Broker → 真实目录 → events → 恢复 → logout → JSON 报告 | `test_acceptance_flow.py::test_acceptance_http_chain_closes_report_and_node_journal[local]` 和 `test_platform_acceptance_check.py` 要求真实 list、最终回复、恢复和旧 Cookie 撤销全部成立 | RELEASE-01 |
 | 节点验收 | 同一账号入口 → RemoteToolBroker → command DB → HTTP poll → NodeClient → NodeJournal → DirectoryBackend → HTTP receipt → 模型第二轮 → Run 终态 → 报告 | 上述用例的 `[remote]` 实例使用独立节点目录；模型第二轮必须看到节点 sentinel 文件，Hub 目录为空；命令、journal、Hub receipt 均 succeeded；重复命令不能重执行 | NODE-01、RELEASE-01 |
 | 不确定提交 | Run 已持久化 → 202 响应被阻塞 → 统一截止时间到期 → unconfirmed → GET 对话按 client_token 找消息 → 找回唯一 Run → 重建 Hub → 完成 | `test_acceptance_flow.py::test_accepted_response_timeout_recovers_unique_run_by_token` 要求仅一次提交、报告保留对话和 token、GET 恢复无重发 | ASSIST-02、RELEASE-01 |
@@ -35,10 +36,12 @@
 | CONFIG-01 | 提交前引用校验与冻结配置：`test_platform_defaults.py`、`test_platform_provider_canary.py` |
 | USAGE-01 | 模型前预算准入、模型后幂等记账与 unknown 释放：`test_platform_usage.py` |
 | WINDOW-01 | 执行窗口授权、票据、写入租约：矩阵中的 execution window API 用例；真实 PTY 另做 NODE-LIVE |
+| BROWSER-01 | Hub 与 Node 策略拒绝用户提供的 loopback URL；只有 offline transport 测试显式启用 loopback fixture；redirect、DNS pinning、TLS 和预算见矩阵 |
+| BROWSER-02 | browser.submit 需 owner 精确授权、一次性签名派发和 Node 端无重放；真实 DOM/network driver 仍需外部运行时验收 |
 | MEMORY-01 | 显式选择 → 冻结内容 → worker 注入：矩阵中的 memory/context 用例 |
 | MONITOR-01、ACTION-01、SCHEDULE-01 | 监控证据 → 事件 → 只读诊断/审批操作 → 定时触发；分别验证资源/owner/revision 与去重边界 |
-| SESSION-01、SSE-01、ADOPT-01 | runner 会话正文交付、事件分页重连、接管撤销；会话缺少正文不能算任务成功 |
-| BACKUP-01 | SQLite backup API → 加密备份 → 独立目录恢复 → integrity/FK 与产物校验 |
+| SESSION-01、SSE-01、ADOPT-01 | runner 会话正文交付、事件分页重连、接管撤销；native 续聊必须绑定私有身份并恢复同一会话，缺少身份不得启动 sibling；terminate/quarantine/pause/resume 必须 fence 在途续聊，未确认回收时返回 `escape_unverified`；旧进程完成回调不得覆盖新 handle，同一会话只允许一个 native resume 在途，暂停会话不得启动 sibling；跨 session 并发追加不得突破机器级加密 spool 配额；同一 session 并发 transcript ingest 不得突破 raw retention 配额；接管控制入队、exact capture 升级与撤销 CAS 必须串行，撤销后不得再排入控制命令或完成质量升级；exact 升级必须隔离 operator/ingest 鉴权，拒绝 revoked/pending/unknown/非法 session，重复升级只写一条审计，exact 事件同时保留 redacted 流和加密 raw；会话缺少正文不能算任务成功 |
+| BACKUP-01 | SQLite在线快照 → 加密及key-id校验 → 独立目录恢复 → integrity/FK与产物校验；覆盖失败清理、no-overwrite和有界retention |
 | UI-01 | 控制台路由、页面操作、长文本/Markdown/恶意 HTML；与助手贯穿浏览器用例共同验证 UI |
 
 列出任一组当前绑定的完整 selector，无需手抄可能过期的清单：
@@ -58,12 +61,21 @@ PY
 
 | 原故障 | 必须保持的结果 | 回归 selector（省略 `tests/`） |
 |---|---|---|
+| `.md` MIME 依赖主机数据库，Markdown 被下载为二进制且无法预览 | 支持预览的文本扩展有确定 MIME；显式二进制类型仍拒绝预览；内容、owner 隔离、完整性和截断契约不变 | `test_platform_artifact_routes.py::test_artifact_http_api_is_operator_scoped_and_integrity_checked`、`test_platform_artifact_routes.py::test_artifact_preview_is_bounded_owner_scoped_and_text_only`，已绑定 FILES-01 |
+| MemoryItem 校验/SQLite 失败丢失根因，损坏标签被当成空列表 | 仓储、应用服务保留类型化 cause；事务清理不覆盖首个 SQLite 错误；损坏标签失败关闭；HTTP 仍返回固定 503 错误且不泄露存储正文 | `test_platform_memory_error_chains.py`，四个 selector 已绑定 MEMORY-01 |
+| 非法记忆选择返回503，Unicode和搜索失败丢失异常链 | 非法ID/选择器/预算/版本/查询返回400且不入队；搜索不可用仍503；保留原因但不泄漏存储错误正文 | `test_memory_context_input_validation.py`，已绑定 MEMORY-01 |
+| 损坏的冻结记忆快照被强制转换、重新截断或忽略 | worker 在模型调用前校验冻结字段与原始预算；损坏快照失败并保留有界事件，正常快照保持原样 | `test_memory_context_snapshot_validation.py`，已绑定 MEMORY-01 |
+| 只调度字典序前100个 owner，后台失败静默或不能等待停止 | owner 使用索引游标分批循环；单 owner 失败记录脱敏诊断并继续；停止句柄可 signal/join | `test_platform_schedule_recovery.py`、`test_platform_schedules.py`，已绑定 SCHEDULE-01 |
+| 健康数据库锁定/访问失败被误判损坏，重建空库且遗留连接 | 真实独占锁和非损坏 SQLite 错误保留原文件并抛出原异常；初始化失败关闭连接；明确损坏仍保留原文件后重建 | `test_task_database_initialization.py`，已绑定 RELEASE-01；包含 Python 3.10 无错误码兼容与扩展错误码 |
+| 旧任务表删除后升级中断，重启创建空表而旧数据滞留迁移表 | 历史 schema 升级在一个事务中；复制/删除/重命名失败及进程退出均完整回滚；重试和并发启动保留任务、租约、结果、文件和审计 | `test_task_schema_migration.py`，已绑定 RELEASE-01；schema 固定来自 `182e034` |
 | 只读验收先写后拒绝 | 执行前拒绝；文件字节、产物数量、节点派发均无变化 | `test_platform_acceptance_check.py::test_acceptance_denies_tools_before_side_effects`；`test_platform_run_worker.py::test_acceptance_policy_is_frozen_and_enforced_by_new_worker`；上述 adversarial wire 用例 |
 | 单个参数 node ID、`-k`、`--deselect` 隐藏失败参数 | 不完整集合不得生成 passed 报告；完整兄弟参数仍属于必需集合 | `test_journey_gate.py::test_hidden_failing_parameter_cannot_pass_journey` |
 | 慢响应或截止后才到达 succeeded | 统一截止时间约束创建、提交、轮询、events、恢复；返回 acceptance_timeout/unconfirmed 并保留已知定位信息 | `test_acceptance_deadline.py::test_model_deadline_rejects_late_success_without_replay` |
 | `--lf` 缓存提前裁剪参数 | 与 require-journeys / journey-report 同用时退出 UsageError；普通局部调试可使用 | `test_journey_gate.py::test_last_failed_cache_cannot_hide_required_parameters` |
 | DNS/TCP/TLS 超过总预算 | DNS 不能迟到后发送请求；多地址连接共享预算；TLS 保留证书/主机名校验 | `test_acceptance_deadline.py` 中 DNS、TCP、TLS 用例 |
-
+| 窗口 metadata 接受 NaN / Infinity 并写入 SQLite | 严格 JSON 编码；API 返回 `invalid_metadata`，创建失败且不留下窗口行 | `test_platform_execution_windows.py::test_window_metadata_rejects_non_finite_json_before_persistence`、`test_window_metadata_http_rejects_non_finite_json_before_persistence`；WINDOW-01 |
+| 对话 overrides 接受 NaN / Infinity、无效 Unicode 或显式非对象假值 | 严格 JSON 编码并要求对象；HTTP、应用、仓储和领域边界返回有界校验错误，不创建对话或 Run | `test_platform_conversation.py::test_conversation_rejects_non_finite_overrides_before_persistence`、`test_platform_conversation.py::test_conversation_rejects_invalid_unicode_override_before_persistence`、`test_platform_conversation.py::test_conversation_rejects_falsey_non_object_overrides`、`test_platform_conversation.py::test_turn_rejects_falsey_non_object_overrides`、`test_platform_conversation.py::test_platform_repository_rejects_non_mapping_overrides_before_writes`、`test_platform_defaults.py::test_default_resolution_rejects_non_mapping_overrides`；CONFIG-01 |
+| 不完整请求事件含缺失或无效 `started_at` 时 Run 读取返回 503 | 请求投影只公开有限且可显示的 UTC epoch；无效/缺失时间不伪造 elapsed，也不阻断 Run 历史 | `test_request_metadata_api.py::test_active_request_with_invalid_start_time_does_not_break_run_projection`、`test_request_metadata_api.py::test_pending_terminal_unknown_and_projection_queries_are_batched`；USAGE-01 |
 HTTP传输边界的后续回归见[请求元数据矩阵](request-metadata.md)：两origin重定向、真实chunked DONE、响应头/体滴流、共享DNS上限与迟到隔离、代理CONNECT及TLS校验、未读响应关闭、worker异常链和超时后调度槽复用，均已加入 MODEL-02 / RUN-02 / RELEASE-01 的逐函数门禁。
 
 修改缺陷时先证明用例能识别坏行为：通过受控输入或在隔离工作树临时移除对应修复使其失败，再恢复并运行同一用例。新链路通过不能替代旧回归用例；不要修改失败断言来接受未完成的行为。
@@ -115,44 +127,16 @@ gh run download RUN_ID --repo dengyie/agent-fleet \
   --name agent-fleet-test-evidence --dir /tmp/fleet-ci-evidence
 ```
 
-以下核验命令应在**与报告 revision 对应的干净代码检出**中执行。本机运行产生 dirty=true 时只能作为开发证据；提交后使用 Linux CI 的干净报告作为交付证据。命令对 Linux CI 要求零跳过：
+Linux CI 会在测试成功后、上传证据和启动打包前调用 tools.testing.release_evidence；验证失败会阻断 package job。需要人工复核时，应在**与报告 revision 对应的干净代码检出**中执行下方校验。本机 dirty 报告只能作为开发证据。校验器绑定报告 revision、clean tree、矩阵 SHA-256、全部 journey/参数化 selector、JUnit failure/error/skip、浏览器 PNG 签名和外部项 not_run 状态。Linux artifact 中任何 skip 都会阻断打包。pytest subtests 的总数可高于 JUnit testcase 元素数，校验器分别验证 journey 参数计数与 JUnit 汇总，不假设两者总数相等。
 
 ```bash
-python3 - /tmp/fleet-ci-evidence "$(git rev-parse HEAD)" <<'PY'
-import hashlib, json, sys
-from pathlib import Path
-import xml.etree.ElementTree as ET
-
-evidence = Path(sys.argv[1])
-raw = Path('docs/testing/journeys.json').read_bytes()
-matrix = json.loads(raw)
-report = json.loads((evidence / 'journeys.json').read_text())
-assert report['revision'] == sys.argv[2], 'wrong checkout / stale report'
-assert report['working_tree_dirty'] is False, 'dirty checkout'
-assert report['matrix_sha256'] == hashlib.sha256(raw).hexdigest(), 'wrong matrix'
-assert report['ci_status'] == 'passed'
-rows = report['journeys']
-assert len(rows) == len(matrix['journeys'])
-assert {r['id'] for r in rows} == {r['id'] for r in matrix['journeys']}
-for expected in matrix['journeys']:
-    row = next(r for r in rows if r['id'] == expected['id'])
-    assert row['status'] == 'passed'
-    assert len(row['selectors']) == len(expected['tests'])
-    assert {s['selector'] for s in row['selectors']} == set(expected['tests'])
-    for selector in row['selectors']:
-        assert selector['status'] == 'passed'
-        assert selector['collected'] == selector['passed'] > 0
-        assert selector['nonpassing_cases'] == []
-root = ET.parse(evidence / 'results.xml').getroot()
-cases = list(root.iter('testcase'))
-assert cases and not list(root.iter('failure')) and not list(root.iter('error'))
-assert not list(root.iter('skipped')), 'inspect skip reason; Linux release evidence must be complete'
-assert {r['id'] for r in report['external_checks']} == {r['id'] for r in matrix['external_checks']}
-assert all(r['status'] == 'not_run' for r in report['external_checks'])
-assert list((evidence / 'browser').rglob('*.png')), 'missing browser screenshots'
-print(f"Verified {len(rows)} journeys and {len(cases)} JUnit cases; external checks remain not_run")
-PY
+python3 -m tools.testing.release_evidence \
+  --evidence /tmp/fleet-ci-evidence \
+  --checkout "$PWD" \
+  --revision "$(git rev-parse HEAD)"
 ```
+
+此校验器也会读取实际 Git `HEAD` 和 porcelain 状态；`--revision` 必须等于 checkout commit，checkout 必须干净。报告中的 revision/dirty 字段不能替代实际 Git 检查。人工诊断优先检查校验器给出的错误码与原始 JUnit/JSON，不维护第二份容易漂移的校验实现。
 
 macOS 上依赖 `/proc` 和真实 stop/resume 的测试可能跳过；保留具体原因，并由 Linux CI 补齐这些验证。不能将预期的本机平台跳过扩展成对其他测试 skip 的豁免。pytest subtests 的统计与 JUnit testcase 数可能不同，核验重点是无失败/错误、参数齐全以及必需流程全通过，不在文档中固定一个会过期的总测试数。
 

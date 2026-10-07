@@ -2,6 +2,8 @@
 
 请求级模型、五项 Token、耗时、费用来源、重试与交互验收详见[请求元数据测试矩阵](request-metadata.md)。
 
+尚未完成的真实浏览器、接管、凭据、Browserbase 与通知工作见[待确认实施决策](browser-notification-proposal.md)；该提案不是已批准规格或通过证明。
+
 这份文档是测试入口。可执行范围定义在 [journeys.json](journeys.json)；逐阶段断言、审查回归和证据核验见 [test-chains.md](test-chains.md)；外部验收见 [release-acceptance.md](release-acceptance.md)。测试用例、门禁和文档必须随功能一起更新。
 
 ## 为什么需要这套门禁
@@ -84,6 +86,8 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/test_full_flow_browser.py -q
 | BACKUP-01 | 一致备份、加密和恢复 | integration |
 | UI-01 | 控制台页面和文本渲染 | browser |
 | RELEASE-01 | 发布探活与验收CLI | integration |
+| BROWSER-01 | 浏览器离线网络边界 | contract |
+| BROWSER-02 | 单次表单提交审批 | integration |
 | GATE-01 | 全流程门禁自身 | contract |
 
 ## 新增贯穿测试如何工作
@@ -94,8 +98,23 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/test_full_flow_browser.py -q
 - `tests/test_full_flow_browser.py` 不替换模型工厂；页面关闭后释放已阻塞的模型请求，再新开页面验证后台完成。四次工具调用必须留下真实事件，下载文件必须与实际写入内容一致。502 后刷新必须仍显示错误，不能丢掉上一条成功回复。
 - `tests/test_account_smtp_transport.py` 进行实际 TLS/STARTTLS、SMTP AUTH 和 MIME 投递；验证不可信证书被拒绝、SMTP DATA 失败不被当作成功或自动重试。测试 CA 只在该 fixture 内受信任。
 - `tests/test_acceptance_flow.py` 串联真实账号验收入口、模型 HTTP、节点 HTTP poll/receipt、journal、最终报告与恢复；验证越权 wire 工具没有本地或节点副作用，权限覆盖不能改变冻结策略，Hub 重启后仍只允许 list，已提交响应超时后可通过对话/token 找回唯一 Run。`tests/support/loopback_node.py` 使用产品 NodeClient/Transport 和独立目录，不能代替实际远程主机验收。
+- `tests/test_platform_journal_admission.py` 用共享 SQLite 与独立客户端验证崩溃重投、并发准入、迟到回执及终态不可覆盖；阻塞 executor 时另一个命令仍能执行，证明数据库事务没有跨过执行边界。`tests/test_platform_browser_results.py` 验证实际 JSON 字节预算、数值精度、非有限数、Unicode 与 PNG 类型边界；错误结果不得作为成功回执持久化。
+
+- `tests/test_platform_schedule_recovery.py` 验证实际租约到期回收、活跃重复 tick、两实例并发回收、迟到完成不可覆盖、完成时刻与下次执行计算，以及超过目录首页的到期任务发现。全部使用临时 SQLite 和注入时钟，不发送通知或执行外部动作。
+
+- `tests/test_platform_schedule_memory_validation.py` 通过真实 Flask/SQLite 验证字段类型、布尔启用值、Unicode、数值溢出和版本前置条件；非法输入返回稳定 400，且不新增或更新记录。合法布尔值和整数版本的兼容性同时检查。
+
+- `tests/test_task_patch_bounds.py` 将 UTF-8 patch 从认证 runner POST 贯穿至 SQLite 和 operator GET，验证 Hub 再脱敏、100 KiB 内含截断标记、历史行读取边界、非法类型/Unicode 不写入，以及重复处理稳定性。
+
+- `tests/test_task_summary_collection.py` 和 `tests/test_task_summary_contract.py` 验证 20 KiB 文件读取与完整 JSON 存储边界、文件替换/增长时的身份检查和描述符关闭，以及真实 runner HTTP 的非法摘要拒绝。计数必须是非负且不超过 JavaScript 安全整数范围的整数；耗时必须有限且非负。失败名称最多 20 条、每条 200 字符，同时受完整 JSON 的 UTF-8 字节预算限制。缺失文件保持可选，存在但损坏的摘要返回有界错误，不静默当作无测试结果。
+
+- `tests/test_worktree_diff_streaming.py` 用真实 Git 和临时进程验证大补丁采集的 Python 内存上界、stdout/stderr 同时排空、UTF-8 截断、非零退出码，以及管道保持打开或提前关闭时的超时终止和回收。字节限额包含截断标记；此处验证的是采集进程内存，不代表限制 Git 子进程的内部内存。
+
+- `tests/test_workspace_output_bounds.py` 用实际文件和本地进程验证工作区 64 KiB 读取/输出限额在采集时生效，保留非零退出码、stderr、超时和截断信息，并检查无效 UTF-8 替代字符不会突破字节预算。Git、directory 和 sandbox 共用 `tools/bounded_process.py` 的非阻塞管道读取及进程组回收；配置 launcher 的测试只是临时对端，不证明生产隔离。
 
 ## 门禁判定规则
+
+`BROWSER-01` / `BROWSER-02` 对应 [T3.7 网络边界](../superpowers/specs/2026-10-04-t3.7-browser-navigation-network-boundary.md)和[提交审批契约](../superpowers/specs/2026-10-05-browser-submit-approval-contract.md)。提交贯穿测试使用真实 SQLite、worker、签名、Node journal 和进程内 HTTP，注入模型、DOM driver 及 socket；验证单次授权、并发消费、事务回滚、到期、撤销、跨 Run 拒绝、表单边界与秘密标记排除。TLS 测试仅访问隔离的 loopback fixture。这些证据不代表真实浏览器 adapter、进程网络隔离、审批 UI 或外部站点验收；browser/network/submit 产品开关仍默认关闭。
 
 `tools/testing/pytest_journeys.py` 读取矩阵并检查 **实际收集和执行结果**：
 

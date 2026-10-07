@@ -170,7 +170,7 @@ class NodeClient:
 
     def _signature_ok(self, command: Mapping):
         if self.public_key is None:
-            signature_ok = not self.require_signature
+            signature_ok = not self.require_signature and command.get("action") != "tool.browser.submit"
         else:
             signature_ok = verify_command(command, self.public_key)
         if not signature_ok:
@@ -194,22 +194,30 @@ class NodeClient:
         if not self._signature_ok(command):
             return {"command_id": command_id, "status": "rejected",
                     "reason": "invalid_signature"}
-        prior = self.journal.get(command_id)
-        if prior and prior["state"] in {"succeeded", "failed", "unknown"}:
+        attribution = {}
+        arguments = command.get("arguments")
+        if command.get("action") == "tool.browser.submit" and isinstance(arguments, Mapping):
+            approval_id = arguments.get("approval_id")
+            if isinstance(approval_id, str):
+                attribution["approval_id"] = approval_id
+        prior = self.journal.begin(command_id, now=self.clock(), metadata=attribution)
+        if not prior["claimed"]:
             return {"command_id": command_id, "status": prior["state"], "result": prior["result"]}
-        self.journal.begin(command_id, now=self.clock())
         try:
             result = self.executor(command)
+            if attribution and isinstance(result, Mapping):
+                result = {**result, **attribution}
             if isinstance(result, Mapping):
                 result = self._materialize_browser_session_result(command, result)
                 result = self._materialize_browser_result(command, result)
             execution_state = result.get("state") if isinstance(result, Mapping) else None
             status = execution_state if execution_state in {"succeeded", "failed", "unknown"} else "succeeded"
-            self.journal.finish(command_id, status, result, now=self.clock())
-            return {"command_id": command_id, "status": status, "result": result or {}}
+            saved = self.journal.finish(command_id, status, result, now=self.clock())
+            return {"command_id": command_id, "status": saved["state"], "result": saved["result"] or {}}
         except Exception:
-            self.journal.finish(command_id, "unknown", {"reason": "executor_interrupted"}, now=self.clock())
-            return {"command_id": command_id, "status": "unknown", "reason": "executor_interrupted"}
+            failure = {"reason": "executor_interrupted", **attribution}
+            saved = self.journal.finish(command_id, "unknown", failure, now=self.clock())
+            return {"command_id": command_id, "status": saved["state"], "result": saved["result"] or {}}
 
     def poll_once(self, *, limit=20, lease_s=60.0):
         """Poll once, execute each command, and upload bounded receipts."""
@@ -251,6 +259,8 @@ class NodeClient:
                     receipt["result"]["error_code"] = result["error_code"][:80]
             elif result.get("reason"):
                 receipt["result"] = {"reason": str(result["reason"])[:80]}
+                if isinstance(result.get("approval_id"), str):
+                    receipt["result"]["approval_id"] = result["approval_id"]
             try:
                 receipt_status, _ = self._post(
                     "/api/platform/v1/nodes/receipts", receipt)

@@ -1,6 +1,6 @@
 import { renderRequestMetadata, tickRequestMetadata } from './request-metadata.js';
 import { uiIcon, pagePath } from '../../routes.js';
-import { getPlatformArtifactContentUrl } from '../../api/platform.js';
+import { getPlatformArtifactContentUrl, getExecutionWindowFrameUrl } from '../../api/platform.js';
 
 export function el(tag, className, text) { var node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
 export function clear(node) { while (node && node.firstChild) node.removeChild(node.firstChild); }
@@ -95,7 +95,10 @@ function renderExecutionWindowEvents(host, events) {
     host.appendChild(el('div', 'assistant-window-event', text));
   });
 }
-export function renderExecutionWindow(host, state, onClose) {
+export function renderExecutionWindow(host, state, actions) {
+  actions = actions || {};
+  var previousImage = host.querySelector('.assistant-window-frame-image');
+  var previousSrc = previousImage && previousImage.getAttribute('src');
   clear(host);
   if (state.loading) { host.appendChild(el('div', 'assistant-window-status meta', '执行窗口恢复中')); return; }
   if (state.error) { host.appendChild(el('div', 'assistant-window-status err', state.error)); return; }
@@ -106,12 +109,47 @@ export function renderExecutionWindow(host, state, onClose) {
   copy.appendChild(el('span', 'assistant-window-meta', String(state.window.state || 'unknown') + ' · ' + String(state.mode || 'unknown')));
   if (state.window.window_id) copy.appendChild(el('span', 'assistant-window-meta', state.window.window_id));
   row.appendChild(copy);
-  var actions = el('div', 'assistant-window-actions');
+  var buttonHost = el('div', 'assistant-window-actions');
   if (state.window.state !== 'closed' && state.window.state !== 'expired') {
+    if (state.mode === 'writable') {
+      var release = document.createElement('button'); release.type = 'button'; release.className = 'button-secondary';
+      release.textContent = state.controlPending ? '正在归还…' : '归还控制'; release.disabled = !!state.controlPending;
+      release.addEventListener('click', actions.onReleaseControl); buttonHost.appendChild(release);
+    } else if (state.window.state === 'attached' && ['attached', 'read-only'].indexOf(state.mode) !== -1) {
+      var take = document.createElement('button'); take.type = 'button'; take.className = 'button-secondary';
+      take.textContent = state.controlPending ? '正在接管…' : '接管控制'; take.disabled = !!state.controlPending;
+      take.addEventListener('click', actions.onTakeControl); buttonHost.appendChild(take);
+    }
     var close = document.createElement('button'); close.type = 'button'; close.className = 'button-secondary'; close.textContent = '关闭执行窗口';
-    close.addEventListener('click', onClose); actions.appendChild(close);
+    close.addEventListener('click', actions.onClose); buttonHost.appendChild(close);
   }
-  row.appendChild(actions); host.appendChild(row);
+  row.appendChild(buttonHost); host.appendChild(row);
+  if (state.controlError) host.appendChild(el('div', 'assistant-window-status err', state.controlError));
+  if (state.frame && typeof state.frame.artifact_id === 'string') {
+    var frame = el('section', 'assistant-window-frame');
+    var dimensions = String(state.frame.width || '?') + ' × ' + String(state.frame.height || '?');
+    frame.appendChild(el('div', 'assistant-window-frame-meta meta', dimensions + (state.frame.captured_at ? ' · ' + state.frame.captured_at : '')));
+    if (state.frameError) {
+      frame.appendChild(el('div', 'assistant-window-status err', state.frameError));
+      var retry = document.createElement('button'); retry.type = 'button'; retry.className = 'button-secondary';
+      retry.textContent = '重试加载'; retry.addEventListener('click', actions.onRetryFrame); frame.appendChild(retry);
+    } else {
+      var frameSrc = getExecutionWindowFrameUrl(
+        state.window.window_id, state.frame.artifact_id, state.frameRetryKey,
+      );
+      var reuseImage = previousSrc === frameSrc && previousImage;
+      var image = reuseImage ? previousImage : document.createElement('img');
+      image.className = 'assistant-window-frame-image'; image.alt = '浏览器画面';
+      if (!reuseImage) {
+        image.addEventListener('error', function () {
+          if (typeof actions.onFrameError === 'function') actions.onFrameError(state.frame.frame_seq);
+        }, {once: true});
+        image.src = frameSrc;
+      }
+      frame.appendChild(image);
+    }
+    host.appendChild(frame);
+  }
   var events = el('div', 'assistant-window-events'); renderExecutionWindowEvents(events, state.events); host.appendChild(events);
 }
 function formatArtifactSize(size) {

@@ -22,6 +22,10 @@ class PlatformSchedulerRepositoryError(RuntimeError):
         super().__init__(code)
 
 
+def _reject_json_constant(token: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {token}")
+
+
 def _number(value: Any, code: str) -> float:
     try:
         parsed = float(value)
@@ -34,7 +38,10 @@ def _number(value: Any, code: str) -> float:
 
 def _result_json(value: Mapping[str, Any] | None) -> str:
     try:
-        encoded = json.dumps(dict(value or {}), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        encoded = json.dumps(
+            dict(value or {}), ensure_ascii=True, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        )
     except (TypeError, ValueError):
         raise PlatformSchedulerRepositoryError("invalid_result") from None
     if len(encoded.encode("utf-8")) > MAX_RESULT_BYTES:
@@ -102,11 +109,11 @@ class PlatformSchedulerRepository:
         if row is None:
             return None
         try:
-            result = json.loads(row["last_result"] or "{}")
-        except (TypeError, ValueError):
-            result = {}
-        if not isinstance(result, Mapping):
-            result = {}
+            result = json.loads(row["last_result"] or "{}", parse_constant=_reject_json_constant)
+            if not isinstance(result, Mapping):
+                raise ValueError("expected object")
+        except (TypeError, ValueError) as exc:
+            raise PlatformSchedulerRepositoryError("scheduler_store") from exc
         return {
             "job_id": row["job_id"],
             "state": row["state"],

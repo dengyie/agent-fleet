@@ -1,6 +1,6 @@
 # Browser Submit Approval Contract Specification
 
-> Status: draft for review. This slice adds no runtime code; it defines the approval-gated `browser.submit` contract deferred by T3.6/T3.7 and fixes its policy values before implementation. All browser gates remain default-off. This document authorizes no gate change, external network access, real-browser integration, production credential use, or deployment.
+> Status: approved for implementation by the owner on 2026-10-06; implemented and verified as an offline approval/driver/transport contract. All browser gates remain default-off. Real-browser adapters, process-level egress enforcement, external network activation and deployment remain outside this slice.
 
 ## 1. Goal
 
@@ -78,7 +78,7 @@ The model never receives form data in tool arguments. It proposes `browser.submi
 | Retry class | `manual_only` |
 | Result budgets | identical to `browser.click` |
 
-All values above are fixed acceptance values for this draft, enforced fail-closed, not tunables.
+All values above are fixed acceptance values for this contract, enforced fail-closed, not tunables.
 
 ## 5. Proposed implementation boundary
 
@@ -99,7 +99,7 @@ All values above are fixed acceptance values for this draft, enforced fail-close
 
 ## 6. Acceptance matrix (offline, deterministic)
 
-All tests are offline, in-process, and deterministic: injected fake drivers, injected monotonic/UTC clocks, in-process HTTP transport, synthetic markers, fake sockets for the submit path. No test contacts external DNS, the Internet, a VPS, a production browser/profile, or production credentials. The implementation coverage table below records the evidence produced by the implementation commit; Partial entries name exactly what stays unproven, and nothing beyond them is claimed as passing.
+All tests are offline, in-process, and deterministic: injected fake drivers, injected monotonic/UTC clocks, in-process HTTP transport, synthetic markers, fake sockets for the submit path. No test contacts external DNS, the Internet, a VPS, a production browser/profile, or production credentials. The implementation evidence for each case is recorded in §9.
 
 ### Positive cases
 
@@ -124,33 +124,11 @@ All tests are offline, in-process, and deterministic: injected fake drivers, inj
 9. Gate-off layering: with `platform_browser_submit_enabled` off, the tool is absent from tool definitions, `LocalToolBroker`/`RemoteToolBroker` return `submit_disabled`, and the Node executor rejects the command regardless of a valid approval.
 10. Body/field bounds: 65 fields, an over-long field name/value, or a >16 KiB body fails `request_too_large` before the request is sent; the transport submit path is unreachable for any other caller or method.
 
-### Implementation coverage (produced by the implementation commit)
-
-| Case | Status | Evidence and boundaries |
-| --- | --- | --- |
-| P1 | Covered | `tests/test_platform_submit_approvals.py` grant/consume/consumed-state; `tests/test_platform_node_http_e2e.py::test_browser_submit_is_approval_gated_and_single_use` (one grant → one dispatch → `approval_id` in the durable command arguments, approval row `consumed`); retry-after-consume maps `approval_required`/`approval_consumed` in `tests/test_platform_remote_delivery.py` |
-| P2 | Covered | TTL boundary test: `now >= granted_at + 300` → `approval_expired` (boundary expires); pre-boundary consume succeeds; sweep terminalizes. Grant-time lazy TTL sweep inside the grant transaction (`tests/test_platform_submit_approvals.py::test_lapsed_grants_free_budget_at_next_grant`) and unexpired-first consumption (`test_consume_prefers_unexpired_over_lapsed_approval`) keep lapsed rows from shadowing valid grants or occupying budgets |
-| P3 | Covered | Idempotent grant returns the same `approval_id`; conflicting content with the same key fails `approval_idempotency_conflict` |
-| P4 | Covered | Revoke → `revoked` terminal state; consumption of a revoked approval fails `approval_required` (no active row); revoke of a missing id fails `approval_not_found` |
-| P5 | Covered | Node journal, wire receipt, Hub command row, and Run events record opaque `approval_id`; synthetic form-field, page-content, and driver-exception markers are proven absent across every metadata plane (Node journal, wire receipts, Hub command rows, Run events, model transcript, artifact registry, Hub response bodies, run row, captured logs) via `tests/test_platform_node_http_e2e.py::test_browser_submit_markers_stay_off_metadata_planes` |
-| P6 | Covered | Broker consumption precedes command creation; denial before grant leaves `driver.submits` empty in the e2e stand-in |
-| P7 | Covered | `close_session` terminalizes active approvals in the same transaction; `RunService.cancel` expires them before committing cancellation (`test_run_cancel_terminals_active_approvals`); `LocalRunWorkerService._finish` terminalizes unconsumed approvals whenever the Run leaves the queue — succeeded, failed, unknown alike (`test_run_terminal_state_expires_unconsumed_approvals`); the broker consumes through `SubmitApprovalService.consume_submit_approval` with no test double on the worker (`test_browser_submit_consumes_through_production_service_assembly`) |
-| N1 | Covered | The selector-based `browser.submit` carries no URL, so destination policy applies at `navigate`; transport `submit_form` reuses the exact shared normalizer and fails `origin_forbidden` before sending for any unapproved destination origin or scheme (`tests/test_platform_browser_transport.py::test_submit_form_enforces_destination_origin_policy`) |
-| N2 | Covered | Consumption matches `(owner, run, session, selector)` exactly; a different selector finds no active row → `approval_required` before dispatch |
-| N3 | Covered | Selector and form-field screening reject sensitive markers at serialization time before any request (`sensitive_field_forbidden`) |
-| N4 | Blocked | Non-form selectors and missing enclosing forms are driver-level responsibilities; the deterministic driver seam is exercised with a stub; real browser DOM/form parsing is blocked behind the real browser driver gate |
-| N5 | Covered | Session 5th-active and workspace 65th-grant-per-hour limits covered with `approval_limit` 429; the 17th-active-per-run boundary is independently exercised with a dedicated second run keeping its own budget (`tests/test_platform_submit_approvals.py::test_run_per_active_limit_boundary`) |
-| N6 | Covered | Consumption is scoped by `run_id` in the same WHERE clause as owner/session/selector; dedicated cross-run consumption test proves an approval granted for run R1 cannot be consumed by run R2 (`tests/test_platform_submit_approvals.py::test_cross_run_consumption_is_scoped`) |
-| N7 | Covered | After-dispatch failure → `BrowserExecutionError` → `unknown` receipt, run-bound (`test_submit_after_dispatch_failure_is_unknown_and_run_bound`); approval stays consumed (no refund path exists) |
-| N8 | Covered | POST redirect → `redirect_denied`, one request, no replay/rewrite/follow-up |
-| N9 | Covered | Tool definition omitted when the gate is off; local/remote brokers return `submit_disabled`; Node runtime parent gate (`browser submit requires browser capability`), default off, tool absent from allowed_tools |
-| N10 | Covered | 65 fields / over-long name or value / >16 KiB body → `request_too_large` before sending; general request path stays GET/HEAD-only |
-
 ### Exit criteria
 
 - All positive/negative cases above are exercised by deterministic offline tests; `compileall` and `git diff --check` pass; the platform doc status table and this spec are updated in the same commit.
 - Browser/submit/network gates remain off by default; the owner-grant endpoint is authenticated and rate-bounded; no deployment is performed.
-- Anything not listed above must not be claimed as passing. The approval UI, observation surfaces, Take Control/Return Control, writer fencing, real browser drivers, Browserbase, and production deployment remain unimplemented and out of scope.
+- Anything not listed above is outside this contract's acceptance scope. Approval UI, dedicated observation surfaces, real browser drivers, Browserbase, and production deployment remain unimplemented. `browser.frame`, Take Control/Return Control, and writer fencing are covered by the execution-window continuation recorded in the [development completion plan](../plans/2026-10-06-development-completion.md#audit-repair-q-png-frame-payload-validation-and-browser-writer-fencing-2026-10-06); they do not establish real browser lifecycle or process-level network isolation.
 
 ## 7. Implementation entry gate
 
@@ -169,3 +147,40 @@ All tests are offline, in-process, and deterministic: injected fake drivers, inj
 - CDP evaluate, arbitrary JavaScript, shell/host access, or any new transport beyond the bounded submit path.
 - Enabling browser/network/submit gates, contacting external services, production/test-node deployment, or claiming production readiness.
 - Modification of T3.6/T3.7 fixed bounds, existing tool semantics, or receipt contracts.
+
+
+## 9. Implementation and verification record (2026-10-06)
+
+The owner-approved implementation preserves the existing synchronous Flask/SQLite worker architecture. It adds no runtime dependency and makes no claim of production browser readiness.
+
+### API and persistence details
+
+- Grant: `POST /api/platform/v1/runs/{run_id}/browser-approvals`, JSON exactly `{session_id, selector}`. Optional `Idempotency-Key` header supplies grant identity. Workspace and Node come from the durable session; clients cannot supply them.
+- Revoke: `DELETE /api/platform/v1/runs/{run_id}/browser-approvals/{approval_id}`. A scoped metadata GET is also available. Wrong owner/run requests cannot revoke another approval.
+- Responses expose the opaque approval/run/session identifiers, state, timestamps and consumed command identifier. They omit selector and internal owner/workspace/node metadata. Public timestamps are UTC ISO-8601; SQLite uses injectable UTC epoch seconds.
+- Workspace rate keys include owner identity because workspace IDs are owner-scoped. Quota queries use compound indexes and stop after 4/16/64 qualifying rows. TTL sweeps are bounded to 256 records per call; grant/admission/read paths enforce expiry directly, so correctness never depends on a periodic sweep.
+- SQLite lifecycle triggers expire approvals in the same write as session closure or Run cancellation/termination, including recovery and task-projection paths. Grant and admission independently verify the durable run/session scope and liveness.
+- Command admission checks idempotency, consumes approval, signs the final arguments, and inserts command/outbox under one write transaction. Signing/storage failures roll back the approval; a successfully persisted but undelivered command keeps its approval consumed.
+- Local ToolBroker submit remains disabled: only the Hub remote command path owns approval authority. Node requires a valid signature for submit even when legacy unsigned execution is otherwise enabled.
+- `platform_browser_submit_enabled` requires browser and network parent flags. Model visibility additionally requires the Node's advertised `browser.submit` capability. NodeRuntime still forces external networking unavailable as required by T3.7.
+- The injected `driver.submit(selector)` owns DOM form resolution and password/file-control screening. Backend dispatch grants a context-local single-POST permit; `submit_form` fails outside that activation or on a second request. No real DOM/browser adapter is shipped. Driver fixtures prove the contract, not browser process egress enforcement.
+
+### Acceptance evidence
+
+| Contract cases | Deterministic regression evidence |
+|---|---|
+| Positive 1, 4–6; negative 2, 3, 4, 7, 8 | `tests/test_platform_submit_e2e.py::test_submit_end_to_end_contract` exercises the owner HTTP grant, real worker, signed command repository, in-process Node HTTP transport, driver and pinned exchange. Its synthetic-marker sweep inspects Run events, Node journal, Hub command receipt, wire receipt, Hub HTTP bodies, model transcript, captured logs, browser artifact-ticket registry and artifact manifest registry. |
+| Positive 4, revocation during an admitted submit | The `revoked_in_flight` case in `test_submit_end_to_end_contract` waits until the form POST has completed, revokes the already-consumed approval while the driver call is still in flight, then verifies the command finishes with its original result. The existing `revoked` case continues to prove revocation before admission prevents dispatch. |
+| Positive 2 | `test_approval_ttl_is_exclusive_and_old_rows_do_not_shadow_new`, `test_ttl_before_boundary_and_bounded_sweep` in `tests/test_platform_submit_approvals.py`. |
+| Positive 3 | `test_grant_idempotency_and_selector_mismatch`, `test_owner_grant_exact_body_idempotency_and_scoped_revoke`. |
+| Positive 7 | `test_session_close_and_run_cancel_expire_only_their_approvals`, `test_every_run_terminal_state_expires_approvals`, `test_expiry_targets_exact_run`. |
+| Negative 5 | `test_expired_rows_release_active_quota`, `test_run_and_workspace_limits_and_rolling_hour`, `test_workspace_rate_limit_is_owner_scoped`. |
+| Negative 6 | Repository scope mismatch tests and `test_signed_submit_reaches_driver_and_records_approval[True]` reject cross-Run submission with a separately valid signature; signature tampering/unsigned commands are checked by `test_unsigned_submit_and_tampered_approval_are_rejected_before_driver`. |
+| Negative 9 | `test_submit_parent_gates`, NodeRuntime submit gate tests and local-broker bypass regression. |
+| Negative 10 | `test_submit_exact_body_boundaries`, `test_submit_transport_requires_scoped_dispatch_and_single_post` in `tests/test_platform_browser_transport.py`. |
+| Atomicity and restart | `test_approval_command_and_outbox_roll_back_together`, `test_atomic_admission_signs_final_arguments_and_is_command_idempotent`, `test_concurrent_commands_cannot_consume_same_approval`, `test_restart_keeps_revocation_and_failed_signing_rolls_back`. |
+| Preserved transport semantics | Existing T3.7 transport suite plus `test_submit_redirect_matrix_never_replays` and `test_submit_shares_absolute_deadline_and_session_budget`. |
+
+The [journey matrix](../../testing/journeys.json) now requires `BROWSER-01` / `BROWSER-02`. Local full-gate execution on 2026-10-06 used installed Playwright and Chrome: **2632 passed, 2 skipped, 154 subtests passed; 29/29 journeys passed**. Both skips require Linux `/proc`; all external checks remain `not_run`. This includes product UI tests, but the submit driver is still an injected fixture. Latest focused approval/HTTP/E2E/transport validation: **189 passed**. Python 3.10 AST checks (26 changed Python files), `compileall` for `hub tools tests`, and `git diff --check` passed; an existing probe docstring emits a SyntaxWarning.
+
+Full gate command: `FLEET_PLAYWRIGHT_MODULE=/tmp/pr6-review-browser/node_modules/playwright FLEET_BROWSER_CHANNEL=chrome FLEET_SCREENSHOTS=/tmp/agent-fleet-submit-evidence/browser PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. /Users/mango/project/codex/agent-fleet/.venv/bin/python -m pytest tests -q --tb=short -rs -p no:cacheprovider --require-journeys --journey-report=/tmp/agent-fleet-submit-evidence/journeys.json --junitxml=/tmp/agent-fleet-submit-evidence/results.xml`. Evidence records the pre-commit revision plus dirty working-tree state; it is local verification, not a production-release claim. See the [implementation plan](../plans/2026-10-06-browser-submit-approval.md#verification-evidence) for the integration and regression record.

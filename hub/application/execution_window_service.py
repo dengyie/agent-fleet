@@ -43,6 +43,7 @@ class ExecutionWindowService:
             "invalid_event_kind": 400, "invalid_event_payload": 400,
             "forbidden_event_field": 400, "event_payload_too_large": 413,
             "invalid_cursor": 400, "invalid_run": 400, "event_conflict": 409,
+            "frame_not_found": 404, "frame_scope": 409, "frame_dimensions": 415,
             "window_store": 503,
         }.get(code, 400)
         detail = {
@@ -55,7 +56,8 @@ class ExecutionWindowService:
             "invalid_event_payload": "事件载荷不合法", "forbidden_event_field": "事件载荷包含受限字段",
             "event_payload_too_large": "事件载荷超出限制", "invalid_cursor": "事件游标不合法",
             "invalid_run": "运行标识不合法", "event_conflict": "事件写入冲突",
-            "window_store": "执行窗口存储不可用",
+            "window_store": "执行窗口存储不可用", "frame_not_found": "画面不存在",
+            "frame_scope": "画面事件作用域不匹配", "frame_dimensions": "画面尺寸超出限制",
         }.get(code, "执行窗口请求不合法")
         return ApplicationError(code, detail, status)
 
@@ -65,7 +67,7 @@ class ExecutionWindowService:
         except ApplicationError:
             raise
         except ExecutionWindowRepositoryError as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
     def create(self, owner_id: str, run_id: str, *, ttl_s=900.0, metadata: Mapping | None = None):
         owner_id = self._owner(owner_id)
@@ -134,6 +136,12 @@ class ExecutionWindowService:
         owner_id = self._owner(owner_id); window_id = self._window_id(window_id)
         return self._call(lambda: self.repository.list_events(
             owner_id, window_id, after=after, limit=limit,
+        ))
+
+    def get_frame_artifact(self, owner_id, window_id, artifact_id):
+        owner_id = self._owner(owner_id); window_id = self._window_id(window_id)
+        return self._call(lambda: self.repository.get_frame_artifact(
+            owner_id, window_id, artifact_id,
         ))
 
 

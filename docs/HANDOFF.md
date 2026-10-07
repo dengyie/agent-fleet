@@ -79,7 +79,7 @@ python3 tools/agent-self-report.py --endpoint https://hub.example.com --name <ma
 2026-09-08 收口把「能延期的」标成了 `deferred-with-condition`，也把 **v4 原文尚未兑现的产品面** 误标成 done。2026-09-09 起清单分两栏：
 
 - **已落地**：现网 LIVE 以私有运维笔记为准（公开仓 orphan `main` 不是 overlay）。
-- **v4 初始目标未完成（本轮必做）**：见 `docs/superpowers/specs/2026-09-09-v4-initial-goal-completion-design.md` 与 plan `docs/superpowers/plans/2026-09-09-v4-initial-goal-completion.md`。
+- **v4 初始目标代码已完成并合入本地 `main`**：实现和本地证据见 `docs/superpowers/specs/2026-09-09-v4-initial-goal-completion-design.md` 与 plan `docs/superpowers/plans/2026-09-09-v4-initial-goal-completion.md`；LIVE overlay、生产恢复和 Phase 4/5 实发仍需独立验收。
 - **条件触发延期**：仍不是待办（WebSocket / frontend-v2 / 通用密钥下发等）；main 自动部署已按用户 2026-10-04 指令实施，见下表。
 
 历史计划里的未勾 checkbox 仍不是待办。
@@ -100,7 +100,7 @@ python3 tools/agent-self-report.py --endpoint https://hub.example.com --name <ma
 | 备份恢复演练清单 | **done（2026-09-11 真切回再切回 `da54e48`）** | ops | 先 `cp -a` LIVE → `bak-20260911-pre-rollback-drill`，tar 覆盖 `bak-20260911-pre-da54e48`（`182e034`），拨测 `/diff`=404；再覆盖回 `da54e48`，`/diff` 无 operator=401。禁止 `ln -sfn`。 | pre-rollback bak |
 | WebSocket | **deferred-with-condition** | eng | 触发=实测 SSE+10s 轮询不够。需单独 spec（auth/proxy/reconnect/origin/downgrade）。无替换计划。 | 保持 SSE |
 | 更多 agent 专用采集器 | **deferred-with-condition** | eng | 触发=具体机器/家族需求。须有界 metadata + 隔离失败 + fixture。不预做。 | 删 collector |
-| Exact capture 生产升级 | **deferred-with-condition** | ops | 路由已接；默认 `best_effort`。触发=加密/配额/留存/审计核查通过后 operator 显式 `capture-exact`。不随 gate 自动开。 | 不调用 upgrade |
+| Exact capture 生产升级 | **deferred-with-condition** | ops | Hub 侧 `/api/adoptions/<session_id>/capture-exact` 已提供 operator-only 的 Adoption 标签升级与 `capture_exact` 审计；但 probe 侧 adopt bridge 仍固定以 `best_effort` 采集，当前没有把该状态传到 agent/source 的 exact 升级协议。因此 API 返回 `exact` 只代表控制面状态，不能当作 transcript 已变为 exact。触发=补齐受管 source/capability 证明、signed probe-side upgrade、加密/配额/留存/审计核查并完成端到端验收；不随 gate 自动开。 | 不调用 upgrade |
 | `agent_profiles` P2 / 密钥下发 | **deferred-with-condition** | eng | 触发=单独安全设计获批。控制面永不下发密钥；Phase 5 只翻本机 `is_current`。 | 保持禁令 |
 | LLM classifier / 自动 terminate | **deferred-with-condition** | eng | 触发=确定性 policy + 审计稳定。classifier 不得成为唯一不可逆控制依据。 | 不接入 |
 | Hermes 结构化 spawn/resume | **deferred-with-condition** | eng | 触发=runtime capability probe 证明。在此之前 Hermes 永久 `unsupported_action`。 | 保持拒绝 |

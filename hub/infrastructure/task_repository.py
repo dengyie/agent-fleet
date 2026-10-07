@@ -12,19 +12,19 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
+from hub.domain.task_result import (
+    MAX_DIFF_PATCH, MAX_TEST_SUMMARY, bound_patch,
+    normalize_test_summary as _normalize_test_summary,
+)
 
 
 LEASE_TTL_S = 300
 TASK_TTL_S = 24 * 3600
+SQLITE_CONNECT_TIMEOUT_S = 10.0
 AGENT_TYPES = ("codex", "claude_code", "hermes")
 TASK_STATES = (
     "queued", "leased", "running", "paused",
     "succeeded", "failed", "cancelled", "expired",
-)
-MAX_DIFF_PATCH = 102400
-MAX_TEST_SUMMARY = 20480
-TEST_SUMMARY_KEYS = (
-    "framework", "passed", "failed", "skipped", "errors", "duration_s", "failed_names",
 )
 
 SCHEMA = """
@@ -105,48 +105,6 @@ def _tx(conn):
     else:
         conn.execute("COMMIT")
 
-def _normalize_test_summary(raw):
-    """Allowlisted test summary; unknown keys dropped. None if empty."""
-    if raw is None or raw == "":
-        return None
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except (TypeError, ValueError):
-            return None
-    if not isinstance(raw, dict):
-        return None
-    out = {}
-    for key in TEST_SUMMARY_KEYS:
-        if key not in raw:
-            continue
-        value = raw[key]
-        if key == "framework":
-            text = str(value)[:32]
-            if text in ("pytest", "unittest", "unknown"):
-                out[key] = text
-            else:
-                out[key] = "unknown"
-        elif key in ("passed", "failed", "skipped", "errors"):
-            try:
-                out[key] = max(0, int(value))
-            except (TypeError, ValueError):
-                continue
-        elif key == "duration_s":
-            try:
-                out[key] = float(value)
-            except (TypeError, ValueError):
-                continue
-        elif key == "failed_names" and isinstance(value, (list, tuple)):
-            names = []
-            for item in value[:20]:
-                text = str(item)[:200]
-                if text:
-                    names.append(text)
-            out[key] = names
-    return out or None
-
-
 def _audit(conn, actor, action, task_id=None, detail=None, now=None):
     conn.execute(
         "INSERT INTO audit (ts, actor, action, task_id, detail) VALUES (?,?,?,?,?)",
@@ -160,39 +118,74 @@ class SqliteTaskRepository:
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
 
-    def _connect(self):
-        conn = sqlite3.connect(str(self.db_path), timeout=10, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+    def _connect(self) -> sqlite3.Connection:
+        deadline = time.monotonic() + SQLITE_CONNECT_TIMEOUT_S
+        while True:
+            conn = sqlite3.connect(str(self.db_path),
+                                   timeout=max(0.0, deadline - time.monotonic()),
+                                   isolation_level=None)
+            try:
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA foreign_keys=ON")
+                return conn
+            except sqlite3.OperationalError as exc:
+                conn.close()
+                code = getattr(exc, "sqlite_errorcode", None)
+                locked = (code & 0xff) in (5, 6) if code is not None else str(exc) in (
+                    "database is locked", "database table is locked",
+                )
+                remaining = deadline - time.monotonic()
+                if not locked or remaining <= 0:
+                    raise
+                # WAL negotiation can fail immediately despite busy_timeout.
+                # Retry only this idempotent setup, after releasing all locks.
+                time.sleep(min(0.01, remaining))
+                if time.monotonic() >= deadline:
+                    raise
+            except BaseException:
+                conn.close()
+                raise
 
 
-    def init(self):
+    def init(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         if self.db_path.exists():
             try:
-                conn = self._connect()
-                ok = conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-                conn.close()
-            except sqlite3.DatabaseError:
+                with contextlib.closing(self._connect()) as conn:
+                    ok = conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            except sqlite3.DatabaseError as exc:
+                code = getattr(exc, "sqlite_errorcode", None)
+                # SQLite primary codes CORRUPT=11 and NOTADB=26 are stable;
+                # Python 3.10 exposes only their exact SQLite error messages.
+                corrupt = (code & 0xff) in (11, 26) if code is not None else str(exc) in (
+                    "database disk image is malformed", "file is not a database",
+                )
+                if not corrupt:
+                    raise
                 ok = False
             if not ok:
                 os.replace(self.db_path, self.db_path.with_name(self.db_path.name + ".corrupt"))
         conn = self._connect()
         try:
-            conn.executescript(SCHEMA)
-            self._migrate_schema(conn)
+            # Disable FK enforcement only on this initialization connection;
+            # table replacement is checked before committing and it then closes.
+            conn.execute("PRAGMA foreign_keys=OFF")
+            with conn:
+                # executescript commits any preceding transaction, so BEGIN
+                # belongs in the script, before the first schema change.
+                conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA)
+                self._migrate_schema(conn)
         finally:
             conn.close()
 
-    def _migrate_schema(self, conn):
-        """Add v4-initial columns/tables on existing LIVE databases.
+    def _migrate_schema(self, conn: sqlite3.Connection) -> None:
+        """Apply v4 changes inside init's serialized schema transaction.
 
         CREATE TABLE IF NOT EXISTS does not alter old ``results`` / ``tasks``
         check constraints. Rebuild ``tasks`` when the state CHECK lacks
         ``paused`` so pause/continue can persist. New result columns are
-        nullable; duplicate-column ALTER is ignored.
+        nullable; column inspection runs under the same writer transaction.
         """
         cols = {
             row[1] for row in conn.execute("PRAGMA table_info(results)").fetchall()
@@ -215,7 +208,6 @@ class SqliteTaskRepository:
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
         ).fetchone()
         if sql and sql[0] and "'paused'" not in sql[0]:
-            conn.execute("PRAGMA foreign_keys=OFF")
             conn.execute(
                 "CREATE TABLE tasks_v4 ("
                 " task_id TEXT PRIMARY KEY,"
@@ -240,7 +232,8 @@ class SqliteTaskRepository:
             )
             conn.execute("DROP TABLE tasks")
             conn.execute("ALTER TABLE tasks_v4 RENAME TO tasks")
-            conn.execute("PRAGMA foreign_keys=ON")
+            if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise sqlite3.IntegrityError("task schema migration violates foreign keys")
 
     def create_task(self, *, machine, agent_type, project, instruction, requested_by,
                     client_token=None, ttl_s=TASK_TTL_S, now=None, confirm=False):
@@ -415,10 +408,10 @@ class SqliteTaskRepository:
         if diff_patch is None:
             patch_value = None
         else:
-            patch_value = str(diff_patch)[:MAX_DIFF_PATCH]
+            patch_value = bound_patch(diff_patch)[0]
         summary_obj = _normalize_test_summary(test_summary)
         summary_json = (
-            json.dumps(summary_obj, ensure_ascii=False)[:MAX_TEST_SUMMARY]
+            json.dumps(summary_obj, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
             if summary_obj is not None else None
         )
         now = time.time() if now is None else now

@@ -51,6 +51,17 @@ MACHINE="smoke-$(( $$ % 1000 ))"
 
 if [ -z "$ENDPOINT" ]; then
   # --- 本地模式：临时目录跑仓库副本，不污染真实 state/credentials ---
+  PORT_PYTHON="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+  [ -n "$PORT_PYTHON" ] || fail "无法分配本地 hub 端口：找不到 Python"
+  PORT="$($PORT_PYTHON - <<'PY'
+import socket
+
+with socket.socket() as listener:
+    listener.bind(("127.0.0.1", 0))
+    print(listener.getsockname()[1])
+PY
+)"
+  [ -n "$PORT" ] || fail "无法分配本地 hub 端口"
   mkdir -p "$WORK/state" "$WORK/credentials"
   cp -r hub tools connectors frontend agent_profiles.py report_schema.py session_schema.py platform_schema.py requirements.txt "$WORK/"
   # 隔离的白名单 hosts.yaml：仅冒烟机器 + projects: [demo]
@@ -68,11 +79,11 @@ EOF
     cd "$WORK"
     AGENT_FLEET_INGEST_TOKEN="$INGEST_TOKEN" \
       AGENT_FLEET_SESSION_REPOSITORIES_ENABLED=1 \
-      exec "$PY" hub/web.py --port 8799 --host 127.0.0.1 --dev-operator smoke@local
+      exec "$PY" hub/web.py --port "$PORT" --host 127.0.0.1 --dev-operator smoke@local
   ) > "$WORK/hub.log" 2>&1 &
   HUB_PID=$!
   LOCAL=1
-  ENDPOINT="http://127.0.0.1:8799"
+  ENDPOINT="http://127.0.0.1:$PORT"
   ready=0
   for _ in {1..30}; do
     if curl -sf "$ENDPOINT/healthz" >/dev/null 2>&1; then ready=1; break; fi

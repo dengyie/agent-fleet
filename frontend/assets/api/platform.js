@@ -195,3 +195,8 @@ export async function getExecutionWindowEvents(windowId, after, limit) {
     '&limit=' + encodeURIComponent(String(bounded));
   return object(await platformRequest(path), 'execution window events');
 }
+export function getExecutionWindowFrameUrl(windowId, artifactId, cacheKey) {
+  var path = apiPath('platform', 'v1', 'execution-windows', segment(windowId),
+    'frames', segment(artifactId));
+  return cacheKey ? path + '?retry=' + encodeURIComponent(String(cacheKey)) : path;
+}

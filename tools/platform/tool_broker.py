@@ -171,6 +171,7 @@ class ToolBroker:
         self.browser_backend = browser_backend
         self.browser_enabled = bool(browser_enabled)
         self.browser_submit_enabled = bool(browser_submit_enabled)
+        self.allowed_tools = self.TOOLS if allowed_tools is None else self.TOOLS.intersection(allowed_tools)
 
     @classmethod
     def tool_definitions(cls, allowed_tools=None, *, browser_enabled: bool = False,
@@ -195,7 +196,7 @@ class ToolBroker:
         if tool in BROWSER_TOOLS:
             if not self.browser_enabled or self.browser_backend is None:
                 return ToolReceipt(command_id, "failed", {}, "browser_disabled")
-            if tool == "browser.submit" and not self.browser_submit_enabled:
+            if tool == "browser.submit":
                 return ToolReceipt(command_id, "failed", {}, "submit_disabled")
             try:
                 result = self.browser_backend.execute(tool, dict(arguments))

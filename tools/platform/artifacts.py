@@ -37,10 +37,26 @@ class ArtifactStore:
     PREVIEW_CONTENT_TYPES = frozenset({
         "text/plain", "text/markdown", "text/csv", "application/json",
     })
+    _CONTENT_TYPES_BY_SUFFIX = {
+        ".md": "text/markdown",
+        ".markdown": "text/markdown",
+        ".txt": "text/plain",
+        ".csv": "text/csv",
+        ".json": "application/json",
+    }
 
     def __init__(self, root: Path, *, clock=time.time):
         self.root = Path(root).expanduser().resolve()
         self.clock = clock
+
+    @classmethod
+    def _content_type_for_name(cls, name: str) -> str:
+        suffix = Path(name).suffix.lower()
+        return (
+            cls._CONTENT_TYPES_BY_SUFFIX.get(suffix)
+            or mimetypes.guess_type(name)[0]
+            or "application/octet-stream"
+        )
 
     def _paths(self, artifact_id: str) -> tuple[Path, Path]:
         if not isinstance(artifact_id, str) or not artifact_id or len(artifact_id) > 128:
@@ -100,7 +116,7 @@ class ArtifactStore:
             "name": display_name,
             "size": len(raw),
             "sha256": hashlib.sha256(raw).hexdigest(),
-            "content_type": content_type or mimetypes.guess_type(display_name)[0] or "application/octet-stream",
+            "content_type": content_type or self._content_type_for_name(display_name),
             "created_at": float(self.clock()),
         }
         self.root.mkdir(parents=True, exist_ok=True)

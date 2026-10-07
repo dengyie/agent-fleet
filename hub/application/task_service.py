@@ -26,10 +26,10 @@ from typing import Any
 
 from hub.domain.task import (
     DEFAULT_AGENT_TYPES,
-    MAX_DIFF_PATCH,
     public_task,
     validate_task_input,
 )
+from hub.domain.task_result import PATCH_TRUNCATION_SUFFIX
 from session_schema import is_valid_session_id
 from tools.result_files import (
     MAX_BYTES_PER_WINDOW,
@@ -38,6 +38,7 @@ from tools.result_files import (
     normalize_path,
     public_file,
     public_file_meta,
+    redact_patch,
 )
 
 logger = logging.getLogger(__name__)
@@ -279,10 +280,11 @@ class TaskService:
         row, changed = self._task_op(self.task_repo.pause_task, task_id, actor)
         if row is None:
             raise ApplicationError("not_found", "任务不存在", 404)
-        if not changed:
+        if not changed and row["state"] != "paused":
             raise ApplicationError("conflict", "当前状态不可暂停", 409)
-        self._emit("task_paused", row["machine"], task_id, "paused")
-        return {"ok": True, "changed": True, "task": self._public_task(row)}
+        if changed:
+            self._emit("task_paused", row["machine"], task_id, "paused")
+        return {"ok": True, "changed": changed, "task": self._public_task(row)}
 
     def continue_task(self, task_id: str, actor: str) -> dict:
         row, changed = self._task_op(self.task_repo.continue_task, task_id, actor)
@@ -318,8 +320,8 @@ class TaskService:
         patch = result.get("diff_patch")
         if not isinstance(patch, str) or not patch:
             raise ApplicationError("not_found", "没有 patch", 404)
-        truncated = len(patch) > MAX_DIFF_PATCH
-        body = patch[:MAX_DIFF_PATCH]
+        body, _ = redact_patch(patch)
+        truncated = body.endswith(PATCH_TRUNCATION_SUFFIX)
         try:
             self.task_repo.audit_action(
                 actor or "operator", "read_task_diff", task_id,

@@ -14,10 +14,19 @@ from tools.platform.node_executor import BROWSER_TOOLS, NodeToolExecutor
 
 
 GLOBAL = "93.184.216.34"
+BROWSER_URL = "https://one.example/"
 
 
 def _resolver(host, _port, *, type):
     return [(2, 1, 6, "", (GLOBAL, 443))]
+
+
+def _backend(driver_factory, *, submit_enabled=False):
+    return LocalBrowserBackend(
+        driver_factory, network_enabled=True,
+        allowed_origins=("https://one.example",), resolver=_resolver,
+        submit_enabled=submit_enabled,
+    )
 
 
 def test_policy_matches_effective_default_https_port():
@@ -27,6 +36,32 @@ def test_policy_matches_effective_default_https_port():
         allowed_origins=("https://one.example:443",),
         resolver=_resolver,
     ) == "https://one.example/page"
+
+
+def test_browser_policy_rejects_loopback_urls():
+    from tools.platform.browser_policy import BrowserPolicyError
+
+    with pytest.raises(BrowserPolicyError, match="network_disabled"):
+        validate_url("http://localhost:3000", network_enabled=False)
+
+    with pytest.raises(BrowserPolicyError, match="origin_forbidden"):
+        validate_url("http://127.0.0.1:3000", network_enabled=True)
+
+
+def test_browser_policy_bounds_dns_answers():
+    from tools.platform.browser_policy import BrowserPolicyError
+
+    answers = [
+        (2, 1, 6, "", (GLOBAL, 443))
+        for _ in range(17)
+    ]
+
+    with pytest.raises(BrowserPolicyError, match="request_limit_exceeded"):
+        validate_url(
+            BROWSER_URL, network_enabled=True,
+            allowed_origins=("https://one.example",),
+            resolver=lambda *_args, **_kwargs: answers,
+        )
 
 
 @pytest.mark.parametrize("value", [
@@ -68,10 +103,10 @@ def test_backend_failure_preserves_driver_cause_without_exposing_it_in_text():
         def open(self, _url):
             raise cause
 
-    backend = LocalBrowserBackend(Driver, network_enabled=False)
+    backend = _backend(Driver)
 
     with pytest.raises(BrowserBackendError, match="backend_failed") as caught:
-        backend.execute("browser.open", {"url": "http://localhost:3000"}, run_id="run-a")
+        backend.execute("browser.open", {"url": BROWSER_URL}, run_id="run-a")
 
     assert caught.value.__cause__ is cause
     assert str(caught.value) == "backend_failed"
@@ -88,15 +123,15 @@ def test_post_dispatch_driver_failure_is_unknown_and_keeps_cause():
         def navigate(self, _url):
             raise cause
 
-    backend = LocalBrowserBackend(Driver, network_enabled=False)
+    backend = _backend(Driver)
     opened = backend.execute(
-        "browser.open", {"url": "http://localhost:3000"}, run_id="run-a",
+        "browser.open", {"url": BROWSER_URL}, run_id="run-a",
     )
 
     with pytest.raises(BrowserExecutionError, match="backend_interrupted") as caught:
         backend.execute(
             "browser.navigate",
-            {"session_id": opened["session_id"], "url": "http://localhost:3000/next"},
+            {"session_id": opened["session_id"], "url": "https://one.example/next"},
             run_id="run-a",
         )
 
@@ -116,8 +151,8 @@ def test_cleanup_failures_are_bounded_and_keep_primary_cause():
             raise cleanup
 
     with pytest.raises(BrowserBackendError) as caught:
-        LocalBrowserBackend(Driver, network_enabled=False).execute(
-            "browser.open", {"url": "http://localhost:3000"}, run_id="run-a",
+        _backend(Driver).execute(
+            "browser.open", {"url": BROWSER_URL}, run_id="run-a",
         )
 
     assert caught.value.code == "backend_failed"
@@ -134,8 +169,8 @@ def test_close_all_reports_bounded_cleanup_failure_without_driver_text():
         def close(self):
             raise RuntimeError("driver-private-close")
 
-    backend = LocalBrowserBackend(Driver, network_enabled=False)
-    backend.execute("browser.open", {"url": "http://localhost:3000"}, run_id="run-a")
+    backend = _backend(Driver)
+    backend.execute("browser.open", {"url": BROWSER_URL}, run_id="run-a")
 
     with pytest.raises(BrowserCleanupError) as caught:
         backend.close_all()
@@ -156,9 +191,9 @@ def test_node_client_journals_browser_dispatch_failure_as_unknown(tmp_path):
         def navigate(self, _url):
             raise cause
 
-    backend = LocalBrowserBackend(Driver, network_enabled=False)
+    backend = _backend(Driver)
     opened = backend.execute(
-        "browser.open", {"url": "http://localhost:3000"}, run_id="run-a",
+        "browser.open", {"url": BROWSER_URL}, run_id="run-a",
     )
     executor = NodeToolExecutor(
         None, allowed_tools=BROWSER_TOOLS, browser_backend=backend,
@@ -169,7 +204,7 @@ def test_node_client_journals_browser_dispatch_failure_as_unknown(tmp_path):
         action="tool.browser.navigate", resource_id="workspace-a",
         arguments={
             "session_id": opened["session_id"],
-            "url": "http://localhost:3000/next",
+            "url": "https://one.example/next",
         },
         retry_class="manual_only", expires_at=9_999_999_999, run_id="run-a",
     ).as_dict()
@@ -217,9 +252,9 @@ def test_node_client_redacts_dispatch_url_ip_body_and_tls_details(tmp_path):
         def navigate(self, _url):
             raise cause
 
-    backend = LocalBrowserBackend(Driver, network_enabled=False)
+    backend = _backend(Driver)
     opened = backend.execute(
-        "browser.open", {"url": "http://localhost:3000"}, run_id="run-a",
+        "browser.open", {"url": BROWSER_URL}, run_id="run-a",
     )
     executor = NodeToolExecutor(
         None, allowed_tools=BROWSER_TOOLS, browser_backend=backend,
@@ -230,7 +265,7 @@ def test_node_client_redacts_dispatch_url_ip_body_and_tls_details(tmp_path):
         action="tool.browser.navigate", resource_id="workspace-a",
         arguments={
             "session_id": opened["session_id"],
-            "url": "http://localhost:3000/next",
+            "url": "https://one.example/next",
         },
         retry_class="manual_only", expires_at=9_999_999_999, run_id="run-a",
     ).as_dict()
@@ -365,19 +400,19 @@ def test_submit_requires_gate_and_dispatches_to_driver_submit():
             return {"clicked": True}
 
     driver = Driver()
-    gated = LocalBrowserBackend(lambda: driver, network_enabled=False)
-    opened = gated.execute("browser.open", {"url": "http://localhost:3000"}, run_id="run-a")
+    gated = _backend(lambda: driver)
+    opened = gated.execute("browser.open", {"url": BROWSER_URL}, run_id="run-a")
     with pytest.raises(BrowserBackendError, match="submit_disabled"):
         gated.execute(
             "browser.submit",
-            {"session_id": opened["session_id"], "selector": "#go"}, run_id="run-a")
+            {"session_id": opened["session_id"], "selector": "#go"}, run_id="run-a", approval_id="approval-1234567890")
     assert driver.submits == []
 
-    enabled = LocalBrowserBackend(lambda: driver, network_enabled=False, submit_enabled=True)
-    opened = enabled.execute("browser.open", {"url": "http://localhost:3000"}, run_id="run-a")
+    enabled = _backend(lambda: driver, submit_enabled=True)
+    opened = enabled.execute("browser.open", {"url": BROWSER_URL}, run_id="run-a")
     receipt = enabled.execute(
         "browser.submit",
-        {"session_id": opened["session_id"], "selector": "#go"}, run_id="run-a")
+        {"session_id": opened["session_id"], "selector": "#go"}, run_id="run-a", approval_id="approval-1234567890")
     assert receipt["result"] == {"clicked": True}
     assert driver.submits == ["#go"]
 
@@ -390,15 +425,15 @@ def test_submit_after_dispatch_failure_is_unknown_and_run_bound():
         def submit(self, _selector):
             raise RuntimeError("driver-private-submit-failure")
 
-    backend = LocalBrowserBackend(Driver, network_enabled=False, submit_enabled=True)
-    opened = backend.execute("browser.open", {"url": "http://localhost:3000"}, run_id="run-a")
+    backend = _backend(Driver, submit_enabled=True)
+    opened = backend.execute("browser.open", {"url": BROWSER_URL}, run_id="run-a")
     with pytest.raises(BrowserExecutionError, match="backend_interrupted"):
         backend.execute(
             "browser.submit",
-            {"session_id": opened["session_id"], "selector": "#go"}, run_id="run-a")
+            {"session_id": opened["session_id"], "selector": "#go"}, run_id="run-a", approval_id="approval-1234567890")
 
-    other = LocalBrowserBackend(Driver, network_enabled=False, submit_enabled=True)
-    opened = other.execute("browser.open", {"url": "http://localhost:3000"}, run_id="run-a")
+    other = _backend(Driver, submit_enabled=True)
+    opened = other.execute("browser.open", {"url": BROWSER_URL}, run_id="run-a")
     with pytest.raises(BrowserBackendError, match="session_not_found"):
         other.execute(
             "browser.submit",

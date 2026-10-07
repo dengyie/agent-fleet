@@ -32,7 +32,9 @@
 
 - [x] Update request metadata/testing docs and exact journey selectors for all new scenarios.
 - [x] Run compile/Python 3.10 syntax checks, full pytest and all required browser journeys; inspect output and final diff.
-- [ ] Commit, fetch/rebase onto latest main, merge via the established public release clone, push main and await CI deployment.
-- [ ] Verify deployed manifests, public asset hashes, DB integrity, live request metadata and browser recovery; update the canonical Obsidian deployment note and linked indexes, then scan for stale/broken notes.
+- [x] Commit, fetch/rebase onto latest main, merge via the established public release clone, push main and await CI deployment.
+- [x] Verify deployed manifests, public asset hashes, DB integrity, live request metadata and browser recovery; update the canonical Obsidian deployment note and linked indexes, then scan for stale/broken notes.
 
 Local verification: 2549 passed, 154 subtests passed, 2 macOS-only platform skips; 27/27 journeys. Python 3.10 grammar and compile checks passed. Linux CI must prove the release revision with no skips. Initial red evidence: all 9 original regression cases failed before the fixes.
+
+Release verification: Linux CI run [37261284190](https://github.com/dengyie/agent-fleet/actions/runs/37261284190) tested, packaged, and deployed exact revision `6e547a2f5cbb7315239b8d18a3c5a422964fc8a7`; all three jobs succeeded without skips. The canonical Obsidian deployment note records production manifest/hash, database integrity, request metadata, browser recovery, and rollback evidence.

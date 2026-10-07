@@ -246,6 +246,33 @@ class TaskCrudApiTests(TaskApiTestBase):
         resp = self.client.post(f"/api/tasks/{tid}/pause")
         self.assertEqual(resp.status_code, 409)
 
+    def test_repeated_pause_is_idempotent_without_duplicate_events(self) -> None:
+        from unittest.mock import patch
+        from hub.application.task_service import TaskService
+
+        tid = self._create().get_json()["task"]["task_id"]
+        with patch.object(TaskService, "_emit") as emit:
+            first = self.client.post(f"/api/tasks/{tid}/pause")
+            repeated = self.client.post(f"/api/tasks/{tid}/pause")
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(repeated.status_code, 200)
+        first_data, repeated_data = first.get_json(), repeated.get_json()
+        self.assertTrue(first_data["changed"])
+        self.assertFalse(repeated_data["changed"])
+        self.assertEqual(repeated_data["task"], first_data["task"])
+        emit.assert_called_once_with("task_paused", "mac-local", tid, "paused")
+        conn = task_store._connect()
+        try:
+            pauses = conn.execute(
+                "SELECT COUNT(*) FROM audit WHERE task_id=? AND action='pause_task'", (tid,),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(pauses, 1)
+        poll = self.client.post("/api/commands/poll", json={"runner_id": "r1"},
+                                headers={"X-Runner-Credential": "mac-local:runner-secret"})
+        self.assertIsNone(poll.get_json()["task"])
+
     def test_confirm_gate_blocks_poll_until_confirmed(self):
         tid = self._create(confirm=True).get_json()["task"]["task_id"]
         detail = self.client.get(f"/api/tasks/{tid}").get_json()["task"]

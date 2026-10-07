@@ -17,7 +17,7 @@ const assert = require('node:assert/strict');
     };
    });
    const page = await context.newPage(); page.setDefaultTimeout(5000);
-   await page.goto(origin + '/account');
+   await page.goto(origin + '/account', {waitUntil: 'domcontentloaded'});
    await page.getByLabel('账号或邮箱', {exact:true}).fill(from);
    await page.getByLabel('密码', {exact:true}).fill('Review-password-123!');
    await page.getByRole('button', {name:'登录', exact:true}).click();
@@ -42,7 +42,7 @@ const assert = require('node:assert/strict');
   }
   const context = await browser.newContext();
   const page = await context.newPage(); page.setDefaultTimeout(5000);
-  await page.goto(origin + '/account');
+  await page.goto(origin + '/account', {waitUntil: 'domcontentloaded'});
   await page.getByLabel('账号或邮箱', {exact:true}).fill('admin@example.test');
   await page.getByLabel('密码', {exact:true}).fill('Review-password-123!');
   await page.getByRole('button', {name:'登录', exact:true}).click();

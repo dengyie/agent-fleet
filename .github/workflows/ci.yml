@@ -48,6 +48,12 @@ jobs:
             --junitxml="$RUNNER_TEMP/fleet-test-evidence/results.xml" \
             --require-journeys \
             --journey-report="$RUNNER_TEMP/fleet-test-evidence/journeys.json"
+      - name: Verify release evidence
+        run: |
+          python -m tools.testing.release_evidence \
+            --evidence "$RUNNER_TEMP/fleet-test-evidence" \
+            --checkout "$GITHUB_WORKSPACE" \
+            --revision "$GITHUB_SHA"
       - name: Preserve test evidence
         if: always()
         uses: actions/upload-artifact@v4

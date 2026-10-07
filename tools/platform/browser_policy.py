@@ -1,6 +1,8 @@
 """Fail-closed URL and argument policy for browser commands."""
 from __future__ import annotations
 
+from hub.domain.browser_submit import SENSITIVE_MARKERS, submit_selector
+
 import ipaddress
 import re
 import socket
@@ -13,12 +15,12 @@ MAX_URL = 2048
 MAX_TEXT = 4096
 MAX_SELECTOR = 512
 MAX_SCROLL = 2000
+_MAX_DNS_ANSWERS = 16
 _ALLOWED_TOOLS = frozenset({
     "browser.open", "browser.navigate", "browser.snapshot", "browser.screenshot",
     "browser.click", "browser.type", "browser.scroll", "browser.back", "browser.close",
     "browser.submit",
 })
-SENSITIVE_MARKERS = ("password", "passwd", "token", "secret", "credential", "cookie", "authorization", "api_key")
 _SENSITIVE_MARKERS = SENSITIVE_MARKERS
 
 
@@ -41,16 +43,20 @@ def _resolved_addresses(host: str, port: int, resolver=None) -> tuple[ipaddress.
         resolver = socket.getaddrinfo
     try:
         rows = resolver(host, port, type=socket.SOCK_STREAM)
+        addresses = []
+        for row in rows or ():
+            if len(addresses) == _MAX_DNS_ANSWERS:
+                raise BrowserPolicyError("request_limit_exceeded")
+            try:
+                sockaddr = row[4]
+                address = ipaddress.ip_address(sockaddr[0])
+            except (IndexError, KeyError, TypeError, ValueError) as exc:
+                raise BrowserPolicyError("origin_unresolvable") from exc
+            addresses.append(address)
+    except BrowserPolicyError:
+        raise
     except (OSError, socket.gaierror, TypeError, ValueError):
         raise BrowserPolicyError("origin_unresolvable") from None
-    addresses = []
-    for row in rows or ():
-        try:
-            sockaddr = row[4]
-            address = ipaddress.ip_address(sockaddr[0])
-        except (IndexError, KeyError, TypeError, ValueError):
-            raise BrowserPolicyError("origin_unresolvable") from None
-        addresses.append(address)
     if not addresses:
         raise BrowserPolicyError("origin_unresolvable")
     return tuple(addresses)
@@ -81,7 +87,8 @@ def validate_url(value: object, *, network_enabled: bool = False, allowed_origin
         address = None
     loopback = host == "localhost" or (address is not None and address.is_loopback)
     if loopback:
-        return value
+        raise BrowserPolicyError(
+            "network_disabled" if not network_enabled else "origin_forbidden")
     if not network_enabled:
         raise BrowserPolicyError("network_disabled")
     configured_origins = [
@@ -121,7 +128,7 @@ def validate_action(tool: object, arguments: object, *, network_enabled: bool = 
         "browser.snapshot": set(), "browser.screenshot": set(),
         "browser.click": {"selector"}, "browser.type": {"selector", "text"},
         "browser.scroll": {"delta_y"}, "browser.back": set(), "browser.close": set(),
-        "browser.submit": {"selector", "approval_id"},
+        "browser.submit": {"selector"},
     }[tool]
     allowed = set(allowed)
     if tool != "browser.open":
@@ -138,11 +145,11 @@ def validate_action(tool: object, arguments: object, *, network_enabled: bool = 
             arguments.get("url"), network_enabled=network_enabled,
             allowed_origins=allowed_origins, resolver=resolver)
     if tool in {"browser.click", "browser.type", "browser.submit"}:
-        result["selector"] = validate_selector(arguments.get("selector"))
-    if tool == "browser.submit" and "approval_id" in arguments:
-        approval_id = arguments.get("approval_id")
-        if not isinstance(approval_id, str) or not 16 <= len(approval_id) <= 128:
-            raise BrowserPolicyError("invalid_approval")
+        try:
+            result["selector"] = (submit_selector(arguments.get("selector")) if tool == "browser.submit"
+                                  else validate_selector(arguments.get("selector")))
+        except ValueError as exc:
+            raise BrowserPolicyError(getattr(exc, "code", "invalid_selector")) from exc
     if tool == "browser.type":
         text = arguments.get("text")
         if not isinstance(text, str) or len(text.encode("utf-8")) > MAX_TEXT:

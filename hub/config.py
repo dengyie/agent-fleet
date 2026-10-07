@@ -389,9 +389,8 @@ class FleetConfig:
             platform_browser_network_enabled=bool(
                 platform_browser_network_enabled and platform_enabled
                 and platform_browser_enabled),
-            platform_browser_submit_enabled=bool(
-                platform_browser_submit_enabled and platform_enabled
-                and platform_browser_enabled),
+            platform_browser_submit_enabled=bool(platform_enabled and platform_browser_enabled
+                                                 and platform_browser_network_enabled and platform_browser_submit_enabled),
             platform_browser_allowed_origins=browser_origins,
             platform_usage_limits_enabled=bool(
                 platform_usage_limits_enabled and platform_enabled),

@@ -14,7 +14,7 @@ const [origin] = process.argv.slice(2);
       if (/^\/api\/(platform|status|stream|tasks|sessions|machines)/.test(new URL(request.url()).pathname)) featureRequests.push(request.url());
     });
     async function expectLogin(returnTo) {
-      await page.waitForURL(url => url.pathname === '/login');
+      await page.waitForURL(url => url.pathname === '/login', {waitUntil: 'domcontentloaded'});
       await page.getByRole('heading', {name: '登录工作空间', exact: true}).waitFor();
       assert.equal(new URL(page.url()).searchParams.get('return_to'), returnTo);
       assert.equal(await page.locator('.console-layout').isVisible(), false);
@@ -22,14 +22,14 @@ const [origin] = process.argv.slice(2);
     async function login() {
       await page.getByLabel('操作员令牌', {exact: true}).fill('browser-fixture-token');
       await page.getByRole('button', {name: '登录', exact: true}).click();
-      await page.waitForURL(url => url.pathname !== '/login');
+      await page.waitForURL(url => url.pathname !== '/login', {waitUntil: 'domcontentloaded'});
     }
     for (const route of ['/', '/assistant', '/monitoring', '/machine/example', '/task/example', '/session/example', '/conversation/conv-auth']) {
-      await page.goto(origin + route);
+      await page.goto(origin + route, {waitUntil: 'domcontentloaded'});
       await expectLogin(route);
     }
     assert.deepEqual(featureRequests, [], 'protected data and SSE must not load before session validation');
-    await page.goto(origin + '/assistant');
+    await page.goto(origin + '/assistant', {waitUntil: 'domcontentloaded'});
     await expectLogin('/assistant');
     const output = process.env.FLEET_SCREENSHOTS || '/tmp/agent-fleet-console-evidence';
     fs.mkdirSync(output, {recursive: true});
@@ -51,7 +51,7 @@ const [origin] = process.argv.slice(2);
     assert.equal(await send.isDisabled(), false);
     await page.locator('#sidebar-conversations a').filter({hasText: '登录恢复验收'}).waitFor();
     await page.evaluate(() => sessionStorage.setItem('fleet_operator_token', 'expired-fixture'));
-    await page.goto(origin + '/conversation/conv-auth?keep=1#history');
+    await page.goto(origin + '/conversation/conv-auth?keep=1#history', {waitUntil: 'domcontentloaded'});
     await expectLogin('/conversation/conv-auth?keep=1#history');
     await login();
     await page.waitForFunction(() => document.querySelector('[aria-label="工作区"]').value === 'saved');
@@ -69,7 +69,7 @@ const [origin] = process.argv.slice(2);
     const defaultsRoute = '**/api/platform/v1/defaults';
     await page.route(defaultsRoute, route => route.fulfill({status: 503, contentType: 'application/json',
       body: JSON.stringify({error: 'unavailable', detail: 'catalog unavailable', request_id: 'catalog-check'})}));
-    await page.goto(origin + '/assistant');
+    await page.goto(origin + '/assistant', {waitUntil: 'domcontentloaded'});
     await page.getByText('平台配置加载失败', {exact: true}).waitFor();
     assert.ok((await page.locator('.assistant-initialization').textContent()).includes('catalog-check'));
     assert.equal(await send.isDisabled(), true);
@@ -79,7 +79,7 @@ const [origin] = process.argv.slice(2);
     const conversationRoute = '**/api/platform/v1/conversations/conv-auth';
     await page.route(conversationRoute, route => route.fulfill({status: 503, contentType: 'application/json',
       body: JSON.stringify({error: 'unavailable', detail: 'recovery unavailable'})}));
-    await page.goto(origin + '/conversation/conv-auth');
+    await page.goto(origin + '/conversation/conv-auth', {waitUntil: 'domcontentloaded'});
     await page.getByText('会话恢复失败', {exact: true}).waitFor();
     assert.equal(await send.isDisabled(), true);
     await page.unroute(conversationRoute);
@@ -89,19 +89,19 @@ const [origin] = process.argv.slice(2);
 
     // A 401 after a successful entry check must also redirect, even non-JSON errors.
     await page.route(defaultsRoute, route => route.fulfill({status: 401, contentType: 'text/html', body: 'unauthorized'}));
-    await page.goto(origin + '/assistant');
+    await page.goto(origin + '/assistant', {waitUntil: 'domcontentloaded'});
     await expectLogin('/assistant');
     assert.equal(await page.evaluate(() => sessionStorage.getItem('fleet_operator_token')), null);
     await page.unroute(defaultsRoute);
     await login();
     await page.getByText('就绪', {exact: true}).waitFor();
     await page.route(defaultsRoute, route => route.fulfill({status: 403, contentType: 'application/json', body: JSON.stringify({error: 'forbidden', detail: 'denied'})}));
-    await page.reload();
+    await page.reload({waitUntil: 'domcontentloaded'});
     await page.getByText('当前操作员无访问权限', {exact: true}).waitFor();
     assert.equal(new URL(page.url()).pathname, '/assistant', 'resource 403 must not log out a valid operator');
     await page.unroute(defaultsRoute);
     await page.route(sessionRoute, route => route.fulfill({status: 503, contentType: 'application/json', body: JSON.stringify({error: 'unavailable', detail: 'session unavailable'})}));
-    await page.goto(origin + '/monitoring');
+    await page.goto(origin + '/monitoring', {waitUntil: 'domcontentloaded'});
     await page.getByText('暂时无法验证登录状态', {exact: true}).waitFor();
     assert.equal(await page.locator('.console-layout').isVisible(), false);
     assert.equal(await page.evaluate(() => sessionStorage.getItem('fleet_operator_token')), 'browser-fixture-token');
@@ -110,16 +110,16 @@ const [origin] = process.argv.slice(2);
     await page.locator('.monitoring-view').waitFor();
     await page.getByRole('button', {name: '退出登录', exact: true}).click();
     await expectLogin('/monitoring');
-    await page.goBack();
-    await page.waitForURL(url => url.pathname === '/login');
+    await page.goBack({waitUntil: 'domcontentloaded'});
+    await page.waitForURL(url => url.pathname === '/login', {waitUntil: 'domcontentloaded'});
     assert.equal(await page.locator('.console-layout').isVisible(), false);
     for (const unsafe of ['https://foreign.invalid/', '//foreign.invalid/', '/login?return_to=/login']) {
-      await page.goto(origin + '/login?return_to=' + encodeURIComponent(unsafe));
+      await page.goto(origin + '/login?return_to=' + encodeURIComponent(unsafe), {waitUntil: 'domcontentloaded'});
       await login();
       await page.getByText('就绪', {exact: true}).waitFor();
       assert.equal(new URL(page.url()).pathname, '/assistant');
       await page.getByRole('button', {name: '退出登录', exact: true}).click();
-      await page.waitForURL(url => url.pathname === '/login');
+      await page.waitForURL(url => url.pathname === '/login', {waitUntil: 'domcontentloaded'});
     }
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     assert.deepEqual(errors, []);

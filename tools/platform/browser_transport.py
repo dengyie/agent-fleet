@@ -10,16 +10,32 @@ import ssl
 import threading
 import time
 from functools import partial
+from contextlib import contextmanager
+from contextvars import ContextVar
+from collections.abc import Iterator
 from urllib.parse import quote_plus, urldefrag, urljoin, urlsplit
 
 from tools.platform.browser_url import canonical_url, normalize_origin
-from tools.platform.browser_policy import SENSITIVE_MARKERS
+from hub.domain.browser_submit import SENSITIVE_MARKERS
 
 
 class BrowserTransportError(RuntimeError):
     def __init__(self, code: str):
         self.code = code
         super().__init__(code)
+
+
+_submit_permit: ContextVar[bool] = ContextVar("browser_submit_permit", default=False)
+
+
+@contextmanager
+def _submit_scope() -> Iterator[None]:
+    """One synchronous driver activation may attempt at most one POST."""
+    token = _submit_permit.set(True)
+    try:
+        yield
+    finally:
+        _submit_permit.reset(token)
 
 
 _SUBMIT_CONTENT_TYPE = "application/x-www-form-urlencoded"
@@ -186,11 +202,11 @@ def _parse_url(value: str, allowed_origins: frozenset[tuple[str, str, int]], res
     return parsed, tuple(addresses)
 
 
-def _validate_submit_fields(fields) -> bytes:
+def _validate_submit_fields(fields: object) -> bytes:
     """Serialize the bounded urlencoded POST body, fail-closed before any I/O."""
     if not isinstance(fields, dict):
         raise BrowserTransportError("invalid_arguments")
-    if not fields or len(fields) > _MAX_SUBMIT_FIELDS:
+    if len(fields) > _MAX_SUBMIT_FIELDS:
         raise BrowserTransportError("request_too_large")
     items = []
     total = 0
@@ -517,9 +533,15 @@ class PinnedBrowserTransport:
         return self._exchange(url, method=method, headers=self._request_headers(headers),
                               body=None, follow_redirects=True)
 
-    def submit_form(self, url: str, fields) -> tuple[int, dict[str, str], bytes]:
+    def submit_form(self, url: str, fields: object) -> tuple[int, dict[str, str], bytes]:
         """The only POST entry; the general request path stays GET/HEAD-only."""
-        body = _validate_submit_fields(fields)
+        if not _submit_permit.get():
+            raise BrowserTransportError("approval_required")
+        try:
+            body = _validate_submit_fields(fields)
+        except UnicodeError as exc:
+            raise BrowserTransportError("invalid_arguments") from exc
+        _submit_permit.set(False)
         return self._exchange(url, method="POST",
                               headers={"Content-Type": _SUBMIT_CONTENT_TYPE},
                               body=body, follow_redirects=False)

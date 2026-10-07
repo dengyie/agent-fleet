@@ -8,7 +8,7 @@ TERMINAL_WINDOW_STATES = frozenset({"closed", "expired"})
 # kinds describe bounded control-plane facts and leave host execution to a
 # future adapter with its own capability contract.
 WINDOW_EVENT_KINDS = frozenset({
-    "status", "text", "notice", "input_ack", "output",
+    "status", "text", "notice", "input_ack", "output", "browser.frame",
 })
 
 WINDOW_EVENT_FIELDS = {
@@ -17,7 +17,17 @@ WINDOW_EVENT_FIELDS = {
     "notice": frozenset({"level", "message", "code"}),
     "input_ack": frozenset({"client_event_id", "accepted", "reason"}),
     "output": frozenset({"text", "stream", "format"}),
+    "browser.frame": frozenset({
+        "artifact_id", "sha256", "content_type", "width", "height",
+        "captured_at", "frame_seq",
+    }),
 }
+
+BROWSER_MUTATION_ACTIONS = frozenset({
+    "tool.browser.open", "tool.browser.navigate", "tool.browser.click",
+    "tool.browser.type", "tool.browser.scroll", "tool.browser.back",
+    "tool.browser.submit", "tool.browser.close",
+})
 
 
 def public_window(row: dict) -> dict:
@@ -32,5 +42,6 @@ def public_window(row: dict) -> dict:
 __all__ = [
     "WINDOW_STATES", "TERMINAL_WINDOW_STATES", "WINDOW_EVENT_KINDS",
     "WINDOW_EVENT_FIELDS",
+    "BROWSER_MUTATION_ACTIONS",
     "public_window",
 ]

@@ -71,6 +71,12 @@ def test_default_resolution_precedence_is_request_conversation_workspace_owner()
     }
 
 
+@pytest.mark.parametrize("overrides", [[], "", 0, False])
+def test_default_resolution_rejects_non_mapping_overrides(overrides):
+    with pytest.raises(TypeError, match="overrides must be a mapping"):
+        resolve_run_config("owner@example.test", overrides=overrides)
+
+
 def test_public_model_never_returns_secret_ref(tmp_path):
     service = DefaultsService(_repo(tmp_path))
     payload = service.list_models("owner@example.test")

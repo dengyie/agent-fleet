@@ -28,6 +28,7 @@ Coverage (from the Task 5 brief):
 import json  # noqa: F401 (kept for parity with sibling test files)
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -279,6 +280,76 @@ class TranscriptRetentionAndQuotaTests(unittest.TestCase):
                                     text="y" * 4096, event_id="evt_q_x"))
         self.assertEqual(result.status, "rejected")
         self.assertEqual(result.reason, "raw_quota_exceeded")
+
+    def test_concurrent_raw_ingest_cannot_exceed_session_quota(self):
+        probe_db = self.tmp / "probe.db"
+        probe = TranscriptRepository(probe_db, key=_key(),
+                                     max_raw_bytes=1 << 20)
+        probe.init()
+        probe_result = probe.ingest(_event(seq=1, session_id="sess_shared",
+                                           event_id="evt_a", text="x"))
+        conn = probe._connect()
+        try:
+            cipher_size = conn.execute(
+                "SELECT length(nonce_ciphertext) FROM raw_events WHERE event_id=?",
+                (probe_result.event_id,)).fetchone()[0]
+        finally:
+            conn.close()
+
+        db = self.tmp / "concurrent-quota.db"
+        repo = TranscriptRepository(db, key=_key(),
+                                    max_raw_bytes=cipher_size)
+        repo.init()
+        original_persist = repo._persist_redacted
+        persist_started = threading.Event()
+        release_persist = threading.Event()
+        second_finished = threading.Event()
+        call_count = 0
+        call_guard = threading.Lock()
+
+        def blocking_persist(conn, clean, redacted):
+            nonlocal call_count
+            with call_guard:
+                call_count += 1
+                first_call = call_count == 1
+            if first_call:
+                persist_started.set()
+                release_persist.wait(2)
+            return original_persist(conn, clean, redacted)
+
+        repo._persist_redacted = blocking_persist
+        results = []
+        def ingest(seq, mark_done=False):
+            try:
+                results.append(repo.ingest(_event(
+                    seq=seq, session_id="sess_shared",
+                    event_id=f"evt_{'a' if seq == 1 else 'b'}", text="x")))
+            finally:
+                if mark_done:
+                    second_finished.set()
+
+        threads = [threading.Thread(target=ingest, args=(1,)),
+                   threading.Thread(target=ingest, args=(2, True))]
+        for thread in threads:
+            thread.start()
+        self.assertTrue(persist_started.wait(2))
+        self.assertFalse(second_finished.wait(0.2))
+        release_persist.set()
+        for thread in threads:
+            thread.join(3)
+        repo._persist_redacted = original_persist
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(sum(result.raw_written for result in results), 1)
+        conn = repo._connect()
+        try:
+            stored = conn.execute(
+                "SELECT COALESCE(SUM(length(nonce_ciphertext)), 0)"
+                " FROM raw_events WHERE session_id=?",
+                ("sess_shared",)).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertLessEqual(stored, cipher_size)
 
 
 class FailureIsolationTests(unittest.TestCase):

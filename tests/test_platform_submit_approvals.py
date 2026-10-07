@@ -1,489 +1,359 @@
-"""Submit approval contract: durable approvals, owner REST surface, gating."""
-from hub.bootstrap import create_app
-from hub.config import FleetConfig
+from concurrent.futures import ThreadPoolExecutor
+import sqlite3
 
-OWNER = "owner@example.test"
-RUN = "run-submit"
-SELECTOR = "#checkout"
+import pytest
 
+from hub.infrastructure.browser_repository import BrowserRepository, BrowserRepositoryError
+from hub.infrastructure.platform_db import PlatformRepository
+from support.browser import browser_backend, URL
 
-def _app(tmp_path, *, submit=False):
-    return create_app(FleetConfig.from_root(
-        tmp_path, ingest_token="ingest", dev_operator=OWNER,
-        platform_enabled=True, platform_browser_enabled=True,
-        platform_browser_submit_enabled=submit,
-    ))
+OWNER = 'owner@example.test'
 
 
-def _open_session(app, *, session_id, node_id="node-submit", run_id=RUN):
-    repo = app.extensions["fleet"]["repositories"]["browser"]
-    repo.create_session(
-        OWNER, workspace_id="workspace-submit", run_id=run_id,
-        node_id=node_id, profile_id="profile-default", backend="cdp_local",
-        session_id=session_id, now=1.0,
-    )
-    return repo
+@pytest.fixture
+def approval_store(tmp_path):
+    clock = [100.0]
+    platform = PlatformRepository(tmp_path / 'platform.db')
+    platform.init()
+    platform.upsert_workspace(OWNER, {'workspace_id': 'workspace-a', 'root_path': str(tmp_path)})
+    for run in ('run-a', 'run-b'):
+        platform.create_conversation(OWNER, 'conv-' + run, title='', workspace_id='workspace-a')
+        platform.append_turn(OWNER, 'conv-' + run, 'msg-' + run, run, text='test',
+                             client_token=run, config_snapshot={'workspace_id': 'workspace-a', 'execution_node_id': 'node-a'}, now=100)
+    repo = BrowserRepository(platform.db_path, clock=lambda: clock[0])
+    repo.init()
+    for sid, run in (('session-aaaaaaaaaa', 'run-a'), ('session-bbbbbbbbbb', 'run-b')):
+        repo.create_session(OWNER, workspace_id='workspace-a', run_id=run, node_id='node-a',
+                            profile_id='profile-a', session_id=sid)
+    return repo, platform, clock
 
 
-def _client(app):
-    client = app.test_client()
-    headers = {"X-Dev-Operator": OWNER}
-    return client, headers
+def grant(repo, *, run='run-a', sid='session-aaaaaaaaaa', selector='#go', **kwargs):
+    return repo.grant_submit_approval(OWNER, workspace_id='workspace-a', run_id=run,
+                                      node_id='node-a', session_id=sid, selector=selector, **kwargs)
 
 
-def test_grant_binds_session_row_and_consumes_once(tmp_path):
-    app = _app(tmp_path, submit=True)
-    _open_session(app, session_id="s" * 16)
-    service = app.extensions["fleet"]["services"]["submit_approvals"]
-    first = service.grant(OWNER, RUN, session_id="s" * 16, selector=SELECTOR)
-    approval = first["approval"]
-    assert approval["state"] == "active"
-    assert approval["node_id"] == "node-submit"
-    assert approval["workspace_id"] == "workspace-submit"
-    assert approval["expires_at"] - approval["granted_at"] == 300.0
-
-    repo = app.extensions["fleet"]["repositories"]["browser"]
-    consumed = repo.consume_submit_approval(
-        OWNER, RUN, session_id="s" * 16, selector=SELECTOR,
-        command_id="cmd-1", now=approval["granted_at"] + 1,
-    )
-    assert consumed == approval["approval_id"]
-    stored = repo.get_submit_approval(OWNER, approval["approval_id"])
-    assert stored["state"] == "consumed"
-    assert stored["consumed_command_id"] == "cmd-1"
-    import pytest
-    from hub.infrastructure.browser_repository import BrowserRepositoryError
-    with pytest.raises(BrowserRepositoryError) as err:
-        repo.consume_submit_approval(
-            OWNER, RUN, session_id="s" * 16, selector=SELECTOR,
-            command_id="cmd-2", now=approval["granted_at"] + 1,
-        )
-    assert err.value.code == "approval_required"
+def consume(repo, *, now=101, selector='#go'):
+    return repo.consume_submit_approval(OWNER, 'run-a', session_id='session-aaaaaaaaaa',
+                                        selector=selector, command_id='run-a:step:1', now=now)
 
 
-def test_ttl_boundary_and_expiry_sweep(tmp_path):
-    import pytest
-    from hub.infrastructure.browser_repository import BrowserRepositoryError
-    app = _app(tmp_path, submit=True)
-    _open_session(app, session_id="s" * 16)
-    repo = app.extensions["fleet"]["repositories"]["browser"]
-    approval = repo.grant_submit_approval(
-        OWNER, workspace_id="workspace-submit", run_id=RUN,
-        node_id="node-submit", session_id="s" * 16, selector=SELECTOR, now=100.0,
-    )
-    with pytest.raises(BrowserRepositoryError) as err:
-        repo.consume_submit_approval(
-            OWNER, RUN, session_id="s" * 16, selector=SELECTOR,
-            command_id="cmd-1", now=400.0,
-        )
-    assert err.value.code == "approval_expired"
-    assert repo.get_submit_approval(OWNER, approval["approval_id"])["state"] == "expired"
-
-    later = repo.grant_submit_approval(
-        OWNER, workspace_id="workspace-submit", run_id=RUN,
-        node_id="node-submit", session_id="s" * 16, selector=SELECTOR, now=1000.0,
-    )
-    assert repo.expire_submit_approvals(now=later["expires_at"]) >= 1
-    assert repo.get_submit_approval(OWNER, later["approval_id"])["state"] == "expired"
+def test_approval_ttl_is_exclusive_and_old_rows_do_not_shadow_new(approval_store):
+    repo, _, clock = approval_store
+    grant(repo)
+    clock[0] = 400
+    with pytest.raises(BrowserRepositoryError, match='approval_expired'):
+        consume(repo, now=400)
+    new = grant(repo)
+    assert consume(repo, now=401) == new['approval_id']
 
 
-def test_grant_rejects_unknown_or_closed_session(tmp_path):
-    import pytest
-    app = _app(tmp_path, submit=True)
-    service = app.extensions["fleet"]["services"]["submit_approvals"]
-    from hub.application.task_service import ApplicationError
-    with pytest.raises(ApplicationError) as missing:
-        service.grant(OWNER, RUN, session_id="s" * 16, selector=SELECTOR)
-    assert missing.value.code == "session_not_found"
-    repo = _open_session(app, session_id="s" * 16)
-    repo.close_session(OWNER, "s" * 16, now=2.0)
-    with pytest.raises(ApplicationError) as closed:
-        service.grant(OWNER, RUN, session_id="s" * 16, selector=SELECTOR)
-    assert closed.value.code == "session_not_found"
-
-
-def test_close_session_terminals_active_approvals_atomically(tmp_path):
-    app = _app(tmp_path, submit=True)
-    repo = _open_session(app, session_id="s" * 16)
-    approval = repo.grant_submit_approval(
-        OWNER, workspace_id="workspace-submit", run_id=RUN,
-        node_id="node-submit", session_id="s" * 16, selector=SELECTOR, now=1.0,
-    )
-    repo.close_session(OWNER, "s" * 16, now=2.0)
-    assert repo.get_submit_approval(OWNER, approval["approval_id"])["state"] == "expired"
-    import pytest
-    from hub.infrastructure.browser_repository import BrowserRepositoryError
-    with pytest.raises(BrowserRepositoryError) as err:
-        repo.consume_submit_approval(
-            OWNER, RUN, session_id="s" * 16, selector=SELECTOR,
-            command_id="cmd-1", now=2.5,
-        )
-    assert err.value.code == "approval_required"
-
-
-def test_idempotent_grant_and_conflict(tmp_path):
-    import pytest
-    app = _app(tmp_path, submit=True)
-    _open_session(app, session_id="s" * 16)
-    service = app.extensions["fleet"]["services"]["submit_approvals"]
-    first = service.grant(OWNER, RUN, session_id="s" * 16, selector=SELECTOR,
-                          idempotency_key="idem-1")["approval"]
-    again = service.grant(OWNER, RUN, session_id="s" * 16, selector=SELECTOR,
-                          idempotency_key="idem-1")["approval"]
-    assert again["approval_id"] == first["approval_id"]
-    from hub.application.task_service import ApplicationError
-    with pytest.raises(ApplicationError) as conflict:
-        service.grant(OWNER, RUN, session_id="s" * 16, selector="#other",
-                      idempotency_key="idem-1")
-    assert conflict.value.code == "approval_idempotency_conflict"
-
-
-def test_active_and_rate_limits(tmp_path):
-    import pytest
-    app = _app(tmp_path, submit=True)
-    _open_session(app, session_id="s" * 16)
-    service = app.extensions["fleet"]["services"]["submit_approvals"]
-    from hub.application.task_service import ApplicationError
-    for index in range(4):
-        service.grant(OWNER, RUN, session_id="s" * 16,
-                      selector=f"{SELECTOR}-{index}")
-    with pytest.raises(ApplicationError) as session_limit:
-        service.grant(OWNER, RUN, session_id="s" * 16, selector="#one-too-many")
-    assert session_limit.value.code == "approval_limit"
-    assert session_limit.value.status == 429
-
-    repo = app.extensions["fleet"]["repositories"]["browser"]
-    # Free the four active slots so the hourly-budget loop starts from zero.
-    for index in range(4):
-        repo.consume_submit_approval(
-            OWNER, RUN, session_id="s" * 16, selector=f"{SELECTOR}-{index}",
-            command_id=f"cmd-p{index}", now=1.0,
-        )
-    other_run = "run-other-999"
-    repo.create_session(
-        OWNER, workspace_id="workspace-submit", run_id=other_run,
-        node_id="node-submit", profile_id="profile-default", backend="cdp_local",
-        session_id="t" * 16, now=1.0,
-    )
-    # Workspace-hour cap counts every grant, active or not: consume each new
-    # approval so the per-run/per-session active caps stay clear until the
-    # 64-grants-per-hour budget is spent.  All timestamps stay inside one
-    # grant-hour window, on the same injected clock base.
-    base = 100000.0
-    for index in range(60):
-        approval = repo.grant_submit_approval(
-            OWNER, workspace_id="workspace-submit", run_id=RUN,
-            node_id="node-submit", session_id="s" * 16,
-            selector=f"{SELECTOR}-x{index}", now=base,
-        )
-        repo.consume_submit_approval(
-            OWNER, RUN, session_id="s" * 16, selector=f"{SELECTOR}-x{index}",
-            command_id=f"cmd-x{index}", now=base,
-        )
-        assert approval["state"] == "active"
-    # The hourly cap counts the injected-clock window, so assert through a
-    # service bound to the same clock base as the grants above.
-    from hub.application.conversation_service import SubmitApprovalService
-    hourly_service = SubmitApprovalService(repo, clock=lambda: 100000.0)
-    with pytest.raises(ApplicationError) as hourly:
-        hourly_service.grant(OWNER, other_run, session_id="t" * 16, selector="#elsewhere")
-    assert hourly.value.code == "approval_limit"
-    assert hourly.value.status == 429
-
-
-def test_revoke_blocks_consumption(tmp_path):
-    import pytest
-    from hub.infrastructure.browser_repository import BrowserRepositoryError
-    app = _app(tmp_path, submit=True)
-    _open_session(app, session_id="s" * 16)
-    service = app.extensions["fleet"]["services"]["submit_approvals"]
-    approval = service.grant(OWNER, RUN, session_id="s" * 16,
-                             selector=SELECTOR)["approval"]
-    revoked = service.revoke(OWNER, approval["approval_id"])["approval"]
-    assert revoked["state"] == "revoked"
-    assert service.get(OWNER, approval["approval_id"])["approval"]["state"] == "revoked"
-    repo = app.extensions["fleet"]["repositories"]["browser"]
-    with pytest.raises(BrowserRepositoryError) as err:
-        repo.consume_submit_approval(
-            OWNER, RUN, session_id="s" * 16, selector=SELECTOR,
-            command_id="cmd-1", now=approval["granted_at"] + 1,
-        )
-    assert err.value.code == "approval_required"
-    from hub.application.task_service import ApplicationError
-    with pytest.raises(ApplicationError) as missing:
-        service.revoke(OWNER, "missing-approval-id-000")
-    assert missing.value.code == "approval_not_found"
-
-
-def test_owner_rest_surface_end_to_end(tmp_path):
-    app = _app(tmp_path, submit=True)
-    _open_session(app, session_id="s" * 16)
-    client, headers = _client(app)
-    granted = client.post(
-        f"/api/platform/v1/runs/{RUN}/browser-approvals",
-        json={"session_id": "s" * 16, "selector": SELECTOR,
-              "idempotency_key": "rest-1"},
-        headers=headers,
-    )
-    assert granted.status_code == 200
-    approval = granted.get_json()["approval"]
-    assert approval["node_id"] == "node-submit"
-    approval_id = approval["approval_id"]
-
-    fetched = client.get(
-        f"/api/platform/v1/runs/{RUN}/browser-approvals/{approval_id}",
-        headers=headers,
-    )
-    assert fetched.status_code == 200
-    assert fetched.get_json()["approval"]["approval_id"] == approval_id
-
-    wrong_run = client.get(
-        f"/api/platform/v1/runs/run-mismatch-00/browser-approvals/{approval_id}",
-        headers=headers,
-    )
-    assert wrong_run.status_code == 404
-
-    # A wrong-run revoke fails before mutating: the approval stays active.
-    wrong_delete = client.delete(
-        f"/api/platform/v1/runs/run-mismatch-00/browser-approvals/{approval_id}",
-        headers=headers,
-    )
-    assert wrong_delete.status_code == 404
-    approvals = app.extensions["fleet"]["services"]["submit_approvals"]
-    assert approvals.get(OWNER, approval_id)["approval"]["state"] == "active"
-
-    revoked = client.delete(
-        f"/api/platform/v1/runs/{RUN}/browser-approvals/{approval_id}",
-        headers=headers,
-    )
-    assert revoked.status_code == 200
-    assert revoked.get_json()["approval"]["state"] == "revoked"
-
-
-def test_rest_surface_disabled_without_gate(tmp_path):
-    app = _app(tmp_path, submit=False)
-    client, headers = _client(app)
-    response = client.post(
-        f"/api/platform/v1/runs/{RUN}/browser-approvals",
-        json={"session_id": "s" * 16, "selector": SELECTOR}, headers=headers,
-    )
-    assert response.status_code == 404
-    assert response.get_json()["error"] == "submit_disabled"
-
-
-def test_rest_rejects_foreign_identity_and_bad_body(tmp_path):
-    app = _app(tmp_path, submit=True)
-    _open_session(app, session_id="s" * 16)
-    client = app.test_client()
-    # DEV fallback authorizes the unauthenticated call in dev mode; a foreign
-    # domain credential header must suppress that fallback entirely.
-    foreign = client.post(
-        f"/api/platform/v1/runs/{RUN}/browser-approvals",
-        json={"session_id": "s" * 16, "selector": SELECTOR},
-        headers={"X-Platform-Node-Credential": "node-submit:" + "n" * 40},
-    )
-    assert foreign.status_code == 401
-    headers = {"X-Dev-Operator": OWNER}
-    bad = client.post(
-        f"/api/platform/v1/runs/{RUN}/browser-approvals",
-        json={"session_id": "s" * 16}, headers=headers,
-    )
-    assert bad.status_code == 400
-    sensitive = client.post(
-        f"/api/platform/v1/runs/{RUN}/browser-approvals",
-        json={"session_id": "s" * 16, "selector": "input[name=password]"},
-        headers=headers,
-    )
-    assert sensitive.status_code == 400
-    assert sensitive.get_json()["error"] == "invalid_selector"
-
-
-def test_run_per_active_limit_boundary(tmp_path):
-    # N5: the 17th active approval for one run fails approval_limit with no
-    # row created, while a second run keeps its own independent budget. Each
-    # session caps at four active approvals, so spread the 16 across four
-    # sessions to exercise the per-run boundary specifically.
-    import pytest
-    from hub.infrastructure.browser_repository import BrowserRepositoryError
-    app = _app(tmp_path, submit=True)
-    repo = app.extensions["fleet"]["repositories"]["browser"]
-    for session_index in range(4):
-        session_id = chr(ord("a") + session_index) * 16
-        repo.create_session(
-            OWNER, workspace_id="workspace-submit", run_id=RUN,
-            node_id="node-submit", profile_id="profile-default", backend="cdp_local",
-            session_id=session_id, now=1.0,
-        )
-        for grant_index in range(4):
-            repo.grant_submit_approval(
-                OWNER, workspace_id="workspace-submit", run_id=RUN,
-                node_id="node-submit", session_id=session_id,
-                selector=f"{SELECTOR}-{session_index}{grant_index}", now=1.0,
-            )
-    repo.create_session(
-        OWNER, workspace_id="workspace-submit", run_id=RUN,
-        node_id="node-submit", profile_id="profile-default", backend="cdp_local",
-        session_id="e" * 16, now=1.0,
-    )
-    with pytest.raises(BrowserRepositoryError) as err:
-        repo.grant_submit_approval(
-            OWNER, workspace_id="workspace-submit", run_id=RUN,
-            node_id="node-submit", session_id="e" * 16,
-            selector="#seventeen", now=1.0,
-        )
-    assert err.value.code == "approval_limit"
-    # A separate run has an independent per-run active budget.
-    repo.create_session(
-        OWNER, workspace_id="workspace-submit", run_id="run-second-00",
-        node_id="node-submit", profile_id="profile-default", backend="cdp_local",
-        session_id="u" * 16, now=1.0,
-    )
-    approval = repo.grant_submit_approval(
-        OWNER, workspace_id="workspace-submit", run_id="run-second-00",
-        node_id="node-submit", session_id="u" * 16, selector=SELECTOR, now=1.0,
-    )
-    assert approval["state"] == "active"
-
-
-def test_cross_run_consumption_is_scoped(tmp_path):
-    # N6: an approval granted under run R is not consumable from run R2,
-    # even with the same session/selector, and leaves the row untouched.
-    import pytest
-    from hub.infrastructure.browser_repository import BrowserRepositoryError
-    app = _app(tmp_path, submit=True)
-    repo = _open_session(app, session_id="s" * 16)
-    approval = repo.grant_submit_approval(
-        OWNER, workspace_id="workspace-submit", run_id=RUN,
-        node_id="node-submit", session_id="s" * 16, selector=SELECTOR, now=1.0,
-    )
-    with pytest.raises(BrowserRepositoryError) as err:
-        repo.consume_submit_approval(
-            OWNER, "run-cross-00000", session_id="s" * 16, selector=SELECTOR,
-            command_id="cmd-cross", now=1.0,
-        )
-    assert err.value.code == "approval_required"
-    assert repo.get_submit_approval(OWNER, approval["approval_id"])["state"] == "active"
-
-
-def test_run_cancel_terminals_active_approvals(tmp_path):
-    # P7: cancelling the run expires its active approvals; consumption
-    # afterwards finds no active row.
-    import pytest
-    from hub.application.task_service import ApplicationError
-    from hub.infrastructure.browser_repository import BrowserRepositoryError
-    app = _app(tmp_path, submit=True)
-    repo = _open_session(app, session_id="s" * 16)
-    platform_repo = app.extensions["fleet"]["platform_repository"]
-    platform_repo.upsert_model(OWNER, {"profile_id": "model", "provider": "deterministic", "model": "test"})
-    platform_repo.upsert_workspace(OWNER, {"workspace_id": "workspace-submit", "root_path": str(tmp_path / "home")})
-    platform_repo.upsert_node(OWNER, {"node_id": "node-submit", "label": "Submit"})
-    platform_repo.create_conversation(OWNER, "conv-submit-cancel", title="",
-                                      workspace_id="workspace-submit")
-    platform_repo.append_turn(
-        OWNER, "conv-submit-cancel", "msg-cancel-1", RUN, text="use browser",
-        client_token="cancel-turn-1",
-        config_snapshot={"workspace_id": "workspace-submit",
-                         "model_profile_id": "model",
-                         "execution_node_id": "node-submit"}, now=1,
-    )
-    run_service = app.extensions["fleet"]["services"]["runs"]
-    approval = repo.grant_submit_approval(
-        OWNER, workspace_id="workspace-submit", run_id=RUN,
-        node_id="node-submit", session_id="s" * 16, selector=SELECTOR, now=1.0,
-    )
-    cancelled = run_service.cancel(OWNER, RUN)
-    assert cancelled["ok"]
-    assert repo.get_submit_approval(OWNER, approval["approval_id"])["state"] == "expired"
-    with pytest.raises(BrowserRepositoryError) as err:
-        repo.consume_submit_approval(
-            OWNER, RUN, session_id="s" * 16, selector=SELECTOR,
-            command_id="cmd-after", now=2.0,
-        )
-    assert err.value.code == "approval_required"
-    # The run row keeps cancel semantics; a second cancel stays idempotent.
-    again_cancel = run_service.cancel(OWNER, RUN)
-    assert again_cancel["ok"]
-    with pytest.raises(ApplicationError) as missing:
-        run_service.cancel(OWNER, "run-missing-000")
-    assert missing.value.code == "run_not_found"
-
-
-def test_lapsed_grants_free_budget_at_next_grant(tmp_path):
-    # Four lapsed approvals must not block a fresh grant: the lazy TTL sweep
-    # inside grant_submit_approval terminalizes expired rows before counting.
-    app = _app(tmp_path, submit=True)
-    repo = _open_session(app, session_id="s" * 16)
+def test_expired_rows_release_active_quota(approval_store):
+    repo, _, clock = approval_store
     for i in range(4):
-        repo.grant_submit_approval(
-            OWNER, workspace_id="workspace-submit", run_id=RUN,
-            node_id="node-submit", session_id="s" * 16,
-            selector=f"{SELECTOR}-{i}", now=100.0,
+        grant(repo, selector=f'#field{i}')
+    with pytest.raises(BrowserRepositoryError, match='approval_limit'):
+        grant(repo)
+    clock[0] = 400
+    assert grant(repo)['state'] == 'active'
+
+
+@pytest.mark.parametrize('state,expected', [('consumed', 'approval_consumed'), ('revoked', 'approval_revoked')])
+def test_terminal_approval_errors_are_distinct(approval_store, state, expected):
+    repo, _, _ = approval_store
+    approval = grant(repo)
+    if state == 'consumed':
+        consume(repo)
+    else:
+        repo.revoke_submit_approval(OWNER, approval['approval_id'])
+    with pytest.raises(BrowserRepositoryError, match=expected):
+        consume(repo)
+
+
+def test_grant_requires_matching_run_and_node(approval_store):
+    repo, _, _ = approval_store
+    with pytest.raises(BrowserRepositoryError, match='session_not_found'):
+        grant(repo, run='run-b')
+    with pytest.raises(BrowserRepositoryError, match='session_not_found'):
+        repo.grant_submit_approval(OWNER, workspace_id='workspace-a', run_id='run-a', node_id='wrong-node',
+                                   session_id='session-aaaaaaaaaa', selector='#go')
+
+
+def test_session_close_and_run_cancel_expire_only_their_approvals(approval_store):
+    repo, platform, clock = approval_store
+    first = grant(repo)
+    other = grant(repo, run='run-b', sid='session-bbbbbbbbbb')
+    repo.close_session(OWNER, 'session-aaaaaaaaaa')
+    assert repo.get_submit_approval(OWNER, first['approval_id'])['state'] == 'expired'
+    assert repo.get_submit_approval(OWNER, other['approval_id'])['state'] == 'active'
+    platform.cancel_run(OWNER, 'run-b', now=101)
+    assert repo.get_submit_approval(OWNER, other['approval_id'])['state'] == 'expired'
+
+
+def test_expiry_targets_exact_run(approval_store):
+    repo, _, _ = approval_store
+    first = grant(repo)
+    other = grant(repo, run='run-b', sid='session-bbbbbbbbbb')
+    repo.expire_submit_approvals(owner_id=OWNER, run_id='run-a')
+    assert repo.get_submit_approval(OWNER, first['approval_id'])['state'] == 'expired'
+    assert repo.get_submit_approval(OWNER, other['approval_id'])['state'] == 'active'
+
+
+def test_grant_idempotency_and_selector_mismatch(approval_store):
+    repo, _, _ = approval_store
+    first = grant(repo, idempotency_key='one')
+    assert grant(repo, idempotency_key='one') == first
+    with pytest.raises(BrowserRepositoryError, match='approval_idempotency_conflict'):
+        grant(repo, idempotency_key='one', selector='#other')
+    with pytest.raises(BrowserRepositoryError, match='approval_required'):
+        consume(repo, selector='#other')
+
+
+def submit_command(command_id='run-a:step:1'):
+    from hub.domain.platform_command import PlatformCommand
+    return PlatformCommand.create(command_id=command_id, owner_id=OWNER, target_node='node-a',
+        resource_id='workspace-a', action='tool.browser.submit',
+        arguments={'session_id': 'session-aaaaaaaaaa', 'selector': '#go'},
+        retry_class='manual_only', expires_at=1000, run_id='run-a')
+
+
+def delivery_for(repo):
+    from hub.application.command_delivery_service import CommandDeliveryService
+    from hub.infrastructure.command_repository import CommandRepository
+    from hub.domain.control import generate_ed25519_keypair
+    private, public = generate_ed25519_keypair()
+    commands = CommandRepository(repo.db_path, clock=repo.clock)
+    commands.init()
+    return CommandDeliveryService(commands, signing_key=private, require_signature=True, clock=repo.clock), public
+
+
+def test_approval_command_and_outbox_roll_back_together(approval_store):
+    repo, _, _ = approval_store
+    approval = grant(repo)
+    delivery, _ = delivery_for(repo)
+    with sqlite3.connect(repo.db_path) as conn:
+        conn.execute("CREATE TRIGGER reject_submit BEFORE INSERT ON platform_command_outbox BEGIN SELECT RAISE(ABORT, 'injected'); END")
+    with pytest.raises(Exception):
+        delivery.enqueue_submit(submit_command(), approvals=repo, idempotency_key='run-a:step:1')
+    assert repo.get_submit_approval(OWNER, approval['approval_id'])['state'] == 'active'
+    assert delivery.repository.get('run-a:step:1') is None
+    with sqlite3.connect(repo.db_path) as conn:
+        conn.execute('DROP TRIGGER reject_submit')
+    row = delivery.enqueue_submit(submit_command(), approvals=repo, idempotency_key='run-a:step:1')
+    assert row['arguments']['approval_id'] == approval['approval_id']
+
+
+def test_atomic_admission_signs_final_arguments_and_is_command_idempotent(approval_store):
+    from hub.domain.platform_command import verify_command
+    repo, _, _ = approval_store
+    approval = grant(repo)
+    delivery, public = delivery_for(repo)
+    first = delivery.enqueue_submit(submit_command(), approvals=repo, idempotency_key='run-a:step:1')
+    assert verify_command(first, public)
+    assert first['arguments']['approval_id'] == approval['approval_id']
+    another = grant(repo)
+    again = delivery.enqueue_submit(submit_command(), approvals=repo, idempotency_key='run-a:step:1')
+    assert again['arguments'] == first['arguments']
+    assert repo.get_submit_approval(OWNER, another['approval_id'])['state'] == 'active'
+
+
+def test_concurrent_commands_cannot_consume_same_approval(approval_store):
+    repo, _, _ = approval_store
+    grant(repo)
+    delivery, _ = delivery_for(repo)
+    def attempt(i):
+        try:
+            delivery.enqueue_submit(submit_command(f'run-a:step:{i}'), approvals=repo)
+            return 'queued'
+        except Exception as exc:
+            return exc.code
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(attempt, (1, 2)))
+    assert sorted(results) == ['approval_consumed', 'queued']
+
+
+@pytest.mark.parametrize('cross_run', [False, True])
+def test_signed_submit_reaches_driver_and_records_approval(approval_store, tmp_path, cross_run):
+    from dataclasses import replace
+    from hub.domain.platform_command import args_hash, sign_command, verify_command
+    from tools.platform.node_executor import NodeToolExecutor
+    from tools.platform.node_client import NodeClient
+    from tools.platform.journal import NodeJournal
+    repo, _, clock = approval_store
+    calls = []
+    class Driver:
+        def open(self, url):
+            return None
+        def submit(self, selector):
+            calls.append(selector)
+            return {'state': 'submitted'}
+    backend = browser_backend(Driver, submit_enabled=True)
+    sid = backend.execute('browser.open', {'url': URL}, run_id='run-a')['session_id']
+    repo.create_session(OWNER, workspace_id='workspace-a', run_id='run-a', node_id='node-a', profile_id='profile-a', session_id=sid)
+    approval = grant(repo, sid=sid)
+    command = submit_command()
+    arguments = {'session_id': sid, 'selector': '#go'}
+    command = replace(command, arguments=arguments, args_digest=args_hash(arguments))
+    delivery, public = delivery_for(repo)
+    row = delivery.enqueue_submit(command, approvals=repo)
+    if cross_run:
+        row = {**row, 'run_id': 'run-b', 'command_id': 'run-b:step:1'}
+        row['signature'] = sign_command(row, delivery.signing_key)
+    assert verify_command(row, public)
+    journal = NodeJournal(tmp_path / 'node.db')
+    journal.init()
+    node = NodeClient(journal, executor=NodeToolExecutor(None, browser_backend=backend, browser_enabled=True),
+                      clock=lambda: clock[0], node_id='node-a', public_key=public, require_signature=True)
+    wire = node.handle(row)
+    if cross_run:
+        assert wire['status'] == 'failed'
+        assert wire['result']['error_code'] == 'session_not_found'
+        assert calls == []
+        assert repo.get_submit_approval(OWNER, approval['approval_id'])['state'] == 'consumed'
+        return
+    assert wire['status'] == 'succeeded'
+    assert wire['result']['result']['approval_id'] == approval['approval_id']
+    assert calls == ['#go']
+    assert node.handle(row) == wire
+    assert calls == ['#go']
+
+
+def test_local_tool_broker_cannot_bypass_owner_approval():
+    from tools.platform.tool_broker import ToolBroker
+    calls = []
+    class Leases:
+        def validate(self, *args):
+            return True
+    class Driver:
+        def open(self, url):
+            return None
+        def submit(self, selector):
+            calls.append(selector)
+            return {'state': 'submitted'}
+    backend = browser_backend(Driver, submit_enabled=True)
+    sid = backend.execute('browser.open', {'url': URL})['session_id']
+    broker = ToolBroker(None, Leases(), resource_id='workspace-a', browser_backend=backend,
+                        browser_enabled=True, browser_submit_enabled=True)
+    receipt = broker.execute(command_id='run-a:step:1', tool='browser.submit',
+                             arguments={'session_id': sid, 'selector': '#go'}, owner_id=OWNER, epoch=1)
+    assert receipt.error_code == 'submit_disabled'
+    assert calls == []
+
+
+def test_opaque_session_and_approval_ids_do_not_use_catalog_id_rules(approval_store):
+    repo, _, _ = approval_store
+    sid = '_opaque-key-session-123456'
+    repo.create_session(OWNER, workspace_id='workspace-a', run_id='run-a', node_id='node-a', profile_id='profile-a', session_id=sid)
+    assert grant(repo, sid=sid)['session_id'] == sid
+
+
+def test_run_and_workspace_limits_and_rolling_hour(approval_store):
+    repo, _, clock = approval_store
+    sessions = [f'session-limit-{i:04}' for i in range(17)]
+    for sid in sessions:
+        repo.create_session(OWNER, workspace_id='workspace-a', run_id='run-a', node_id='node-a', profile_id='profile-a', session_id=sid)
+    for sid in sessions[:16]:
+        grant(repo, sid=sid)
+    with pytest.raises(BrowserRepositoryError, match='approval_limit'):
+        grant(repo, sid=sessions[-1])
+    repo.expire_submit_approvals(owner_id=OWNER, run_id='run-a')
+    for index in range(48):
+        approval = grant(repo, sid=sessions[0], selector=f'#rate{index}')
+        repo.revoke_submit_approval(OWNER, approval['approval_id'])
+    with pytest.raises(BrowserRepositoryError, match='approval_limit'):
+        grant(repo, sid=sessions[0])
+    clock[0] = 3700
+    assert grant(repo, sid=sessions[0])['state'] == 'active'
+
+
+def test_unsigned_submit_and_tampered_approval_are_rejected_before_driver(approval_store, tmp_path):
+    from tools.platform.node_client import NodeClient
+    from tools.platform.journal import NodeJournal
+    repo, _, _ = approval_store
+    grant(repo)
+    delivery, public = delivery_for(repo)
+    row = delivery.enqueue_submit(submit_command(), approvals=repo)
+    journal = NodeJournal(tmp_path / 'signatures.db')
+    journal.init()
+    calls = []
+    node = NodeClient(journal, executor=lambda cmd: calls.append(cmd), clock=lambda: 101)
+    assert node.handle({**row, 'signature': None})['status'] == 'rejected'
+    signed_node = NodeClient(journal, executor=lambda cmd: calls.append(cmd), clock=lambda: 101, public_key=public)
+    row['arguments']['approval_id'] = 'another-approval-id'
+    assert signed_node.handle(row)['status'] == 'rejected'
+    assert calls == []
+
+
+def test_restart_keeps_revocation_and_failed_signing_rolls_back(approval_store):
+    repo, _, _ = approval_store
+    approval = grant(repo)
+    delivery, _ = delivery_for(repo)
+    delivery.signing_key = b'bad-key'
+    with pytest.raises(Exception) as error:
+        delivery.enqueue_submit(submit_command(), approvals=repo)
+    assert error.value.__cause__ is not None
+    assert repo.get_submit_approval(OWNER, approval['approval_id'])['state'] == 'active'
+    repo.revoke_submit_approval(OWNER, approval['approval_id'])
+    reopened = BrowserRepository(repo.db_path, clock=repo.clock)
+    reopened.init()
+    with pytest.raises(BrowserRepositoryError, match='approval_revoked'):
+        consume(reopened)
+
+
+@pytest.mark.parametrize('state', ['succeeded', 'failed', 'unknown', 'cancelled'])
+def test_every_run_terminal_state_expires_approvals(approval_store, state):
+    repo, platform, clock = approval_store
+    approval = grant(repo)
+    other = grant(repo, run='run-b', sid='session-bbbbbbbbbb')
+    claim = platform.claim_run(OWNER, worker_id='terminal-worker', now=100, lease_s=60)
+    assert claim['run_id'] == 'run-a'
+    platform.finish_run(OWNER, 'run-a', lease_id=claim['lease_id'], worker_id='terminal-worker', state=state, now=101)
+    assert repo.get_submit_approval(OWNER, approval['approval_id'])['state'] == 'expired'
+    assert repo.get_submit_approval(OWNER, other['approval_id'])['state'] == 'active'
+
+
+def test_ttl_before_boundary_and_bounded_sweep(approval_store):
+    repo, _, clock = approval_store
+    approval = grant(repo)
+    assert consume(repo, now=399.999) == approval['approval_id']
+    next_approval = grant(repo)
+    clock[0] = 400
+    assert repo.expire_submit_approvals() == 1
+    assert repo.get_submit_approval(OWNER, next_approval['approval_id'])['state'] == 'expired'
+
+
+def test_workspace_rate_limit_is_owner_scoped(approval_store):
+    repo, platform, _ = approval_store
+    for i in range(64):
+        approval = grant(repo, selector=f'#grant{i}')
+        repo.revoke_submit_approval(OWNER, approval['approval_id'])
+    other = 'other@example.test'
+    platform.upsert_workspace(other, {'workspace_id': 'workspace-a', 'root_path': '/tmp/other-workspace'})
+    platform.create_conversation(other, 'conv-other', title='', workspace_id='workspace-a')
+    platform.append_turn(other, 'conv-other', 'msg-other', 'run-other', text='test', client_token='other', config_snapshot={'workspace_id': 'workspace-a'}, now=100)
+    repo.create_session(other, workspace_id='workspace-a', run_id='run-other', node_id='node-a', profile_id='profile-a', session_id='session-other-123456')
+    assert repo.grant_submit_approval(other, workspace_id='workspace-a', run_id='run-other', node_id='node-a', session_id='session-other-123456', selector='#go')['state'] == 'active'
+
+
+def test_writer_fence_rejects_submit_before_consuming_approval(approval_store):
+    from hub.application.task_service import ApplicationError
+    from hub.infrastructure.execution_window_repository import ExecutionWindowRepository
+
+    repo, _, _ = approval_store
+    approval = grant(repo)
+    windows = ExecutionWindowRepository(repo.db_path, clock=repo.clock)
+    windows.init()
+    created = windows.create_window(OWNER, 'run-a')
+    window_id = created['window']['window_id']
+    windows.redeem_ticket(OWNER, window_id, created['attach_ticket'])
+    windows.acquire_writer(OWNER, window_id, 'operator')
+    delivery, _ = delivery_for(repo)
+    delivery.browser_write_guard = ExecutionWindowRepository.assert_browser_write_allowed
+
+    with pytest.raises(ApplicationError) as blocked:
+        delivery.enqueue_submit(
+            submit_command(), approvals=repo, idempotency_key='run-a:step:1',
         )
-    fresh = repo.grant_submit_approval(
-        OWNER, workspace_id="workspace-submit", run_id=RUN,
-        node_id="node-submit", session_id="s" * 16, selector=SELECTOR, now=500.0,
-    )
-    assert fresh["state"] == "active"
-    assert fresh["granted_at"] == 500.0
-    # The lapsed rows are terminal, not silently freed for reuse.
-    assert repo.get_submit_approval(OWNER, fresh["approval_id"])["state"] == "active"
-
-
-def test_consume_prefers_unexpired_over_lapsed_approval(tmp_path):
-    # An older lapsed approval must not shadow a newer valid one: consumption
-    # succeeds against the unexpired row instead of failing approval_expired.
-    import pytest
-    from hub.infrastructure.browser_repository import BrowserRepositoryError
-    app = _app(tmp_path, submit=True)
-    repo = _open_session(app, session_id="s" * 16)
-    lapsed = repo.grant_submit_approval(
-        OWNER, workspace_id="workspace-submit", run_id=RUN,
-        node_id="node-submit", session_id="s" * 16, selector=SELECTOR, now=0.0,
-    )
-    valid = repo.grant_submit_approval(
-        OWNER, workspace_id="workspace-submit", run_id=RUN,
-        node_id="node-submit", session_id="s" * 16, selector=SELECTOR, now=350.0,
-    )
-    consumed = repo.consume_submit_approval(
-        OWNER, RUN, session_id="s" * 16, selector=SELECTOR,
-        command_id="cmd-valid", now=360.0,
-    )
-    assert consumed == valid["approval_id"]
-    assert repo.get_submit_approval(OWNER, valid["approval_id"])["state"] == "consumed"
-    # The second grant's lazy sweep already terminalized the lapsed row, so a
-    # further consume finds no active row at all (approval_required) instead
-    # of silently consuming the lapsed one.
-    assert repo.get_submit_approval(OWNER, lapsed["approval_id"])["state"] == "expired"
-    with pytest.raises(BrowserRepositoryError) as err:
-        repo.consume_submit_approval(
-            OWNER, RUN, session_id="s" * 16, selector=SELECTOR,
-            command_id="cmd-lapsed", now=360.0,
-        )
-    assert err.value.code == "approval_required"
-
-
-def test_run_terminal_state_expires_unconsumed_approvals(tmp_path):
-    # LocalRunWorkerService._finish terminalizes approvals a finished Run
-    # never consumed (succeeded/failed/unknown all leave the queue).
-    from hub.application.run_worker_service import LocalRunWorkerService
-    app = _app(tmp_path, submit=True)
-    repo = _open_session(app, session_id="s" * 16)
-    service = app.extensions["fleet"]["services"]["submit_approvals"]
-    approval = repo.grant_submit_approval(
-        OWNER, workspace_id="workspace-submit", run_id=RUN,
-        node_id="node-submit", session_id="s" * 16, selector=SELECTOR, now=1.0,
-    )
-
-    class _FakeRunEvents:
-        def state(self, owner_id, run_id, state, **kwargs):
-            return {"run_id": run_id, "state": state}
-
-    worker = LocalRunWorkerService(
-        app.extensions["fleet"]["platform_repository"], _FakeRunEvents(),
-        worker_id="finish-worker", submit_approvals=service,
-    )
-    finished = worker._finish(
-        {"owner_id": OWNER, "run_id": RUN, "lease_id": None}, "succeeded")
-    assert finished["state"] == "succeeded"
-    stored = repo.get_submit_approval(OWNER, approval["approval_id"])
-    assert stored["state"] == "expired"
+    assert blocked.value.code == 'writer_lease_active'
+    assert repo.get_submit_approval(OWNER, approval['approval_id'])['state'] == 'active'
+    assert delivery.repository.get('run-a:step:1') is None

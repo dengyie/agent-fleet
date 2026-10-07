@@ -289,8 +289,7 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
              platform_provider_network_enabled=None,
              platform_remote_execution_enabled=None,
              platform_browser_enabled=None, platform_browser_network_enabled=None,
-             platform_browser_submit_enabled=None,
-             platform_browser_allowed_origins=None,
+             platform_browser_allowed_origins=None, platform_browser_submit_enabled=None,
              platform_memory_enabled=None,
              platform_memory_context_enabled=None):
     """Compatibility wrapper around ``hub.bootstrap.create_app``.
@@ -396,8 +395,7 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         platform_browser_enabled, env=_PLATFORM_BROWSER_ENABLE_ENV)
     platform_browser_network_on = _feature_on(
         platform_browser_network_enabled, env=_PLATFORM_BROWSER_NETWORK_ENABLE_ENV)
-    platform_browser_submit_on = _feature_on(
-        platform_browser_submit_enabled, env=_PLATFORM_BROWSER_SUBMIT_ENABLE_ENV)
+    platform_browser_submit_on = _feature_on(platform_browser_submit_enabled, env=_PLATFORM_BROWSER_SUBMIT_ENABLE_ENV)
     platform_browser_origins = _optional_setting(
         platform_browser_allowed_origins, env=_PLATFORM_BROWSER_ORIGINS_ENV)
     if isinstance(platform_browser_origins, str):
@@ -465,8 +463,8 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         platform_remote_execution_enabled=platform_remote_execution_on,
         platform_browser_enabled=platform_browser_on,
         platform_browser_network_enabled=platform_browser_network_on,
-        platform_browser_submit_enabled=platform_browser_submit_on,
         platform_browser_allowed_origins=platform_browser_origins,
+        platform_browser_submit_enabled=platform_browser_submit_on,
         platform_memory_enabled=platform_memory_on,
         platform_memory_context_enabled=platform_memory_context_on,
     )

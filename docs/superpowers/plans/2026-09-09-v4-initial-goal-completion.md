@@ -1,6 +1,6 @@
 # v4 初始目标补齐 Implementation Plan
 
-> **Status (2026-09-09): code complete in working tree; LIVE overlay is Task 7.** Spec: `docs/superpowers/specs/2026-09-09-v4-initial-goal-completion-design.md`.
+> **Status (2026-10-07): code complete and merged into local `main` at `3a76ce2`; LIVE overlay remains Task 7.** Spec: `docs/superpowers/specs/2026-09-09-v4-initial-goal-completion-design.md`.
 > 本计划是 v4 原文未兑现项的实施清单，不是 2026-09-08 收口里那些条件触发延期项。
 
 > **For agentic workers:** 按任务顺序做。每个 Task 先写失败测试再改代码。不要从本文件未勾 checkbox 倒推去重做 2026-08-19 Phase 1–4 历史计划。

@@ -30,6 +30,35 @@ def test_smoke_verifies_uploaded_conversation(tmp_path):
     assert 'Conversation upload pending' not in result.stderr
 
 
+def test_concurrent_smoke_runs_use_isolated_hubs(tmp_path):
+    import sys
+    processes = []
+    for index in range(2):
+        env = {
+            **os.environ,
+            'PYTHON': sys.executable,
+            'FLEET_SMOKE_ARTIFACT_DIR': str(tmp_path / f'evidence-{index}'),
+        }
+        processes.append(subprocess.Popen(
+            ['bash', str(ROOT / 'deploy/e2e-smoke.sh')], cwd=ROOT, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+
+    results = []
+    try:
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=60)
+            results.append((process.returncode, stdout, stderr))
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+
+    for returncode, stdout, stderr in results:
+        assert returncode == 0, stdout + stderr
+        assert 'SMOKE OK' in stdout
+
+
 def test_smoke_rejects_successful_task_when_conversation_upload_is_disabled(tmp_path):
     import sys
     import shlex

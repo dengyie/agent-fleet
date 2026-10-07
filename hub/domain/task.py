@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 from agent_profiles import EXECUTABLE_AGENT_TYPES
 from session_schema import is_valid_session_id
+from hub.domain.task_result import MAX_DIFF_PATCH, MAX_TEST_SUMMARY, bound_patch, normalize_test_summary
 
 
 MACHINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -38,8 +39,6 @@ MAX_INSTRUCTION = 2000
 MAX_CLIENT_TOKEN = 128
 MAX_LOG_SUMMARY = 10240
 MAX_DIFF_STAT = 5120
-MAX_DIFF_PATCH = 102400
-MAX_TEST_SUMMARY = 20480
 
 _TERMINAL_STATES = frozenset(("succeeded", "failed", "cancelled", "expired"))
 _CANCELLABLE_STATES = frozenset(("queued", "leased", "running", "paused"))
@@ -139,16 +138,11 @@ def public_result(result: Mapping[str, Any] | None) -> dict[str, Any] | None:
         elif key == "diff_patch":
             if not value:
                 continue
-            value = _bounded_text(value, MAX_DIFF_PATCH)
+            value = bound_patch(value)[0]
         elif key == "test_summary":
             if not isinstance(value, dict) or not value:
                 continue
-            value = {
-                k: value[k]
-                for k in ("framework", "passed", "failed", "skipped",
-                          "errors", "duration_s", "failed_names")
-                if k in value
-            }
+            value = normalize_test_summary(value)
             if not value:
                 continue
         out[key] = value

@@ -102,7 +102,7 @@ export function mountAssistant(target, options) {
   var pendingTurn = null; var submitting = false; var catalogReady = false; var modelCatalog = [];
   var artifactState = { loading: false, error: null, artifacts: [], workspaceId: null, previewById: {} };
   var memoryState = { loading: false, error: null, items: [], selected: {}, order: [], maxItems: 8, maxBytes: 8192, query: '' }; var memoryRequestSequence = 0;
-  renderArtifacts(artifactHost, artifactState); renderMemoryItems(memoryHost, memoryState, toggleMemory); renderSelectedMemoryItems(selectedMemoryHost, memoryState, removeMemory); renderExecutionWindow(windowHost, windowState, closeWindow);
+  renderArtifacts(artifactHost, artifactState); renderMemoryItems(memoryHost, memoryState, toggleMemory); renderSelectedMemoryItems(selectedMemoryHost, memoryState, removeMemory); renderWindow();
   function setStatus(text) {
     var names = {queued: '排队中', running: '运行中', waiting_node: '等待节点', waiting_approval: '等待审批', waiting_task: '等待任务', cancelling: '正在取消', succeeded: '已完成', failed: '执行失败', unknown: '结果待确认', cancelled: '已取消'};
     status.textContent = names[text] || text;
@@ -127,7 +127,16 @@ export function mountAssistant(target, options) {
   }
   function setWindowState(next) {
     windowState = Object.assign({}, windowState, next || {});
-    renderExecutionWindow(windowHost, windowState, closeWindow);
+    renderWindow();
+  }
+  function renderWindow() {
+    renderExecutionWindow(windowHost, windowState, {
+      onClose: closeWindow,
+      onTakeControl: takeControl,
+      onReleaseControl: returnControl,
+      onRetryFrame: retryWindowFrame,
+      onFrameError: markFrameError
+    });
   }
   function windowError(error) {
     return (error && (error.detail || error.message || error.code)) || '执行窗口不可用';
@@ -142,18 +151,27 @@ export function mountAssistant(target, options) {
         setWindowState({ window: currentWindow, mode: currentWindow.state, leaseToken: null });
         return;
       }
-      if (currentWindow) setWindowState({ window: currentWindow });
+      if (currentWindow && currentWindow.state !== windowState.window.state) {
+        setWindowState({ window: currentWindow });
+      }
       var data = await getExecutionWindowEvents(windowId, windowEventCursor, 100);
       var events = Array.isArray(data.events) ? data.events : [];
       if (events.length) {
         windowEventCursor = typeof data.next_cursor === 'number' ? data.next_cursor : (events[events.length - 1].sequence || windowEventCursor);
+        var frames = events.filter(function (event) {
+          return event && event.kind === 'browser.frame' && event.payload &&
+            typeof event.payload.artifact_id === 'string' && event.payload.artifact_id;
+        });
+        var latestFrame = frames.length ? frames[frames.length - 1].payload : null;
+        if (latestFrame && (!windowState.frame || latestFrame.frame_seq > windowState.frame.frame_seq)) {
+          setWindowState({ frame: latestFrame, frameError: null, frameRetryKey: '' });
+        }
         setWindowState({ events: windowState.events.concat(events).slice(-100) });
       }
       if (windowState.mode === 'writable' && windowState.leaseToken) {
         try {
           var renewed = await renewExecutionWindowWriter(windowId, { holder_id: windowState.holderId, lease_token: windowState.leaseToken, ttl_s: 60 });
-          var lease = renewed.lease || {};
-          setWindowState({ leaseExpiresAt: lease.expires_at || windowState.leaseExpiresAt });
+          if (!renewed.lease) throw new Error('writer_lease_invalid');
         } catch (renewError) {
           if (renewError && renewError.code === 'lease_conflict') setWindowState({ mode: 'read-only', leaseToken: null });
           else if (renewError && (renewError.code === 'lease_expired' || renewError.code === 'lease_not_found')) setWindowState({ mode: 'read-only', leaseToken: null });
@@ -179,7 +197,8 @@ export function mountAssistant(target, options) {
   }
   async function doConnectExecutionWindow(runId, create) {
     if (!runId) return;
-    setWindowState({ loading: true, error: null, mode: 'recovering', events: [], leaseToken: null });
+    setWindowState({ loading: true, error: null, mode: 'recovering', events: [],
+      frame: null, frameError: null, frameRetryKey: '', leaseToken: null });
     windowEventCursor = 0;
     try {
       var created = create ? await createExecutionWindow(runId, { metadata: { surface: 'assistant' } }) : null;
@@ -198,19 +217,54 @@ export function mountAssistant(target, options) {
         current = attached.window || current;
       }
       setWindowState({ loading: false, window: current, mode: 'attached' });
-      try {
-        var acquired = await acquireExecutionWindowWriter(current.window_id, { holder_id: windowState.holderId, ttl_s: 60 });
-        var lease = acquired.lease || {};
-        setWindowState({ mode: 'writable', leaseToken: acquired.lease_token || null, leaseExpiresAt: lease.expires_at || 0 });
-      } catch (leaseError) {
-        if (leaseError && leaseError.code === 'lease_conflict') setWindowState({ mode: 'read-only' });
-        else throw leaseError;
-      }
       pollExecutionWindow();
     } catch (error) {
       if (error && (error.code === 'not_found' || error.code === 'execution_windows_disabled')) setWindowState({ loading: false, window: null, mode: 'disconnected', error: null });
       else if (error && error.code === 'window_closed') setWindowState({ loading: false, window: current || windowState.window || null, mode: 'closed', error: null });
       else setWindowState({ loading: false, mode: 'error', error: windowError(error) });
+    }
+  }
+  async function takeControl() {
+    var current = windowState.window;
+    if (!current || !current.window_id || windowState.controlPending) return;
+    setWindowState({ controlPending: true, controlError: null });
+    try {
+      var acquired = await acquireExecutionWindowWriter(current.window_id, {
+        holder_id: windowState.holderId, ttl_s: 60
+      });
+      setWindowState({ mode: 'writable', leaseToken: acquired.lease_token || null,
+        leaseExpiresAt: (acquired.lease || {}).expires_at || 0, controlError: null });
+    } catch (error) {
+      if (error && error.code === 'lease_conflict') {
+        setWindowState({ mode: 'read-only', leaseToken: null, controlError: '已有其他操作员接管' });
+      } else {
+        setWindowState({ controlError: windowError(error) });
+      }
+    } finally {
+      setWindowState({ controlPending: false });
+    }
+  }
+  async function returnControl() {
+    var current = windowState.window;
+    if (!current || !current.window_id || !windowState.leaseToken || windowState.controlPending) return;
+    setWindowState({ controlPending: true, controlError: null });
+    try {
+      await releaseExecutionWindowWriter(current.window_id, {
+        holder_id: windowState.holderId, lease_token: windowState.leaseToken
+      });
+      setWindowState({ mode: 'attached', leaseToken: null, leaseExpiresAt: 0, controlError: null });
+    } catch (error) {
+      setWindowState({ controlError: windowError(error) });
+    } finally {
+      setWindowState({ controlPending: false });
+    }
+  }
+  function retryWindowFrame() {
+    setWindowState({ frameError: null, frameRetryKey: token() });
+  }
+  function markFrameError(sequence) {
+    if (windowState.frame && windowState.frame.frame_seq === sequence) {
+      setWindowState({ frameError: '画面加载失败' });
     }
   }
   async function closeWindow() {

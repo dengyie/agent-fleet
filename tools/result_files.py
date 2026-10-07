@@ -17,12 +17,17 @@ Rules (fail closed):
 """
 from __future__ import annotations
 
-import json
+import os
 import re
+import stat
 import uuid
 from pathlib import Path
 from typing import Any, Iterable
 
+from hub.domain.task_result import (
+    MAX_DIFF_PATCH, MAX_TEST_SUMMARY, PatchError, TestSummaryError,
+    bound_patch, normalize_test_summary,
+)
 from tools.session.redact import RedactionReport, Redactor
 
 MAX_FILES = 16
@@ -32,10 +37,6 @@ MAX_DEPTH = 4
 MAX_NAME = 64
 MAX_BYTES_PER_WINDOW = 1048576  # 1MB
 READ_WINDOW_S = 60.0
-MAX_DIFF_PATCH = 102400
-TEST_SUMMARY_KEYS = (
-    "framework", "passed", "failed", "skipped", "errors", "duration_s", "failed_names",
-)
 TEST_RESULT_NAMES = ("test-results.json", "test_results.json")
 
 ALLOWED_SUFFIXES = (
@@ -113,6 +114,8 @@ def bound_content(
 
 def redact_patch(text: str, max_bytes: int = MAX_DIFF_PATCH) -> tuple[str, bool]:
     """Redact + bound a unified diff. Empty input stays empty."""
+    if not isinstance(text, str):
+        raise PatchError("invalid_diff_patch")
     if not text:
         return "", False
     # /dev/null is Git syntax for an added/deleted file, not a private path.
@@ -122,68 +125,52 @@ def redact_patch(text: str, max_bytes: int = MAX_DIFF_PATCH) -> tuple[str, bool]
     protected = re.sub(r"(?m)^(---|\+\+\+) /dev/null$", lambda m: m[1] + " " + marker, text)
     redacted, report = redact_content(protected)
     redacted = redacted.replace(marker, "/dev/null")
-    encoded = redacted.encode("utf-8")
-    truncated = len(encoded) > max_bytes
-    if truncated:
-        cut = encoded[:max_bytes]
-        while cut:
-            try:
-                redacted = cut.decode("utf-8")
-                break
-            except UnicodeDecodeError:
-                cut = cut[:-1]
-        else:
-            redacted = ""
-        redacted += "\n…[truncated]"
+    redacted, truncated = bound_patch(redacted, max_bytes)
     return redacted, truncated or report.replaced > 0
 
 
-def normalize_test_summary(raw: Any) -> dict[str, Any] | None:
-    if raw is None or raw == "":
+def _read_summary_file(path: Path) -> bytes | None:
+    try:
+        original = path.lstat()
+    except FileNotFoundError:
         return None
-    if isinstance(raw, str):
+    except OSError as exc:
+        raise TestSummaryError("test_summary_read") from exc
+    if not stat.S_ISREG(original.st_mode):
+        return None
+    if original.st_size > MAX_TEST_SUMMARY:
+        raise TestSummaryError("test_summary_too_large")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(path, flags)
         try:
-            raw = json.loads(raw)
-        except (TypeError, ValueError):
-            return None
-    if not isinstance(raw, dict):
-        return None
-    out: dict[str, Any] = {}
-    for key in TEST_SUMMARY_KEYS:
-        if key not in raw:
-            continue
-        value = raw[key]
-        if key == "framework":
-            text = str(value)[:32]
-            out[key] = text if text in ("pytest", "unittest", "unknown") else "unknown"
-        elif key in ("passed", "failed", "skipped", "errors"):
-            try:
-                out[key] = max(0, int(value))
-            except (TypeError, ValueError):
-                continue
-        elif key == "duration_s":
-            try:
-                out[key] = float(value)
-            except (TypeError, ValueError):
-                continue
-        elif key == "failed_names" and isinstance(value, (list, tuple)):
-            names = [str(item)[:200] for item in value[:20] if str(item)]
-            out[key] = names
-    return out or None
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (original.st_dev, original.st_ino):
+                raise TestSummaryError("test_summary_changed")
+            with open(descriptor, "rb", closefd=False) as stream:
+                body = stream.read(MAX_TEST_SUMMARY + 1)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise TestSummaryError("test_summary_read") from exc
+    if len(body) > MAX_TEST_SUMMARY:
+        raise TestSummaryError("test_summary_too_large")
+    return body
 
 
 def collect_test_summary(worktree: Path) -> dict[str, Any] | None:
-    """Read an optional allowlisted test-results.json from the worktree root."""
-    root = Path(worktree)
+    """Read bounded regular reports; absent evidence differs from invalid."""
     for name in TEST_RESULT_NAMES:
-        path = root / name
-        if not path.is_file() or path.is_symlink():
+        body = _read_summary_file(Path(worktree) / name)
+        if body is None:
             continue
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, ValueError):
-            return None
-        return normalize_test_summary(raw)
+            text = body.decode("utf-8")
+        except UnicodeError as exc:
+            raise TestSummaryError("invalid_test_summary") from exc
+        if not text:
+            raise TestSummaryError("invalid_test_summary")
+        return normalize_test_summary(text)
     return None
 
 

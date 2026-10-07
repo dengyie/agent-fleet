@@ -537,6 +537,256 @@ class SupervisorTests(unittest.TestCase):
         self.assertNotIn("--ephemeral", resume["argv"])
         self.assertNotIn(signal.SIGCONT, handle.signals)
 
+    def test_terminate_wins_over_native_resume_starting_concurrently(self):
+        entered_create = threading.Event()
+        release_create = threading.Event()
+
+        class BlockingResumeOps(FakeOps):
+            def create(self, argv, cwd, env):
+                if argv and ("--resume" in argv or "resume" in argv):
+                    entered_create.set()
+                    if not release_create.wait(2):
+                        raise AssertionError("resume create was not released")
+                return super().create(argv, cwd, env)
+
+        ops = BlockingResumeOps()
+        sv = self._sv(ops=ops)
+        native = self._native_jsonl()
+        m = self._launch(sv, capability_manifest={"resume": True})
+        self._bind_native_identity(
+            sv, m.session_id, native_file_path=native, cwd="/srv/jobs",
+            env={"HOME": "/srv/jobs"}, resume_token="resume-race",
+            exe_path="/opt/codex")
+        outcomes = []
+        worker = threading.Thread(target=lambda: outcomes.append(
+            sv.append_user_turn(m.session_id, "continue")))
+        worker.start()
+        self.assertTrue(entered_create.wait(1))
+        self.assertEqual(
+            sv.terminate_session(m.session_id, grace_s=0), "terminated")
+        release_create.set()
+        worker.join(2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(outcomes, ["terminated"])
+        self.assertEqual(sv.get(m.session_id).state, sup_mod.TERMINATED)
+        self.assertIsNone(sv._handle_of(m.session_id))
+        resumed = ops.children[-1]
+        self.assertFalse(resumed.alive)
+        self.assertIn(signal.SIGKILL, resumed.signals)
+
+    def test_stale_native_resume_reports_unverified_cleanup_failure(self):
+        entered_create = threading.Event()
+        release_create = threading.Event()
+
+        class UnreapableResumeOps(FakeOps):
+            def create(self, argv, cwd, env):
+                is_resume = bool(argv and "resume" in argv)
+                if is_resume:
+                    entered_create.set()
+                    if not release_create.wait(2):
+                        raise AssertionError("resume create was not released")
+                proc = super().create(argv, cwd, env)
+                proc.is_resume = is_resume
+                return proc
+
+            def group_kill(self, proc, sig):
+                if proc.is_resume:
+                    return False
+                return super().group_kill(proc, sig)
+
+            def group_reap(self, proc, timeout=None):
+                if proc.is_resume:
+                    return False
+                return super().group_reap(proc, timeout)
+
+        ops = UnreapableResumeOps()
+        sv = self._sv(ops=ops)
+        native = self._native_jsonl()
+        m = self._launch(sv, capability_manifest={"resume": True})
+        self._bind_native_identity(
+            sv, m.session_id, native_file_path=native, cwd="/srv/jobs",
+            env={"HOME": "/srv/jobs"}, resume_token="failed-cleanup",
+            exe_path="/opt/codex")
+        outcomes = []
+        worker = threading.Thread(target=lambda: outcomes.append(
+            sv.append_user_turn(m.session_id, "continue")))
+        worker.start()
+        self.assertTrue(entered_create.wait(1))
+        self.assertEqual(
+            sv.terminate_session(m.session_id, grace_s=0), "terminated")
+        release_create.set()
+        worker.join(2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(outcomes, ["escape_unverified"])
+        self.assertEqual(sv.get(m.session_id).reason, "escape_unverified")
+        self.assertTrue(ops.children[-1].alive)
+
+    def test_quarantine_wins_over_native_resume_starting_concurrently(self):
+        entered_create = threading.Event()
+        release_create = threading.Event()
+
+        class BlockingResumeOps(FakeOps):
+            def create(self, argv, cwd, env):
+                if argv and ("--resume" in argv or "resume" in argv):
+                    entered_create.set()
+                    if not release_create.wait(2):
+                        raise AssertionError("resume create was not released")
+                return super().create(argv, cwd, env)
+
+        ops = BlockingResumeOps()
+        sv = self._sv(ops=ops)
+        native = self._native_jsonl()
+        m = self._launch(sv, capability_manifest={"resume": True})
+        self._bind_native_identity(
+            sv, m.session_id, native_file_path=native, cwd="/srv/jobs",
+            env={"HOME": "/srv/jobs"}, resume_token="quarantine-race",
+            exe_path="/opt/codex")
+        old = sv._handle_of(m.session_id)
+        outcomes = []
+        worker = threading.Thread(target=lambda: outcomes.append(
+            sv.append_user_turn(m.session_id, "continue")))
+        worker.start()
+        self.assertTrue(entered_create.wait(1))
+        self.assertEqual(sv.quarantine_session(m.session_id), "quarantined")
+        release_create.set()
+        worker.join(2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(outcomes, ["unsupported_action"])
+        self.assertEqual(sv.get(m.session_id).state, sup_mod.QUARANTINED)
+        self.assertIs(sv._handle_of(m.session_id), old)
+        self.assertTrue(old.alive)
+        self.assertTrue(old.stopped)
+        resumed = ops.children[-1]
+        self.assertFalse(resumed.alive)
+        self.assertIn(signal.SIGKILL, resumed.signals)
+
+    def test_stale_process_completion_cannot_replace_resumed_session(self):
+        ops = FakeOps()
+        sv = self._sv(ops=ops)
+        native = self._native_jsonl()
+        m = self._launch(sv, capability_manifest={"resume": True})
+        self._bind_native_identity(
+            sv, m.session_id, native_file_path=native, cwd="/srv/jobs",
+            env={"HOME": "/srv/jobs"}, resume_token="completion-race",
+            exe_path="/opt/codex")
+        old = sv._handle_of(m.session_id)
+
+        self.assertEqual(sv.append_user_turn(m.session_id, "continue"),
+                         "appended")
+        current = sv._handle_of(m.session_id)
+        self.assertIsNot(current, old)
+        old.alive = False
+        old.exit_code = 0
+
+        result = sv._finish_completed(m, old, m.session_id, 0, lambda _: None)
+
+        self.assertEqual(result.outcome, "superseded")
+        self.assertEqual(sv.get(m.session_id).state, sup_mod.RUNNING)
+        self.assertIs(sv._handle_of(m.session_id), current)
+        self.assertTrue(current.alive)
+
+    def test_concurrent_native_resumes_admit_only_one_process(self):
+        entered_create = threading.Event()
+        release_create = threading.Event()
+
+        class BlockingResumeOps(FakeOps):
+            def create(self, argv, cwd, env):
+                if argv and ("--resume" in argv or "resume" in argv):
+                    entered_create.set()
+                    if not release_create.wait(2):
+                        raise AssertionError("resume create was not released")
+                return super().create(argv, cwd, env)
+
+        ops = BlockingResumeOps()
+        sv = self._sv(ops=ops)
+        native = self._native_jsonl()
+        m = self._launch(sv, capability_manifest={"resume": True})
+        self._bind_native_identity(
+            sv, m.session_id, native_file_path=native, cwd="/srv/jobs",
+            env={"HOME": "/srv/jobs"}, resume_token="double-resume",
+            exe_path="/opt/codex")
+        outcomes = []
+        first = threading.Thread(target=lambda: outcomes.append(
+            sv.append_user_turn(m.session_id, "first")))
+        second = threading.Thread(target=lambda: outcomes.append(
+            sv.append_user_turn(m.session_id, "second")))
+        first.start()
+        self.assertTrue(entered_create.wait(1))
+        second.start()
+        second.join(1)
+        release_create.set()
+        first.join(2)
+        second.join(2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertCountEqual(outcomes, ["appended", "unsupported_action"])
+        self.assertEqual(len(ops.create_calls), 2)  # launch + one resume
+
+    def test_paused_session_rejects_native_resume_without_spawning(self):
+        ops = FakeOps()
+        sv = self._sv(ops=ops)
+        native = self._native_jsonl()
+        m = self._launch(sv, capability_manifest={"resume": True})
+        self._bind_native_identity(
+            sv, m.session_id, native_file_path=native, cwd="/srv/jobs",
+            env={"HOME": "/srv/jobs"}, resume_token="paused-resume",
+            exe_path="/opt/codex")
+        self.assertEqual(sv.pause_session(m.session_id), sup_mod.PAUSED)
+        before = list(ops.create_calls)
+
+        self.assertEqual(sv.append_user_turn(m.session_id, "continue"),
+                         "unsupported_action")
+
+        self.assertEqual(ops.create_calls, before)
+        self.assertEqual(sv.get(m.session_id).state, sup_mod.PAUSED)
+
+    def test_pause_and_resume_preempt_native_resume_startup(self):
+        class BlockingResumeOps(FakeOps):
+            def __init__(self):
+                super().__init__()
+                self.entered_create = threading.Event()
+                self.release_create = threading.Event()
+
+            def create(self, argv, cwd, env):
+                if argv and "resume" in argv:
+                    self.entered_create.set()
+                    if not self.release_create.wait(2):
+                        raise AssertionError("resume create was not released")
+                return super().create(argv, cwd, env)
+
+        for action, expected_state in (
+                ("pause_session", sup_mod.PAUSED),
+                ("resume_session", sup_mod.RUNNING)):
+            with self.subTest(action=action):
+                ops = BlockingResumeOps()
+                sv = self._sv(ops=ops)
+                native = self._native_jsonl()
+                m = self._launch(sv, capability_manifest={"resume": True})
+                self._bind_native_identity(
+                    sv, m.session_id, native_file_path=native,
+                    cwd="/srv/jobs", env={"HOME": "/srv/jobs"},
+                    resume_token=f"{action}-race", exe_path="/opt/codex")
+                outcomes = []
+                worker = threading.Thread(target=lambda: outcomes.append(
+                    sv.append_user_turn(m.session_id, "continue")))
+                worker.start()
+                self.assertTrue(ops.entered_create.wait(1))
+                self.assertEqual(getattr(sv, action)(m.session_id),
+                                 expected_state)
+                ops.release_create.set()
+                worker.join(2)
+
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(outcomes, ["unsupported_action"])
+                self.assertEqual(sv.get(m.session_id).state, expected_state)
+                resumed = ops.children[-1]
+                self.assertFalse(resumed.alive)
+                self.assertIn(signal.SIGKILL, resumed.signals)
+
     def test_launch_keeps_cwd_env_private_after_handle_release(self):
         sv = self._sv()
         m = self._launch(sv)

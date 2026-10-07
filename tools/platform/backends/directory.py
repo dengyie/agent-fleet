@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 from hub.domain.workspace import WorkspaceError, normalize_relative_path
+from tools.bounded_process import decode_prefix, run_bounded
 from .base import ToolReceipt
 
 MAX_READ_BYTES = 64 * 1024
@@ -62,9 +63,10 @@ class DirectoryBackend:
             path = self._path(relative_path)
             if not path.is_file():
                 return self._receipt("", "failed", error_code="not_found")
-            raw = path.read_bytes()
-            truncated = len(raw) > MAX_READ_BYTES
-            return self._receipt("", "succeeded", {"path": relative_path, "content": raw[:MAX_READ_BYTES].decode("utf-8", errors="replace")}, truncated=truncated)
+            with path.open("rb") as handle:
+                raw = handle.read(MAX_READ_BYTES + 1)
+            content, truncated = decode_prefix(raw, MAX_READ_BYTES)
+            return self._receipt("", "succeeded", {"path": relative_path, "content": content}, truncated=truncated)
         except WorkspaceError as exc:
             return self._receipt("", "failed", error_code=exc.code)
         except OSError:
@@ -117,10 +119,11 @@ class DirectoryBackend:
         if executable not in ALLOWED_EXECUTABLES or any(arg in {"-c", "--command"} for arg in argv[1:]):
             return self._receipt(command_id, "failed", error_code="command_not_allowed")
         try:
-            proc = subprocess.run(argv, cwd=self.root, capture_output=True, timeout=max(0.1, min(float(timeout_s), 300.0)), check=False, env={"PATH": os.environ.get("PATH", "")})
+            proc = run_bounded(argv, cwd=self.root, timeout_s=max(0.1, min(float(timeout_s), 300.0)),
+                               stdout_limit=MAX_OUTPUT_BYTES + 1, stderr_limit=MAX_OUTPUT_BYTES + 1,
+                               env={"PATH": os.environ.get("PATH", "")})
             raw = proc.stdout + proc.stderr
-            truncated = len(raw) > MAX_OUTPUT_BYTES
-            output = raw[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace")
+            output, truncated = decode_prefix(raw, MAX_OUTPUT_BYTES)
             return self._receipt(command_id, "succeeded" if proc.returncode == 0 else "failed", {"returncode": proc.returncode, "output": output}, error_code=None if proc.returncode == 0 else "process_failed", truncated=truncated)
         except subprocess.TimeoutExpired:
             return self._receipt(command_id, "failed", error_code="timeout")
