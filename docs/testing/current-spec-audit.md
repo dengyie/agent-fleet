@@ -127,7 +127,7 @@ Guardian 重启旧 Web 服务时，原实现先读取并校验 `/proc/<pid>`，�
 
 同一提交的 Guardian/deployment/release-layout 定向切片为 **101 passed、3 skipped、2 subtests**；Python 3.10 compileall、相关 Shell `bash -n` 和 `git diff --check` 通过。Release archive 含 `deploy/hk-web-process-control.py` 与本地 provenance；解包 compileall 通过，使用仅供本地 smoke 的临时 ingest token 后 `hub.web.make_app()` 导入通过。Release validator 对 macOS JUnit 返回 `junit_incomplete`，这是预期的 Linux 发布门禁拒绝，不能当作 Linux 通过证据。
 
-当前剩余项仍未关闭：Ubuntu CI 尚未为此提交执行；pidfd 信号、Linux 安装回滚和三层浏览器网络隔离需 Linux 环境实测；浏览器观察/接管/凭据/Browserbase 与通知参数仍待 owner 批准；四项 live acceptance、Komari/test-node pilot、异地备份、key escrow、生产恢复/回滚和 signed probe-side exact-capture upgrade 仍需各自真实环境或批准契约。
+当前剩余项仍未关闭：公开基线候选的 Ubuntu CI 已通过，且候选与开发分支的实现代码及 journey matrix 一致；开发分支最新审计文档提交本身尚未有独立 CI run。Linux pidfd 与 `/proc` 用例已由候选 CI 执行且无 skip；Linux 安装回滚和三层浏览器网络隔离仍需专用运行时实测。浏览器观察/接管/凭据/Browserbase 与通知参数仍需 owner 确认；四项 live acceptance、Komari/test-node pilot、异地备份、key escrow、生产恢复/回滚和 signed probe-side exact-capture upgrade 仍需各自真实环境或批准契约。
 
 尝试将功能分支推到公开 `origin` 以触发 Ubuntu 测试时，远端在更新 ref 前拒绝了包含 178 个提交的 push，提示该分支像是私有历史并要求从公开 orphan snapshot 的克隆发布；没有提交被推送。当前主检出仍干净且未变。本机没有 Docker、Podman、Lima、Colima、Multipass、QEMU 或其他可用 Linux VM。不得通过重写 orphan 历史规避远端保护；获取此 revision 的 Linux CI 证据需要先确定公开快照发布流程及允许公开的变更范围。
 
@@ -135,4 +135,12 @@ Guardian 重启旧 Web 服务时，原实现先读取并校验 `/proc/<pid>`，�
 
 为准备符合远端保护要求的审阅候选，在 Codex 隔离工作树 `/Users/mango/.codex/worktrees/public-snapshot-review/agent-fleet` 从 `origin/main` 建立预览；把本地 `main` 相对公开基线的 tracked diff 应用为一个提交 `03569ba61a25d124ac994ca7321ddc9afef542ac`，其唯一父提交为公开 `f6c35f9a5f8e5e6da9ad0abaf7c37ff257b6ea58`。该候选仅存在本地，没有推送。
 
-公开快照路径审查未发现 credentials/state/var/`.env`/hosts/private-key 路径；高熵凭据模式扫描命中 `tests/test_task_patch_bounds.py` 和 `tests/test_task_files.py` 中用于脱敏回归的相同合成 `ghp_...` 字符串。完整 Python 3.10 + Chrome 门禁为 **3080 passed、5 macOS Linux-only skips、156 subtests、29/29 journeys**，耗时 336.09 秒；唯一警告是既有 `tools/probe/discovery.py` docstring 的无效转义弃用警告。证据在 `/tmp/agent-fleet-public-snapshot-committed/`。Release validator 返回 `junit_incomplete`，原因仍为 5 个平台 skip；包归档包含 pidfd helper，解包 compileall 与使用临时测试 token 创建 Hub app 通过。该本机候选仍需 owner 批准发布及真正 Ubuntu clean CI，不能当作远端 gate 通过。
+公开快照路径审查未发现 credentials/state/var/`.env`/hosts/private-key 路径；高熵凭据模式扫描命中 `tests/test_task_patch_bounds.py` 和 `tests/test_task_files.py` 中用于脱敏回归的相同合成 `ghp_...` 字符串。完整 Python 3.10 + Chrome 门禁为 **3080 passed、5 macOS Linux-only skips、156 subtests、29/29 journeys**，耗时 336.09 秒；唯一警告是既有 `tools/probe/discovery.py` docstring 的无效转义弃用警告。证据在 `/tmp/agent-fleet-public-snapshot-committed/`。本机候选的 release validator 返回 `junit_incomplete`，原因是 5 个 macOS 平台 skip；包归档包含 pidfd helper，解包 compileall 与使用临时测试 token 创建 Hub app 通过。
+
+## 2026-10-08 Ubuntu CI 候选验证
+
+公开基线快照提交 `a0b5372425a48a340f532203d044fc135d8a5ef1`（分支 `codex/public-ci-candidate`，父提交为公开 `f6c35f9`）已在 GitHub Actions Ubuntu 24.04 / Python 3.10 上通过 CI run [37695537251](https://github.com/dengyie/agent-fleet/actions/runs/37695537251)。完整套件结果为 **3085 passed、0 skipped、156 subtests passed**，耗时 359.96 秒；无失败，仅有既有 `tools/probe/discovery.py` 无效转义弃用警告。Release evidence verifier 成功核验 29 个 journeys、404 个 selector、3085 个 JUnit cases，外部 checks 仍为 `not_run`；测试证据 artifact ID 为 `11514843558`。
+
+此 run 只证明该公开基线候选的 test 与 release-evidence 检查。Workflow 的 `package` 和 `deploy` jobs 均因条件未满足而 skipped；它不是最终开发分支的逐提交 CI，也不证明生产打包、部署、MODEL-LIVE、MAIL-LIVE、NODE-LIVE 或 DEPLOY-LIVE。合并到开发分支后仍需对最终提交重新运行 CI。
+
+Ubuntu 报告绑定的代码与 journey matrix 同当前 `codex/development-completion-todo` 工作树相同（matrix SHA-256 `2a9f73a02e1774b10c9d5803ace9d072f74f77ee58006a964cf0b91eae65923b`），JUnit 共 3085 cases、0 failures、0 errors、0 skips；pidfd 与 `/proc` 实测 selector 均执行。随后发现并修复 `tools/probe/discovery.py` docstring 的 Python 3.10 invalid-escape warning：原复现命令 `/opt/homebrew/bin/python3.10 -Werror::DeprecationWarning -m py_compile tools/probe/discovery.py` 以 `SyntaxError: invalid escape sequence` 失败，修改说明文字后同命令通过；`tests/test_discovery.py` 为 11 passed，`git diff --check` 通过。此文档记录时完整 journey gate 将针对包含该修正的 dirty worktree 另行执行。

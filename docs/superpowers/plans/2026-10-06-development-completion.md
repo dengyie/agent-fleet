@@ -1081,3 +1081,17 @@ Ubuntu CI evidence and Linux runtime/network-isolation tests. Browser observatio
 taking control, credentials, Browserbase and notifications remain unapproved
 product contracts; MODEL-LIVE, MAIL-LIVE, NODE-LIVE, DEPLOY-LIVE and the named
 backup/restore pilots require their actual environments and evidence.
+
+## Ubuntu CI candidate verification (2026-10-08)
+
+The public-baseline snapshot was published on `codex/public-ci-candidate` as
+`a0b5372425a48a340f532203d044fc135d8a5ef1`, with public `f6c35f9` as its parent.
+GitHub Actions run [37695537251](https://github.com/dengyie/agent-fleet/actions/runs/37695537251)
+passed on Ubuntu 24.04 with Python 3.10: **3085 passed, zero skips, 156
+subtests, 29 journeys, 404 selectors, and 3085 JUnit cases**. The release
+evidence verifier passed and the evidence artifact is ID `11514843558`. One
+existing invalid-escape deprecation warning remains in
+`tools/probe/discovery.py`. The workflow skipped `package` and `deploy` due to
+its conditions. This is Linux test evidence for the public-baseline candidate,
+not CI evidence for the final development revision or live production
+acceptance; re-run against the final development snapshot after integration.
