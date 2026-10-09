@@ -963,9 +963,8 @@ export function mountMachine(root, machineName, store, client) {
     busy: false,
   };
 
-  var unsubscribe = store.subscribe(function () {
-    render();
-  });
+  function onStoreChange() { render(); }
+  var unsubscribe = store.subscribe(onStoreChange);
 
   function isActive() {
     return !disposed;
@@ -1105,7 +1104,7 @@ export function mountMachine(root, machineName, store, client) {
     }
     if (!focusedCreateForm && typeof window !== 'undefined' &&
         window.location && window.location.hash === '#task-create-form') {
-      var createForm = document.getElementById('task-create-form');
+      var createForm = root.querySelector('#task-create-form');
       if (createForm) {
         focusedCreateForm = true;
         if (typeof createForm.scrollIntoView === 'function') {
@@ -1168,9 +1167,20 @@ export function mountMachine(root, machineName, store, client) {
       render();
     });
 
-  return function teardown() {
+  function teardown() {
     disposed = true;      // 护栏：后续 render / 异步回调一律 no-op
-    unsubscribe();
+    if (unsubscribe) unsubscribe();
+    unsubscribe = null;
     removeAllChildren(root);
+  }
+  teardown.suspend = function () {
+    if (unsubscribe) unsubscribe();
+    unsubscribe = null;
   };
+  teardown.resume = function () {
+    if (disposed || unsubscribe) return;
+    unsubscribe = store.subscribe(onStoreChange);
+    render();
+  };
+  return teardown;
 }

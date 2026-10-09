@@ -14,12 +14,17 @@ const [origin] = process.argv.slice(2);
       window.advanceFleetTime = amount => { shift += amount; };
     });
     page.setDefaultTimeout(5000);
-    const errors = [], featureRequests = [];
+    const errors = [], featureRequests = [], cachedConversationReads = new Map();
     let sessionRequests = 0;
     page.on('pageerror', error => errors.push(error.message));
     page.on('request', request => {
-      if (new URL(request.url()).pathname === '/api/operator/session') sessionRequests++;
-      if (/^\/api\/(platform|status|stream|tasks|sessions|machines)/.test(new URL(request.url()).pathname)) featureRequests.push(request.url());
+      const pathname = new URL(request.url()).pathname;
+      if (pathname === '/api/operator/session') sessionRequests++;
+      const cachedConversation = pathname.match(/^\/api\/platform\/v1\/conversations\/(cache-[a-f])$/);
+      if (cachedConversation) {
+        cachedConversationReads.set(cachedConversation[1], (cachedConversationReads.get(cachedConversation[1]) || 0) + 1);
+      }
+      if (/^\/api\/(platform|status|stream|tasks|sessions|machines)/.test(pathname)) featureRequests.push(request.url());
     });
     async function expectLogin(returnTo) {
       await page.waitForURL(url => url.pathname === '/login', {waitUntil: 'domcontentloaded'});
@@ -32,6 +37,9 @@ const [origin] = process.argv.slice(2);
       await page.getByRole('button', {name: '登录', exact: true}).click();
       await page.waitForURL(url => url.pathname !== '/login', {waitUntil: 'domcontentloaded'});
     }
+    async function waitForAssistantReady() {
+      await page.locator('.assistant-run-status:visible').filter({hasText: /^就绪$/}).waitFor();
+    }
     for (const route of ['/', '/assistant', '/monitoring', '/machine/example', '/task/example', '/session/example', '/conversation/conv-auth']) {
       await page.goto(origin + route, {waitUntil: 'domcontentloaded'});
       assert.equal(await page.getByText('正在验证登录状态…', {exact: true}).count(), 0);
@@ -40,6 +48,10 @@ const [origin] = process.argv.slice(2);
     assert.deepEqual(featureRequests, [], 'protected data and SSE must not load before session validation');
     await page.goto(origin + '/assistant', {waitUntil: 'domcontentloaded'});
     await expectLogin('/assistant');
+    const loginLogo = page.locator('.login-brand .brand-logo');
+    assert.equal(await loginLogo.getAttribute('src'), '/assets/brand/mango-ddf462d0.png');
+    assert.equal(await loginLogo.evaluate(image => image.complete && image.naturalWidth === 192), true,
+      'login page loads the canonical Mango logo');
     const output = process.env.FLEET_SCREENSHOTS || '/tmp/agent-fleet-console-evidence';
     fs.mkdirSync(output, {recursive: true});
     await page.screenshot({path: path.join(output, 'login-mobile.png'), fullPage: true});
@@ -51,13 +63,33 @@ const [origin] = process.argv.slice(2);
     await page.getByText('令牌无效或登录已失效，请重新输入。', {exact: true}).waitFor();
     assert.equal(await page.evaluate(() => sessionStorage.getItem('fleet_operator_token')), null);
     await login();
-    await page.getByText('就绪', {exact: true}).waitFor();
+    await waitForAssistantReady();
+    const consoleLogo = page.locator('.console-brand .brand-logo');
+    assert.equal(await consoleLogo.evaluate(image => image.complete && image.naturalWidth === 192), true,
+      'console navigation loads the canonical Mango logo');
+    assert.equal(await page.locator('link[rel="icon"][type="image/x-icon"]').getAttribute('href'),
+      '/assets/brand/mango-cdd3ec60.ico');
     const checksAtEntry = sessionRequests;
+    const documentTimeOrigin = await page.evaluate(() => performance.timeOrigin);
+    await page.setViewportSize({width: 1440, height: 900});
+    const assistantInput = page.getByLabel('给助手的任务');
+    await assistantInput.fill('页面切换后保留的草稿');
+    await page.evaluate(() => { window.__assistantInput = document.querySelector('[aria-label="给助手的任务"]'); });
+    await page.locator('[data-nav="assistant"]').click();
+    await page.waitForTimeout(100);
+    assert.equal(await page.evaluate(() => performance.timeOrigin), documentTimeOrigin,
+      'clicking the active route does not reload the document');
+    await page.locator('.skip-link').evaluate(link => link.click());
+    await page.goBack();
+    await page.waitForFunction(() => window.location.hash === '');
+    assert.equal(await assistantInput.inputValue(), '页面切换后保留的草稿',
+      'same-route history navigation preserves the assistant draft');
+    assert.equal(await page.evaluate(() => window.__assistantInput === document.querySelector('[aria-label="给助手的任务"]')),
+      true, 'same-route history navigation preserves the mounted assistant view');
     await page.evaluate(() => { window.dispatchEvent(new Event('focus')); window.dispatchEvent(new Event('focus')); });
     await page.waitForTimeout(100);
     assert.equal(sessionRequests, checksAtEntry, 'focus does not bypass the one-minute session interval');
     await page.setViewportSize({width: 1440, height: 900});
-    const documentTimeOrigin = await page.evaluate(() => performance.timeOrigin);
     await page.locator('[data-nav="monitoring"]').click();
     await page.getByRole('heading', {name: '服务监控', exact: true}).waitFor();
     assert.equal(sessionRequests, checksAtEntry, 'in-app navigation does not repeat session validation');
@@ -70,6 +102,10 @@ const [origin] = process.argv.slice(2);
     assert.equal(sessionRequests, checksAtEntry, 'browser history navigation does not repeat session validation');
     assert.equal(await page.evaluate(() => performance.timeOrigin), documentTimeOrigin,
       'browser history navigation keeps the current document alive');
+    assert.equal(await page.evaluate(() => window.__assistantInput === document.querySelector('[aria-label="给助手的任务"]')),
+      true, 'returning to the assistant reuses the mounted view');
+    assert.equal(await assistantInput.inputValue(), '页面切换后保留的草稿',
+      'returning to the assistant preserves the draft');
     await page.setViewportSize({width: 390, height: 844});
     await page.locator('#mobile-menu').click();
     await page.locator('[data-nav="monitoring"]').click();
@@ -179,11 +215,11 @@ const [origin] = process.argv.slice(2);
     await historyEntry.locator('a').click();
     await page.waitForURL(url => url.pathname === '/conversation/conv-controls');
     await page.getByRole('heading', {name: '改名后的对话', exact: true}).waitFor();
-    await page.getByText('就绪', {exact: true}).waitFor();
+    await waitForAssistantReady();
     assert.equal(await send.isDisabled(), true, 'archived conversations cannot send new turns');
     assert.equal(await page.getByLabel('给助手的任务').evaluate(input => input.readOnly), true);
     await page.goto(origin + '/assistant', {waitUntil: 'domcontentloaded'});
-    await page.getByText('就绪', {exact: true}).waitFor();
+    await waitForAssistantReady();
     await page.getByRole('button', {name: '查看归档'}).click();
     historyEntry = page.locator('#sidebar-conversations .conversation-history-entry').filter({hasText: '改名后的对话'});
     await historyEntry.waitFor();
@@ -205,6 +241,29 @@ const [origin] = process.argv.slice(2);
     await page.getByRole('button', {name: '永久删除', exact: true}).click();
     await historyEntry.waitFor({state: 'detached'});
     await page.setViewportSize({width: 390, height: 844});
+
+    await page.goto(origin + '/assistant', {waitUntil: 'domcontentloaded'});
+    await waitForAssistantReady();
+    async function navigateToCachedConversation(id) {
+      const pathname = '/api/platform/v1/conversations/' + id;
+      const loaded = page.waitForResponse(response => new URL(response.url()).pathname === pathname);
+      const path = '/conversation/' + id;
+      await page.evaluate(route => window.dispatchEvent(new CustomEvent('fleet:navigate', {detail: {path: route}})), path);
+      await page.waitForURL(url => url.pathname === path);
+      await loaded;
+    }
+    for (const id of ['cache-a', 'cache-b', 'cache-c', 'cache-d', 'cache-e', 'cache-f']) {
+      await navigateToCachedConversation(id);
+    }
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate', {detail: {path: '/assistant'}})));
+    await waitForAssistantReady();
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate', {detail: {path: '/conversation/cache-f'}})));
+    await page.waitForURL(url => url.pathname === '/conversation/cache-f');
+    assert.equal(cachedConversationReads.get('cache-f'), 1,
+      'recent route cache hits reuse the existing conversation view');
+    await navigateToCachedConversation('cache-b');
+    assert.equal(cachedConversationReads.get('cache-b'), 2,
+      'the five-entry LRU evicts the oldest inactive route and reloads it on return');
 
     await page.evaluate(() => sessionStorage.setItem('fleet_operator_token', 'expired-fixture'));
     await page.goto(origin + '/conversation/conv-auth?keep=1#history', {waitUntil: 'domcontentloaded'});
@@ -231,7 +290,7 @@ const [origin] = process.argv.slice(2);
     assert.equal(await send.isDisabled(), true);
     await page.unroute(defaultsRoute);
     await page.getByRole('button', {name: '重试加载', exact: true}).click();
-    await page.getByText('就绪', {exact: true}).waitFor();
+    await waitForAssistantReady();
     const conversationRoute = '**/api/platform/v1/conversations/conv-auth';
     await page.route(conversationRoute, route => route.fulfill({status: 503, contentType: 'application/json',
       body: JSON.stringify({error: 'unavailable', detail: 'recovery unavailable'})}));
@@ -250,7 +309,7 @@ const [origin] = process.argv.slice(2);
     assert.equal(await page.evaluate(() => sessionStorage.getItem('fleet_operator_token')), null);
     await page.unroute(defaultsRoute);
     await login();
-    await page.getByText('就绪', {exact: true}).waitFor();
+    await waitForAssistantReady();
     await page.route(defaultsRoute, route => route.fulfill({status: 403, contentType: 'application/json', body: JSON.stringify({error: 'forbidden', detail: 'denied'})}));
     await page.reload({waitUntil: 'domcontentloaded'});
     await page.getByText('当前操作员无访问权限', {exact: true}).waitFor();
@@ -275,7 +334,7 @@ const [origin] = process.argv.slice(2);
     for (const unsafe of ['https://foreign.invalid/', '//foreign.invalid/', '/login?return_to=/login']) {
       await page.goto(origin + '/login?return_to=' + encodeURIComponent(unsafe), {waitUntil: 'domcontentloaded'});
       await login();
-      await page.getByText('就绪', {exact: true}).waitFor();
+      await waitForAssistantReady();
       assert.equal(new URL(page.url()).pathname, '/assistant');
       await page.getByRole('button', {name: '退出登录', exact: true}).click();
       await page.waitForURL(url => url.pathname === '/login', {waitUntil: 'domcontentloaded'});

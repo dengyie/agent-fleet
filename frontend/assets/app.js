@@ -26,18 +26,47 @@ function protectConsole() {
   const shell = document.querySelector('.console-layout');
   const gate = document.getElementById('access-state');
   const retry = gate.querySelector('button');
-  let teardown, disposeNavigation, mounted = false, checking = false, redirecting = false, account = null;
+  const routeViews = new Map();
+  const MAX_CACHED_ROUTES = 5;
+  let activeRouteView = null, disposeNavigation, mounted = false, checking = false, redirecting = false, account = null;
   let lastSessionCheckAt = 0;
-  function disposeRoute() {
-    if (typeof teardown === 'function') teardown();
-    teardown = undefined;
-    document.getElementById('route-view').replaceChildren();
+  function routeKey(value) {
+    return value.page + ':' + (value.id || '');
+  }
+  function suspendRouteView(view) {
+    if (!view || view.suspended) return;
+    view.suspended = true;
+    view.host.hidden = true;
+    view.host.inert = true;
+    if (view.teardown && typeof view.teardown.suspend === 'function') view.teardown.suspend();
+    view.host.remove();
+  }
+  function resumeRouteView(view) {
+    if (!view || !view.suspended) return;
+    view.suspended = false;
+    view.host.hidden = false;
+    view.host.inert = false;
+    document.getElementById('route-view').appendChild(view.host);
+    if (view.teardown && typeof view.teardown.resume === 'function') view.teardown.resume();
+  }
+  function destroyRouteView(view) {
+    if (!view) return;
+    if (typeof view.teardown === 'function') view.teardown();
+    view.host.remove();
+    routeViews.delete(view.key);
+    if (activeRouteView === view) activeRouteView = null;
   }
   function disposeView() {
     shell.hidden = true; sse.stop();
     if (disposeNavigation) disposeNavigation();
     disposeNavigation = undefined;
-    disposeRoute();
+    for (const view of routeViews.values()) {
+      if (typeof view.teardown === 'function') view.teardown();
+      view.host.remove();
+    }
+    routeViews.clear();
+    activeRouteView = null;
+    mounted = false;
     for (const id of ['route-view', 'sidebar-conversations', 'sidebar-nodes']) {
       document.getElementById(id).replaceChildren();
     }
@@ -47,25 +76,48 @@ function protectConsole() {
     redirecting = true; disposeView();
     redirectToLogin();
   }
-  function mountRoute() {
-    const target = document.getElementById('route-view');
-    target.replaceChildren();
+  function mountRoute(view) {
+    const target = view.host;
     const mountEntity = {machine: mountMachine, task: mountTask, session: mountSession};
-    if (route.page === 'account') teardown = mountAccount(target);
-    else if (route.page === 'fleet') teardown = mountFleet(target, store, client);
-    else if (route.page === 'assistant') teardown = mountAssistant(target, {conversationId: route.id, account});
-    else if (route.page === 'monitoring') teardown = mountMonitoring(target, client);
-    else if (mountEntity[route.page] && route.id) teardown = mountEntity[route.page](target, route.id, store, client);
+    if (route.page === 'account') view.teardown = mountAccount(target);
+    else if (route.page === 'fleet') view.teardown = mountFleet(target, store, client);
+    else if (route.page === 'assistant') view.teardown = mountAssistant(target, {conversationId: route.id, account});
+    else if (route.page === 'monitoring') view.teardown = mountMonitoring(target, client);
+    else if (mountEntity[route.page] && route.id) view.teardown = mountEntity[route.page](target, route.id, store, client);
     else target.textContent = '页面不存在或缺少标识，请从导航重新进入。';
   }
   function renderRoute(nextRoute) {
-    if (typeof teardown === 'function') teardown();
-    teardown = undefined;
+    const key = routeKey(nextRoute);
+    if (activeRouteView && activeRouteView.key === key) {
+      route = nextRoute;
+      if (disposeNavigation && typeof disposeNavigation.updateRoute === 'function') disposeNavigation.updateRoute(route);
+      return;
+    }
+    suspendRouteView(activeRouteView);
     route = nextRoute;
     if (disposeNavigation && typeof disposeNavigation.updateRoute === 'function') {
       disposeNavigation.updateRoute(route);
     }
-    mountRoute();
+    let view = routeViews.get(key);
+    if (view) {
+      routeViews.delete(key);
+      routeViews.set(key, view);
+      resumeRouteView(view);
+    } else {
+      const host = document.createElement('div');
+      host.className = 'route-view-entry';
+      host.dataset.routeCacheEntry = key;
+      view = {key, host, teardown: undefined, suspended: false};
+      const routeHost = document.getElementById('route-view');
+      if (!routeViews.size) routeHost.replaceChildren();
+      routeHost.appendChild(host);
+      routeViews.set(key, view);
+      mountRoute(view);
+    }
+    activeRouteView = view;
+    while (routeViews.size > MAX_CACHED_ROUTES) {
+      destroyRouteView(routeViews.values().next().value);
+    }
   }
   function navigateTo(url, {replace = false, fromHistory = false} = {}) {
     let target;
@@ -79,14 +131,16 @@ function protectConsole() {
       nextRoute = resolveRoute(target);
       replace = true;
     }
+    const currentUrl = new URL(window.location.href);
     const nextUrl = target.pathname + target.search + target.hash;
-    if ((!fromHistory || forbiddenForAccount) && nextUrl !== window.location.pathname + window.location.search + window.location.hash) {
+    if ((!fromHistory || forbiddenForAccount) && nextUrl !== currentUrl.pathname + currentUrl.search + currentUrl.hash) {
       window.history[replace ? 'replaceState' : 'pushState'](null, '', nextUrl);
     }
-    if (mounted && (route.page !== nextRoute.page || route.id !== nextRoute.id || fromHistory)) {
+    if (mounted && routeKey(route) !== routeKey(nextRoute)) {
       renderRoute(nextRoute);
     } else {
       route = nextRoute;
+      if (disposeNavigation && typeof disposeNavigation.updateRoute === 'function') disposeNavigation.updateRoute(route);
     }
     return true;
   }
@@ -96,8 +150,12 @@ function protectConsole() {
     if (!anchor || anchor.hasAttribute('download') || (anchor.target && anchor.target !== '_self')) return;
     let target;
     try { target = new URL(anchor.href, window.location.href); } catch (_) { return; }
-    if (target.origin !== window.location.origin || (target.pathname === window.location.pathname &&
-        target.search === window.location.search)) return;
+    if (target.origin !== window.location.origin) return;
+    const current = new URL(window.location.href);
+    if (target.pathname === current.pathname && target.search === current.search) {
+      if (target.hash === current.hash) event.preventDefault();
+      return;
+    }
     if (resolveRoute(target).page === 'invalid') return;
     event.preventDefault();
     navigateTo(target);
@@ -112,7 +170,7 @@ function protectConsole() {
   window.addEventListener('popstate', onPopState);
   function mount() {
     disposeNavigation = mountNavigation(route, store);
-    mountRoute();
+    renderRoute(route);
     if ((!account || account.role === 'admin') && route.page !== 'fleet') client.getStatus().then(status => store.setStatus(status)).catch(() => {
       document.getElementById('sidebar-nodes').textContent = '节点列表暂时不可用';
     });
@@ -148,6 +206,7 @@ function protectConsole() {
       }
       if (redirecting) return;
       if (!mounted) mount();
+      else resumeRouteView(activeRouteView);
       gate.hidden = true; shell.hidden = false; if (!account || account.role === "admin") sse.start();
     } catch (error) {
       if (error.status === 401) requireLogin();
@@ -168,10 +227,17 @@ function protectConsole() {
     await verifyAccess();
   }, 60000);
   window.addEventListener('pagehide', event => {
-    shell.hidden = true; sse.stop();
-    if (!event.persisted) { window.clearInterval(sessionTimer); disposeView(); }
+    sse.stop();
+    if (event.persisted) suspendRouteView(activeRouteView);
+    else { shell.hidden = true; window.clearInterval(sessionTimer); disposeView(); }
   });
-  window.addEventListener('pageshow', event => { if (event.persisted) verifyAccess(); });
+  window.addEventListener('pageshow', event => {
+    if (!event.persisted) return;
+    resumeRouteView(activeRouteView);
+    gate.hidden = true; shell.hidden = false;
+    if (!account || account.role === 'admin') sse.start();
+    verifyAccess();
+  });
   gate.hidden = true;
   shell.hidden = false;
   verifyAccess({force: true});

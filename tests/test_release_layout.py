@@ -78,7 +78,9 @@ class ReleaseLayoutTests(unittest.TestCase):
                    'assets/realtime/sse.js', 'assets/state/store.js',
                    'assets/views/fleet.js', 'assets/views/machine.js', 'assets/views/task.js',
                    'assets/views/session.js', 'assets/views/assistant.js', 'assets/views/monitoring.js', 'assets/views/account.js'}
-        allowed.update({'assets/app.js', 'THIRD_PARTY.md'})
+        allowed.update({'assets/app.js', 'THIRD_PARTY.md',
+                        'assets/brand/mango-ddf462d0.png',
+                        'assets/brand/mango-cdd3ec60.ico'})
         for folder in ('assets/ui', 'assets/vendor', 'assets/shell', 'assets/styles', 'assets/views/assistant'):
             allowed.update(p.relative_to(FRONTEND_DIR).as_posix() for p in (FRONTEND_DIR / folder).rglob('*') if p.is_file())
         unexpected = present - allowed

@@ -3,7 +3,8 @@
 .console-sidebar { width: var(--sidebar-w); position: fixed; inset: 0 auto 0 0; padding: 24px 14px 16px; background: var(--sidebar-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; z-index: 40; }
 .console-brand { display: flex; align-items: center; gap: 10px; padding: 0 8px; color: var(--text); font-size: 20px; font-weight: 680; letter-spacing: -.8px; line-height: 1.3; }
 .console-brand:hover { text-decoration: none; }
-.brand-symbol { width: 32px; height: 34px; display: grid; place-items: center; background: var(--link-bg); color: var(--link); border-radius: 9px; }
+.brand-logo { display: block; width: 36px; height: 36px; flex: none; object-fit: contain; }
+.login-brand .brand-logo { width: 42px; height: 42px; }
 .brand-caption { display: block; margin-top: 4px; font-size: 10px; font-weight: 450; color: var(--text-3); letter-spacing: 1px; }
 .new-conversation { display: flex; align-items: center; gap: 9px; margin: 28px 0 24px; padding: 11px; background: var(--accent); color: #fff; border: 1px solid var(--accent); border-radius: 8px; font-size: 13px; font-weight: 600; }
 .new-conversation:hover { text-decoration: none; filter: brightness(.97); }
@@ -72,6 +73,7 @@ body[data-page=monitoring] .monitoring-heading h1,body[data-page=monitoring] .mo
 .console-conversations a { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #sidebar-nodes { flex: 0 0 var(--sidebar-nodes-height, 22vh); height: var(--sidebar-nodes-height, 22vh); min-height: 60px; max-height: min(50vh, 480px); }
 .console-sidebar { overflow-y: auto; }
+#route-view > .route-view-entry { display: contents; }
 
 .monitoring-nodes { margin-bottom: 18px; }
 .monitoring-node-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 16px; margin-top: 14px; }
@@ -81,7 +83,6 @@ body[data-page=monitoring] .monitoring-heading h1,body[data-page=monitoring] .mo
 /* The sidebar owns history; the canvas stays focused on the current task. */
 .console-brand { padding-right: 30px; }
 .brand-caption { font-size: 10px; letter-spacing: .5px; }
-.brand-symbol { color: var(--ok); background: var(--ok-bg); }
 .sidebar-collapse { position: absolute; top: 26px; right: 12px; border: 0; width: 26px; height: 28px; }
 .desktop-menu { display: none; }
 .conversation-search { position: relative; display: block; margin: 0 5px 10px; }

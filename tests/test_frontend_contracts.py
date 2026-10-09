@@ -42,6 +42,7 @@ release dependency.
 """
 
 import os
+import hashlib
 import re
 import shutil
 import subprocess
@@ -701,6 +702,18 @@ class StaticFrontendTests(unittest.TestCase):
         self.assertIn('<meta charset="utf-8">', source)
         self.assertIn('<meta name="viewport"', source)
 
+    def test_canonical_mango_brand_assets_are_fingerprinted_and_verified(self):
+        source = INDEX_HTML.read_text()
+        logo = FRONTEND_DIR / 'assets' / 'brand' / 'mango-ddf462d0.png'
+        favicon = FRONTEND_DIR / 'assets' / 'brand' / 'mango-cdd3ec60.ico'
+        self.assertIn('class="brand-logo"', source)
+        self.assertIn('/assets/brand/mango-ddf462d0.png', source)
+        self.assertIn('/assets/brand/mango-cdd3ec60.ico', source)
+        self.assertEqual(hashlib.md5(logo.read_bytes()).hexdigest(),
+                         'ddf462d0256bb6af05032b1aaca63440')
+        self.assertEqual(hashlib.md5(favicon.read_bytes()).hexdigest(),
+                         'cdd3ec60deb3e534592285102d9f46a4')
+
 
 class RouteHelperContractTests(unittest.TestCase):
     """Task 12 route helpers: apiPath / pagePath encode segments safely."""
@@ -1229,8 +1242,9 @@ class Task15ReviewFixTests(unittest.TestCase):
             self.assertNotEqual(promise, -1, 'missing async request chain')
             self.assertLess(init, promise,
                             'render() 必须在异步请求前调用，loading 才先绘制')
-        # machine: 订阅回调也是 render（SSE 增量重绘）
-        self.assertIn('store.subscribe(function () {', machine)
+        # machine: SSE 增量通知绑定到可暂停/恢复的 render 订阅。
+        self.assertIn('function onStoreChange() { render(); }', machine)
+        self.assertIn('store.subscribe(onStoreChange)', machine)
 
     def test_views_fence_teardown_against_late_async_callbacks(self):
         machine = self.MACHINE_JS.read_text()
@@ -1534,7 +1548,9 @@ class TaskViewBoundaryTests(unittest.TestCase):
         self.assertIn('var disposed', source)
         self.assertIn('if (disposed) {', source)
         self.assertIn('disposed = true', source)
-        self.assertIn('return function teardown', source)
+        self.assertIn('function teardown()', source)
+        self.assertIn('teardown.suspend', source)
+        self.assertIn('teardown.resume', source)
 
     def test_task_view_keeps_bounded_diff_and_log_output(self):
         source = self.TASK_JS.read_text()
