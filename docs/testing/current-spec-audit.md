@@ -661,3 +661,23 @@ configuration; DEPLOY-LIVE rollback requires an isolated staging target. No
 live job or report is marked passed for these checks. Real Chromium process
 egress isolation, Browserbase/credential decisions, notification rules and
 metadata-retention scope remain open product/infra work.
+
+## 2026-10-09 unknown browser mutation takeover fence
+
+A regression reproduced the `receipt_timeout` path: a claimed
+`tool.browser.click` was durably changed to `unknown`, then
+`ExecutionWindowRepository.acquire_writer()` still granted the operator writer
+lease because its in-flight query considered only `leased`, `accepted`, and
+`running`. A missing receipt does not establish that the Node stopped the
+dispatched side effect, so this allowed a human write to overlap an operation
+whose remote outcome was unresolved.
+
+The writer-acquisition transaction now treats `unknown` browser mutations as a
+conflict alongside active delivery states. It does not clear the uncertainty,
+replay the command, or infer Node termination. The regression is bound to
+`WINDOW-01` in `docs/testing/journeys.json`. The pre-fix test failed with
+`DID NOT RAISE ExecutionWindowRepositoryError`; after the fix, the focused
+execution-window, Node HTTP, submit approval and delivery suites passed **108
+tests**. Full journey, committed package and GitHub Linux CI evidence will be
+recorded after integration. Browser/submit production gates remain default-off;
+this is a control-plane fence and does not prove real Chromium termination.
