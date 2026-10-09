@@ -1709,6 +1709,28 @@ and states were unchanged before and after; available memory remained about
 2.9 GiB, and the temporary archive, source tree, and virtualenv were cleaned.
 This does not replace the full required journey gate or any live external check.
 
+## Audit repair AO: Do not advertise submit without T3.7 egress proof (2026-10-10)
+
+The Node runtime already forces browser network access off because no driver
+proves T3.7's browser-wide interception, owned adapter, and process/socket
+isolation. A separate configuration path still passed
+`browser_submit_enabled=True` into `LocalBrowserBackend` and exposed
+`browser.submit` in the executor allowlist and manifest. That advertised a
+state-changing capability without the network boundary required by the submit
+contract.
+
+The runtime assembly now derives submit availability from the actual backend
+network proof state. Until a proven driver is wired, both network and submit
+remain disabled and `browser.submit` is omitted even when requested in config.
+No gate, transport, or production behavior is enabled by this repair. The
+new regression failed against the old assembly and passes after the minimal
+fix; focused Node/browser/transport/submit verification is **261 passed**.
+The local full gate on the repair branch is **3145 passed, 5 Darwin
+`/proc`/pidfd skips, 160 subtests, 28/29 journeys**, with only the Linux-only
+RELEASE-01 journey incomplete. Linux CI must provide zero-skip release evidence
+for the eventual merged revision; real browser lifecycle/egress, Browserbase,
+credentials, notification policy, and live external acceptance remain open.
+
 ## Audit repair AN: Keep operator takeover fenced by unknown browser mutations (2026-10-10)
 
 The writer-acquisition transaction previously rejected browser mutations in `leased`, `accepted`, and `running` states but omitted `unknown`. A deterministic regression claimed a `tool.browser.click`, marked it `unknown` through the same durable command repository path used after a receipt timeout, and showed that `acquire_writer()` incorrectly returned a writer lease. Because a missing receipt does not prove the Node has stopped executing, this could allow operator input to overlap an unresolved browser side effect.

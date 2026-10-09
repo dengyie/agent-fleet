@@ -1,6 +1,6 @@
 # 当前规格审计矩阵
 
-审计维护日期：2026-10-09（初始完整矩阵证据记录于 2026-10-08）
+审计维护日期：2026-10-10（初始完整矩阵证据记录于 2026-10-08）
 初始审计基线：本地 `main` 的开发集成分支 `codex/development-completion-todo`；当时 HEAD 为 `d715e743cf176be3af52f40635703ea58270a555`，验证代码提交为 `88b12483691bc41c630df68d0bdce00430d87572`。该基线之后的复验按下方各日期 checkpoint 记录。
 
 2026-10-09 续审在同一隔离分支 HEAD `540c0f46c1591c1a621fdfc9293fe5c573f7e7bc` 上增加 overlay 回滚错误状态诊断与回归，并完成隔离 Linux 安装器故障注入；该工作树的这些实现和审计更新尚未提交。
@@ -687,3 +687,23 @@ The public frontend manifest reports the full SHA, /healthz returns 200, and
 an anonymous /api/operator/session request returns 401. Browser/submit
 production gates remain default-off; this control-plane fence does not prove
 real Chromium termination.
+
+## 2026-10-10 Node submit capability fail-closed repair
+
+The Node runtime had a capability-advertisement gap: when a configuration
+requested `browser_submit_enabled`, `NodeRuntime` passed that intent through to
+`LocalBrowserBackend` and advertised `browser.submit` even though the runtime
+unconditionally forces browser network access off until T3.7's three-layer
+egress proof exists. The driver could therefore report a submit-capable
+surface that could never safely reach an approved network boundary.
+
+The fix is at the runtime assembly boundary. While no driver proves the
+required process/adapter/socket enforcement, the Node now forces both browser
+network and submit off; `browser.submit` is omitted from the executor allowlist
+and manifest regardless of the requested submit flag. This preserves the
+existing configuration validation and does not enable any gate. A regression
+first failed on the old code (`submit_enabled is True` and `browser.submit`
+advertised), then passed after the fix. Focused Node/browser/transport/submit
+verification is **261 passed**; `compileall` and `git diff --check` pass. Real
+Chromium lifecycle, egress isolation, and production browser/submit gates stay
+open under the T3.7/T3.8/T3.9 external conditions.

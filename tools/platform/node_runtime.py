@@ -133,13 +133,18 @@ class NodeRuntime:
         browser_backend = None
         if config.browser_enabled:
             from .browser_backend import LocalBrowserBackend
+            # External browser egress is unavailable until a driver proves the
+            # T3.7 three-layer boundary.  Keep submit disabled with it: a
+            # submit capability without an enforced network boundary would
+            # advertise a side-effecting tool that cannot safely execute.
+            browser_network_enabled = False
             browser_backend = LocalBrowserBackend(
                 config.browser_driver_factory,
                 clock=clock or __import__("time").time,
                 # No supported driver proves all-socket egress enforcement yet.
-                network_enabled=False,
+                network_enabled=browser_network_enabled,
                 allowed_origins=config.browser_allowed_origins,
-                submit_enabled=config.browser_submit_enabled,
+                submit_enabled=config.browser_submit_enabled and browser_network_enabled,
             )
         service_executor = (
             ServiceActionExecutor(path_prefix=config.service_path_prefix)
@@ -147,6 +152,11 @@ class NodeRuntime:
         )
         browser_available = bool(
             browser_backend is not None and browser_backend.available
+        )
+        browser_submit_available = bool(
+            browser_backend is not None
+            and browser_backend.network_enabled
+            and browser_backend.submit_enabled
         )
         allowed_tools = frozenset(
             capability for capability in NODE_TOOLS
@@ -156,7 +166,7 @@ class NodeRuntime:
                 browser_available
                 and BROWSER_SESSION_CAPABILITY in config.capabilities
                 and capability in BROWSER_TOOLS
-                and (capability != "browser.submit" or config.browser_submit_enabled)
+                and (capability != "browser.submit" or browser_submit_available)
             )
         )
         allowed_postchecks = frozenset(
