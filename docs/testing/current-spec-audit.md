@@ -707,3 +707,23 @@ advertised), then passed after the fix. Focused Node/browser/transport/submit
 verification is **261 passed**; `compileall` and `git diff --check` pass. Real
 Chromium lifecycle, egress isolation, and production browser/submit gates stay
 open under the T3.7/T3.8/T3.9 external conditions.
+
+## 2026-10-10 post-merge and production evidence for repair AO
+
+Repair AO was merged through PR [#16](https://github.com/dengyie/agent-fleet/pull/16)
+as main revision `50c1b1d80d35c2a608572df3a521427fb10c4e53`. Main workflow
+[37984348242](https://github.com/dengyie/agent-fleet/actions/runs/37984348242)
+passed Linux test, release-evidence, package, and restricted deploy. Its
+JUnit report records **3310 tests, zero failures, zero errors, and zero skips**;
+the journey report is clean with all 29 required journeys passed. The receiver
+receipt is `deployed/succeeded`, with backup
+`/var/lib/agent-fleet-deploy/37984348242-5b9_jbc1`.
+
+Independent production probes returned the same SHA from
+`https://agent.mangoqwq.com/manifest.json`, `/healthz` HTTP 200, and anonymous
+`/api/operator/session` HTTP 401. This closes merge/package/deploy evidence for
+the capability-advertisement repair. It does not prove a real browser driver or
+three-layer process/socket egress boundary; browser and submit gates remain
+default-off. `MODEL-LIVE`, `MAIL-LIVE`, `NODE-LIVE`, and `DEPLOY-LIVE` external
+acceptance remain `not_run`; Browserbase/credential/observation/notification
+contracts and signed exact-capture source upgrade remain open.
