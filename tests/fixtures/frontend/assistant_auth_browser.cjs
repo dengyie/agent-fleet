@@ -66,8 +66,14 @@ const [origin] = process.argv.slice(2);
     await page.setViewportSize({width: 1280, height: 900});
     const historySearch = page.getByRole('searchbox', {name: '搜索最近对话'});
     await historySearch.fill('归档');
+    const searchState = await page.locator('#sidebar-conversations .conversation-history-entry').evaluateAll(entries =>
+      entries.map(entry => ({searchText: entry.dataset.searchText, hidden: entry.hidden,
+        display: getComputedStyle(entry).display, text: entry.innerText})));
     assert.equal(await page.locator('#sidebar-conversations .conversation-history-entry:visible').count(), 0,
-      'search matches conversation content, not action labels');
+      'search matches conversation content, not action labels: ' + JSON.stringify({
+        query: await historySearch.inputValue(), status: await page.locator('#conversation-search-status').textContent(),
+        entries: searchState,
+      }));
     await historySearch.fill('');
     const divider = page.locator('#sidebar-nodes-resize');
     const initialNodeHeight = Number(await divider.getAttribute('aria-valuenow'));

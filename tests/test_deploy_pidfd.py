@@ -44,14 +44,16 @@ class DeploymentPidfdSourceTests(unittest.TestCase):
         self.assertIn('hub_pid_for_cwd "$live" allow_existing', rollback)
         self.assertIn('probe_process_matches "$pid" "$expected_cwd"', probe_stop)
 
-    def test_probe_stop_leaves_pidfile_cleanup_to_next_start(self):
+    def test_probe_stop_does_not_remove_advisory_pid_file(self):
         source = (REPO_ROOT / "deploy" / "hk-container-install.sh").read_text()
-        start = source.index("stop_probe_loop()")
-        end = source.index("\nstart_probe_loop()", start)
-        probe_stop = source[start:end]
-        start_stop = source.index("start_probe_loop()")
-        start_end = source.index("\ncleanup_token_source()", start_stop)
-        probe_start = source[start_stop:start_end]
+        probe_stop_start = source.index("stop_probe_loop()")
+        probe_stop_end = source.index("\nstart_probe_loop()", probe_stop_start)
+        probe_stop = source[probe_stop_start:probe_stop_end]
+        probe_start_start = source.index("start_probe_loop()")
+        probe_start_end = source.index("\ncleanup_token_source()", probe_start_start)
+        probe_start = source[probe_start_start:probe_start_end]
+        poll_start = probe_start.index("for _ in $(seq 1 20); do")
+        poll = probe_start[poll_start:]
 
         self.assertNotIn('rm -f "$probe_pid_file"', probe_stop)
         self.assertEqual(probe_start.count('rm -f "$probe_pid_file"'), 1)
@@ -59,18 +61,7 @@ class DeploymentPidfdSourceTests(unittest.TestCase):
             probe_start.index('rm -f "$probe_pid_file"'),
             probe_start.index('su -s /bin/bash -c'),
         )
-
-    def test_probe_start_poll_does_not_remove_new_pid_file_on_transient_identity_miss(self):
-        source = (REPO_ROOT / "deploy" / "hk-container-install.sh").read_text()
-        start = source.index("start_probe_loop()")
-        end = source.index("\nwait_for_status()", start)
-        probe_start = source[start:end]
-        poll_start = probe_start.index("for _ in $(seq 1 20); do")
-        poll = probe_start[poll_start:]
-
-        self.assertIn('rm -f "$probe_pid_file"', probe_start[:poll_start])
         self.assertNotIn('rm -f "$probe_pid_file"', poll)
-        self.assertNotIn('rm -f "$probe_pid_file"', probe_stop)
 
     def test_probe_start_poll_does_not_remove_new_pid_file_on_transient_identity_miss(self):
         source = (REPO_ROOT / "deploy" / "hk-container-install.sh").read_text()
