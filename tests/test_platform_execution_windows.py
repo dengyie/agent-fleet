@@ -529,6 +529,29 @@ def test_take_control_fails_queued_browser_writes_and_waits_for_inflight(tmp_pat
         windows.acquire_writer("owner-a@example.test", window_id, "operator", ttl_s=30)
     assert active.value.code == "lease_conflict"
 
+def test_take_control_waits_for_unknown_browser_mutation(tmp_path):
+    _, windows, clock, run_id = _repositories(tmp_path)
+    commands = CommandRepository(windows.db_path, clock=clock)
+    commands.init()
+    created = windows.create_window("owner-a@example.test", run_id)
+    window_id = created["window"]["window_id"]
+    windows.redeem_ticket("owner-a@example.test", window_id, created["attach_ticket"])
+    command = PlatformCommand.create(
+        command_id="run-a:step:unknown", target_node="node-a",
+        owner_id="owner-a@example.test", action="tool.browser.click",
+        resource_id="workspace-a",
+        arguments={"session_id": "session-aaaaaaaaaa", "selector": "#go"},
+        retry_class="manual_only", expires_at=2000, run_id=run_id,
+    )
+    commands.enqueue(command, idempotency_key=command.command_id)
+    commands.claim_for_node("node-a", "worker-a", owner_id="owner-a@example.test")
+    unknown = commands.mark_unknown(command.command_id, reason="receipt_timeout")
+    assert unknown["status"] == "unknown"
+
+    with pytest.raises(ExecutionWindowRepositoryError) as blocked:
+        windows.acquire_writer("owner-a@example.test", window_id, "operator")
+    assert blocked.value.code == "lease_conflict"
+
 
 def test_writer_lease_is_exclusive_across_windows_for_the_same_run(tmp_path):
     _, windows, _, run_id = _repositories(tmp_path)

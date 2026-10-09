@@ -435,7 +435,9 @@ class ExecutionWindowRepository:
                 marks = ",".join("?" for _ in mutations)
                 inflight = conn.execute(
                     f"SELECT 1 FROM platform_commands WHERE owner_id=? AND run_id=? "
-                    f"AND status IN ('leased','accepted','running') AND action IN ({marks}) LIMIT 1",
+                    # Unknown means the remote side effect may still be running.
+                    f"AND status IN ('leased','accepted','running','unknown') "
+                    f"AND action IN ({marks}) LIMIT 1",
                     (owner_id, row["run_id"], *mutations),
                 ).fetchone()
                 if inflight is not None:

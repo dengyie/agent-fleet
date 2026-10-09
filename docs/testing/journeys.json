@@ -252,7 +252,7 @@
       "id": "WINDOW-01",
       "title": "执行窗口连接及租约",
       "layer": "integration",
-      "acceptance": "票据一次性且到期失效；写入租约互斥；关闭/重连/查询均有owner边界",
+      "acceptance": "票据一次性且到期失效；写入租约互斥；不确定的浏览器变更继续阻止接管；关闭/重连/查询均有owner边界",
       "boundary": "window control API; no claim of real PTY/browser attachment",
       "tests": [
         "tests/test_platform_execution_windows.py::test_execution_window_http_lifecycle_and_redaction",
@@ -267,6 +267,7 @@
         "tests/test_platform_execution_windows.py::test_window_invalid_unicode_credentials_are_client_errors",
         "tests/test_platform_execution_windows.py::test_window_input_translation_retains_original_cause",
         "tests/test_platform_execution_windows.py::test_writer_lease_is_exclusive_across_windows_for_the_same_run",
+        "tests/test_platform_execution_windows.py::test_take_control_waits_for_unknown_browser_mutation",
         "tests/test_platform_execution_windows.py::test_active_writer_rejects_browser_mutation_inside_command_admission",
         "tests/test_platform_submit_approvals.py::test_writer_fence_rejects_submit_before_consuming_approval",
         "tests/test_platform_node_http_e2e.py::test_browser_frame_upload_is_published_and_served_only_through_its_window"

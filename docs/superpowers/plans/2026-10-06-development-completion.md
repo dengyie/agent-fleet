@@ -1708,3 +1708,9 @@ limit. The tests used local fixtures only. All six production Supervisor PIDs
 and states were unchanged before and after; available memory remained about
 2.9 GiB, and the temporary archive, source tree, and virtualenv were cleaned.
 This does not replace the full required journey gate or any live external check.
+
+## Audit repair AN: Keep operator takeover fenced by unknown browser mutations (2026-10-09)
+
+The writer-acquisition transaction previously rejected browser mutations in `leased`, `accepted`, and `running` states but omitted `unknown`. A deterministic regression claimed a `tool.browser.click`, marked it `unknown` through the same durable command repository path used after a receipt timeout, and showed that `acquire_writer()` incorrectly returned a writer lease. Because a missing receipt does not prove the Node has stopped executing, this could allow operator input to overlap an unresolved browser side effect.
+
+The minimal repair includes `unknown` in the in-flight browser mutation query. The transaction therefore continues returning `lease_conflict`; no reconciliation result is inferred and no command is replayed. The regression is required by `WINDOW-01`. Before the fix it failed (`DID NOT RAISE ExecutionWindowRepositoryError`); after the fix the execution-window, Node HTTP, submit approval and delivery suites passed **108 tests**. Full commit/package and CI verification will be recorded after integration. Browser gates remain default-off; the control-plane fix does not prove real Chromium process termination.
