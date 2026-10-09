@@ -56,6 +56,32 @@ const [origin] = process.argv.slice(2);
     await page.evaluate(() => { window.dispatchEvent(new Event('focus')); window.dispatchEvent(new Event('focus')); });
     await page.waitForTimeout(100);
     assert.equal(sessionRequests, checksAtEntry, 'focus does not bypass the one-minute session interval');
+    await page.setViewportSize({width: 1440, height: 900});
+    const documentTimeOrigin = await page.evaluate(() => performance.timeOrigin);
+    await page.locator('[data-nav="monitoring"]').click();
+    await page.getByRole('heading', {name: '服务监控', exact: true}).waitFor();
+    assert.equal(sessionRequests, checksAtEntry, 'in-app navigation does not repeat session validation');
+    assert.equal(await page.evaluate(() => performance.timeOrigin), documentTimeOrigin,
+      'in-app navigation keeps the current document alive');
+    assert.equal(await page.locator('.console-layout').isVisible(), true, 'the console stays visible during route changes');
+    assert.equal(await page.locator('#access-state').isVisible(), false, 'route changes do not show an authentication screen');
+    await page.goBack();
+    await page.getByRole('combobox', {name: '模型', exact: true}).waitFor();
+    assert.equal(sessionRequests, checksAtEntry, 'browser history navigation does not repeat session validation');
+    assert.equal(await page.evaluate(() => performance.timeOrigin), documentTimeOrigin,
+      'browser history navigation keeps the current document alive');
+    await page.setViewportSize({width: 390, height: 844});
+    await page.locator('#mobile-menu').click();
+    await page.locator('[data-nav="monitoring"]').click();
+    await page.getByRole('heading', {name: '服务监控', exact: true}).waitFor();
+    assert.equal(sessionRequests, checksAtEntry, 'mobile navigation does not repeat session validation');
+    assert.equal(await page.evaluate(() => performance.timeOrigin), documentTimeOrigin,
+      'mobile navigation keeps the current document alive');
+    assert.equal(await page.locator('body').evaluate(node => node.classList.contains('navigation-open')), false,
+      'mobile navigation closes the drawer after route changes');
+    await page.goBack();
+    await page.getByRole('combobox', {name: '模型', exact: true}).waitFor();
+    await page.setViewportSize({width: 1440, height: 900});
     const model = page.getByRole('combobox', {name: '模型', exact: true});
     const workspace = page.getByRole('combobox', {name: '工作区', exact: true});
     const send = page.getByRole('button', {name: '发送任务'});
