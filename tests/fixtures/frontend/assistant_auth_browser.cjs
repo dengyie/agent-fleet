@@ -64,6 +64,47 @@ const [origin] = process.argv.slice(2);
     assert.equal(await send.isDisabled(), false);
     await page.locator('#sidebar-conversations a').filter({hasText: '登录恢复验收'}).waitFor();
     await page.setViewportSize({width: 1280, height: 900});
+    const divider = page.locator('#sidebar-nodes-resize');
+    const initialNodeHeight = Number(await divider.getAttribute('aria-valuenow'));
+    const sidebarGeometry = async () => page.evaluate(() => {
+      const bounds = selector => {
+        const {top, height, bottom} = document.querySelector(selector).getBoundingClientRect();
+        return {top, height, bottom};
+      };
+      return {
+        history: bounds('#sidebar-conversations'),
+        nodes: bounds('#sidebar-nodes'),
+        footer: bounds('.sidebar-footer'),
+      };
+    });
+    const beforeKeyboardResize = await sidebarGeometry();
+    await divider.focus();
+    await divider.press('ArrowUp');
+    const increasedNodeHeight = Number(await divider.getAttribute('aria-valuenow'));
+    assert.equal(increasedNodeHeight, Math.min(initialNodeHeight + 16, Number(await divider.getAttribute('aria-valuemax'))));
+    assert.equal((await sidebarGeometry()).footer.top, beforeKeyboardResize.footer.top,
+      'keyboard resizing keeps the self-hosted footer anchored');
+    assert.equal(await page.evaluate(() => localStorage.getItem('fleet-sidebar-nodes-height')),
+      String(increasedNodeHeight));
+    const afterKeyboardIncrease = await sidebarGeometry();
+    await divider.press('ArrowDown');
+    assert.equal((await sidebarGeometry()).footer.top, afterKeyboardIncrease.footer.top,
+      'keyboard resizing leaves the self-hosted footer anchored');
+    const beforeDrag = await sidebarGeometry();
+    const dividerBounds = await divider.boundingBox();
+    await page.mouse.move(dividerBounds.x + dividerBounds.width / 2, dividerBounds.y + dividerBounds.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(dividerBounds.x + dividerBounds.width / 2, dividerBounds.y - 48, {steps: 8});
+    await page.mouse.up();
+    const afterDrag = await sidebarGeometry();
+    assert.equal(afterDrag.footer.top, beforeDrag.footer.top, 'resizing the lists keeps the self-hosted footer anchored: ' +
+      JSON.stringify({beforeDrag, afterDrag}));
+    assert.equal(afterDrag.footer.height, beforeDrag.footer.height, 'resizing the lists leaves the self-hosted footer size unchanged');
+    assert.ok(afterDrag.nodes.height > beforeDrag.nodes.height, 'dragging upward expands the node list');
+    assert.ok(afterDrag.history.height < beforeDrag.history.height, 'the conversation list gives space to the node list');
+    assert.equal(await page.evaluate(() => localStorage.getItem('fleet-sidebar-nodes-height')),
+      await divider.getAttribute('aria-valuenow'), 'dragged height persists for the next visit');
+
     const historySearch = page.getByRole('searchbox', {name: '搜索最近对话'});
     await historySearch.fill('归档');
     const searchState = await page.locator('#sidebar-conversations .conversation-history-entry').evaluateAll(entries =>
@@ -75,14 +116,6 @@ const [origin] = process.argv.slice(2);
         entries: searchState,
       }));
     await historySearch.fill('');
-    const divider = page.locator('#sidebar-nodes-resize');
-    const initialNodeHeight = Number(await divider.getAttribute('aria-valuenow'));
-    await divider.focus();
-    await divider.press('ArrowUp');
-    assert.equal(Number(await divider.getAttribute('aria-valuenow')), initialNodeHeight + 16);
-    assert.equal(await page.evaluate(() => localStorage.getItem('fleet-sidebar-nodes-height')),
-      String(initialNodeHeight + 16));
-
     let historyEntry = page.locator('#sidebar-conversations .conversation-history-entry').filter({hasText: '历史操作验收'});
     await historyEntry.locator('summary').click();
     await historyEntry.getByRole('button', {name: '重命名'}).click();

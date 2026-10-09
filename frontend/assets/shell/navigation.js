@@ -48,7 +48,9 @@ export function mountNavigation(route, store) {
   const historyHeading = document.getElementById('conversation-heading');
   const archiveToggle = document.getElementById('archived-toggle');
   const resizeHandle = document.getElementById('sidebar-nodes-resize');
+  const historyList = document.getElementById('sidebar-conversations');
   const nodeList = document.getElementById('sidebar-nodes');
+  const adjustableLists = document.getElementById('sidebar-adjustable-lists');
   const titleDialog = document.getElementById('conversation-title-dialog');
   const titleInput = document.getElementById('conversation-title-input');
   const titleError = document.getElementById('conversation-title-error');
@@ -75,7 +77,14 @@ export function mountNavigation(route, store) {
   collapse.addEventListener('click', onCollapse);
   expand.addEventListener('click', onExpand);
   const MIN_NODE_HEIGHT = 60;
-  function maxNodeHeight() { return Math.max(MIN_NODE_HEIGHT, Math.min(480, window.innerHeight * 0.5)); }
+  const MIN_HISTORY_HEIGHT = 70;
+  function maxNodeHeight() {
+    const group = adjustableLists.getBoundingClientRect();
+    const history = historyList.getBoundingClientRect();
+    const nodes = nodeList.getBoundingClientRect();
+    const fixedHeight = history.top - group.top + nodes.top - history.bottom + Math.max(0, group.bottom - nodes.bottom);
+    return Math.max(MIN_NODE_HEIGHT, Math.floor(Math.min(480, window.innerHeight * 0.5, group.height - fixedHeight - MIN_HISTORY_HEIGHT)));
+  }
   function setNodeHeight(value, persist = false) {
     const max = maxNodeHeight();
     const height = Math.round(Math.max(MIN_NODE_HEIGHT, Math.min(max, value)));
