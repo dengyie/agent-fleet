@@ -1736,3 +1736,22 @@ credentials, notification policy, and live external acceptance remain open.
 The writer-acquisition transaction previously rejected browser mutations in `leased`, `accepted`, and `running` states but omitted `unknown`. A deterministic regression claimed a `tool.browser.click`, marked it `unknown` through the same durable command repository path used after a receipt timeout, and showed that `acquire_writer()` incorrectly returned a writer lease. Because a missing receipt does not prove the Node has stopped executing, this could allow operator input to overlap an unresolved browser side effect.
 
 The minimal repair includes unknown in the in-flight browser mutation query. The transaction therefore continues returning lease_conflict; no reconciliation result is inferred and no command is replayed. The regression is required by WINDOW-01. Before the fix it failed because no ExecutionWindowRepositoryError was raised; after the fix the execution-window, Node HTTP, submit approval and delivery suites passed 108 tests. PR #13 merged as main SHA f4a8178e3ac2ecfa69a5ba420c9b4ce62b53ed75. Main CI run 37968458252 passed 3149 tests and 160 subtests; all 29/29 journeys and 461 selectors passed, release evidence verified 3149 JUnit cases with zero failures/errors/skips, and package/deploy succeeded. The deployment receipt is deployed / succeeded; the public manifest matches f4a8178e3ac2ecfa69a5ba420c9b4ce62b53ed75, /healthz is 200, anonymous operator session is 401, and rollback backup is /var/lib/agent-fleet-deploy/37968458252-f6ysx8j_. Browser/submit gates remain default-off; the control-plane fix does not prove real Chromium process termination.
+
+## Post-merge evidence for repairs AO and AN (2026-10-10)
+
+Repairs AO and AN are present on main at
+`50c1b1d80d35c2a608572df3a521427fb10c4e53` after PR [#16](https://github.com/dengyie/agent-fleet/pull/16).
+Main CI [37984348242](https://github.com/dengyie/agent-fleet/actions/runs/37984348242)
+completed Linux test, release-evidence, package, and deploy successfully. The
+clean report contains **3310 passed, 0 failures, 0 errors, 0 skips, and 29/29
+journeys**; the receiver returned `deployed/succeeded` and stored backup
+`/var/lib/agent-fleet-deploy/37984348242-5b9_jbc1`. The public manifest matches
+the full revision, `/healthz` returns 200, and anonymous operator session returns
+401. This is release/deployment evidence for the merged repairs, not evidence
+that a real browser driver or three-layer process/socket egress boundary exists.
+
+The remaining completion work is external or requires a new approved contract:
+dedicated Linux runtime proof for real Chromium lifecycle and process-level
+egress isolation; observation, takeover, credential, Browserbase, notification,
+and metadata-retention decisions; signed exact-capture source upgrade; and the
+separately credentialed MODEL-LIVE, MAIL-LIVE, NODE-LIVE, and DEPLOY-LIVE checks.
