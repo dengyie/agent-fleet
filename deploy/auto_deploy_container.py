@@ -6,6 +6,7 @@ This file deliberately has no imports from the release being deployed.
 import http.client
 import json
 import os
+import select
 from pathlib import Path
 import signal
 import sqlite3
@@ -20,17 +21,78 @@ def processes(root):
         if not path.name.isdecimal():
             continue
         try:
-            if path.stat().st_uid != os.getuid() or path.joinpath('cwd').resolve() != root.resolve():
-                continue
-            argv = path.joinpath('cmdline').read_bytes().decode().split('\0')
-            kind = next((kind for kind, suffix in [('hub', 'hub/web.py'), ('guardian', 'deploy/hk-self-report-loop.sh')]
-                         if any(arg == suffix or arg.endswith('/' + suffix) for arg in argv)), None)
-            if kind:
-                started = path.joinpath('stat').read_text().split(') ', 1)[1].split()[19]
-                found.append((int(path.name), kind, started))
-        except (OSError, UnicodeError, IndexError):
+            identity = process_identity(root, path)
+            if identity is not None:
+                found.append(identity)
+        except (OSError, UnicodeError, IndexError, ValueError):
             continue
     return found
+
+
+def process_identity(root, path):
+    if path.stat().st_uid != os.getuid() or path.joinpath('cwd').resolve() != root.resolve():
+        return None
+    argv = tuple(arg for arg in path.joinpath('cmdline').read_bytes().decode().split('\0') if arg)
+    kind = next((kind for kind, suffix in [('hub', 'hub/web.py'), ('guardian', 'deploy/hk-self-report-loop.sh')]
+                 if any(arg == suffix or arg.endswith('/' + suffix) for arg in argv)), None)
+    if kind is None:
+        return None
+    stat = path.joinpath('stat').read_text()
+    started = stat[stat.rfind(') ') + 2:].split()[19]
+    return int(path.name), kind, started
+
+
+def _send_pidfd_signal(pidfd, signum):
+    sender = getattr(signal, 'pidfd_send_signal', None)
+    if sender is None:
+        raise RuntimeError('pidfd_unavailable')
+    try:
+        sender(pidfd, signum, None, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _capture_pidfd(root, pid):
+    pidfd_open = getattr(os, 'pidfd_open', None)
+    if sys.platform != 'linux' or pidfd_open is None or getattr(signal, 'pidfd_send_signal', None) is None:
+        raise RuntimeError('pidfd_unavailable')
+    try:
+        pidfd = pidfd_open(pid, 0)
+    except ProcessLookupError:
+        return None
+    except OSError as error:
+        raise RuntimeError('pidfd_open_failed') from error
+
+    keep = False
+    try:
+        try:
+            identity = process_identity(root, Path('/proc') / str(pid))
+        except (OSError, UnicodeError, IndexError, ValueError) as error:
+            if _send_pidfd_signal(pidfd, 0):
+                raise RuntimeError('process_identity_unreadable') from error
+            return None
+        if identity is None or identity[0] != pid or not _send_pidfd_signal(pidfd, 0):
+            return None
+        keep = True
+        return identity, pidfd
+    finally:
+        if not keep:
+            os.close(pidfd)
+
+
+def _wait_pidfd(pidfd, timeout):
+    poller = select.poll()
+    poller.register(pidfd, select.POLLIN)
+    return bool(poller.poll(round(timeout * 1000)))
+
+
+def _stop_pidfd(pidfd, term_timeout=8, kill_timeout=3):
+    if not _send_pidfd_signal(pidfd, signal.SIGTERM) or _wait_pidfd(pidfd, term_timeout):
+        return
+    if not _send_pidfd_signal(pidfd, signal.SIGKILL) or _wait_pidfd(pidfd, kill_timeout):
+        return
+    raise RuntimeError('process_stop_failed')
 
 
 def assert_idle(root):
@@ -48,16 +110,24 @@ def stop(root):
     # Guardian first, so it cannot restart the Hub during the transition.
     for kind in ('guardian', 'hub'):
         original = {row for row in processes(root) if row[1] == kind}
-        for pid, _, _ in original & set(processes(root)):
-            os.kill(pid, signal.SIGTERM)
-        deadline = time.monotonic() + 8
-        while original & set(processes(root)) and time.monotonic() < deadline:
-            time.sleep(.1)
-        for pid, _, _ in original & set(processes(root)):
-            os.kill(pid, signal.SIGKILL)
-        deadline = time.monotonic() + 3
-        while original & set(processes(root)) and time.monotonic() < deadline:
-            time.sleep(.1)
+        pinned = []
+        try:
+            for row in original:
+                captured = _capture_pidfd(root, row[0])
+                if captured is None:
+                    continue
+                identity, pidfd = captured
+                if identity == row:
+                    pinned.append(pidfd)
+                else:
+                    os.close(pidfd)
+            for pidfd in pinned:
+                _stop_pidfd(pidfd)
+        finally:
+            for pidfd in pinned:
+                os.close(pidfd)
+        if {row for row in processes(root) if row[1] == kind} & original:
+            raise RuntimeError('process_stop_failed')
     if processes(root):
         raise RuntimeError('process_stop_failed')
 

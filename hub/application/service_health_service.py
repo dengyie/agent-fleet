@@ -86,7 +86,7 @@ class ServiceHealthService:
                     raise ServiceRepositoryError("http_probe_loopback_forbidden")
             return {"ok": True, "service": self.repository.upsert_service(owner_id, data)}
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
     def _freshness(self, evidence: dict, *, now: float) -> str:
         age = max(0.0, now - float(evidence["observed_at"]))
@@ -159,7 +159,7 @@ class ServiceHealthService:
         try:
             return {"ok": True, "services": [self._public(owner_id, row) for row in self.repository.list_services(owner_id)]}
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
     def get(self, owner_id: str, service_id: str) -> dict:
         owner_id = self._owner(owner_id)
@@ -170,7 +170,7 @@ class ServiceHealthService:
             evidence = self.repository.list_evidence(owner_id, service_id, limit=100)
             return {"ok": True, **self._public(owner_id, service), "evidence": evidence}
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
     def ingest(
         self,
@@ -195,7 +195,7 @@ class ServiceHealthService:
             )
             return {"ok": True, "evidence": saved}
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
     def node_evidence(self, owner_id: str, node_id: str, evidence: dict) -> dict:
         return self.ingest(owner_id, evidence, node_id=validate_id(node_id, "node_id"))

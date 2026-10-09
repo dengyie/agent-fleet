@@ -1,3 +1,5 @@
+import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -154,3 +156,69 @@ def test_evidence_ids_and_detail_are_bounded(repo):
             source="local", state="unhealthy", detail={"blob": "x" * (64 * 1024)},
         )
     assert oversized.value.code == "detail_too_large"
+
+
+@pytest.mark.parametrize("non_finite", [float("nan"), float("inf"), float("-inf")])
+def test_incident_rejects_non_finite_detail_before_persistence(repo, non_finite):
+    with pytest.raises(IncidentRepositoryError) as error:
+        repo.open_or_update(
+            "owner-a@example.test", _data(), observed_at=10, source="local",
+            state="unhealthy", detail={"value": non_finite},
+        )
+
+    assert error.value.code == "invalid_detail"
+    assert repo.list("owner-a@example.test") == []
+
+
+@pytest.mark.parametrize(("column", "value"), [
+    ("evidence_ids", "{"),
+    ("evidence_ids", '["ev-1",7]'),
+    ("latest_detail", "{"),
+    ("latest_detail", "[]"),
+    ("latest_detail", '{"status":NaN}'),
+])
+def test_corrupt_persisted_incident_json_fails_closed(repo, column, value):
+    row = repo.open_or_update(
+        "owner-a@example.test", _data(), observed_at=10, source="local",
+        state="unhealthy", detail={"status": "safe"},
+    )
+    with sqlite3.connect(repo.db_path) as connection:
+        connection.execute(
+            f"UPDATE incidents SET {column}=? WHERE incident_id=?",
+            (value, row["incident_id"]),
+        )
+
+    with pytest.raises(IncidentRepositoryError) as error:
+        repo.get("owner-a@example.test", row["incident_id"])
+    assert error.value.code == "incident_store"
+    assert error.value.__cause__ is not None
+
+
+def test_corrupt_incident_json_is_bounded_on_owner_http_route(tmp_path):
+    from hub.bootstrap import create_app
+    from hub.config import FleetConfig
+
+    owner = "owner-a@example.test"
+    app = create_app(FleetConfig.from_root(
+        tmp_path, dev_operator=owner, platform_enabled=True,
+        service_monitoring_enabled=True,
+    ))
+    repository = app.extensions["fleet"]["repositories"]["platform_incidents"]
+    row = repository.open_or_update(
+        owner, _data(), observed_at=10, source="local", state="unhealthy",
+    )
+    marker = "persisted-incident-secret"
+    with sqlite3.connect(repository.db_path) as connection:
+        connection.execute(
+            "UPDATE incidents SET latest_detail=? WHERE incident_id=?",
+            (json.dumps({"marker": marker})[:-1], row["incident_id"]),
+        )
+
+    response = app.test_client().get(
+        f"/api/platform/v1/incidents/{row['incident_id']}"
+    )
+    assert response.status_code == 503
+    body = response.get_json()
+    assert body["ok"] is False
+    assert body["error"] == "incident_store"
+    assert marker not in json.dumps(body)

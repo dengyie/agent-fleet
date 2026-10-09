@@ -20,13 +20,14 @@ Usage:
 import asyncio
 import logging
 import os
-import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 # Use gateway.run logger for visibility in gateway logs
 logger = logging.getLogger("gateway.run")
+_RELEASE_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _proc_identity(pid: int) -> tuple[str, str, int] | None:
@@ -111,6 +112,67 @@ class AgentFleetGuardian:
             and (not require_api_only or "--no-serve-frontend" in cmdline)
         )
 
+    def _managed_hub_cwd(self, pid: int) -> str | None:
+        identity = _proc_identity(pid)
+        if identity is None:
+            return None
+        cmdline, cwd, uid = identity
+        if uid != os.getuid() or "hub/web.py" not in cmdline:
+            return None
+        try:
+            actual = Path(cwd).resolve(strict=True)
+            configured = self.repo_root.resolve(strict=True)
+            module_root = _RELEASE_ROOT.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        if actual in {configured, module_root}:
+            return str(actual)
+        # Symlink-based releases keep older Hub cwd values in sibling release
+        # directories while LIVE already resolves to the candidate release.
+        if actual.parent == module_root.parent and (actual / "hub" / "web.py").is_file():
+            return str(actual)
+        return None
+
+    async def _stop_process_with_pidfd(self, pid: int, expected_cwd: str) -> str:
+        helper = _RELEASE_ROOT / "deploy" / "hk-web-process-control.py"
+        if not helper.is_file():
+            logger.error("Process-control helper is missing: %s", helper)
+            return "failed"
+        try:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                str(helper),
+                str(pid),
+                expected_cwd,
+                str(os.getuid()),
+                "web",
+                "allow_existing",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            communication = asyncio.create_task(process.communicate())
+            try:
+                stdout, stderr = await asyncio.shield(communication)
+            except asyncio.CancelledError:
+                await asyncio.shield(communication)
+                raise
+        except (OSError, RuntimeError) as error:
+            logger.error("Unable to run pidfd process control: %s", error)
+            return "failed"
+
+        result = stdout.decode("utf-8", "replace").strip()
+        if process.returncode == 0 and result in {"stopped", "absent"}:
+            return result
+        if process.returncode == 3 and result == "mismatch":
+            return result
+        logger.error(
+            "Pidfd process control failed for PID %s (exit=%s): %s",
+            pid,
+            process.returncode,
+            stderr.decode("utf-8", "replace").strip(),
+        )
+        return "failed"
+
     async def check_health(self) -> int:
         """
         Check agent-fleet web service health.
@@ -149,42 +211,33 @@ class AgentFleetGuardian:
         logger.warning("Restarting agent-fleet web service")
 
         try:
-            # Step 1: Kill old process
+            # Stop the old process through a pidfd so PID reuse cannot redirect
+            # TERM or KILL after the identity check.
             if self.web_pid_file.exists():
                 try:
                     old_pid = int(self.web_pid_file.read_text().strip())
-                    # A replaced release can have a different launch mode;
-                    # still require the same user, Hub command and cwd.
-                    if not self.process_matches(old_pid, require_api_only=False):
-                        logger.warning("Ignoring stale or mismatched web PID %s", old_pid)
-                        self.web_pid_file.unlink(missing_ok=True)
+                    if old_pid <= 0:
+                        raise ValueError("PID must be positive")
+                except (ValueError, OSError) as error:
+                    logger.warning("Ignoring invalid or unreadable web PID: %s", error)
+                else:
+                    expected_cwd = self._managed_hub_cwd(old_pid)
+                    if expected_cwd is None:
+                        identity = _proc_identity(old_pid)
+                        if identity is not None:
+                            logger.warning("Ignoring stale or unmanaged web PID %s", old_pid)
+                            stop_result = "mismatch"
+                        else:
+                            expected_cwd = str(self.repo_root.resolve())
+                            stop_result = await self._stop_process_with_pidfd(old_pid, expected_cwd)
                     else:
-                        try:
-                            os.kill(old_pid, 0)  # Check if process exists
-                            logger.info(f"Killing old web process {old_pid}")
-                            os.kill(old_pid, signal.SIGTERM)
-                            await asyncio.sleep(2)
-
-                            # Re-check identity before a force kill. A recycled
-                            # PID must never receive the signal.
-                            if self.process_matches(old_pid, require_api_only=False):
-                                logger.warning(
-                                    f"Process {old_pid} still alive, sending SIGKILL")
-                                os.kill(old_pid, signal.SIGKILL)
-                                await asyncio.sleep(1)
-
-                            # Verify killed
-                            try:
-                                os.kill(old_pid, 0)
-                                logger.error(f"Failed to kill process {old_pid}")
-                                return False
-                            except ProcessLookupError:
-                                pass  # Success
-
-                        except ProcessLookupError:
-                            logger.info(f"Old process {old_pid} already dead")
-                except (ValueError, OSError) as e:
-                    logger.warning(f"Failed to read/kill old PID: {e}")
+                        stop_result = await self._stop_process_with_pidfd(old_pid, expected_cwd)
+                    if stop_result == "failed":
+                        return False
+                    if stop_result == "mismatch":
+                        logger.warning("Ignoring stale or mismatched web PID %s", old_pid)
+                    else:
+                        logger.info("Old web process %s: %s", old_pid, stop_result)
 
             # Step 2: Start new process
             if not self.repo_root.exists():
@@ -225,8 +278,7 @@ class AgentFleetGuardian:
             # Step 3: Verify started
             await asyncio.sleep(2)
             try:
-                os.kill(new_pid, 0)  # Check if process still alive
-                if not self.process_matches(new_pid):
+                if proc.poll() is not None or not self.process_matches(new_pid):
                     logger.error("New web process identity check failed: PID %s", new_pid)
                     self.web_pid_file.unlink(missing_ok=True)
                     return False

@@ -27,6 +27,7 @@ function protectConsole() {
   const gate = document.getElementById('access-state');
   const retry = gate.querySelector('button');
   let teardown, unsubscribe, mounted = false, checking = false, redirecting = false, account = null;
+  let lastSessionCheckAt = 0;
   function disposeView() {
     shell.hidden = true; sse.stop();
     if (typeof teardown === 'function') teardown();
@@ -57,14 +58,11 @@ function protectConsole() {
     });
     mounted = true;
   }
-  async function verifyAccess({background = false} = {}) {
-    if (checking || redirecting) return;
+  async function verifyAccess({force = false} = {}) {
+    const now = Date.now();
+    if (checking || redirecting || (!force && now - lastSessionCheckAt < 60000)) return;
     checking = true;
-    if (!background) {
-      shell.hidden = true; gate.hidden = false; retry.hidden = true;
-      gate.querySelector('p').textContent = '正在验证登录状态…';
-      sse.stop();
-    }
+    lastSessionCheckAt = now;
     try {
       const session = await api.getOperatorSession();
       if (redirecting) return;
@@ -90,8 +88,8 @@ function protectConsole() {
       gate.hidden = true; shell.hidden = false; if (!account || account.role === "admin") sse.start();
     } catch (error) {
       if (error.status === 401) requireLogin();
-      else if (!background) gate.querySelector('p').textContent = '暂时无法验证登录状态';
-      if (!background) retry.hidden = redirecting;
+      else if (!mounted) document.getElementById('route-view').textContent =
+        '工作空间暂时无法连接，稍后会自动重试。';
     } finally { checking = false; }
   }
   window.addEventListener('fleet-auth-required', requireLogin);
@@ -100,18 +98,20 @@ function protectConsole() {
     catch (error) { gate.hidden = false; gate.querySelector('p').textContent = '退出登录失败，请重试'; }
   });
   document.getElementById('refresh-page').addEventListener('click', () => window.location.reload());
-  retry.addEventListener('click', verifyAccess);
-  window.addEventListener('focus', verifyAccess);
+  retry.addEventListener('click', () => verifyAccess({force: true}));
+  window.addEventListener('focus', () => verifyAccess());
   const sessionTimer = window.setInterval(async () => {
     if (document.hidden || checking || redirecting) return;
-    await verifyAccess({background: true});
+    await verifyAccess();
   }, 60000);
   window.addEventListener('pagehide', event => {
     shell.hidden = true; sse.stop();
     if (!event.persisted) { window.clearInterval(sessionTimer); disposeView(); }
   });
   window.addEventListener('pageshow', event => { if (event.persisted) verifyAccess(); });
-  verifyAccess();
+  gate.hidden = true;
+  shell.hidden = false;
+  verifyAccess({force: true});
 }
 
 if (window.location.pathname === '/login') mountLogin();

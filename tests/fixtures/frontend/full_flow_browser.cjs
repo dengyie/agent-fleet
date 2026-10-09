@@ -11,16 +11,19 @@ const origin = process.argv[2];
   const watch = p => {p.setDefaultTimeout(12000); p.on('pageerror', e => errors.push(e.message));};
   watch(page);
   try {
-    await page.goto(origin + '/assistant');
-    await page.waitForURL('**/login?**');
+    // SPA readiness is asserted after the auth redirect below. Waiting for
+    // every page resource's `load` event here makes the journey depend on
+    // nondeterministic local browser scheduling.
+    await page.goto(origin + '/assistant', {waitUntil: 'domcontentloaded'});
+    await page.waitForURL('**/login?**', {waitUntil: 'domcontentloaded'});
     await page.getByLabel('账号或邮箱', {exact: true}).fill('mango');
     await page.getByLabel('密码', {exact: true}).fill('Full-flow-password-123!');
     await page.getByRole('button', {name: '登录', exact: true}).click();
-    await page.waitForURL('**/assistant');
+    await page.waitForURL('**/assistant', {waitUntil: 'domcontentloaded'});
     await page.getByText('就绪', {exact: true}).waitFor();
     await page.getByRole('textbox', {name: '给助手的任务'}).fill('slow full flow');
     await page.getByRole('button', {name: '发送任务'}).click();
-    await page.waitForURL('**/conversation/**');
+    await page.waitForURL('**/conversation/**', {waitUntil: 'domcontentloaded'});
     await page.locator('.assistant-run-status[data-state="running"]').waitFor();
     const conversationUrl = page.url();
     await page.close();
@@ -58,9 +61,9 @@ const origin = process.argv[2];
       await page.screenshot({path: process.env.FLEET_SCREENSHOTS + '/full-flow-recovered.png', fullPage: true});
     }
     await page.getByRole('button', {name: '退出登录', exact: true}).click();
-    await page.waitForURL('**/login**');
+    await page.waitForURL('**/login**', {waitUntil: 'domcontentloaded'});
     await page.goto(conversationUrl);
-    await page.waitForURL('**/login?**');
+    await page.waitForURL('**/login?**', {waitUntil: 'domcontentloaded'});
     console.log('PASS: account → real HTTP model → tools → artifact → tab close/recovery → failure → logout');
   } catch (error) {
     if (process.env.FLEET_SCREENSHOTS && !page.isClosed()) {

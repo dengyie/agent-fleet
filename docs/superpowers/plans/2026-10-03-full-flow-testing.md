@@ -51,3 +51,21 @@
 - [x] Document workflow inventory, test layers, exact commands, failure triage, evidence retention and external acceptance. Replace stale token-login production instructions with current account flow.
 - [x] Run full suite with `--require-journeys --journey-report`, check all mapped outcomes, then run the new account-authenticated release probe against selected live models and report individual results.
 - [x] Rebase the publication branch onto latest public main, publish a reviewable PR, verify CI and record precise tests and external limits. Do not claim absence of all future bugs or use test counts as proof of user-flow coverage.
+
+## 2026-10-09: Batch console transcript fixture ingestion
+
+Profiling `test_console_in_real_browser` showed that its 205 one-event calls to
+`SessionService.ingest_events` spent 3.253 seconds cumulatively in that method.
+The fixture now builds the same 205 events and submits three bounded batches
+of 100, 100, and 5. A post-change profile recorded three calls and about 1.82
+seconds cumulative in `ingest_events` (roughly 44% lower for that measured
+path). This is fixture setup profiling, not an end-to-end suite speed claim;
+the product ingest path and its batch limit are unchanged.
+
+The focused session-ingest and Chromium console slice passed **36 tests with
+zero skips**. Clean Linux commit `2a02f17dcff47ed2fdbf3491fd35a21647112a01`
+passed the required full gate: **3126 passed, zero skips, 160 subtests, and
+29/29 journeys**. The release evidence validator accepted all **456 selectors
+and 3126 JUnit cases** against the clean Linux and local checkouts. Evidence is
+`/tmp/agent-fleet-linux-2a02f17-evidence/`; external MODEL/MAIL/NODE/DEPLOY
+checks remain `not_run`.

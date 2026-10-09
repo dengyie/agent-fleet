@@ -41,6 +41,9 @@ def _error(exc: PlatformScheduleError) -> ApplicationError:
         "invalid_missed_policy": 400,
         "invalid_overlap_policy": 400,
         "invalid_schedule": 400,
+        "invalid_name": 400,
+        "invalid_next_run": 400,
+        "invalid_enabled": 400,
         "value_too_large": 413,
     }.get(code, 503)
     detail = "调度请求不合法" if status < 500 else "调度存储不可用"
@@ -92,6 +95,8 @@ def update_schedule(schedule_id):
         expected = request.headers.get("If-Match", body.get("revision"))
         if isinstance(expected, str):
             expected = expected.strip().strip('"')
+        elif expected is not None and type(expected) is not int:
+            raise ApplicationError("invalid_revision", "revision 不合法", 400)
         try:
             expected = int(expected) if expected is not None else None
         except (TypeError, ValueError):

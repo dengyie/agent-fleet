@@ -7,7 +7,11 @@ import re
 import subprocess
 from pathlib import Path
 
+from hub.domain.task_result import MAX_DIFF_PATCH, bound_patch
+from tools.bounded_process import run_bounded
+
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+DIFF_TIMEOUT_S = 60.0
 
 
 class WorktreeError(RuntimeError):
@@ -45,26 +49,38 @@ def create_worktree(project: Path, task_id: str) -> Path:
 
 
 def _truncate_text(out: str, max_bytes: int) -> str:
-    encoded = out.encode("utf-8", "replace")
-    if len(encoded) <= max_bytes:
-        return out
-    cut = encoded[:max_bytes].decode("utf-8", "replace")
-    return cut + "\n…[truncated]"
+    return bound_patch(out, max_bytes)[0]
 
 
-def diff_stat(worktree: Path, max_bytes=5120) -> str:
+def _git_diff(worktree: Path, *args: str, max_bytes: int) -> str:
+    """Drain both pipes under one deadline, retaining only a bounded prefix."""
+    if type(max_bytes) is not int or not 0 <= max_bytes <= MAX_DIFF_PATCH:
+        raise WorktreeError("invalid_diff_limit")
+    command = ["git", "diff", "--cached", "--no-ext-diff", "--no-textconv", *args]
+    try:
+        proc = run_bounded(command, cwd=worktree, timeout_s=DIFF_TIMEOUT_S,
+                           stdout_limit=max_bytes + 1, stderr_limit=1200)
+    except subprocess.TimeoutExpired as exc:
+        raise WorktreeError("git diff 超时") from exc
+    except OSError as exc:
+        raise WorktreeError("git diff 执行失败") from exc
+    if proc.returncode != 0:
+        detail = proc.stderr.decode("utf-8", errors="replace")[:300].strip()
+        raise WorktreeError(f"git diff 失败: {detail}")
+    return _truncate_text(proc.stdout.decode("utf-8", errors="replace"), max_bytes)
+
+
+def diff_stat(worktree: Path, max_bytes: int = 5120) -> str:
     worktree = Path(worktree)
     _git(worktree, "add", "-A")  # 让未跟踪文件进入 diff 视野（worktree 即用即弃）
-    proc = _git(worktree, "diff", "--cached", "--stat")
-    return _truncate_text(proc.stdout, max_bytes)
+    return _git_diff(worktree, "--stat", max_bytes=max_bytes)
 
 
-def diff_patch(worktree: Path, max_bytes=102400) -> str:
+def diff_patch(worktree: Path, max_bytes: int = MAX_DIFF_PATCH) -> str:
     """Unified diff of the disposable worktree. Caller redacts."""
     worktree = Path(worktree)
     _git(worktree, "add", "-A")
-    proc = _git(worktree, "diff", "--cached", "--no-color", "--binary")
-    return _truncate_text(proc.stdout or "", max_bytes)
+    return _git_diff(worktree, "--no-color", "--binary", max_bytes=max_bytes)
 
 
 def cleanup_worktree(project: Path, worktree: Path, task_id: str) -> None:

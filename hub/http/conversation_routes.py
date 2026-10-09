@@ -41,10 +41,13 @@ def _call(fn):
 def create_conversation():
     def _create():
         body = _body()
+        overrides = body.get("overrides", {})
+        if "overrides" in body and not isinstance(overrides, dict):
+            raise ApplicationError("invalid_value", "请求数据不合法", 400)
         return jsonify(_services()[0].create(
             g.operator, title=body.get("title", ""),
             workspace_id=body.get("workspace_id"),
-            overrides=body.get("overrides") or {},
+            overrides=overrides,
         ))
     return _call(_create)
 
@@ -59,7 +62,11 @@ def list_conversations():
             raise ApplicationError("invalid_limit", "limit 不合法", 400) from None
         if limit < 1:
             raise ApplicationError("invalid_limit", "limit 不合法", 400)
-        return jsonify(_services()[0].list(g.operator, limit=limit))
+        archived = request.args.get("archived", "false")
+        if archived not in ("true", "false"):
+            raise ApplicationError("invalid_value", "archived 必须为 true 或 false", 400)
+        return jsonify(_services()[0].list(
+            g.operator, limit=limit, archived=archived == "true"))
     return _call(_list)
 
 
@@ -67,6 +74,35 @@ def list_conversations():
 @require_operator
 def get_conversation(conversation_id):
     return _call(lambda: jsonify(_services()[0].get(g.operator, conversation_id)))
+
+@bp.patch("/conversations/<conversation_id>")
+@require_operator
+def rename_conversation(conversation_id):
+    def _rename():
+        body = _body()
+        if set(body) != {"title"}:
+            raise ApplicationError("invalid_value", "请求数据不合法", 400)
+        return jsonify(_services()[0].rename(
+            g.operator, conversation_id, body["title"]))
+    return _call(_rename)
+
+@bp.post("/conversations/<conversation_id>/archive")
+@require_operator
+def archive_conversation(conversation_id):
+    return _call(lambda: jsonify(_services()[0].set_archived(
+        g.operator, conversation_id, archived=True)))
+
+@bp.post("/conversations/<conversation_id>/restore")
+@require_operator
+def restore_conversation(conversation_id):
+    return _call(lambda: jsonify(_services()[0].set_archived(
+        g.operator, conversation_id, archived=False)))
+
+@bp.delete("/conversations/<conversation_id>")
+@require_operator
+def delete_conversation(conversation_id):
+    return _call(lambda: jsonify(_services()[0].delete_archived(
+        g.operator, conversation_id)))
 
 
 @bp.post("/conversations/<conversation_id>/turns")
@@ -84,6 +120,9 @@ def append_acceptance_turn(conversation_id):
 def _append_turn(conversation_id, *, acceptance=False):
     def _turn():
         body = _body()
+        overrides = body.get("overrides", {})
+        if "overrides" in body and not isinstance(overrides, dict):
+            raise ApplicationError("invalid_value", "请求数据不合法", 400)
         if "memory_context" in body and body["memory_context"] is not None \
                 and not isinstance(body["memory_context"], dict):
             raise ApplicationError("invalid_memory_context", "memory_context 必须是 JSON 对象", 400)
@@ -92,7 +131,7 @@ def _append_turn(conversation_id, *, acceptance=False):
         return jsonify(_services()[0].turn(
             g.operator, conversation_id,
             text=body.get("text"), client_token=body.get("client_token"),
-            overrides=body.get("overrides") or {},
+            overrides=overrides,
             memory_context=body.get("memory_context")
             if "memory_context" in body else None,
             acceptance=acceptance,
@@ -129,39 +168,22 @@ def get_run_events(run_id):
 
 @bp.post("/runs/<run_id>/browser-approvals")
 @require_operator
-def grant_browser_approval(run_id):
-    def _grant():
-        body = _body()
-        selector = body.get("selector")
-        session_id = body.get("session_id")
-        if not isinstance(selector, str) or not isinstance(session_id, str):
-            raise ApplicationError("invalid_selector", "selector 与 session_id 必填", 400)
-        idempotency_key = body.get("idempotency_key")
-        if idempotency_key is not None and not isinstance(idempotency_key, str):
-            raise ApplicationError("invalid_id", "idempotency_key 不合法", 400)
-        return jsonify(_approvals().grant(
-            g.operator, run_id, session_id=session_id, selector=selector,
-            idempotency_key=idempotency_key,
-        ))
-    return _call(_grant)
+def grant_browser_approval(run_id: str):
+    return _call(lambda: jsonify(_approvals().grant(
+        g.operator, run_id, body=_body(), idempotency_key=request.headers.get("Idempotency-Key"),
+    )))
 
 
 @bp.delete("/runs/<run_id>/browser-approvals/<approval_id>")
 @require_operator
-def revoke_browser_approval(run_id, approval_id):
-    return _call(lambda: jsonify(
-        _approvals().revoke(g.operator, approval_id, run_id=run_id)))
+def revoke_browser_approval(run_id: str, approval_id: str):
+    return _call(lambda: jsonify(_approvals().revoke(g.operator, run_id, approval_id)))
 
 
 @bp.get("/runs/<run_id>/browser-approvals/<approval_id>")
 @require_operator
-def get_browser_approval(run_id, approval_id):
-    def _get():
-        approval = _approvals().get(g.operator, approval_id)
-        if approval.get("approval", {}).get("run_id") != run_id:
-            raise ApplicationError("approval_not_found", "审批不存在", 404)
-        return jsonify(approval)
-    return _call(_get)
+def get_browser_approval(run_id: str, approval_id: str):
+    return _call(lambda: jsonify(_approvals().get(g.operator, run_id, approval_id)))
 
 
 __all__ = ["bp"]

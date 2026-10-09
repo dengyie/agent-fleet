@@ -10,12 +10,13 @@ import json
 import secrets
 import sqlite3
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
 from hub.domain.execution_window import (
-    TERMINAL_WINDOW_STATES, WINDOW_EVENT_FIELDS, WINDOW_EVENT_KINDS,
-    WINDOW_STATES, public_window,
+    BROWSER_MUTATION_ACTIONS, TERMINAL_WINDOW_STATES, WINDOW_EVENT_FIELDS,
+    WINDOW_EVENT_KINDS, WINDOW_STATES, public_window,
 )
 from platform_schema import validate_id, validate_owner_id
 
@@ -24,6 +25,7 @@ MAX_EVENT_BYTES = 32 * 1024
 MAX_EVENT_TEXT = 8 * 1024
 MAX_EVENT_LIMIT = 200
 MAX_WINDOW_LIST_LIMIT = 50
+MAX_EVENT_CURSOR = 2**53 - 1
 _FORBIDDEN_EVENT_MARKERS = (
     "command", "argv", "executable", "shell", "path", "pid", "pty",
     "browser", "process", "secret", "token", "password", "credential",
@@ -40,15 +42,21 @@ class ExecutionWindowRepositoryError(RuntimeError):
         return self.code
 
 
-def _token_hash(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+def _token_hash(token: str, *, code: str = "invalid_lease") -> str:
+    try:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+    except UnicodeError as exc:
+        raise ExecutionWindowRepositoryError(code) from exc
 
 
 def _json(value: Mapping[str, Any] | None) -> str:
     try:
-        encoded = json.dumps(dict(value or {}), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-    except (TypeError, ValueError):
-        raise ExecutionWindowRepositoryError("invalid_metadata") from None
+        encoded = json.dumps(
+            dict(value or {}), ensure_ascii=True, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ExecutionWindowRepositoryError("invalid_metadata") from exc
     if len(encoded.encode("utf-8")) > MAX_METADATA_BYTES:
         raise ExecutionWindowRepositoryError("metadata_too_large")
     return encoded
@@ -85,18 +93,21 @@ def _event_json(value: Mapping[str, Any] | None, kind: str) -> str:
             for child in item:
                 inspect(child, depth + 1)
         elif isinstance(item, str):
-            if len(item.encode("utf-8")) > MAX_EVENT_TEXT:
+            if len(item) > MAX_EVENT_TEXT or len(item.encode("utf-8")) > MAX_EVENT_TEXT:
                 raise ExecutionWindowRepositoryError("event_payload_too_large")
         elif isinstance(item, float) and (item != item or item in (float("inf"), float("-inf"))):
             raise ExecutionWindowRepositoryError("invalid_event_payload")
-        elif item is not None and not isinstance(item, (bool, int, float)):
+        elif isinstance(item, int) and not isinstance(item, bool):
+            if not -MAX_EVENT_CURSOR <= item <= MAX_EVENT_CURSOR:
+                raise ExecutionWindowRepositoryError("invalid_event_payload")
+        elif item is not None and not isinstance(item, (bool, float)):
             raise ExecutionWindowRepositoryError("invalid_event_payload")
 
-    inspect(value)
     try:
+        inspect(value)
         encoded = json.dumps(dict(value), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-    except (TypeError, ValueError):
-        raise ExecutionWindowRepositoryError("invalid_event_payload") from None
+    except (TypeError, ValueError) as exc:
+        raise ExecutionWindowRepositoryError("invalid_event_payload") from exc
     if len(encoded.encode("utf-8")) > MAX_EVENT_BYTES:
         raise ExecutionWindowRepositoryError("event_payload_too_large")
     return encoded
@@ -128,6 +139,8 @@ class ExecutionWindowRepository:
             );
             CREATE INDEX IF NOT EXISTS idx_execution_windows_owner
               ON execution_windows(owner_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_execution_windows_run
+              ON execution_windows(owner_id, run_id);
             CREATE TABLE IF NOT EXISTS execution_window_tickets (
               ticket_id TEXT PRIMARY KEY, window_id TEXT NOT NULL, owner_id TEXT NOT NULL,
               token_hash TEXT NOT NULL UNIQUE, expires_at REAL NOT NULL,
@@ -155,6 +168,15 @@ class ExecutionWindowRepository:
             );
             CREATE INDEX IF NOT EXISTS idx_execution_window_events_cursor
               ON execution_window_events(owner_id, window_id, sequence);
+            CREATE TABLE IF NOT EXISTS execution_window_frames (
+              window_id TEXT NOT NULL, owner_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+              workspace_id TEXT NOT NULL, artifact_id TEXT NOT NULL, sha256 TEXT NOT NULL,
+              width INTEGER NOT NULL, height INTEGER NOT NULL, captured_at TEXT NOT NULL,
+              PRIMARY KEY(window_id, sequence), UNIQUE(window_id, artifact_id),
+              FOREIGN KEY(window_id) REFERENCES execution_windows(window_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_execution_window_frames_artifact
+              ON execution_window_frames(owner_id, window_id, artifact_id);
             """)
         except (sqlite3.Error, OSError):
             raise ExecutionWindowRepositoryError("window_store") from None
@@ -185,8 +207,8 @@ class ExecutionWindowRepository:
     def _ttl(value: Any, *, minimum: float, maximum: float, code: str) -> float:
         try:
             ttl = float(value)
-        except (TypeError, ValueError):
-            raise ExecutionWindowRepositoryError(code) from None
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ExecutionWindowRepositoryError(code) from exc
         if ttl != ttl or ttl < minimum or ttl > maximum:
             raise ExecutionWindowRepositoryError(code)
         return ttl
@@ -332,7 +354,7 @@ class ExecutionWindowRepository:
             if row is None: raise ExecutionWindowRepositoryError("window_not_found")
             if row["state"] == "expired": raise ExecutionWindowRepositoryError("window_expired")
             if row["state"] in {"closed", "closing"}: raise ExecutionWindowRepositoryError("window_closed")
-            ticket_row = conn.execute("SELECT * FROM execution_window_tickets WHERE owner_id=? AND window_id=? AND token_hash=?", (owner_id, window_id, _token_hash(ticket))).fetchone()
+            ticket_row = conn.execute("SELECT * FROM execution_window_tickets WHERE owner_id=? AND window_id=? AND token_hash=?", (owner_id, window_id, _token_hash(ticket, code="invalid_ticket"))).fetchone()
             if ticket_row is None: raise ExecutionWindowRepositoryError("invalid_ticket")
             if ticket_row["consumed_at"] is not None or ticket_row["revoked_at"] is not None: raise ExecutionWindowRepositoryError("ticket_used")
             if float(ticket_row["expires_at"]) <= now:
@@ -396,8 +418,34 @@ class ExecutionWindowRepository:
             if row is None: raise ExecutionWindowRepositoryError("window_not_found")
             if row["state"] != "attached":
                 raise ExecutionWindowRepositoryError("window_not_attached")
-            active = conn.execute("SELECT * FROM execution_window_leases WHERE owner_id=? AND window_id=? AND released_at IS NULL AND revoked_at IS NULL AND expires_at>? ORDER BY created_at DESC LIMIT 1", (owner_id, window_id, now)).fetchone()
+            active = conn.execute(
+                "SELECT l.* FROM execution_window_leases l JOIN execution_windows w "
+                "ON w.owner_id=l.owner_id AND w.window_id=l.window_id "
+                "WHERE l.owner_id=? AND w.run_id=? AND w.state='attached' AND w.expires_at>? "
+                "AND l.released_at IS NULL AND l.revoked_at IS NULL AND l.expires_at>? "
+                "ORDER BY l.created_at DESC LIMIT 1",
+                (owner_id, row["run_id"], now, now),
+            ).fetchone()
             if active is not None: raise ExecutionWindowRepositoryError("lease_conflict")
+            has_commands = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='platform_commands'"
+            ).fetchone() is not None
+            if has_commands:
+                mutations = tuple(sorted(BROWSER_MUTATION_ACTIONS))
+                marks = ",".join("?" for _ in mutations)
+                inflight = conn.execute(
+                    f"SELECT 1 FROM platform_commands WHERE owner_id=? AND run_id=? "
+                    f"AND status IN ('leased','accepted','running') AND action IN ({marks}) LIMIT 1",
+                    (owner_id, row["run_id"], *mutations),
+                ).fetchone()
+                if inflight is not None:
+                    raise ExecutionWindowRepositoryError("lease_conflict")
+                conn.execute(
+                    f"UPDATE platform_commands SET status='failed',result=?,lease_owner=NULL,lease_until=NULL,updated_at=? "
+                    f"WHERE owner_id=? AND run_id=? AND status='queued' AND action IN ({marks})",
+                    (json.dumps({"state": "failed", "result": {}, "error_code": "writer_lease_active"},
+                                sort_keys=True, separators=(",", ":")), now, owner_id, row["run_id"], *mutations),
+                )
             conn.execute("UPDATE execution_window_leases SET revoked_at=? WHERE owner_id=? AND window_id=? AND released_at IS NULL AND revoked_at IS NULL", (now, owner_id, window_id))
             token = secrets.token_urlsafe(32); lease_id = "lease_" + secrets.token_urlsafe(18); expires = min(float(row["expires_at"]), now + ttl)
             conn.execute("INSERT INTO execution_window_leases(lease_id,window_id,owner_id,holder_id,lease_token_hash,expires_at,created_at) VALUES(?,?,?,?,?,?,?)", (lease_id, window_id, owner_id, holder_id, _token_hash(token), expires, now))
@@ -412,6 +460,125 @@ class ExecutionWindowRepository:
             if conn is not None:
                 try: conn.execute("ROLLBACK")
                 except sqlite3.Error: pass
+            raise ExecutionWindowRepositoryError("window_store") from None
+        finally:
+            if conn is not None: conn.close()
+
+    @staticmethod
+    def assert_browser_write_allowed(connection, owner_id: str, run_id: str, *, now: float) -> None:
+        row = connection.execute(
+            "SELECT 1 FROM execution_windows w JOIN execution_window_leases l "
+            "ON l.owner_id=w.owner_id AND l.window_id=w.window_id "
+            "WHERE w.owner_id=? AND w.run_id=? AND w.state='attached' AND w.expires_at>? "
+            "AND l.released_at IS NULL AND l.revoked_at IS NULL AND l.expires_at>? LIMIT 1",
+            (owner_id, run_id, now, now),
+        ).fetchone()
+        if row is not None:
+            raise ExecutionWindowRepositoryError("writer_lease_active")
+
+    def append_browser_frame_event(self, connection, *, owner_id: str, ticket_id: str,
+                                   artifact_id: str, sha256: str, width: int, height: int,
+                                   now: float | None = None) -> dict[str, Any] | None:
+        try:
+            owner_id = validate_owner_id(owner_id)
+            if (not isinstance(ticket_id, str) or not ticket_id or len(ticket_id) > 128
+                    or not isinstance(artifact_id, str) or not artifact_id or len(artifact_id) > 128):
+                raise ValueError("invalid frame identifier")
+        except ValueError:
+            raise ExecutionWindowRepositoryError("frame_scope") from None
+        if (isinstance(width, bool) or not isinstance(width, int) or not 1 <= width <= 4096
+                or isinstance(height, bool) or not isinstance(height, int) or not 1 <= height <= 4096):
+            raise ExecutionWindowRepositoryError("frame_dimensions")
+        ticket = connection.execute(
+            "SELECT * FROM browser_artifact_tickets WHERE owner_id=? AND ticket_id=?",
+            (owner_id, ticket_id),
+        ).fetchone()
+        if (ticket is None or ticket["state"] != "consumed" or ticket["window_id"] is None
+                or ticket["artifact_id"] != artifact_id or ticket["sha256"] != sha256
+                or ticket["content_type"] != "image/png"):
+            raise ExecutionWindowRepositoryError("frame_scope")
+        window_id = ticket["window_id"]
+        moment = float(self.clock() if now is None else now)
+        window = connection.execute(
+            "SELECT run_id,state,expires_at FROM execution_windows WHERE owner_id=? AND window_id=?",
+            (owner_id, window_id),
+        ).fetchone()
+        session = connection.execute(
+            "SELECT state,workspace_id,run_id,node_id FROM browser_sessions "
+            "WHERE owner_id=? AND session_id=?",
+            (owner_id, ticket["session_id"]),
+        ).fetchone()
+        if (window is None or session is None or window["state"] != "attached"
+                or float(window["expires_at"]) <= moment or window["run_id"] != ticket["run_id"]
+                or window_id != ticket["window_id"]
+                or session["state"] != "open" or session["run_id"] != ticket["run_id"]
+                or session["workspace_id"] != ticket["workspace_id"]
+                or session["node_id"] != ticket["node_id"]):
+            return None
+        client_event_id = "frame_" + hashlib.sha256(
+            f"{ticket['command_id']}:{artifact_id}".encode("utf-8")
+        ).hexdigest()[:48]
+        prior = connection.execute(
+            "SELECT e.*,f.workspace_id,f.artifact_id,f.sha256 AS frame_sha256 "
+            "FROM execution_window_events e JOIN execution_window_frames f "
+            "ON f.window_id=e.window_id AND f.sequence=e.sequence "
+            "WHERE e.owner_id=? AND e.window_id=? AND e.client_event_id=?",
+            (owner_id, window_id, client_event_id),
+        ).fetchone()
+        if prior is not None:
+            if (prior["artifact_id"], prior["frame_sha256"], prior["workspace_id"]) != (
+                    artifact_id, sha256, ticket["workspace_id"]):
+                raise ExecutionWindowRepositoryError("event_conflict")
+            return self._event(prior)
+        sequence = int(connection.execute(
+            "SELECT COALESCE(MAX(sequence),0)+1 FROM execution_window_events WHERE window_id=?",
+            (window_id,),
+        ).fetchone()[0])
+        captured_at = datetime.fromtimestamp(moment, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        payload = {
+            "artifact_id": artifact_id, "sha256": sha256, "content_type": "image/png",
+            "width": width, "height": height, "captured_at": captured_at,
+            "frame_seq": sequence,
+        }
+        encoded = _event_json(payload, "browser.frame")
+        connection.execute(
+            "INSERT INTO execution_window_events(window_id,owner_id,sequence,client_event_id,kind,payload,created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (window_id, owner_id, sequence, client_event_id, "browser.frame", encoded, moment),
+        )
+        connection.execute(
+            "INSERT INTO execution_window_frames(window_id,owner_id,sequence,workspace_id,artifact_id,sha256,width,height,captured_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (window_id, owner_id, sequence, ticket["workspace_id"], artifact_id, sha256, width, height, captured_at),
+        )
+        row = connection.execute(
+            "SELECT window_id,sequence,client_event_id,kind,payload,created_at "
+            "FROM execution_window_events WHERE window_id=? AND sequence=?",
+            (window_id, sequence),
+        ).fetchone()
+        return self._event(row)
+
+    def get_frame_artifact(self, owner_id: str, window_id: str, artifact_id: str) -> dict[str, Any] | None:
+        owner_id, window_id = self._owner_window(owner_id, window_id)
+        if (not isinstance(artifact_id, str) or not artifact_id
+                or len(artifact_id) > 128
+                or any(ord(char) < 0x20 or ord(char) == 0x7f for char in artifact_id)):
+            raise ExecutionWindowRepositoryError("invalid_event_payload") from None
+        conn = None
+        try:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT f.workspace_id,f.artifact_id,f.sha256,f.width,f.height,f.captured_at "
+                "FROM execution_window_frames f JOIN execution_window_events e "
+                "ON e.owner_id=f.owner_id AND e.window_id=f.window_id AND e.sequence=f.sequence "
+                "JOIN browser_artifact_tickets t ON t.owner_id=f.owner_id AND t.window_id=f.window_id "
+                "AND t.artifact_id=f.artifact_id AND t.sha256=f.sha256 "
+                "WHERE f.owner_id=? AND f.window_id=? AND f.artifact_id=? AND e.kind='browser.frame' "
+                "AND t.state='consumed' AND t.content_type='image/png' LIMIT 1",
+                (owner_id, window_id, artifact_id),
+            ).fetchone()
+            return dict(row) if row is not None else None
+        except sqlite3.Error:
             raise ExecutionWindowRepositoryError("window_store") from None
         finally:
             if conn is not None: conn.close()
@@ -514,7 +681,7 @@ class ExecutionWindowRepository:
             raise ExecutionWindowRepositoryError("invalid_lease")
         client_event_id = self._event_id(client_event_id)
         kind = self._event_kind(kind)
-        encoded = _event_json(payload or {}, kind)
+        encoded = _event_json({} if payload is None else payload, kind)
         now = float(self.clock() if now is None else now)
         conn = None
         try:
@@ -593,9 +760,9 @@ class ExecutionWindowRepository:
         owner_id, window_id = self._owner_window(owner_id, window_id)
         try:
             after = int(after); limit = int(limit)
-        except (TypeError, ValueError):
-            raise ExecutionWindowRepositoryError("invalid_cursor") from None
-        if after < 0 or limit < 1 or limit > MAX_EVENT_LIMIT:
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ExecutionWindowRepositoryError("invalid_cursor") from exc
+        if not 0 <= after <= MAX_EVENT_CURSOR or not 1 <= limit <= MAX_EVENT_LIMIT:
             raise ExecutionWindowRepositoryError("invalid_cursor")
         conn = None
         try:

@@ -130,6 +130,16 @@ class SessionService:
                 rejected.append({"index": index, "code": clean})
                 continue
 
+            # Exact is a source capability claim, not an event-controlled
+            # quality value. Until a signed source grant is wired here,
+            # reject it before creating session or transcript rows.
+            if clean["capture_quality"] == "exact":
+                rejected.append({
+                    "index": index,
+                    "code": "capture_source_unverified",
+                })
+                continue
+
             session_id = clean["session_id"]
             current_key = (session_id, clean["stream_id"])
             if batch_key is None:

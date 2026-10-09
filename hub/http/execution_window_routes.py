@@ -5,6 +5,7 @@ from flask import Blueprint, current_app, g, jsonify, request
 
 from hub.auth import require_operator
 from hub.http.errors import ApplicationError, error_response
+from tools.platform.artifacts import ArtifactError
 
 bp = Blueprint("execution_windows", __name__, url_prefix="/api/platform/v1/execution-windows")
 
@@ -41,6 +42,11 @@ def _call(fn):
         return fn()
     except ApplicationError as exc:
         return error_response(exc)
+    except ArtifactError as exc:
+        status = {"not_found": 404, "artifact_corrupt": 409}.get(exc.code, 503)
+        detail = {"not_found": "画面不存在", "artifact_corrupt": "画面文件校验失败"}.get(
+            exc.code, "画面文件不可用")
+        return error_response(ApplicationError(exc.code, detail, status))
 
 
 @bp.post("")
@@ -68,6 +74,30 @@ def list_windows():
 @require_operator
 def get_window(window_id):
     return _call(lambda: jsonify(_service().get(g.operator, window_id)))
+
+
+@bp.get("/<window_id>/frames/<artifact_id>")
+@require_operator
+def get_window_frame(window_id, artifact_id):
+    def _read():
+        frame = _service().get_frame_artifact(g.operator, window_id, artifact_id)
+        if frame is None:
+            raise ApplicationError("frame_not_found", "画面不存在", 404)
+        services = current_app.extensions.get("fleet", {}).get("services", {})
+        store = services.get("platform_artifacts")
+        if store is None:
+            raise ApplicationError("artifact_store", "画面文件不可用", 503)
+        manifest = store.get(g.operator, frame["workspace_id"], artifact_id)
+        if (manifest is None or manifest.get("content_type") != "image/png"
+                or manifest.get("sha256") != frame["sha256"]):
+            raise ArtifactError("artifact_corrupt" if manifest is not None else "not_found")
+        raw = store.read(g.operator, frame["workspace_id"], artifact_id)
+        response = current_app.response_class(raw, mimetype="image/png")
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+        return response
+    return _call(_read)
 
 
 @bp.post("/<window_id>/attach")

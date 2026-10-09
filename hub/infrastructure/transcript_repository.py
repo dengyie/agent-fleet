@@ -64,6 +64,8 @@ SCHEMA_VERSION = 1
 
 DEFAULT_MAX_RAW_BYTES = 256 * 1024 * 1024  # 256 MiB default Hub raw budget
 DEFAULT_RAW_RETENTION_DAYS = 14
+DEFAULT_RAW_PURGE_BATCH_SIZE = 500
+MAX_RAW_PURGE_BATCH_SIZE = 1000
 
 # AEAD key contract (aligned with tools.session.crypto.KEY_LENGTH).
 _AEAD_KEY_LENGTH = 32
@@ -375,6 +377,10 @@ class TranscriptRepository:
 
         conn = self._connect()
         try:
+            # Serialize duplicate/sequence/quota admission with the writes
+            # that publish this event.  In particular, the per-session raw
+            # byte budget must not be checked against a stale concurrent view.
+            conn.execute("BEGIN IMMEDIATE")
             # Duplicate check against the redacted stream (the write key),
             # scoped per session so two sessions may share an event_id.
             existing = conn.execute(
@@ -382,6 +388,7 @@ class TranscriptRepository:
                 (session_id, event_id),
             ).fetchone()
             if existing:
+                conn.rollback()
                 return IngestResult("duplicate", event_id=event_id,
                                     reason=None, raw_written=False)
 
@@ -424,10 +431,12 @@ class TranscriptRepository:
                     # plaintext.
                     status = "gap" if is_gap else "accepted"
                     self._persist_redacted(conn, clean, redacted)
+                    conn.commit()
                     return IngestResult(status, event_id=event_id,
                                         reason="raw_write_failed",
                                         raw_written=False)
                 if projected > self._max_raw_bytes:
+                    conn.rollback()
                     if quality == "best_effort":
                         return IngestResult(
                             "gap", event_id=event_id,
@@ -457,9 +466,12 @@ class TranscriptRepository:
                     raw_written = False
 
             status = "gap" if is_gap else "accepted"
+            conn.commit()
             return IngestResult(status, event_id=event_id,
                                 reason=reason, raw_written=raw_written)
         finally:
+            if conn.in_transaction:
+                conn.rollback()
             conn.close()
 
     # -- redacted read ----------------------------------------------------------------
@@ -647,37 +659,57 @@ class TranscriptRepository:
 
     # -- retention / purge --------------------------------------------------------
 
-    def purge_expired_raw(self, now: str) -> list[str]:
+    def purge_expired_raw(
+        self,
+        now: str,
+        *,
+        limit: int = DEFAULT_RAW_PURGE_BATCH_SIZE,
+    ) -> list[str]:
         """Delete raw rows past ``retention_until``; never redacted rows.
 
-        Returns the removed event ids.  Audits each purge with a count, no
-        deleted content.
+        Removes at most ``limit`` rows in one atomic batch. Returns the removed
+        event ids and audits each deletion with the batch count, no content.
         """
-        conn = self._connect()
+        if type(limit) is not int or not 1 <= limit <= MAX_RAW_PURGE_BATCH_SIZE:
+            raise TranscriptError("invalid_purge_limit")
+
+        conn = None
         try:
+            conn = self._connect()
+            conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 "SELECT session_id, event_id FROM raw_events"
-                " WHERE retention_until <= ?",
-                (now,)).fetchall()
+                " WHERE retention_until <= ?"
+                " ORDER BY retention_until ASC, rowid ASC LIMIT ?",
+                (now, limit)).fetchall()
             removed_ids = [r["event_id"] for r in rows]
-            ts = _now_iso()
-            for row in rows:
-                conn.execute(
-                    "DELETE FROM raw_events WHERE session_id=? AND event_id=?"
-                    " AND retention_until <= ?",
-                    (row["session_id"], row["event_id"], now))
-                self._append_audit(
-                    conn, ts, "retention", _AUDIT_RAW_PURGE,
-                    target=row["event_id"], detail=str(len(removed_ids)))
+            if rows:
+                ts = _now_iso()
+                for row in rows:
+                    conn.execute(
+                        "DELETE FROM raw_events WHERE session_id=? AND event_id=?"
+                        " AND retention_until <= ?",
+                        (row["session_id"], row["event_id"], now))
+                    self._append_audit(
+                        conn, ts, "retention", _AUDIT_RAW_PURGE,
+                        target=row["event_id"], detail=str(len(removed_ids)))
+            conn.commit()
             return removed_ids
+        except Exception as exc:
+            if conn is not None and conn.in_transaction:
+                conn.rollback()
+            raise TranscriptError("transcript_store") from exc
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
 
 
 __all__ = [
     "DEFAULT_MAX_RAW_BYTES",
+    "DEFAULT_RAW_PURGE_BATCH_SIZE",
     "DEFAULT_RAW_RETENTION_DAYS",
     "IngestResult",
+    "MAX_RAW_PURGE_BATCH_SIZE",
     "SCHEMA_VERSION",
     "TranscriptError",
     "TranscriptRepository",

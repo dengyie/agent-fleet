@@ -19,10 +19,12 @@ layout and source text like ``tests/test_frontend_xss.py``.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -104,9 +106,10 @@ class PackageSafetyTests(unittest.TestCase):
 
     ``deploy/package-frontend-release.sh <output_dir> [version]`` copies only the
     static ``frontend/`` release files, writes a deterministic non-secret
-    ``manifest.json`` (release version + file list only), and refuses to emit
-    anything if a copied path matches a secret/state/database redline. It must
-    use no build chain (npm/git) and no external network/production endpoints.
+    ``manifest.json`` (release version + file list only), requires a fresh output
+    directory, and refuses to emit anything if a copied path matches a
+    secret/state/database redline. It must use no build chain (npm/git) and no
+    external network/production endpoints.
     """
 
     def test_package_script_source_rejects_secret_and_state_paths(self):
@@ -157,7 +160,9 @@ class DeploymentSafetyTests(unittest.TestCase):
         self.assertIn('old_stopped=0', install)
         self.assertIn('Do not start a', install)
         self.assertIn('deploy/hk-self-report-loop.sh', install)
-        self.assertIn('kill -KILL', install)
+        self.assertIn('hk-web-process-control.py', install)
+        self.assertNotIn('kill -KILL "$pid"', install)
+        self.assertNotIn('kill -TERM "$old_pid"', install)
         self.assertIn('probe_process_matches', install)
         self.assertIn('fleet_cp_tree_retry()', helper)
         self.assertIn('attempts < 5', helper)
@@ -206,7 +211,8 @@ class DeploymentSafetyTests(unittest.TestCase):
     def test_guardian_and_probe_allow_existing_only_for_existing_process(self):
         guardian = (REPO_ROOT / "hub" / "agent_fleet_guardian.py").read_text()
         loop = (REPO_ROOT / "deploy" / "hk-self-report-loop.sh").read_text()
-        self.assertIn("require_api_only=False", guardian)
+        self.assertIn('"web",\n                "allow_existing"', guardian)
+        self.assertNotIn("os.kill(old_pid", guardian)
         self.assertIn('mode=${3:-api_only}', loop)
         self.assertIn('allow_existing', loop)
 
@@ -306,6 +312,20 @@ class DeploymentSafetyTests(unittest.TestCase):
             self.assertEqual(set(manifest.keys()), {'version', 'files'})
             # source frontend dir is not copied into the package.
             self.assertNotIn(str(FRONTEND_DIR), copied)
+
+    def test_package_refuses_existing_output_with_unlisted_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / 'pkg'
+            secret = out / 'credentials' / 'runner-credential.json'
+            secret.parent.mkdir(parents=True)
+            secret.write_text('test-secret', encoding='utf-8')
+
+            proc = self._run_package(None, [str(out), '1.0.0'])
+
+            self.assertNotEqual(proc.returncode, 0,
+                                'a reused output directory is not an exact release')
+            self.assertEqual(secret.read_text(encoding='utf-8'), 'test-secret')
+            self.assertFalse((out / 'manifest.json').exists())
 
     def test_package_refuses_forbidden_secret_and_state_paths(self):
         with tempfile.TemporaryDirectory() as td:
@@ -518,6 +538,7 @@ class RuntimeStoreHygieneTests(unittest.TestCase):
         required = (
             "agent_profiles.py",
             "hub/web.py",
+            "deploy/hk-web-process-control.py",
             "tools/__init__.py",
             "tools/result_files.py",
             "tools/session/__init__.py",
@@ -539,6 +560,57 @@ class RuntimeStoreHygieneTests(unittest.TestCase):
         self.assertFalse(any(e.startswith('frontend/') for e in listing),
                          'backend release must not embed the independent UI')
         self.assertFalse(any(e.startswith('state/') or '/state/' in e for e in listing))
+
+    def test_parallel_full_release_archives_have_isolated_staging(self):
+        script = REPO_ROOT / "deploy" / "package-release.sh"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            real_gzip = shutil.which("gzip")
+            self.assertIsNotNone(real_gzip)
+            started = root / "gzip-started"
+            release = root / "release-gzip"
+            shim_dir = root / "bin"
+            shim_dir.mkdir()
+            gzip_shim = shim_dir / "gzip"
+            gzip_shim.write_text(
+                "#!/bin/sh\n"
+                ": > \"$FLEET_GZIP_STARTED\"\n"
+                "while [ ! -e \"$FLEET_GZIP_RELEASE\" ]; do sleep 0.01; done\n"
+                "exec \"$FLEET_REAL_GZIP\" \"$@\"\n"
+            )
+            gzip_shim.chmod(0o755)
+            first_archive = root / "release-first.tgz"
+            second_archive = root / "release-second.tgz"
+            first = subprocess.Popen(
+                ["bash", str(script), str(first_archive)], cwd=REPO_ROOT,
+                env={**os.environ,
+                     "PATH": os.pathsep.join((str(shim_dir), os.environ["PATH"])),
+                     "FLEET_GZIP_STARTED": str(started),
+                     "FLEET_GZIP_RELEASE": str(release),
+                     "FLEET_REAL_GZIP": real_gzip},
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                deadline = time.monotonic() + 10
+                while not started.exists() and first.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(started.exists(), "first packager did not reach gzip")
+                second = subprocess.run(
+                    ["bash", str(script), str(second_archive)], cwd=REPO_ROOT,
+                    capture_output=True, text=True, timeout=60,
+                )
+            finally:
+                release.touch()
+                first_stdout, first_stderr = first.communicate(timeout=60)
+            self.assertEqual(first.returncode, 0, first_stderr or first_stdout)
+            self.assertEqual(second.returncode, 0, second.stderr or second.stdout)
+            for archive in (first_archive, second_archive):
+                with tarfile.open(archive, "r:gz") as packaged:
+                    names = packaged.getnames()
+                self.assertIn("hub/web.py", names)
+                self.assertIn("tools/session/__init__.py", names)
+            self.assertFalse((REPO_ROOT / ".package-release.tmp.tar").exists())
+            self.assertFalse(any(REPO_ROOT.glob(".package-release.*")))
 
 
     def test_full_release_archive_with_origin_embeds_release_origin_stamp(self):

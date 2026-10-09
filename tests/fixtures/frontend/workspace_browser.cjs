@@ -22,11 +22,14 @@ const [origin, scenario] = process.argv.slice(2);
     await page.route('**/api/platform/v1/runs/review-run/events*', r => r.fulfill({json:{ok:true,events:[],next_cursor:0}}));
     const input = page.getByRole('textbox',{name:'给助手的任务'});
     async function openHistory() {
-      await page.goto(origin + '/conversation/review-model');
-      await page.waitForFunction(() => !document.querySelector('#assistant-model')?.disabled);
+      await page.goto(origin + '/conversation/review-model', {waitUntil: 'domcontentloaded'});
+      await page.waitForFunction(() => {
+        const model = document.querySelector('#assistant-model');
+        return model && model.options.length > 0 && model.value !== '';
+      });
     }
     if (scenario === 'action-errors') {
-      await page.goto(origin + '/assistant');
+      await page.goto(origin + '/assistant', {waitUntil: 'domcontentloaded'});
       await page.getByText('就绪',{exact:true}).waitFor();
       let rejectCreate = true;
       await page.route('**/api/platform/v1/conversations', r => r.request().method() !== 'POST' ? r.continue() : r.fulfill(rejectCreate
@@ -118,10 +121,10 @@ const [origin, scenario] = process.argv.slice(2);
         window.dispatchEvent(new Event('fleet-auth-required'));
         return !document.querySelector('dialog:modal');
       }),true,'teardown must close the native modal before document navigation');
-      await page.waitForURL('**/login?**');
+      await page.waitForURL('**/login?**', {waitUntil: 'domcontentloaded'});
       await page.waitForFunction(() => !document.querySelector('#login-view').hidden && !document.querySelector('#login-form [type=submit]').disabled);
       await page.unroute('**/api/operator/session');
-      await page.goto(origin + '/assistant');
+      await page.goto(origin + '/assistant', {waitUntil: 'domcontentloaded'});
       await page.getByText('就绪',{exact:true}).waitFor();
       await input.focus();
       assert.equal(await input.evaluate(n => n === document.activeElement),true);
@@ -152,6 +155,7 @@ const [origin, scenario] = process.argv.slice(2);
     if (scenario === 'model') {
       await openHistory();
       assert.equal(await page.locator('#assistant-model').inputValue(),'default-a');
+      await page.getByText('本次模型：Model B',{exact:true}).waitFor();
       assert.equal(await page.locator('.assistant-run-model').isVisible(),true,'executed model must be visible separately from the next-turn model');
       assert.equal(await page.locator('.assistant-run-model').textContent(),'本次模型：Model B');
       await page.setViewportSize({width:390,height:844});

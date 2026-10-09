@@ -56,6 +56,7 @@ def test_assistant_auth_in_real_browser(tmp_path):
             'root_path': str(tmp_path / workspace_id)})
     repo.update_defaults(OWNER, {'model_profile_id': 'fixture', 'workspace_id': 'default'}, 0)
     repo.create_conversation(OWNER, 'conv-auth', title='登录恢复验收', workspace_id='saved')
+    repo.create_conversation(OWNER, 'conv-controls', title='历史操作验收', workspace_id='saved')
     hub = app.wsgi_app
 
     def edge(environ, start_response):
@@ -105,8 +106,7 @@ def test_console_in_real_browser(tmp_path):
     SessionRepository(session_db).upsert_session({'session_id': 'browser-session',
         'machine_id': 'studio-mac', 'managed': False, 'capture_quality': 'best_effort'})
     session_service = app.extensions['fleet']['services']['sessions']
-    for seq in range(1, 206):
-        session_service.ingest_events([{
+    transcript_events = [{
             'schema_version': 1, 'event_id': f'browser-evt-{seq}',
             'stream_id': 'browser-stream', 'machine_id': 'studio-mac',
             'session_id': 'browser-session', 'sequence': seq,
@@ -114,7 +114,9 @@ def test_console_in_real_browser(tmp_path):
             'source': 'fixture', 'emitted_at': '2026-09-30T00:00:00Z',
             'payload': {'text': ('LONG_' + '中' * 5000 + '_END') if seq == 1 else f'History row {seq}',
                         'is_complete': True},
-        }])
+        } for seq in range(1, 206)]
+    for start in range(0, len(transcript_events), 100):
+        session_service.ingest_events(transcript_events[start:start + 100])
     task, _ = task_store.create_task(machine='studio-mac', agent_type='codex', project='demo',
         instruction='浏览器验收任务', requested_by=OWNER, client_token='browser-task')
     repo.upsert_model(OWNER, {'profile_id': 'fixture', 'provider': 'deterministic', 'model': '本地验收模型'})

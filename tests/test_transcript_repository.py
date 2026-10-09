@@ -27,7 +27,9 @@ Coverage (from the Task 5 brief):
 
 import json  # noqa: F401 (kept for parity with sibling test files)
 import os
+import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -250,6 +252,53 @@ class TranscriptRetentionAndQuotaTests(unittest.TestCase):
         self.assertEqual(
             self.repo.read_raw("sess_ret", "evt_new", actor="op")["sequence"], 2)
 
+    def test_retention_purge_processes_only_one_bounded_batch(self):
+        for seq in range(1, 4):
+            event_id = f"evt_batch_{seq}"
+            self.repo.ingest(_event(seq=seq, session_id="sess_batch",
+                                    event_id=event_id, text="old"))
+            self._backdate_raw(self.repo, event_id, "2000-01-01T00:00:00Z")
+
+        first = self.repo.purge_expired_raw(
+            now="2026-01-01T00:00:00Z", limit=2)
+        second = self.repo.purge_expired_raw(
+            now="2026-01-01T00:00:00Z", limit=2)
+
+        self.assertEqual(first, ["evt_batch_1", "evt_batch_2"])
+        self.assertEqual(second, ["evt_batch_3"])
+
+    def test_retention_purge_rejects_unbounded_or_invalid_batch_sizes(self):
+        for limit in (0, 10**9, True, "2"):
+            with self.subTest(limit=limit):
+                with self.assertRaises(TranscriptError) as error:
+                    self.repo.purge_expired_raw(
+                        now="2026-01-01T00:00:00Z", limit=limit)
+                self.assertEqual(error.exception.code, "invalid_purge_limit")
+
+    def test_retention_purge_rolls_back_delete_when_audit_write_fails(self):
+        self.repo.ingest(_event(seq=1, event_id="evt_purge_failure", text="retained"))
+        self._backdate_raw(
+            self.repo, "evt_purge_failure", "2000-01-01T00:00:00Z")
+        append_audit = self.repo._append_audit
+
+        def fail_audit(*args, **kwargs):
+            raise sqlite3.OperationalError("private database detail")
+
+        self.repo._append_audit = fail_audit
+        try:
+            with self.assertRaises(TranscriptError) as error:
+                self.repo.purge_expired_raw(now="2026-01-01T00:00:00Z")
+        finally:
+            self.repo._append_audit = append_audit
+
+        self.assertEqual(error.exception.code, "transcript_store")
+        self.assertIsInstance(error.exception.__cause__, sqlite3.OperationalError)
+        self.assertNotIn("private database detail", str(error.exception))
+        self.assertEqual(
+            self.repo.read_raw("sess_t5_tr1", "evt_purge_failure", actor="op")["sequence"],
+            1,
+        )
+
     def test_retention_audit_carries_counts_not_content(self):
         self.repo.ingest(_event(seq=1, event_id="evt_ret_aud",
                                 text="supersecret_value_42"))
@@ -279,6 +328,76 @@ class TranscriptRetentionAndQuotaTests(unittest.TestCase):
                                     text="y" * 4096, event_id="evt_q_x"))
         self.assertEqual(result.status, "rejected")
         self.assertEqual(result.reason, "raw_quota_exceeded")
+
+    def test_concurrent_raw_ingest_cannot_exceed_session_quota(self):
+        probe_db = self.tmp / "probe.db"
+        probe = TranscriptRepository(probe_db, key=_key(),
+                                     max_raw_bytes=1 << 20)
+        probe.init()
+        probe_result = probe.ingest(_event(seq=1, session_id="sess_shared",
+                                           event_id="evt_a", text="x"))
+        conn = probe._connect()
+        try:
+            cipher_size = conn.execute(
+                "SELECT length(nonce_ciphertext) FROM raw_events WHERE event_id=?",
+                (probe_result.event_id,)).fetchone()[0]
+        finally:
+            conn.close()
+
+        db = self.tmp / "concurrent-quota.db"
+        repo = TranscriptRepository(db, key=_key(),
+                                    max_raw_bytes=cipher_size)
+        repo.init()
+        original_persist = repo._persist_redacted
+        persist_started = threading.Event()
+        release_persist = threading.Event()
+        second_finished = threading.Event()
+        call_count = 0
+        call_guard = threading.Lock()
+
+        def blocking_persist(conn, clean, redacted):
+            nonlocal call_count
+            with call_guard:
+                call_count += 1
+                first_call = call_count == 1
+            if first_call:
+                persist_started.set()
+                release_persist.wait(2)
+            return original_persist(conn, clean, redacted)
+
+        repo._persist_redacted = blocking_persist
+        results = []
+        def ingest(seq, mark_done=False):
+            try:
+                results.append(repo.ingest(_event(
+                    seq=seq, session_id="sess_shared",
+                    event_id=f"evt_{'a' if seq == 1 else 'b'}", text="x")))
+            finally:
+                if mark_done:
+                    second_finished.set()
+
+        threads = [threading.Thread(target=ingest, args=(1,)),
+                   threading.Thread(target=ingest, args=(2, True))]
+        for thread in threads:
+            thread.start()
+        self.assertTrue(persist_started.wait(2))
+        self.assertFalse(second_finished.wait(0.2))
+        release_persist.set()
+        for thread in threads:
+            thread.join(3)
+        repo._persist_redacted = original_persist
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(sum(result.raw_written for result in results), 1)
+        conn = repo._connect()
+        try:
+            stored = conn.execute(
+                "SELECT COALESCE(SUM(length(nonce_ciphertext)), 0)"
+                " FROM raw_events WHERE session_id=?",
+                ("sess_shared",)).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertLessEqual(stored, cipher_size)
 
 
 class FailureIsolationTests(unittest.TestCase):

@@ -1,0 +1,126 @@
+name: Live Acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_release:
+        description: Exact deployed RELEASE_ORIGIN commit SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-acceptance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  model-live:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: live-acceptance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - name: Install runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Validate acceptance configuration
+        env:
+          AGENT_FLEET_ENDPOINT: ${{ vars.AGENT_FLEET_ENDPOINT }}
+          AGENT_FLEET_WORKSPACE: ${{ vars.AGENT_FLEET_WORKSPACE }}
+          AGENT_FLEET_USERNAME: ${{ secrets.AGENT_FLEET_USERNAME }}
+          AGENT_FLEET_PASSWORD: ${{ secrets.AGENT_FLEET_PASSWORD }}
+          EXPECTED_RELEASE: ${{ inputs.expected_release }}
+        run: |
+          set -euo pipefail
+          for name in AGENT_FLEET_ENDPOINT AGENT_FLEET_WORKSPACE AGENT_FLEET_USERNAME AGENT_FLEET_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error title=Missing live acceptance configuration::$name is not configured in the live-acceptance environment."
+              exit 2
+            fi
+          done
+          if [[ ! "$EXPECTED_RELEASE" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=Invalid release SHA::expected_release must be a full lowercase 40-character commit SHA."
+            exit 2
+          fi
+      - name: Prepare private credential file
+        env:
+          LIVE_USERNAME: ${{ secrets.AGENT_FLEET_USERNAME }}
+          LIVE_PASSWORD: ${{ secrets.AGENT_FLEET_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["RUNNER_TEMP"]) / "fleet-live-acceptance-credentials.json"
+          path.write_text(json.dumps({
+              "username": os.environ["LIVE_USERNAME"],
+              "password": os.environ["LIVE_PASSWORD"],
+          }), encoding="utf-8")
+          path.chmod(0o600)
+          PY
+      - name: Run read-only acceptance against every enabled model
+        env:
+          AGENT_FLEET_ENDPOINT: ${{ vars.AGENT_FLEET_ENDPOINT }}
+          AGENT_FLEET_WORKSPACE: ${{ vars.AGENT_FLEET_WORKSPACE }}
+          EXPECTED_RELEASE: ${{ inputs.expected_release }}
+          CREDENTIALS_FILE: ${{ runner.temp }}/fleet-live-acceptance-credentials.json
+          REPORT_FILE: ${{ runner.temp }}/fleet-live-acceptance/model.json
+        run: |
+          set -euo pipefail
+          trap 'rm -f "$CREDENTIALS_FILE"' EXIT
+          PYTHONPATH=. python -m tools.platform.acceptance_check \
+            --endpoint "$AGENT_FLEET_ENDPOINT" \
+            --credentials-file "$CREDENTIALS_FILE" \
+            --workspace "$AGENT_FLEET_WORKSPACE" \
+            --all-models \
+            --expected-release "$EXPECTED_RELEASE" \
+            --report "$REPORT_FILE"
+      - name: Summarize model results
+        if: always()
+        env:
+          REPORT_FILE: ${{ runner.temp }}/fleet-live-acceptance/model.json
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          import os
+          from pathlib import Path
+
+          report_path = Path(os.environ["REPORT_FILE"])
+          if not report_path.is_file():
+              print("MODEL-LIVE: no report was produced; check the configuration and setup steps.")
+              raise SystemExit(0)
+          report = json.loads(report_path.read_text(encoding="utf-8"))
+          status = report.get("status")
+          status = status if status in ("passed", "failed") else "invalid"
+          models = report.get("models")
+          models = models if isinstance(models, list) else []
+          passed = sum(isinstance(model, dict) and model.get("status") == "passed" for model in models)
+          print(f"## MODEL-LIVE: `{status}`")
+          print(f"Model checks passed: {passed}/{len(models)}")
+          checks = report.get("checks")
+          checks = checks if isinstance(checks, dict) else {}
+          for check in ("account_session", "configuration", "logout"):
+              value = checks.get(check)
+              if value is not None:
+                  value = value if value in ("passed", "failed") else "invalid"
+                  print(f"- `{check}`: `{value}`")
+          PY
+      - name: Preserve live acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleet-model-live-${{ github.run_id }}
+          path: ${{ runner.temp }}/fleet-live-acceptance/model.json
+          retention-days: 14
+          if-no-files-found: ignore

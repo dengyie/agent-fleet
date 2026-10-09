@@ -89,13 +89,19 @@ export async function searchPlatformMemories(query, limit) {
     '?q=' + encodeURIComponent(value) + '&limit=' + encodeURIComponent(String(bounded))), 'memory search');
 }
 export async function createConversation(input) { return object(await platformRequest(apiPath('platform', 'v1', 'conversations'), json('POST', input)), 'conversation'); }
-export async function getConversations(limit) {
+export async function getConversations(limit, archived) {
   var bounded = typeof limit === 'number' && isFinite(limit)
     ? Math.max(1, Math.min(100, Math.floor(limit))) : 50;
-  return object(await platformRequest(apiPath('platform', 'v1', 'conversations') +
-    '?limit=' + encodeURIComponent(String(bounded))), 'conversations');
+  var path = apiPath('platform', 'v1', 'conversations') +
+    '?limit=' + encodeURIComponent(String(bounded));
+  if (archived === true) path += '&archived=true';
+  return object(await platformRequest(path), 'conversations');
 }
 export async function getConversation(conversationId) { return object(await platformRequest(apiPath('platform', 'v1', 'conversations', segment(conversationId))), 'conversation'); }
+export async function renameConversation(conversationId, title) { return object(await platformRequest(apiPath('platform', 'v1', 'conversations', segment(conversationId)), json('PATCH', { title: title })), 'rename conversation'); }
+export async function archiveConversation(conversationId) { return object(await platformRequest(apiPath('platform', 'v1', 'conversations', segment(conversationId), 'archive'), json('POST')), 'archive conversation'); }
+export async function restoreConversation(conversationId) { return object(await platformRequest(apiPath('platform', 'v1', 'conversations', segment(conversationId), 'restore'), json('POST')), 'restore conversation'); }
+export async function deleteConversation(conversationId) { return object(await platformRequest(apiPath('platform', 'v1', 'conversations', segment(conversationId)), { method: 'DELETE' }), 'delete conversation'); }
 export async function appendConversationTurn(conversationId, input) { return object(await platformRequest(apiPath('platform', 'v1', 'conversations', segment(conversationId), 'turns'), json('POST', input)), 'turn'); }
 export async function getRun(runId) { return object(await platformRequest(apiPath('platform', 'v1', 'runs', segment(runId))), 'run'); }
 export async function getRunEvents(runId, after) {
@@ -194,4 +200,9 @@ export async function getExecutionWindowEvents(windowId, after, limit) {
     '?after=' + encodeURIComponent(String(cursor)) +
     '&limit=' + encodeURIComponent(String(bounded));
   return object(await platformRequest(path), 'execution window events');
+}
+export function getExecutionWindowFrameUrl(windowId, artifactId, cacheKey) {
+  var path = apiPath('platform', 'v1', 'execution-windows', segment(windowId),
+    'frames', segment(artifactId));
+  return cacheKey ? path + '?retry=' + encodeURIComponent(String(cacheKey)) : path;
 }

@@ -34,6 +34,8 @@ python -m tools.session.sync --config /path/to/runner.yaml \
 
 会话页提供前后翻页、长消息全文展开、工具完整参数/结果和源记录展开。API 客户端不再截断消息正文。任务页可跳转关联会话。
 
+控制台侧栏的活动历史与归档历史分别读取 owner-scoped 列表。标题通过 PATCH /api/platform/v1/conversations/<id> 修改，归档/恢复使用 /archive 与 /restore。永久删除只能从归档列表执行，并要求操作者在侧栏确认；主助手没有永久删除工具。接口只删除不存在未结束 Run 或未完成/结果未知远端命令的对话。旧命令即使缺少 owner_id，也通过所属 Run 的 owner 与对话关联。删除在单个 SQLite 事务中清理消息、Run、事件、旧任务链接、浏览器与执行窗口记录，以及平台命令、outbox、reconciliation 和 post-check 记录；工作区产物与用量台账继续按各自资源所有权保留。侧栏计算节点区域可用鼠标、触控或键盘分隔条调整高度，尺寸保存在本地浏览器。
+
 ## 追加消息
 
 `POST /api/sessions/<id>/messages`，JSON `{ "text": "继续检查测试失败" }`，复用既有签名 supervisor 通道。需要会话已受管、节点 ControlClient 可达，并启用 supervisor 和 append-user-turn。返回 202 仅代表入队，通过 control receipt 和随后对话事件确认执行及回复。

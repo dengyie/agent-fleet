@@ -23,16 +23,32 @@ class IncidentRepositoryError(RuntimeError):
         super().__init__(code)
 
 
+def _reject_json_constant(token: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {token}")
+
+
 def _json_ids(value: list[str]) -> str:
     return json.dumps(value[-MAX_EVIDENCE_IDS:], ensure_ascii=True, separators=(",", ":"))
 
 
 def _decode_ids(value: str | None) -> list[str]:
     try:
-        decoded = json.loads(value or "[]")
-    except (TypeError, ValueError):
-        return []
-    return [item for item in decoded if isinstance(item, str)][-MAX_EVIDENCE_IDS:] if isinstance(decoded, list) else []
+        decoded = json.loads(value or "[]", parse_constant=_reject_json_constant)
+        if not isinstance(decoded, list) or any(not isinstance(item, str) for item in decoded):
+            raise ValueError("expected string array")
+        return decoded[-MAX_EVIDENCE_IDS:]
+    except (TypeError, ValueError) as exc:
+        raise IncidentRepositoryError("incident_store") from exc
+
+
+def _decode_detail(value: str | None) -> dict[str, Any]:
+    try:
+        decoded = json.loads(value or "{}", parse_constant=_reject_json_constant)
+        if not isinstance(decoded, Mapping):
+            raise ValueError("expected object")
+        return dict(decoded)
+    except (TypeError, ValueError) as exc:
+        raise IncidentRepositoryError("incident_store") from exc
 
 
 def _bounded_observed_at(value: Any) -> float:
@@ -66,7 +82,10 @@ def _detail_json(detail: Mapping[str, Any] | None) -> str:
     if detail is not None and not isinstance(detail, Mapping):
         raise IncidentRepositoryError("invalid_detail")
     try:
-        encoded = json.dumps(dict(detail or {}), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        encoded = json.dumps(
+            dict(detail or {}), ensure_ascii=True, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        )
     except (TypeError, ValueError):
         raise IncidentRepositoryError("invalid_detail") from None
     if len(encoded.encode("utf-8")) > MAX_DETAIL_BYTES:
@@ -135,12 +154,7 @@ class IncidentRepository:
     def _row(row) -> dict[str, Any]:
         if row is None:
             return None
-        try:
-            detail = json.loads(row["latest_detail"] or "{}")
-        except (TypeError, ValueError):
-            detail = {}
-        if not isinstance(detail, Mapping):
-            detail = {}
+        detail = _decode_detail(row["latest_detail"])
         return {
             "incident_id": row["incident_id"], "owner_id": row["owner_id"],
             "service_id": row["service_id"], "rule_id": row["rule_id"],

@@ -7,6 +7,8 @@ directory and is published only after every file has been copied and checked.
 """
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import json
 import math
@@ -15,6 +17,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -387,11 +390,42 @@ def _publish_new_directory(stage: Path, target: Path) -> None:
     if os.path.lexists(target):
         _raise("destination_exists")
     try:
-        os.rename(stage, target)
-    except FileExistsError:
-        _raise("destination_exists")
-    except OSError:
+        _rename_directory_no_replace(stage, target)
+    except OSError as exc:
+        if exc.errno == errno.EEXIST:
+            _raise("destination_exists")
         _raise("publish_failed")
+
+
+def _rename_directory_no_replace(stage: Path, target: Path) -> None:
+    """Use the platform's atomic directory rename that refuses replacement."""
+    if os.name == "nt":
+        os.rename(stage, target)
+        return
+
+    source = os.fsencode(stage)
+    destination = os.fsencode(target)
+    libc = ctypes.CDLL(None, use_errno=True)
+
+    if sys.platform == "darwin":
+        rename = libc.renamex_np
+        rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        result = rename(source, destination, 0x00000004)  # RENAME_EXCL
+    elif sys.platform.startswith("linux"):
+        rename = getattr(libc, "renameat2", None)
+        if rename is None:
+            raise OSError(errno.ENOTSUP, "no-replace rename unavailable")
+        rename.argtypes = (
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        result = rename(-100, source, -100, destination, 0x00000001)
+    else:
+        raise OSError(errno.ENOTSUP, "no-replace rename unavailable")
+
+    if result != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), os.fspath(target))
 
 
 def _encryption_key(value: Any) -> bytes:

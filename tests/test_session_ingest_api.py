@@ -25,6 +25,7 @@ from hub import state as store
 from hub import task_store
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
+from hub.infrastructure.transcript_repository import TranscriptError
 
 
 def _event(seq, session_id="sess_api_1", kind="user_message",
@@ -218,6 +219,26 @@ class SessionIngestBoundaryTests(SessionHttpTestBase):
 
 
 class SessionIngestIsolationTests(SessionHttpTestBase):
+    def test_unverified_exact_source_is_rejected_before_persistence(self):
+        response = self._ingest([
+            _event(1, quality="exact", text="source-claim-without-proof"),
+        ])
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["accepted_through"], 0)
+        self.assertEqual(body["status"], "rejected")
+        self.assertEqual(body["rejected"], [
+            {"index": 0, "code": "capture_source_unverified"},
+        ])
+        service = self.app.extensions["fleet"]["services"]["sessions"]
+        self.assertIsNone(service.session_repo.get_session("sess_api_1"))
+        self.assertEqual(service.transcript_repo.read_redacted("sess_api_1"), [])
+        with self.assertRaises(TranscriptError) as raised:
+            service.transcript_repo.read_raw(
+                "sess_api_1", "evt_001_api", actor="test")
+        self.assertEqual(raised.exception.code, "raw_not_found")
+
     def test_transcript_failure_bounded_does_not_break_api_ingest(self):
         import hub.infrastructure.transcript_repository as tr_mod
 

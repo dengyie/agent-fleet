@@ -41,7 +41,9 @@ def resolve_run_config(owner_id: str, *, conversation: Mapping[str, Any] | None 
     conversation = conversation or {}
     workspace = workspace or {}
     owner = owner or {}
-    overrides = overrides or {}
+    if overrides is not None and not isinstance(overrides, Mapping):
+        raise TypeError("overrides must be a mapping")
+    overrides = {} if overrides is None else overrides
     values: dict[str, Any] = {}
     sources: dict[str, str] = {}
     for key in ("model_profile_id", "workspace_id", "execution_node_id"):

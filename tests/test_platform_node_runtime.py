@@ -533,14 +533,11 @@ def test_node_runtime_submit_gate_requires_browser_and_default_off(tmp_path):
         journal_path=tmp_path / "journal-submit.db",
         hub_url="https://hub.invalid", public_key=PUBLIC_KEY,
         capabilities=frozenset({"browser.session"}), browser_enabled=True,
-        browser_submit_enabled=True, browser_driver_factory=Driver,
+        browser_submit_enabled=True, browser_network_enabled=True, browser_driver_factory=Driver,
     )
     submit_runtime = NodeRuntime(submit_config, transport=object())
     assert "browser.submit" in submit_runtime.executor.allowed_tools
     assert submit_runtime.browser_backend.submit_enabled is True
-    opened = submit_runtime.browser_backend.execute(
-        "browser.open", {"url": "http://localhost:3000"}, run_id="run-a")
-    receipt = submit_runtime.browser_backend.execute(
-        "browser.submit",
-        {"session_id": opened["session_id"], "selector": "#go"}, run_id="run-a")
-    assert receipt["result"] == {"state": "submitted"}
+    with pytest.raises(BrowserBackendError, match="network_disabled"):
+        submit_runtime.browser_backend.execute(
+            "browser.open", {"url": "http://localhost:3000"}, run_id="run-a")

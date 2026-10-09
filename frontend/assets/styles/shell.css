@@ -69,7 +69,7 @@ body[data-page=monitoring] .monitoring-heading h1,body[data-page=monitoring] .mo
 
 .console-conversations { flex: 1 1 160px; min-height: 70px; }
 .console-conversations a { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#sidebar-nodes { max-height: 22vh; flex-shrink: 0; }
+#sidebar-nodes { flex: 0 0 var(--sidebar-nodes-height, 22vh); height: var(--sidebar-nodes-height, 22vh); min-height: 60px; max-height: 50vh; }
 .console-sidebar { overflow-y: auto; }
 
 .monitoring-nodes { margin-bottom: 18px; }
@@ -88,6 +88,36 @@ body[data-page=monitoring] .monitoring-heading h1,body[data-page=monitoring] .mo
 .conversation-search kbd { position: absolute; right: 9px; top: 9px; color: var(--text-3); font: 10px/18px inherit; pointer-events: none; }
 .console-conversations a { line-height: 1.5; font-size: 12px; padding: 9px 12px; }
 .console-nav a[aria-current=page], .console-conversations a[aria-current=page] { background: color-mix(in srgb, var(--text) 7%, transparent); }
+.conversation-heading { margin-top: 24px; }
+.conversation-heading .nav-group-label { margin-bottom: 8px; }
+.sidebar-text-button { padding: 4px 6px; border: 0; border-radius: 5px; background: transparent; color: var(--link); font-size: 10px; }
+.sidebar-text-button:hover { background: var(--panel-hover); }
+.conversation-history-entry { position: relative; display: flex; align-items: center; gap: 2px; border-radius: 7px; }
+.conversation-history-entry[hidden] { display: none; }
+.conversation-history-entry > a { flex: 1; min-width: 0; }
+.conversation-actions { position: relative; flex: none; margin-right: 4px; }
+.conversation-actions > summary { display: grid; place-items: center; width: 28px; height: 28px; list-style: none; border-radius: 6px; color: var(--text-2); font-size: 17px; line-height: 1; cursor: pointer; }
+.conversation-actions > summary::-webkit-details-marker { display: none; }
+.conversation-actions > summary:hover, .conversation-actions[open] > summary { background: var(--panel-hover); color: var(--text); }
+.conversation-action-menu { position: absolute; z-index: 8; top: 28px; right: 0; min-width: 132px; padding: 4px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); box-shadow: 0 12px 28px #0002; }
+.conversation-menu-item { display: block; width: 100%; padding: 8px 10px; border: 0; border-radius: 5px; background: transparent; color: var(--text); text-align: left; font-size: 12px; }
+.conversation-menu-item:hover { background: var(--panel-hover); }
+.conversation-menu-item.destructive { color: var(--bad); }
+.sidebar-resize-handle { position: relative; flex: 0 0 14px; min-height: 14px; margin: 0 5px; cursor: row-resize; touch-action: none; user-select: none; }
+.sidebar-resize-handle::after { position: absolute; top: 6px; left: 50%; width: 36px; height: 2px; border-radius: 2px; background: var(--border-strong, var(--border)); content: ''; transform: translateX(-50%); }
+.sidebar-resize-handle:hover::after, .sidebar-resize-handle:focus-visible::after { background: var(--link); }
+.sidebar-resize-handle:focus-visible { outline: 2px solid var(--link); outline-offset: -2px; border-radius: 4px; }
+.conversation-dialog { width: min(420px, calc(100vw - 32px)); padding: 22px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); color: var(--text); box-shadow: 0 24px 70px #0004; }
+.conversation-dialog::backdrop { background: #10182870; }
+.conversation-dialog h2 { margin: 0 0 16px; font-size: 17px; }
+.conversation-dialog p { color: var(--text-2); font-size: 13px; line-height: 1.6; }
+.conversation-dialog .conversation-dialog-error { margin: 8px 0 0; color: var(--bad); }
+.conversation-dialog label { display: block; margin-bottom: 6px; color: var(--text-2); font-size: 12px; }
+.conversation-dialog input { width: 100%; }
+.conversation-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.conversation-dialog-actions button { min-height: 34px; padding: 7px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel); color: var(--text); font-size: 12px; }
+.conversation-dialog-actions .button-primary { color: #fff; background: var(--accent); border-color: var(--accent); }
+.conversation-dialog-actions .button-danger { color: #fff; background: var(--bad); border-color: var(--bad); }
 .console-topbar { background: var(--bg); }
 .icon-button:hover { background: var(--panel-hover); color: var(--text); }
 #operator-logout { background: transparent; border: 0; color: var(--text-2); font-size: 11px; padding: 6px; }

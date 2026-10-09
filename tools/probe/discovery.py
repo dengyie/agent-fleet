@@ -227,7 +227,7 @@ def _argv1(args: str) -> str:
 
 
 def _token_basename(token: str) -> str:
-    """跨平台 argv token 的 basename：剥引号后同时按 / 与 \ 切分。
+    """跨平台 argv token 的 basename：剥引号后按斜杠和反斜杠切分。
 
     ps/WMI 采集的 cmdline 可能带引号且分隔符与采集机相关（Windows 反斜杠
     + 引号包裹的含空格路径）；本函数不依赖运行平台语义，保证分类结果

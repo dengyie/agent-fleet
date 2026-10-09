@@ -29,6 +29,7 @@ export async function mountLogin() {
   } catch (error) {
     if (error.status !== 404) {
       const gate = document.getElementById("access-state");
+      gate.hidden = false;
       gate.querySelector("p").textContent = "暂时无法加载登录服务";
       const retry = gate.querySelector("button"); retry.hidden = false; retry.onclick = mountLogin;
       return;

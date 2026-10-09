@@ -1,6 +1,7 @@
 """Application service for bounded, read-only durable schedules."""
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import time
@@ -13,6 +14,9 @@ from hub.infrastructure.platform_schedule_repository import (
     PlatformScheduleRepositoryError,
 )
 from platform_schema import validate_owner_id
+from hub.diagnostics import log_failure
+
+logger = logging.getLogger(__name__)
 
 PlatformScheduleError = PlatformScheduleRepositoryError
 
@@ -115,7 +119,7 @@ class DurableReadOnlyScheduleService:
         interval_s = float(schedule["interval_s"])
         existing = self.repository.get_trigger(owner_id, schedule_id, scheduled_at)
         active = self.repository.get_active_trigger(owner_id, schedule_id, now=now)
-        if active and not (existing and existing["state"] == "running"):
+        if active and float(active["scheduled_at"]) != scheduled_at:
             next_run = _future_run(scheduled_at, interval_s, now)
             policy_state = (
                 "coalesced" if schedule["overlap_policy"] == "coalesce"
@@ -142,12 +146,10 @@ class DurableReadOnlyScheduleService:
                 "coalesced": 1 if schedule["overlap_policy"] == "coalesce" else 0,
                 "executed": 0,
             }
-        if existing and existing["state"] == "running":
-            next_run = _future_run(scheduled_at, interval_s, now)
-            self.repository.advance_schedule(
-                owner_id, schedule_id, next_run_at=next_run, now=now,
-                result={"state": "overlap", "policy": schedule["overlap_policy"]},
-            )
+        if active:
+            # Keep this occurrence discoverable if its worker crashes. Only a
+            # terminal finish advances the schedule; an expired lease below
+            # is reclaimed through the repository's atomic admission.
             return {
                 "schedule_id": schedule_id, "scheduled_at": scheduled_at,
                 "skipped": 1 if schedule["overlap_policy"] == "skip" else 0,
@@ -162,7 +164,7 @@ class DurableReadOnlyScheduleService:
             )
             return {"schedule_id": schedule_id, "scheduled_at": scheduled_at, "executed": 0, "skipped": 1}
 
-        if schedule["missed_policy"] == "skip" and scheduled_at < now:
+        if existing is None and schedule["missed_policy"] == "skip" and scheduled_at < now:
             claim = self.repository.claim_trigger(
                 owner_id, schedule_id, scheduled_at=scheduled_at,
                 worker_id=self.worker_id, now=now, lease_s=self.lease_s,
@@ -186,31 +188,51 @@ class DurableReadOnlyScheduleService:
         try:
             result = self.executor(owner_id, schedule["action"], schedule["target"])
             bounded = _bounded_result(result)
+            finished_at = max(now, float(self.clock()))
             self.repository.finish_trigger(
                 owner_id, schedule_id, scheduled_at, claim["lease_id"],
                 state="succeeded",
-                next_run_at=_future_run(scheduled_at, interval_s, now),
-                now=now, result=bounded,
+                next_run_at=_future_run(scheduled_at, interval_s, finished_at),
+                now=finished_at, result=bounded,
             )
             return {"schedule_id": schedule_id, "scheduled_at": scheduled_at, "executed": 1, "result": bounded}
         except Exception as exc:
             code = _safe_error_code(getattr(exc, "code", None))
+            if code == "lease_mismatch":
+                return {"schedule_id": schedule_id, "scheduled_at": scheduled_at,
+                        "executed": 0, "skipped": 1, "error_code": code}
             failures = int(schedule.get("consecutive_failures", 0)) + 1
-            self.repository.finish_trigger(
-                owner_id, schedule_id, scheduled_at, claim["lease_id"],
-                state="failed",
-                next_run_at=self._next_after_failure(now, interval_s, failures),
-                now=now, error_code=code, result={"state": "failed", "error_code": code},
-            )
+            finished_at = max(now, float(self.clock()))
+            try:
+                self.repository.finish_trigger(
+                    owner_id, schedule_id, scheduled_at, claim["lease_id"],
+                    state="failed",
+                    next_run_at=self._next_after_failure(finished_at, interval_s, failures),
+                    now=finished_at, error_code=code, result={"state": "failed", "error_code": code},
+                )
+            except PlatformScheduleError as finish_error:
+                if finish_error.code != "lease_mismatch":
+                    raise
+                return {"schedule_id": schedule_id, "scheduled_at": scheduled_at,
+                        "executed": 0, "skipped": 1, "error_code": "lease_mismatch"}
             return {"schedule_id": schedule_id, "scheduled_at": scheduled_at, "executed": 0, "failed": 1, "error_code": code}
 
     def tick_once(self, *, owner_id: str, schedule_id: str | None = None, now: float | None = None, force: bool = False) -> dict[str, Any]:
         owner_id = self._owner(owner_id)
         now = float(self.clock() if now is None else now)
-        schedules = [self.get(owner_id, schedule_id)] if schedule_id is not None else self.list(owner_id)
+        if schedule_id is None:
+            schedules = self.repository.list_due(owner_id, now=now)
+        else:
+            schedule = self.get(owner_id, schedule_id)
+            expired = self.repository.get_expired_trigger(owner_id, schedule_id, now=now)
+            if expired is not None:
+                schedule = {**schedule, "next_run_at": expired["scheduled_at"]}
+            schedules = [schedule]
         result = {"ok": True, "executed": 0, "failed": 0, "skipped": 0, "coalesced": 0, "results": []}
         for schedule in schedules:
-            if not schedule["enabled"] or (not force and float(schedule["next_run_at"]) > now):
+            if not schedule["enabled"]:
+                continue
+            if not force and float(schedule["next_run_at"]) > now:
                 continue
             item = self._run_one(owner_id, schedule, now=now)
             for key in ("executed", "failed", "skipped", "coalesced"):
@@ -223,20 +245,53 @@ class DurableReadOnlyScheduleService:
         return self.tick_once(owner_id=owner_id, schedule_id=schedule_id, force=True)
 
     def start(self, *, stop_event: threading.Event | None = None):
-        stop = stop_event or threading.Event()
+        stop = stop_event if stop_event is not None else ScheduleStopHandle()
 
         def loop():
+            after_owner_id = None
             while not stop.wait(self.poll_interval_s):
                 try:
-                    for owner_id in self.repository.list_owners(limit=100):
-                        self.tick_once(owner_id=owner_id)
-                except Exception:
-                    # A later tick can reclaim any expired trigger lease.
+                    owners = self.repository.list_owners(after_owner_id=after_owner_id, limit=100)
+                    if not owners and after_owner_id is not None:
+                        after_owner_id = None
+                        owners = self.repository.list_owners(limit=100)
+                    for owner_id in owners:
+                        try:
+                            self.tick_once(owner_id=owner_id)
+                        except Exception as exc:
+                            log_failure(logger, "platform_schedule_owner_tick_failed", exc,
+                                        worker_id=self.worker_id)
+                    if owners:
+                        after_owner_id = owners[-1]
+                except Exception as exc:
+                    log_failure(logger, "platform_schedule_tick_failed", exc,
+                                worker_id=self.worker_id)
                     continue
 
         thread = threading.Thread(target=loop, name="platform-schedules", daemon=True)
         thread.start()
+        if isinstance(stop, ScheduleStopHandle):
+            stop.bind(thread)
         return stop
 
 
-__all__ = ["DurableReadOnlyScheduleService", "PlatformScheduleError"]
+class ScheduleStopHandle(threading.Event):
+    """Stop signal that can also wait for the scheduler thread to finish."""
+
+    def __init__(self):
+        super().__init__()
+        self.thread: threading.Thread | None = None
+
+    def bind(self, thread: threading.Thread) -> None:
+        self.thread = thread
+
+    def join(self, timeout: float | None = None) -> None:
+        if self.thread is not None:
+            self.thread.join(timeout)
+
+    def __call__(self, timeout: float | None = None) -> None:
+        self.set()
+        self.join(timeout)
+
+
+__all__ = ["DurableReadOnlyScheduleService", "PlatformScheduleError", "ScheduleStopHandle"]

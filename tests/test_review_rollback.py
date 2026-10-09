@@ -63,6 +63,30 @@ def test_code_rollback_preserves_live_database_and_credentials(tmp_path, fallbac
     assert live.stat().st_ino == live_inode
 
 
+def test_overlay_sync_reports_and_preserves_rsync_failure_status(tmp_path):
+    tool_bin = tmp_path / 'bin'
+    source = tmp_path / 'source'
+    target = tmp_path / 'target'
+    tool_bin.mkdir()
+    source.mkdir()
+    target.mkdir()
+    (target / 'release-file').write_text('live')
+    rsync = tool_bin / 'rsync'
+    rsync.write_text('#!/bin/sh\necho injected-rsync-failure >&2\nexit 23\n')
+    rsync.chmod(0o755)
+    env = dict(os.environ, PATH=f'{tool_bin}:{os.environ["PATH"]}')
+
+    result = subprocess.run(
+        ['bash', '-euc', '. "$1"; fleet_overlay_sync_tree "$2" "$3"',
+         'overlay-failure-test', str(HELPER), str(source), str(target)],
+        capture_output=True, text=True, env=env)
+
+    assert result.returncode == 23
+    assert 'injected-rsync-failure' in result.stderr
+    assert f'overlay sync failed (rsync exit=23): {source} -> {target}' in result.stderr
+    assert (target / 'release-file').read_text() == 'live'
+
+
 def test_rollback_starts_previous_cli_with_captured_argv(tmp_path):
     """The old parser rejects the new flag; restoration must use its real argv."""
     import re

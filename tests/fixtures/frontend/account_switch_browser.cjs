@@ -10,6 +10,10 @@ const assert = require('node:assert/strict');
    const context = await browser.newContext();
    // Drive the real timer callback on demand, without a minute-long sleep.
    await context.addInitScript(() => {
+    const originalNow = Date.now.bind(Date);
+    let shift = 0;
+    Date.now = () => originalNow() + shift;
+    window.advanceFleetTime = amount => { shift += amount; };
     const setInterval = window.setInterval.bind(window);
     window.setInterval = (fn, delay, ...args) => {
      if (delay === 60000) window.runSessionTimer = fn;
@@ -17,7 +21,7 @@ const assert = require('node:assert/strict');
     };
    });
    const page = await context.newPage(); page.setDefaultTimeout(5000);
-   await page.goto(origin + '/account');
+   await page.goto(origin + '/account', {waitUntil: 'domcontentloaded'});
    await page.getByLabel('账号或邮箱', {exact:true}).fill(from);
    await page.getByLabel('密码', {exact:true}).fill('Review-password-123!');
    await page.getByRole('button', {name:'登录', exact:true}).click();
@@ -28,6 +32,9 @@ const assert = require('node:assert/strict');
    let checks = 0;
    page.on('response', r => { if (r.url() === origin + '/api/operator/session') checks++; });
    await page.evaluate(async trigger => {
+    // The production console intentionally does not revalidate more than once
+    // per minute. Simulate the next eligible interval after another tab signs in.
+    window.advanceFleetTime(60001);
     if (trigger === 'timer') await window.runSessionTimer();
     else if (trigger === 'pageshow') window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted:true}));
     else window.dispatchEvent(new Event('focus'));
@@ -42,7 +49,7 @@ const assert = require('node:assert/strict');
   }
   const context = await browser.newContext();
   const page = await context.newPage(); page.setDefaultTimeout(5000);
-  await page.goto(origin + '/account');
+  await page.goto(origin + '/account', {waitUntil: 'domcontentloaded'});
   await page.getByLabel('账号或邮箱', {exact:true}).fill('admin@example.test');
   await page.getByLabel('密码', {exact:true}).fill('Review-password-123!');
   await page.getByRole('button', {name:'登录', exact:true}).click();

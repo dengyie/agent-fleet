@@ -11,11 +11,20 @@ from .node_executor import BROWSER_TOOLS
 
 
 class ToolBroker:
+    CONVERSATION_TOOLS = frozenset({
+        "conversation.list", "conversation.rename", "conversation.archive",
+        "conversation.restore",
+    })
+    LOCAL_ONLY_TOOLS = CONVERSATION_TOOLS | frozenset({
+        "platform.get_defaults", "platform.update_defaults", "service.request_action",
+    })
     TOOLS = frozenset({
         "workspace.list", "workspace.read", "workspace.write", "workspace.exec",
         "workspace.artifact", "fleet.list_services", "service.get_health",
-        "service.read_logs", "incident.get_evidence",
+        "service.read_logs", "incident.get_evidence", "service.request_action",
+        "platform.get_defaults", "platform.update_defaults",
     }) | BROWSER_TOOLS
+    TOOLS = TOOLS | CONVERSATION_TOOLS
     _BASE_TOOL_DEFINITIONS = ({'name': 'workspace.list',
       'risk': 'read_only',
       'scope_kind': 'workspace',
@@ -105,7 +114,44 @@ class ToolBroker:
       'parameters': {'type': 'object',
                      'properties': {'incident_id': {'type': 'string', 'description': 'Registered incident ID.'}},
                      'required': ['incident_id'],
-                     'additionalProperties': False}},)
+                     'additionalProperties': False}},
+     {'name': 'conversation.list', 'risk': 'read_only', 'scope_kind': 'owner',
+      'description': 'List a bounded set of the current owner’s active or archived conversations.',
+      'parameters': {'type': 'object', 'properties': {
+          'archived': {'type': 'boolean'},
+          'limit': {'type': 'integer', 'minimum': 1, 'maximum': 20}},
+          'required': [], 'additionalProperties': False}},
+     {'name': 'conversation.rename', 'risk': 'write', 'scope_kind': 'conversation',
+      'description': 'Rename one of the current owner’s conversations.',
+      'parameters': {'type': 'object', 'properties': {
+          'conversation_id': {'type': 'string'}, 'title': {'type': 'string', 'minLength': 1, 'maxLength': 120}},
+          'required': ['conversation_id', 'title'], 'additionalProperties': False}},
+     {'name': 'conversation.archive', 'risk': 'write', 'scope_kind': 'conversation',
+      'description': 'Archive one of the current owner’s conversations.',
+      'parameters': {'type': 'object', 'properties': {'conversation_id': {'type': 'string'}},
+          'required': ['conversation_id'], 'additionalProperties': False}},
+     {'name': 'conversation.restore', 'risk': 'write', 'scope_kind': 'conversation',
+      'description': 'Restore one of the current owner’s archived conversations.',
+      'parameters': {'type': 'object', 'properties': {'conversation_id': {'type': 'string'}},
+          'required': ['conversation_id'], 'additionalProperties': False}},
+     {'name': 'platform.get_defaults', 'risk': 'read_only', 'scope_kind': 'owner',
+      'description': 'Read the current owner’s default model, workspace, execution node, and safe resource catalogs.',
+      'parameters': {'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False}},
+     {'name': 'platform.update_defaults', 'risk': 'write', 'scope_kind': 'owner',
+      'description': 'Replace the current owner’s default model, workspace, and execution node using the revision returned by platform.get_defaults. Use null to clear a selection.',
+      'parameters': {'type': 'object', 'properties': {
+          'expected_revision': {'type': 'integer', 'minimum': 0},
+          'model_profile_id': {'type': ['string', 'null']},
+          'workspace_id': {'type': ['string', 'null']},
+          'execution_node_id': {'type': ['string', 'null']}},
+          'required': ['expected_revision', 'model_profile_id', 'workspace_id', 'execution_node_id'],
+          'additionalProperties': False}},
+     {'name': 'service.request_action', 'risk': 'write', 'scope_kind': 'service',
+      'description': 'Request a fixed action allowed by a registered service. Restart always creates an owner approval grant.',
+      'parameters': {'type': 'object', 'properties': {
+          'service_id': {'type': 'string'},
+          'action': {'type': 'string', 'enum': ['inspect', 'restart']}},
+          'required': ['service_id', 'action'], 'additionalProperties': False}},)
     _BROWSER_TOOL_DEFINITIONS = (
         {'name': 'browser.open', 'risk': 'read_only', 'scope_kind': 'browser',
          'description': 'Open an allowed URL in an isolated browser session.',
@@ -159,7 +205,8 @@ class ToolBroker:
                  diagnostics=None, lease_owner_id: str | None = None,
                  artifact_workspace_id: str | None = None, allowed_tools=None,
                  browser_backend=None, browser_enabled: bool = False,
-                 browser_submit_enabled: bool = False):
+                 browser_submit_enabled: bool = False, conversation_service=None,
+                 service_actions=None, defaults_service=None):
         self.backend = backend
         self.leases = leases
         self.resource_id = resource_id
@@ -167,19 +214,26 @@ class ToolBroker:
         self.artifact_store = artifact_store
         self.diagnostics = diagnostics
         self.lease_owner_id = lease_owner_id
-        self.allowed_tools = self.TOOLS if allowed_tools is None else self.TOOLS.intersection(allowed_tools)
         self.browser_backend = browser_backend
         self.browser_enabled = bool(browser_enabled)
         self.browser_submit_enabled = bool(browser_submit_enabled)
+        self.conversation_service = conversation_service
+        self.service_actions = service_actions
+        self.defaults_service = defaults_service
+        self.allowed_tools = self.TOOLS if allowed_tools is None else self.TOOLS.intersection(allowed_tools)
 
     @classmethod
     def tool_definitions(cls, allowed_tools=None, *, browser_enabled: bool = False,
-                         browser_submit_enabled: bool = False):
+                         browser_submit_enabled: bool = False,
+                         service_actions_enabled: bool = False):
         definitions = [dict(item) for item in cls._BASE_TOOL_DEFINITIONS]
         if browser_enabled:
             definitions.extend(dict(item) for item in cls._BROWSER_TOOL_DEFINITIONS)
             if browser_submit_enabled:
                 definitions.append(dict(cls._SUBMIT_TOOL_DEFINITION))
+        if not service_actions_enabled:
+            definitions = [item for item in definitions
+                           if item["name"] != "service.request_action"]
         allowed = cls.TOOLS if allowed_tools is None else cls.TOOLS.intersection(allowed_tools)
         return [item for item in definitions if item["name"] in allowed]
 
@@ -195,7 +249,7 @@ class ToolBroker:
         if tool in BROWSER_TOOLS:
             if not self.browser_enabled or self.browser_backend is None:
                 return ToolReceipt(command_id, "failed", {}, "browser_disabled")
-            if tool == "browser.submit" and not self.browser_submit_enabled:
+            if tool == "browser.submit":
                 return ToolReceipt(command_id, "failed", {}, "submit_disabled")
             try:
                 result = self.browser_backend.execute(tool, dict(arguments))
@@ -212,6 +266,95 @@ class ToolBroker:
             return ToolReceipt(command_id, receipt.state, receipt.result, receipt.error_code, receipt.truncated)
 
         try:
+            if tool == "platform.get_defaults":
+                if self.defaults_service is None:
+                    return ToolReceipt(command_id, "failed", {}, "platform_controls_unavailable")
+                if arguments:
+                    return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
+                snapshot = self.defaults_service.get_defaults(owner_id)
+                defaults = snapshot["defaults"]
+                return ToolReceipt(command_id, "succeeded", {
+                    "defaults": {key: defaults.get(key) for key in (
+                        "model_profile_id", "workspace_id", "execution_node_id", "revision")},
+                    "models": [{key: row.get(key) for key in (
+                        "profile_id", "provider", "model", "enabled")}
+                        for row in snapshot["models"][:50]],
+                    "workspaces": [{key: row.get(key) for key in (
+                        "workspace_id", "name", "backend", "enabled")}
+                        for row in snapshot["workspaces"][:50]],
+                    "nodes": [{key: row.get(key) for key in (
+                        "node_id", "label", "capabilities", "enabled", "status")}
+                        for row in snapshot["nodes"][:50]],
+                })
+            if tool == "platform.update_defaults":
+                if self.defaults_service is None:
+                    return ToolReceipt(command_id, "failed", {}, "platform_controls_unavailable")
+                if set(arguments) != {
+                    "expected_revision", "model_profile_id", "workspace_id", "execution_node_id",
+                }:
+                    return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
+                revision = arguments.get("expected_revision")
+                values = {key: arguments.get(key) for key in (
+                    "model_profile_id", "workspace_id", "execution_node_id")}
+                if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+                    return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
+                updated = self.defaults_service.update_defaults(
+                    owner_id, values, expected_revision=revision)["defaults"]
+                updated.pop("owner_id", None)
+                return ToolReceipt(command_id, "succeeded", {"defaults": updated})
+            if tool in self.CONVERSATION_TOOLS:
+                if self.conversation_service is None:
+                    return ToolReceipt(command_id, "failed", {}, "conversation_controls_unavailable")
+                valid_keys = {
+                    "conversation.list": {"archived", "limit"},
+                    "conversation.rename": {"conversation_id", "title"},
+                    "conversation.archive": {"conversation_id"},
+                    "conversation.restore": {"conversation_id"},
+                }[tool]
+                if set(arguments) - valid_keys:
+                    return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
+                conversation_id = arguments.get("conversation_id")
+                if tool == "conversation.list":
+                    archived = arguments.get("archived", False)
+                    limit = arguments.get("limit", 20)
+                    if (not isinstance(archived, bool) or isinstance(limit, bool)
+                            or not isinstance(limit, int) or not 1 <= limit <= 20):
+                        return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
+                    result = self.conversation_service.list(
+                        owner_id, limit=limit, archived=archived)
+                    return ToolReceipt(command_id, "succeeded", result)
+                if not isinstance(conversation_id, str) or not conversation_id:
+                    return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
+                if tool == "conversation.rename":
+                    result = self.conversation_service.rename(
+                        owner_id, conversation_id, arguments.get("title"))
+                    row = result["conversation"]
+                    return ToolReceipt(command_id, "succeeded", {
+                        "conversation_id": row["conversation_id"], "title": row["title"],
+                        "archived_at": row["archived_at"],
+                    })
+                if tool == "conversation.archive":
+                    result = self.conversation_service.set_archived(
+                        owner_id, conversation_id, archived=True)
+                else:
+                    result = self.conversation_service.set_archived(
+                        owner_id, conversation_id, archived=False)
+                row = result["conversation"]
+                return ToolReceipt(command_id, "succeeded", {
+                    "conversation_id": row["conversation_id"],
+                    "archived_at": row["archived_at"],
+                    "archived": row["archived_at"] is not None,
+                })
+            if tool == "service.request_action":
+                if self.service_actions is None:
+                    return ToolReceipt(command_id, "failed", {}, "service_actions_disabled")
+                if set(arguments) != {"service_id", "action"}:
+                    return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
+                result = self.service_actions.request(
+                    owner_id, arguments.get("service_id"), arguments.get("action"),
+                    idempotency_key=command_id,
+                )
+                return ToolReceipt(command_id, "succeeded", result)
             if tool.startswith(("fleet.", "service.", "incident.")):
                 if self.diagnostics is None:
                     return ToolReceipt(command_id, "failed", {}, "diagnostics_unavailable")

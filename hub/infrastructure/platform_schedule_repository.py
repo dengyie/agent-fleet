@@ -33,10 +33,12 @@ class PlatformScheduleRepositoryError(RuntimeError):
 
 
 def _finite(value: Any, code: str) -> float:
+    if type(value) not in (int, float):
+        raise PlatformScheduleRepositoryError(code)
     try:
         parsed = float(value)
-    except (TypeError, ValueError):
-        raise PlatformScheduleRepositoryError(code) from None
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise PlatformScheduleRepositoryError(code) from exc
     if not math.isfinite(parsed) or parsed < 0:
         raise PlatformScheduleRepositoryError(code)
     return parsed
@@ -44,7 +46,10 @@ def _finite(value: Any, code: str) -> float:
 
 def _json(value: Any, *, limit: int, code: str) -> str:
     try:
-        encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        encoded = json.dumps(
+            value, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+            allow_nan=False,
+        )
     except (TypeError, ValueError):
         raise PlatformScheduleRepositoryError(code) from None
     if len(encoded.encode("utf-8")) > limit:
@@ -52,11 +57,22 @@ def _json(value: Any, *, limit: int, code: str) -> str:
     return encoded
 
 
-def _decode(value: str | None, fallback: Any) -> Any:
+def _reject_json_constant(token: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {token}")
+
+
+def _decode_object(value: str | None, *, limit: int) -> dict[str, Any]:
     try:
-        return json.loads(value or "")
-    except (TypeError, ValueError):
-        return fallback
+        if not isinstance(value, str) or not value or len(value) > limit:
+            raise ValueError("invalid persisted JSON size")
+        if len(value.encode("utf-8")) > limit:
+            raise ValueError("persisted JSON too large")
+        decoded = json.loads(value, parse_constant=_reject_json_constant)
+        if not isinstance(decoded, Mapping):
+            raise ValueError("expected object")
+        return dict(decoded)
+    except (RecursionError, TypeError, UnicodeError, ValueError) as exc:
+        raise PlatformScheduleRepositoryError("schedule_store") from exc
 
 
 def _safe_rollback(conn) -> None:
@@ -91,6 +107,14 @@ def _validate_target(value: Any) -> dict[str, Any]:
     return {"service_id": service_id}
 
 
+def _decode_target(value: str | None) -> dict[str, Any]:
+    decoded = _decode_object(value, limit=MAX_TARGET_BYTES)
+    try:
+        return _validate_target(decoded)
+    except PlatformScheduleRepositoryError as exc:
+        raise PlatformScheduleRepositoryError("schedule_store") from exc
+
+
 def _validate_definition(data: Mapping[str, Any], *, now: float | None = None) -> dict[str, Any]:
     if not isinstance(data, Mapping):
         raise PlatformScheduleRepositoryError("invalid_schedule")
@@ -98,21 +122,25 @@ def _validate_definition(data: Mapping[str, Any], *, now: float | None = None) -
         schedule_id = validate_id(data.get("schedule_id"), "schedule_id")
     except ValueError:
         raise PlatformScheduleRepositoryError("invalid_id") from None
-    name = data.get("name") or schedule_id
+    name = data.get("name", schedule_id)
     if not isinstance(name, str) or not name.strip() or len(name) > 120:
         raise PlatformScheduleRepositoryError("invalid_name")
+    try:
+        name.encode("utf-8")
+    except UnicodeError as exc:
+        raise PlatformScheduleRepositoryError("invalid_name") from exc
     action = data.get("action")
     if not isinstance(action, str) or action not in SUPPORTED_ACTIONS:
         raise PlatformScheduleRepositoryError("invalid_action")
     interval_s = _finite(data.get("interval_s"), "invalid_interval")
     if interval_s < MIN_INTERVAL_S or interval_s > MAX_INTERVAL_S:
         raise PlatformScheduleRepositoryError("invalid_interval")
-    timezone = _validate_timezone(data.get("timezone") or "UTC")
-    missed_policy = data.get("missed_policy") or "skip"
-    if missed_policy not in MISSED_POLICIES:
+    timezone = _validate_timezone(data.get("timezone", "UTC"))
+    missed_policy = data.get("missed_policy", "skip")
+    if not isinstance(missed_policy, str) or missed_policy not in MISSED_POLICIES:
         raise PlatformScheduleRepositoryError("invalid_missed_policy")
-    overlap_policy = data.get("overlap_policy") or "skip"
-    if overlap_policy not in OVERLAP_POLICIES:
+    overlap_policy = data.get("overlap_policy", "skip")
+    if not isinstance(overlap_policy, str) or overlap_policy not in OVERLAP_POLICIES:
         raise PlatformScheduleRepositoryError("invalid_overlap_policy")
     target = _validate_target(data.get("target") or {})
     next_run_at = data.get("next_run_at")
@@ -121,6 +149,9 @@ def _validate_definition(data: Mapping[str, Any], *, now: float | None = None) -
             raise PlatformScheduleRepositoryError("invalid_next_run")
         next_run_at = float(now) + interval_s
     next_run_at = _finite(next_run_at, "invalid_next_run")
+    enabled = data.get("enabled", True)
+    if type(enabled) is not bool:
+        raise PlatformScheduleRepositoryError("invalid_enabled")
     return {
         "schedule_id": schedule_id,
         "name": name.strip(),
@@ -131,7 +162,7 @@ def _validate_definition(data: Mapping[str, Any], *, now: float | None = None) -
         "missed_policy": missed_policy,
         "overlap_policy": overlap_policy,
         "next_run_at": next_run_at,
-        "enabled": bool(data.get("enabled", True)),
+        "enabled": enabled,
     }
 
 
@@ -198,8 +229,18 @@ class PlatformScheduleRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_platform_schedule_due
                   ON platform_schedules(enabled, next_run_at, owner_id);
+                CREATE INDEX IF NOT EXISTS idx_platform_schedule_owner_enabled
+                  ON platform_schedules(enabled, owner_id);
                 CREATE INDEX IF NOT EXISTS idx_platform_schedule_triggers_recent
                   ON platform_schedule_triggers(owner_id, schedule_id, scheduled_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_platform_schedule_trigger_recovery
+                  ON platform_schedule_triggers(owner_id, schedule_id, lease_expires_at, scheduled_at)
+                  WHERE state='running';
+                CREATE INDEX IF NOT EXISTS idx_platform_schedule_owner_due
+                  ON platform_schedules(owner_id, enabled, next_run_at, schedule_id);
+                CREATE INDEX IF NOT EXISTS idx_platform_schedule_owner_recovery
+                  ON platform_schedule_triggers(owner_id, lease_expires_at, schedule_id, scheduled_at)
+                  WHERE state='running';
                 """
             )
         except (sqlite3.Error, OSError):
@@ -214,7 +255,7 @@ class PlatformScheduleRepository:
             "schedule_id": row["schedule_id"],
             "name": row["name"],
             "action": row["action"],
-            "target": _decode(row["target"], {}),
+            "target": _decode_target(row["target"]),
             "interval_s": float(row["interval_s"]),
             "timezone": row["timezone"],
             "missed_policy": row["missed_policy"],
@@ -226,7 +267,7 @@ class PlatformScheduleRepository:
             "last_run_at": row["last_run_at"],
             "last_success_at": row["last_success_at"],
             "last_error_code": row["last_error_code"],
-            "last_result": _decode(row["last_result"], {}),
+            "last_result": _decode_object(row["last_result"], limit=MAX_RESULT_BYTES),
             "updated_at": row["updated_at"],
         }
 
@@ -240,7 +281,7 @@ class PlatformScheduleRepository:
             "started_at": row["started_at"],
             "finished_at": row["finished_at"],
             "error_code": row["error_code"],
-            "last_result": _decode(row["last_result"], {}),
+            "last_result": _decode_object(row["last_result"], limit=MAX_RESULT_BYTES),
             "updated_at": row["updated_at"],
         }
 
@@ -317,7 +358,38 @@ class PlatformScheduleRepository:
             if conn is not None:
                 conn.close()
 
-    def list_owners(self, *, limit: int = 100) -> list[str]:
+    def list_due(self, owner_id: str, *, now: float, limit: int = 100) -> list[dict[str, Any]]:
+        """Batch pending occurrences, independent of the public catalog page."""
+        try:
+            owner_id = validate_owner_id(owner_id)
+        except ValueError as exc:
+            raise PlatformScheduleRepositoryError("invalid_owner") from exc
+        now = _finite(now, "invalid_time")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise PlatformScheduleRepositoryError("invalid_limit")
+        conn = None
+        try:
+            conn = self._connect()
+            rows = conn.execute(
+                "WITH pending AS ("
+                "SELECT schedule_id,next_run_at AS due_at FROM platform_schedules "
+                "WHERE owner_id=? AND enabled=1 AND next_run_at<=? UNION ALL "
+                "SELECT schedule_id,scheduled_at AS due_at FROM platform_schedule_triggers "
+                "WHERE owner_id=? AND state='running' AND lease_expires_at<=?"
+                ") SELECT s.*,MIN(p.due_at) AS pending_at FROM pending p "
+                "JOIN platform_schedules s ON s.owner_id=? AND s.schedule_id=p.schedule_id "
+                "WHERE s.enabled=1 GROUP BY s.schedule_id "
+                "ORDER BY pending_at,s.schedule_id LIMIT ?",
+                (owner_id, now, owner_id, now, owner_id, limit),
+            ).fetchall()
+            return [{**self._public_schedule(row), "next_run_at": float(row["pending_at"])} for row in rows]
+        except sqlite3.Error as exc:
+            raise PlatformScheduleRepositoryError("schedule_store") from exc
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def list_owners(self, *, after_owner_id: str | None = None, limit: int = 100) -> list[str]:
         try:
             limit = max(1, min(int(limit), 100))
         except (TypeError, ValueError):
@@ -325,11 +397,22 @@ class PlatformScheduleRepository:
         conn = None
         try:
             conn = self._connect()
-            rows = conn.execute(
-                "SELECT DISTINCT owner_id FROM platform_schedules "
-                "WHERE enabled=1 ORDER BY owner_id LIMIT ?",
-                (limit,),
-            ).fetchall()
+            if after_owner_id is None:
+                rows = conn.execute(
+                    "SELECT owner_id FROM platform_schedules "
+                    "WHERE enabled=1 GROUP BY owner_id ORDER BY owner_id LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            else:
+                try:
+                    after_owner_id = validate_owner_id(after_owner_id)
+                except ValueError as exc:
+                    raise PlatformScheduleRepositoryError("invalid_owner") from exc
+                rows = conn.execute(
+                    "SELECT owner_id FROM platform_schedules "
+                    "WHERE enabled=1 AND owner_id>? GROUP BY owner_id ORDER BY owner_id LIMIT ?",
+                    (after_owner_id, limit),
+                ).fetchall()
             return [str(row["owner_id"]) for row in rows]
         except sqlite3.Error:
             raise PlatformScheduleRepositoryError("schedule_store") from None
@@ -448,6 +531,28 @@ class PlatformScheduleRepository:
             if conn is not None:
                 conn.close()
 
+    def get_expired_trigger(
+        self, owner_id: str, schedule_id: str, *, now: float,
+    ) -> dict[str, Any] | None:
+        """Find one interrupted occurrence even after its schedule advanced."""
+        owner_id, schedule_id = self._owner_schedule(owner_id, schedule_id)
+        now = _finite(now, "invalid_time")
+        conn = None
+        try:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT * FROM platform_schedule_triggers "
+                "WHERE owner_id=? AND schedule_id=? AND state='running' "
+                "AND lease_expires_at<=? ORDER BY lease_expires_at,scheduled_at LIMIT 1",
+                (owner_id, schedule_id, now),
+            ).fetchone()
+            return self._public_trigger(row) if row else None
+        except sqlite3.Error as exc:
+            raise PlatformScheduleRepositoryError("schedule_store") from exc
+        finally:
+            if conn is not None:
+                conn.close()
+
     def claim_trigger(
         self, owner_id: str, schedule_id: str, *, scheduled_at: float,
         worker_id: str, now: float | None = None, lease_s: float = 60.0,
@@ -457,6 +562,8 @@ class PlatformScheduleRepository:
         scheduled_at = _finite(scheduled_at, "invalid_scheduled_at")
         now = _finite(self.clock() if now is None else now, "invalid_time")
         lease_s = _finite(lease_s, "invalid_lease")
+        if advance_to is not None:
+            advance_to = _finite(advance_to, "invalid_next_run")
         if lease_s <= 0 or lease_s > 3600 or not isinstance(worker_id, str) or not worker_id or len(worker_id) > 128:
             raise PlatformScheduleRepositoryError("invalid_lease")
         conn = None
@@ -494,6 +601,12 @@ class PlatformScheduleRepository:
                     "VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (owner_id, schedule_id, scheduled_at, "running", 1, lease_id, worker_id,
                      now + lease_s, now, now),
+                )
+            if advance_to is not None:
+                conn.execute(
+                    "UPDATE platform_schedules SET next_run_at=MAX(next_run_at,?),updated_at=? "
+                    "WHERE owner_id=? AND schedule_id=?",
+                    (advance_to, now, owner_id, schedule_id),
                 )
             saved = conn.execute(
                 "SELECT * FROM platform_schedule_triggers WHERE owner_id=? AND schedule_id=? AND scheduled_at=?",

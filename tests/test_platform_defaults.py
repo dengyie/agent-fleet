@@ -27,7 +27,7 @@ def _repo(tmp_path: Path) -> PlatformRepository:
 
 def test_platform_store_isolated_and_wal(tmp_path):
     repo = _repo(tmp_path)
-    assert repo.schema_version() == 2
+    assert repo.schema_version() == 3
     assert repo.path == tmp_path / "platform.db"
     with sqlite3.connect(repo.path) as conn:
         assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
@@ -69,6 +69,12 @@ def test_default_resolution_precedence_is_request_conversation_workspace_owner()
         "workspace_id": "workspace",
         "execution_node_id": "unset",
     }
+
+
+@pytest.mark.parametrize("overrides", [[], "", 0, False])
+def test_default_resolution_rejects_non_mapping_overrides(overrides):
+    with pytest.raises(TypeError, match="overrides must be a mapping"):
+        resolve_run_config("owner@example.test", overrides=overrides)
 
 
 def test_public_model_never_returns_secret_ref(tmp_path):

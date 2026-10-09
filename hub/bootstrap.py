@@ -74,6 +74,7 @@ def create_app(
     platform_delivery = None
     conversation_service = None
     run_service = None
+    submit_approval_service = None
     run_event_service = None
     artifact_store = None
     service_health = None
@@ -101,6 +102,7 @@ def create_app(
     command_inspection = None
     command_postcheck = None
     browser_repository = None
+    browser_capture_gc = None
     submit_approval_service = None
     if config.platform_enabled:
         from hub.application.defaults_service import DefaultsService
@@ -131,10 +133,15 @@ def create_app(
         command_signing_key = getattr(config, "platform_command_signing_raw", None)
         if command_signing_key is None:
             command_signing_key = load_platform_command_signing_key()
+        browser_write_guard = None
+        if getattr(config, "execution_windows_enabled", False):
+            from hub.infrastructure.execution_window_repository import ExecutionWindowRepository
+            browser_write_guard = ExecutionWindowRepository.assert_browser_write_allowed
         platform_delivery = CommandDeliveryService(
             command_repository,
             signing_key=command_signing_key,
             require_signature=bool(getattr(config, "platform_require_command_signature", False)),
+            browser_write_guard=browser_write_guard,
         )
         command_inspection = CommandInspectionService(command_repository)
         command_postcheck = CommandPostcheckService(command_repository, platform_delivery)
@@ -154,7 +161,7 @@ def create_app(
             if getattr(config, "platform_browser_submit_enabled", False):
                 from hub.application.conversation_service import SubmitApprovalService
                 submit_approval_service = SubmitApprovalService(
-                    browser_repository)
+                    browser_repository, platform_repository)
         conversation_service = ConversationService(platform_repository, platform_service)
         run_service = RunService(platform_repository,
                                  browser_repository=browser_repository)
@@ -162,12 +169,13 @@ def create_app(
         if config.platform_artifact_root is None:
             raise RuntimeError("platform_enabled requires a platform_artifact_root")
         artifact_store = ArtifactStore(config.platform_artifact_root)
-        if getattr(config, "platform_browser_enabled", False):
-            from hub.infrastructure.browser_repository import BrowserRepository
-            browser_repository = (repositories or {}).get("browser")
-            if browser_repository is None:
-                browser_repository = BrowserRepository(config.platform_db)
-            browser_repository.init()
+        if browser_repository is not None:
+            from hub.infrastructure.browser_capture_gc import BrowserCaptureGcRepository
+
+            browser_capture_gc = BrowserCaptureGcRepository(
+                config.platform_db, config.platform_artifact_root,
+            )
+            browser_capture_gc.init()
         if getattr(config, "execution_windows_enabled", False):
             from hub.infrastructure.execution_window_repository import ExecutionWindowRepository
             from hub.application.execution_window_service import ExecutionWindowService
@@ -359,6 +367,9 @@ def create_app(
                     config, "platform_remote_execution_enabled", False)),
                 remote_delivery=platform_delivery,
                 usage_meter=usage_repository,
+                conversation_service=conversation_service,
+                service_actions=service_actions,
+                defaults_service=platform_service,
                 browser_enabled=bool(getattr(config, "platform_browser_enabled", False)),
                 browser_network_enabled=bool(getattr(
                     config, "platform_browser_network_enabled", False)),
@@ -584,6 +595,7 @@ def create_app(
         getattr(config, "platform_remote_execution_enabled", False))
     app.config["PLATFORM_BROWSER_ENABLED"] = bool(
         getattr(config, "platform_browser_enabled", False))
+    app.config["PLATFORM_BROWSER_SUBMIT_ENABLED"] = bool(getattr(config, "platform_browser_submit_enabled", False))
     app.config["PLATFORM_BROWSER_NETWORK_ENABLED"] = bool(
         getattr(config, "platform_browser_network_enabled", False))
     app.config["SERVICE_MONITORING_ENABLED"] = bool(config.service_monitoring_enabled)
@@ -666,6 +678,8 @@ def create_app(
         app.extensions["fleet"]["platform_commands"] = command_repository
         if browser_repository is not None:
             app.extensions["fleet"]["repositories"]["browser"] = browser_repository
+        if browser_capture_gc is not None:
+            app.extensions["fleet"]["repositories"]["browser_capture_gc"] = browser_capture_gc
         if submit_approval_service is not None:
             app.extensions["fleet"]["services"]["submit_approvals"] = submit_approval_service
     if platform_scheduler_repository is not None:
@@ -675,6 +689,8 @@ def create_app(
         app.extensions["fleet"]["services"]["platform_defaults"] = platform_service
         app.extensions["fleet"]["services"]["conversations"] = conversation_service
         app.extensions["fleet"]["services"]["runs"] = run_service
+        if submit_approval_service is not None:
+            app.extensions["fleet"]["services"]["submit_approvals"] = submit_approval_service
         app.extensions["fleet"]["services"]["run_events"] = run_event_service
         if usage_repository is not None:
             app.extensions["fleet"]["services"]["usage_repository"] = usage_repository
@@ -736,6 +752,8 @@ def create_app(
             app.extensions["fleet"]["integrations"] = {"komari": komari_client}
     if session_service is not None:
         app.extensions["fleet"]["services"]["sessions"] = session_service
+    if transcript_repo is not None:
+        app.extensions["fleet"]["repositories"]["transcript"] = transcript_repo
     if control_router is not None:
         app.extensions["fleet"]["services"]["control_router"] = control_router
     if adoption_service is not None:
@@ -822,7 +840,16 @@ def create_app(
     return app
 
 
-def start_background_jobs(app, *, reconcile_interval_s=60, lease_reconciler_interval_s=60):
+def start_background_jobs(
+    app,
+    *,
+    reconcile_interval_s=60,
+    lease_reconciler_interval_s=60,
+    transcript_retention_interval_s=300,
+    browser_session_reconciliation_interval_s=60,
+    browser_capture_staging_cleanup_interval_s=300,
+    browser_capture_retention_interval_s=300,
+):
     """Start the backend lifecycle daemons for the real hub process.
 
     Pulls the app-bound ``ReconciliationService`` from the fleet extension, runs
@@ -835,6 +862,10 @@ def start_background_jobs(app, *, reconcile_interval_s=60, lease_reconciler_inte
     from hub.application.reconciliation_service import (
         start_lease_reconciler,
         start_reconciliation,
+        start_transcript_retention,
+        start_browser_session_reconciliation,
+        start_browser_capture_staging_cleanup,
+        start_browser_capture_retention,
     )
 
     fleet = app.extensions.get("fleet", {})
@@ -853,6 +884,49 @@ def start_background_jobs(app, *, reconcile_interval_s=60, lease_reconciler_inte
         "lease_reconciler": start_lease_reconciler(
             service.reconcile_leases, interval_s=lease_reconciler_interval_s),
     }
+    fleet_config = fleet.get("config")
+    transcript_enabled = bool(
+        getattr(fleet_config, "session_repositories_enabled", False)
+        or getattr(fleet_config, "adoption_repositories_enabled", False)
+    )
+    transcript_repo = (
+        fleet.get("repositories", {}).get("transcript")
+        if transcript_enabled else None
+    )
+    if transcript_repo is not None:
+        from datetime import datetime, timezone
+
+        def purge_expired_transcript_batch():
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            return transcript_repo.purge_expired_raw(now=now)
+
+        stops["transcript_retention"] = start_transcript_retention(
+            purge_expired_transcript_batch,
+            interval_s=transcript_retention_interval_s,
+        )
+    browser_reconciliation_enabled = bool(
+        getattr(fleet_config, "platform_browser_enabled", False)
+        and getattr(fleet_config, "platform_remote_execution_enabled", False)
+        and getattr(fleet_config, "platform_require_command_signature", False)
+    )
+    browser_repo = fleet.get("repositories", {}).get("browser")
+    if browser_reconciliation_enabled and browser_repo is not None:
+        stops["browser_session_reconciliation"] = start_browser_session_reconciliation(
+            browser_repo.reconcile_stale_sessions,
+            interval_s=browser_session_reconciliation_interval_s,
+        )
+    artifact_store = fleet.get("services", {}).get("platform_artifacts")
+    if browser_reconciliation_enabled and artifact_store is not None:
+        stops["browser_capture_staging_cleanup"] = start_browser_capture_staging_cleanup(
+            artifact_store.cleanup_staging,
+            interval_s=browser_capture_staging_cleanup_interval_s,
+        )
+    capture_gc = fleet.get("repositories", {}).get("browser_capture_gc")
+    if browser_reconciliation_enabled and capture_gc is not None:
+        stops["browser_capture_retention"] = start_browser_capture_retention(
+            capture_gc.cleanup_expired,
+            interval_s=browser_capture_retention_interval_s,
+        )
     platform_monitoring = fleet.get("services", {}).get("platform_monitoring")
     if platform_monitoring is not None:
         stops["platform_monitoring"] = platform_monitoring.start()

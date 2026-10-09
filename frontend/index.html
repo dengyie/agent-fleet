@@ -14,7 +14,7 @@
 <script type="module" src="./assets/shell/theme.js"></script>
 </head>
 <body>
-<section id="access-state" class="access-state" role="status"><p>正在验证登录状态…</p><button type="button" hidden>重新验证</button></section>
+<section id="access-state" class="access-state" role="status" hidden><p></p><button type="button" hidden>重新验证</button></section>
 <main id="login-view" class="login-page" hidden>
   <section class="login-card" aria-labelledby="login-title">
     <div class="login-brand"><span class="brand-symbol" data-login-icon="layers"></span><span>agent fleet</span></div>
@@ -42,11 +42,12 @@
       <a href="/assistant" data-nav="assistant"><span data-icon="sparkles"></span>主助手</a>
       <a href="/monitoring" data-nav="monitoring"><span data-icon="globe"></span>服务监控</a>
     </nav>
-    <div class="nav-group-heading"><p class="nav-group-label">最近对话</p></div>
+    <div class="nav-group-heading conversation-heading"><p class="nav-group-label" id="conversation-heading">最近对话</p><button type="button" class="sidebar-text-button" id="archived-toggle" aria-pressed="false">查看归档</button></div>
     <label class="conversation-search"><span class="sr-only">搜索最近对话</span><input id="conversation-search" type="search" placeholder="搜索最近对话" aria-label="搜索最近对话" autocomplete="off"><kbd>⌘ K</kbd></label>
     <p id="conversation-search-status" class="sidebar-empty" role="status" hidden></p>
     <nav class="console-nodes console-conversations" id="sidebar-conversations" aria-label="最近对话"><p class="sidebar-empty">正在获取对话…</p></nav>
     <div class="nav-group-heading"><p class="nav-group-label">计算节点</p><span id="node-count" class="subtle-count">—</span></div>
+    <div class="sidebar-resize-handle" id="sidebar-nodes-resize" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="调整最近对话和计算节点的高度"></div>
     <nav class="console-nodes" id="sidebar-nodes" aria-label="计算节点"><p class="sidebar-empty">正在获取节点…</p></nav>
     <div class="sidebar-footer">
       <div class="workspace-identity"><span class="identity-icon" data-icon="lock"></span><div><strong>自托管工作空间</strong><span>你的数据，由你掌控</span></div></div>
@@ -57,6 +58,22 @@
       </div>
     </div>
   </aside>
+  <dialog class="conversation-dialog" id="conversation-title-dialog" aria-labelledby="conversation-title-heading">
+    <form method="dialog">
+      <h2 id="conversation-title-heading">重命名对话</h2>
+      <label for="conversation-title-input">对话名称</label>
+      <input id="conversation-title-input" name="title" type="text" maxlength="120" required autocomplete="off">
+      <p id="conversation-title-error" class="conversation-dialog-error" role="alert" hidden></p>
+      <div class="conversation-dialog-actions"><button type="button" value="cancel" data-dialog-cancel>取消</button><button type="button" class="button-primary" id="conversation-title-save">保存</button></div>
+    </form>
+  </dialog>
+  <dialog class="conversation-dialog" id="conversation-delete-dialog" aria-labelledby="conversation-delete-heading">
+    <form method="dialog">
+      <h2 id="conversation-delete-heading">永久删除对话？</h2>
+      <p id="conversation-delete-copy">此操作会删除对话消息和运行记录，不能撤销。</p>
+      <div class="conversation-dialog-actions"><button type="button" value="cancel" data-dialog-cancel>取消</button><button type="button" class="button-danger" id="conversation-delete-confirm">永久删除</button></div>
+    </form>
+  </dialog>
   <button class="sidebar-backdrop" id="sidebar-backdrop" aria-label="关闭导航" hidden></button>
   <div class="console-main">
     <header class="console-topbar">

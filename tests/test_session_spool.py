@@ -24,6 +24,7 @@ import json
 import shutil
 import struct
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -464,6 +465,82 @@ class GapTests(SpoolTests):
         gap2 = sp.append(_evt(4, quality='best_effort'))
         self.assertFalse(gap2.capture_blocked)
         self.assertIsNotNone(gap2.gap_sequence)
+
+
+class QuotaConcurrencyTests(unittest.TestCase):
+    """Admission must stay serialized across independent session spools."""
+
+    def test_machine_quota_check_waits_for_other_session_write(self):
+        root = Path(tempfile.mkdtemp(prefix="fleet-spool-quota-race-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        probe_root = root / "probe"
+        probe = _spool(probe_root, "host-1", "probe",
+                       max_machine_bytes=1 << 20)
+        probe.append(_evt(1))
+        event_cost = probe.status()["session_bytes"] - 16
+        probe.close()
+
+        shared = root / "shared"
+        first = _spool(shared, "host-1", "first",
+                       max_machine_bytes=1 << 20)
+        second = _spool(shared, "host-1", "second",
+                        max_machine_bytes=1 << 20)
+        self.addCleanup(first.close)
+        self.addCleanup(second.close)
+        quota = first.status()["machine_bytes"] + event_cost
+        first._max_machine_bytes = quota
+        second._max_machine_bytes = quota
+
+        write_started = threading.Event()
+        release_write = threading.Event()
+        second_checked = threading.Event()
+        original_write = type(first)._write_frame
+        original_check = type(first)._within_quota
+        call_count = 0
+        call_guard = threading.Lock()
+
+        def blocking_write(self, sequence, body):
+            nonlocal call_count
+            with call_guard:
+                call_count += 1
+                first_write = call_count == 1
+            if first_write:
+                write_started.set()
+                release_write.wait(2)
+            return original_write(self, sequence, body)
+
+        def observed_check(self, frame_cost):
+            with call_guard:
+                checked_after_first = call_count >= 1
+            if checked_after_first:
+                second_checked.set()
+            return original_check(self, frame_cost)
+
+        type(first)._write_frame = blocking_write
+        type(first)._within_quota = observed_check
+        results = []
+        try:
+            first_thread = threading.Thread(
+                target=lambda: results.append(first.append(_evt(1))))
+            second_thread = threading.Thread(
+                target=lambda: results.append(second.append(_evt(2))))
+            first_thread.start()
+            self.assertTrue(write_started.wait(2))
+            second_thread.start()
+            self.assertFalse(second_checked.wait(0.2))
+            release_write.set()
+            first_thread.join(2)
+            second_thread.join(2)
+        finally:
+            release_write.set()
+            type(first)._write_frame = original_write
+            type(first)._within_quota = original_check
+
+        self.assertFalse(first_thread.is_alive())
+        self.assertFalse(second_thread.is_alive())
+        self.assertEqual(sum(result.accepted for result in results), 1)
+        self.assertLessEqual(first.status()["machine_bytes"], quota)
+
 
 
 if __name__ == '__main__':

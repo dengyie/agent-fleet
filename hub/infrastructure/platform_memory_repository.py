@@ -11,13 +11,9 @@ from pathlib import Path
 from typing import Any
 
 from platform_schema import validate_id, validate_owner_id
-
-MEMORY_KINDS = frozenset({"fact", "preference", "decision", "note"})
-MAX_TITLE = 160
-MAX_CONTENT_BYTES = 16 * 1024
-MAX_TAGS = 16
-MAX_TAG_BYTES = 64
-MAX_SOURCE = 256
+from hub.domain.memory import (
+    MEMORY_KINDS, MAX_TITLE, MAX_CONTENT_BYTES, MAX_TAGS, MAX_TAG_BYTES, MAX_SOURCE,
+)
 MAX_QUERY = 512
 MAX_RESULT = 100
 
@@ -34,7 +30,13 @@ class PlatformMemoryRepositoryError(RuntimeError):
 def _text(value: Any, *, field: str, limit: int, required: bool = True) -> str:
     if not isinstance(value, str) or (required and not value.strip()):
         raise PlatformMemoryRepositoryError(f"invalid_{field}")
-    if len(value.encode("utf-8")) > limit:
+    if len(value) > limit:
+        raise PlatformMemoryRepositoryError("value_too_large")
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeError as exc:
+        raise PlatformMemoryRepositoryError(f"invalid_{field}") from exc
+    if size > limit:
         raise PlatformMemoryRepositoryError("value_too_large")
     return value.strip()
 
@@ -58,19 +60,22 @@ def _normalize(data: Mapping[str, Any], *, memory_id: str | None = None) -> dict
     if not isinstance(data, Mapping):
         raise PlatformMemoryRepositoryError("invalid_memory")
     if memory_id is None:
-        raw_id = data.get("memory_id") or f"memory_{secrets.token_hex(12)}"
+        raw_id = data["memory_id"] if "memory_id" in data else f"memory_{secrets.token_hex(12)}"
     else:
         raw_id = memory_id
     try:
         normalized_id = validate_id(raw_id, "memory_id")
-    except ValueError:
-        raise PlatformMemoryRepositoryError("invalid_id") from None
+    except ValueError as exc:
+        raise PlatformMemoryRepositoryError("invalid_id") from exc
     kind = data.get("kind")
-    if kind not in MEMORY_KINDS:
+    if not isinstance(kind, str) or kind not in MEMORY_KINDS:
         raise PlatformMemoryRepositoryError("invalid_kind")
     title = _text(data.get("title"), field="title", limit=MAX_TITLE)
     content = _text(data.get("content"), field="content", limit=MAX_CONTENT_BYTES)
-    source = _text(data.get("source") or "manual", field="source", limit=MAX_SOURCE)
+    source = _text(data.get("source", "manual"), field="source", limit=MAX_SOURCE)
+    enabled = data.get("enabled", True)
+    if type(enabled) is not bool:
+        raise PlatformMemoryRepositoryError("invalid_enabled")
     return {
         "memory_id": normalized_id,
         "kind": kind,
@@ -78,7 +83,7 @@ def _normalize(data: Mapping[str, Any], *, memory_id: str | None = None) -> dict
         "content": content,
         "tags": _tags(data.get("tags")),
         "source": source,
-        "enabled": bool(data.get("enabled", True)),
+        "enabled": enabled,
     }
 
 
@@ -137,10 +142,10 @@ class PlatformMemoryRepository:
             """)
         except sqlite3.OperationalError as exc:
             if "fts5" in str(exc).lower():
-                raise PlatformMemoryRepositoryError("memory_search_unavailable") from None
-            raise PlatformMemoryRepositoryError("memory_store") from None
-        except (sqlite3.Error, OSError):
-            raise PlatformMemoryRepositoryError("memory_store") from None
+                raise PlatformMemoryRepositoryError("memory_search_unavailable") from exc
+            raise PlatformMemoryRepositoryError("memory_store") from exc
+        except (sqlite3.Error, OSError) as exc:
+            raise PlatformMemoryRepositoryError("memory_store") from exc
         finally:
             if conn is not None:
                 conn.close()
@@ -148,13 +153,17 @@ class PlatformMemoryRepository:
     @staticmethod
     def _public(row: sqlite3.Row) -> dict[str, Any]:
         try:
-            tags = json.loads(row["tags"] or "[]")
-        except (TypeError, ValueError):
-            tags = []
+            raw_tags = json.loads(row["tags"])
+            tags = _tags(raw_tags)
+        except (TypeError, ValueError, PlatformMemoryRepositoryError) as exc:
+            raise PlatformMemoryRepositoryError("memory_store_corrupt") from exc
+        if tags != raw_tags:
+            cause = ValueError("persisted memory tags are not canonical")
+            raise PlatformMemoryRepositoryError("memory_store_corrupt") from cause
         return {
             "memory_id": row["memory_id"], "kind": row["kind"],
             "title": row["title"], "content": row["content"],
-            "tags": list(tags) if isinstance(tags, list) else [],
+            "tags": tags,
             "source": row["source"], "enabled": bool(row["enabled"]),
             "revision": int(row["revision"]),
             "created_at": float(row["created_at"]),
@@ -165,8 +174,8 @@ class PlatformMemoryRepository:
     def _owner(owner_id: Any) -> str:
         try:
             return validate_owner_id(owner_id)
-        except ValueError:
-            raise PlatformMemoryRepositoryError("invalid_owner") from None
+        except ValueError as exc:
+            raise PlatformMemoryRepositoryError("invalid_owner") from exc
 
     def create(self, owner_id: str, data: Mapping[str, Any], *, now: float | None = None) -> dict[str, Any]:
         owner_id = self._owner(owner_id)
@@ -190,14 +199,10 @@ class PlatformMemoryRepository:
             row = conn.execute("SELECT * FROM platform_memory_items WHERE owner_id=? AND memory_id=?", (owner_id, normalized["memory_id"])).fetchone()
             conn.execute("COMMIT")
             return self._public(row)
-        except sqlite3.IntegrityError:
-            if conn is not None:
-                conn.execute("ROLLBACK")
-            raise PlatformMemoryRepositoryError("memory_conflict") from None
-        except (sqlite3.Error, OSError):
-            if conn is not None:
-                conn.execute("ROLLBACK")
-            raise PlatformMemoryRepositoryError("memory_store") from None
+        except sqlite3.IntegrityError as exc:
+            raise PlatformMemoryRepositoryError("memory_conflict") from exc
+        except (sqlite3.Error, OSError) as exc:
+            raise PlatformMemoryRepositoryError("memory_store") from exc
         finally:
             if conn is not None:
                 conn.close()
@@ -206,15 +211,15 @@ class PlatformMemoryRepository:
         owner_id = self._owner(owner_id)
         try:
             memory_id = validate_id(memory_id, "memory_id")
-        except ValueError:
-            raise PlatformMemoryRepositoryError("invalid_id") from None
+        except ValueError as exc:
+            raise PlatformMemoryRepositoryError("invalid_id") from exc
         conn = None
         try:
             conn = self._connect()
             row = conn.execute("SELECT * FROM platform_memory_items WHERE owner_id=? AND memory_id=?", (owner_id, memory_id)).fetchone()
             return self._public(row) if row else None
-        except sqlite3.Error:
-            raise PlatformMemoryRepositoryError("memory_store") from None
+        except sqlite3.Error as exc:
+            raise PlatformMemoryRepositoryError("memory_store") from exc
         finally:
             if conn is not None:
                 conn.close()
@@ -223,15 +228,15 @@ class PlatformMemoryRepository:
         owner_id = self._owner(owner_id)
         try:
             limit = max(1, min(int(limit), MAX_RESULT))
-        except (TypeError, ValueError):
-            raise PlatformMemoryRepositoryError("invalid_limit") from None
+        except (TypeError, ValueError) as exc:
+            raise PlatformMemoryRepositoryError("invalid_limit") from exc
         conn = None
         try:
             conn = self._connect()
             rows = conn.execute("SELECT * FROM platform_memory_items WHERE owner_id=? ORDER BY updated_at DESC, memory_id LIMIT ?", (owner_id, limit)).fetchall()
             return [self._public(row) for row in rows]
-        except sqlite3.Error:
-            raise PlatformMemoryRepositoryError("memory_store") from None
+        except sqlite3.Error as exc:
+            raise PlatformMemoryRepositoryError("memory_store") from exc
         finally:
             if conn is not None:
                 conn.close()
@@ -257,7 +262,6 @@ class PlatformMemoryRepository:
                 (normalized["kind"], normalized["title"], normalized["content"], encoded_tags, normalized["source"], int(normalized["enabled"]), timestamp, owner_id, memory_id, expected_revision),
             )
             if result.rowcount != 1:
-                conn.execute("ROLLBACK")
                 raise PlatformMemoryRepositoryError("revision_conflict")
             conn.execute("DELETE FROM platform_memory_fts WHERE owner_id=? AND memory_id=?", (owner_id, memory_id))
             conn.execute("INSERT INTO platform_memory_fts(memory_id,owner_id,title,content,tags,source) VALUES(?,?,?,?,?,?)", (memory_id, owner_id, normalized["title"], normalized["content"], " ".join(normalized["tags"]), normalized["source"]))
@@ -266,10 +270,8 @@ class PlatformMemoryRepository:
             return self._public(row)
         except PlatformMemoryRepositoryError:
             raise
-        except sqlite3.Error:
-            if conn is not None:
-                conn.execute("ROLLBACK")
-            raise PlatformMemoryRepositoryError("memory_store") from None
+        except sqlite3.Error as exc:
+            raise PlatformMemoryRepositoryError("memory_store") from exc
         finally:
             if conn is not None:
                 conn.close()
@@ -278,8 +280,8 @@ class PlatformMemoryRepository:
         owner_id = self._owner(owner_id)
         try:
             memory_id = validate_id(memory_id, "memory_id")
-        except ValueError:
-            raise PlatformMemoryRepositoryError("invalid_id") from None
+        except ValueError as exc:
+            raise PlatformMemoryRepositoryError("invalid_id") from exc
         if type(expected_revision) is not int or expected_revision < 0:
             raise PlatformMemoryRepositoryError("invalid_revision")
         conn = None
@@ -289,7 +291,6 @@ class PlatformMemoryRepository:
             row = conn.execute("SELECT 1 FROM platform_memory_items WHERE owner_id=? AND memory_id=? AND revision=?", (owner_id, memory_id, expected_revision)).fetchone()
             if row is None:
                 exists = conn.execute("SELECT 1 FROM platform_memory_items WHERE owner_id=? AND memory_id=?", (owner_id, memory_id)).fetchone()
-                conn.execute("ROLLBACK")
                 if exists:
                     raise PlatformMemoryRepositoryError("revision_conflict")
                 return False
@@ -299,10 +300,8 @@ class PlatformMemoryRepository:
             return True
         except PlatformMemoryRepositoryError:
             raise
-        except sqlite3.Error:
-            if conn is not None:
-                conn.execute("ROLLBACK")
-            raise PlatformMemoryRepositoryError("memory_store") from None
+        except sqlite3.Error as exc:
+            raise PlatformMemoryRepositoryError("memory_store") from exc
         finally:
             if conn is not None:
                 conn.close()
@@ -312,8 +311,8 @@ class PlatformMemoryRepository:
         match = _query_terms(query)
         try:
             limit = max(1, min(int(limit), MAX_RESULT))
-        except (TypeError, ValueError):
-            raise PlatformMemoryRepositoryError("invalid_limit") from None
+        except (TypeError, ValueError) as exc:
+            raise PlatformMemoryRepositoryError("invalid_limit") from exc
         conn = None
         try:
             conn = self._connect()
@@ -322,12 +321,8 @@ class PlatformMemoryRepository:
                 (owner_id, match, limit),
             ).fetchall()
             return [self._public(row) for row in rows]
-        except sqlite3.OperationalError as exc:
-            if "fts" in str(exc).lower() or "match" in str(exc).lower():
-                raise PlatformMemoryRepositoryError("invalid_query") from None
-            raise PlatformMemoryRepositoryError("memory_store") from None
-        except sqlite3.Error:
-            raise PlatformMemoryRepositoryError("memory_store") from None
+        except sqlite3.Error as exc:
+            raise PlatformMemoryRepositoryError("memory_store") from exc
         finally:
             if conn is not None:
                 conn.close()

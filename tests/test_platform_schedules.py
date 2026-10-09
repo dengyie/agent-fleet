@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from hub.application.platform_schedule_service import (
@@ -11,6 +13,7 @@ from hub.config import FleetConfig
 from hub.infrastructure.platform_db import PlatformRepository
 from hub.infrastructure.platform_schedule_repository import (
     PlatformScheduleRepository,
+    PlatformScheduleRepositoryError,
 )
 
 
@@ -89,6 +92,22 @@ def test_schedule_repository_enforces_fixed_contract_and_trigger_idempotency(tmp
     assert public["triggers"][0]["scheduled_at"] == 100
     assert "lease_id" not in public["triggers"][0]
     assert "secret" not in str(public)
+
+
+def test_schedule_owner_listing_uses_an_exclusive_bounded_cursor(tmp_path):
+    repo = _repo(tmp_path)
+    for index in range(205):
+        owner_id = f"owner-{index:03}@example.test"
+        _schedule(repo, owner=owner_id, schedule_id="health")
+
+    first = repo.list_owners(limit=100)
+    second = repo.list_owners(after_owner_id=first[-1], limit=100)
+    third = repo.list_owners(after_owner_id=second[-1], limit=100)
+
+    assert len(first) == len(second) == 100
+    assert len(third) == 5
+    assert first[-1] < second[0] and second[-1] < third[0]
+    assert len(set(first + second + third)) == 205
 
 
 def test_schedule_service_skips_old_occurrences_or_catches_up_once(tmp_path):
@@ -219,3 +238,57 @@ def test_schedule_api_rejects_unbounded_or_mutating_inputs(tmp_path):
     })
     assert response.status_code == 400
     assert response.get_json()["error"] in {"invalid_action", "invalid_target", "invalid_interval"}
+
+
+@pytest.mark.parametrize(("column", "stored_json"), [
+    ("target", '{"service_id":"api","marker":"persisted-schedule-secret"'),
+    ("target", "[]"),
+    ("last_result", '{"marker":"persisted-schedule-secret"'),
+    ("last_result", "[]"),
+])
+def test_corrupt_persisted_schedule_json_is_bounded_on_read(tmp_path, column, stored_json):
+    app = create_app(FleetConfig.from_root(
+        tmp_path, dev_operator=OWNER_A, platform_enabled=True,
+        platform_schedules_enabled=True,
+    ))
+    service = app.extensions["fleet"]["services"]["platform_schedules"]
+    service.create(OWNER_A, {
+        "schedule_id": "health", "name": "Health check",
+        "action": "service_health", "target": {"service_id": "api"},
+        "interval_s": 10, "timezone": "UTC",
+    })
+    marker = "persisted-schedule-secret"
+    with sqlite3.connect(service.repository.db_path) as connection:
+        connection.execute(
+            f"UPDATE platform_schedules SET {column}=? WHERE owner_id=? AND schedule_id=?",
+            (stored_json, OWNER_A, "health"),
+        )
+
+    response = app.test_client().get("/api/platform/v1/schedules/health")
+    assert response.status_code == 503
+    body = response.get_json()
+    assert body["ok"] is False
+    assert body["error"] == "schedule_store"
+    assert marker not in str(body)
+
+    with pytest.raises(PlatformScheduleError) as error:
+        service.repository.get(OWNER_A, "health")
+    assert error.value.code == "schedule_store"
+    assert error.value.__cause__ is not None
+
+
+@pytest.mark.parametrize("non_finite", [float("nan"), float("inf"), float("-inf")])
+def test_schedule_rejects_non_finite_result_before_mutation(tmp_path, non_finite):
+    repo = _repo(tmp_path)
+    before = _schedule(repo)
+
+    with pytest.raises(PlatformScheduleRepositoryError) as error:
+        repo.advance_schedule(
+            OWNER_A, "health", next_run_at=120, now=100,
+            result={"value": non_finite},
+        )
+
+    assert error.value.code == "invalid_result"
+    after = repo.get(OWNER_A, "health")
+    assert after["last_result"] == {}
+    assert after["next_run_at"] == before["next_run_at"]

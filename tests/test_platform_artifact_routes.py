@@ -10,7 +10,13 @@ def _app(tmp_path: Path):
     ))
 
 
-def test_artifact_http_api_is_operator_scoped_and_integrity_checked(tmp_path):
+def test_artifact_http_api_is_operator_scoped_and_integrity_checked(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(
+        "tools.platform.artifacts.mimetypes.guess_type",
+        lambda _name: (None, None),
+    )
     app = _app(tmp_path)
     client = app.test_client()
     store = app.extensions["fleet"]["services"]["platform_artifacts"]

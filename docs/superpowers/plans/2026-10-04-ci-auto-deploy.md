@@ -25,7 +25,7 @@
 - [x] 新增受限 SSH receiver，校验上传并通过 systemd 执行；测试非法命令/损坏包不能进入部署。
 - [x] 更新 CI：同 run artifact、main-only、production environment、已知主机校验、专用 key、禁止取消部署、过期版本跳过、上传部署结果。
 - [x] 跑定向及完整门禁，审查 diff；安装专用 receiver 和配置/key，使用当前 main 的 CI 产物执行仅校验探针，不替换 LIVE。
-- [ ] 创建新 PR 并验证 Linux CI；配置 environment secrets；补齐仓库与 canonical 运维文档、router 和 MOC。
+- [x] 创建 PR 并验证 Linux CI；配置 environment secrets；补齐仓库与 canonical 运维文档、router 和 MOC。
 
 ## Validation
 
@@ -42,3 +42,10 @@
 - canonical 运维手册、文档路由和项目 MOC 已同步；文档扫描 RESULT=OK。自动发布在此 workflow 合入 main 后激活，不将 PR 通过当作已部署。
 
 - 全量重跑暴露既有脱敏测试偶发误报：随机 adoption ID 含 `4242` 被当作 PID 泄露。已用固定 ID 先复现失败，再改为公开响应字段合同和实际值断言，路径泄露检查保留；部署/发布/接管 HTTP 合并专项 91 passed、2 subtests。最新完整门禁与 Linux CI 结果记录于 PR。
+
+## Post-merge verification (2026-10-07)
+
+- PR [#7](https://github.com/dengyie/agent-fleet/pull/7) is merged. Its required `test` check passed; `package` and `deploy` were skipped for the PR event under the main-only workflow policy.
+- Main run [37503412061](https://github.com/dengyie/agent-fleet/actions/runs/37503412061) tested, packaged, and deployed revision `f6c35f9a5f8e5e6da9ad0abaf7c37ff257b6ea58`; all three jobs succeeded.
+- Read-only GitHub environment inspection found the five documented secret names and a deployment branch policy restricted to `main`. Secret values were not read.
+- The canonical Obsidian deployment note records production manifest, database, process, and gate checks; router and project MOC entries are mounted.

@@ -31,8 +31,8 @@ def _limit(default: int) -> int:
     raw = request.args.get("limit", str(default))
     try:
         value = int(raw)
-    except (TypeError, ValueError):
-        raise ApplicationError("invalid_limit", "limit 不合法", 400) from None
+    except (TypeError, ValueError) as exc:
+        raise ApplicationError("invalid_limit", "limit 不合法", 400) from exc
     if value < 1:
         raise ApplicationError("invalid_limit", "limit 不合法", 400)
     return min(value, 100)
@@ -44,10 +44,12 @@ def _expected_revision(body=None) -> int:
         raw = body.get("revision")
     if isinstance(raw, str):
         raw = raw.strip().strip('"')
+    elif raw is not None and type(raw) is not int:
+        raise ApplicationError("invalid_revision", "revision 不合法", 400)
     try:
         value = int(raw)
-    except (TypeError, ValueError):
-        raise ApplicationError("precondition_required", "需要 If-Match revision", 428) from None
+    except (TypeError, ValueError) as exc:
+        raise ApplicationError("precondition_required", "需要 If-Match revision", 428) from exc
     if value < 0:
         raise ApplicationError("invalid_revision", "revision 不合法", 400)
     return value
@@ -64,6 +66,8 @@ def _invoke(fn):
             "memory_conflict": 409,
             "revision_conflict": 409,
             "memory_search_unavailable": 503,
+            "memory_store": 503,
+            "memory_store_corrupt": 503,
         }.get(exc.code, 400)
         return error_response(ApplicationError(exc.code, "记忆操作失败", status))
 

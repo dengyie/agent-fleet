@@ -68,7 +68,7 @@ bash deploy/package-frontend-release.sh /tmp/agent-fleet-frontend-20260929 2026-
 
 CI 的 `agent-fleet-release` artifact 只含后端归档；`agent-fleet-frontend` artifact 含独立静态目录。原先只下载后端 artifact 的发布流程需要增加前端 artifact 和静态 root 切换。
 
-前端打包保留目录结构并写入稳定排序的 `manifest.json`（版本、文件清单）。凭据、私钥、数据库/状态快照路径会使打包整体失败；`assets/state/store.js` 是允许的客户端模块。每次使用新的版本目录，避免复用目录留下旧文件。
+前端打包保留目录结构并写入稳定排序的 `manifest.json`（版本、文件清单）。输出目录必须尚不存在；打包器以独占目录创建拒绝复用目标，避免将未列入 manifest 的旧文件或凭据带入 release。凭据、私钥、数据库/状态快照路径会使打包整体失败；`assets/state/store.js` 是允许的客户端模块。每次使用新的版本目录。
 
 当前 JS/CSS 文件名**不含内容哈希**，所有入口和 `/assets/*` 使用 `Cache-Control: no-cache`，允许 ETag/304 重新验证，不能使用 immutable 缓存。JSON API 使用 `no-store`；SSE 关闭代理缓冲和缓存，并设置足够长的读超时。
 

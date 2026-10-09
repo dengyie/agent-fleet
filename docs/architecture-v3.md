@@ -61,6 +61,8 @@ python3 tools/agent-self-report.py --endpoint https://hub.example.com --name <ma
 
 部署状态：hub 跑 push-only release；各节点本地 probe 出站 HTTPS 上报。其余节点各自安装 probe，不由 hub 反向连接。生产机名与域名不写进本文件。
 
+容器内 LIVE 为 bind-mount 时使用 `FLEET_LIVE_MODE=overlay`。代码回滚只恢复 release-managed paths，保留当前 `state/`、`var/`、`credentials/`、`hosts.yaml` 和 LIVE 目录本身；同步失败必须向安装器返回错误，不能把部分恢复报告为成功。隔离 Linux 故障注入覆盖了旧 Hub 恢复，不等于生产部署验收；操作模式以 [`docs/HANDOFF.md`](HANDOFF.md) 为准。
+
 ## 验证
 
 ```bash

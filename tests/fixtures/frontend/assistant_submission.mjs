@@ -13,6 +13,16 @@ class Element {
   removeChild(child) { this.children.splice(this.children.indexOf(child), 1); child.parentNode = null; }
   get options() { return this.children; }
   get firstChild() { return this.children[0] || null; }
+  querySelector(selector) {
+    if (typeof selector !== 'string' || !selector.startsWith('.')) return null;
+    const className = selector.slice(1);
+    if (String(this.className || '').split(/\s+/).includes(className)) return this;
+    for (const child of this.children) {
+      const match = child.querySelector(selector);
+      if (match) return match;
+    }
+    return null;
+  }
   set textContent(value) { this._text = String(value); this.children = []; }
   get textContent() { return this._text + this.children.map(c => c.textContent).join(''); }
   setAttribute(key, value) { this.attributes[key] = value; }

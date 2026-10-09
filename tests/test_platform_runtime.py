@@ -62,6 +62,165 @@ def test_runtime_preserves_structured_tool_call_context_for_next_model_step(tmp_
     assert provider.calls[1][-1]["role"] == "tool"
     assert provider.calls[1][-1]["tool_call_id"] == "call-1"
 
+def test_assistant_conversation_tools_are_owner_scoped_and_lease_checked(tmp_path):
+    app = create_app(FleetConfig.from_root(
+        tmp_path, ingest_token="x", dev_operator="owner@example.test",
+        platform_enabled=True,
+    ))
+    service = app.extensions["fleet"]["services"]["conversations"]
+    repository = app.extensions["fleet"]["platform_repository"]
+    own = repository.create_conversation(
+        "owner@example.test", "conv-own", title="Mine", workspace_id=None,
+    )
+    repository.create_conversation(
+        "other@example.test", "conv-other", title="Private", workspace_id=None,
+    )
+    leases = ResourceLeaseManager()
+    lease = leases.acquire("workspace-1", "owner@example.test")
+    broker = ToolBroker(
+        DirectoryBackend(tmp_path / "workspace"), leases,
+        resource_id="workspace-1", conversation_service=service,
+    )
+
+    available = {item["name"] for item in ToolBroker.tool_definitions()}
+    assert (ToolBroker.CONVERSATION_TOOLS - {"conversation.delete"}) <= available
+    assert "conversation.delete" not in available
+    assert "service.request_action" not in available
+    listing = broker.execute(
+        command_id="call-list", tool="conversation.list", arguments={},
+        owner_id="owner@example.test", epoch=lease["epoch"],
+    )
+    assert listing.state == "succeeded"
+    assert [item["conversation_id"] for item in listing.result["conversations"]] == ["conv-own"]
+    assert "owner_id" not in str(listing.result)
+
+    denied = broker.execute(
+        command_id="call-foreign", tool="conversation.rename",
+        arguments={"conversation_id": "conv-other", "title": "Hijack"},
+        owner_id="owner@example.test", epoch=lease["epoch"],
+    )
+    assert denied.state == "failed"
+    assert denied.error_code == "conversation_not_found"
+    assert repository.get_conversation("other@example.test", "conv-other")["title"] == "Private"
+
+    stale = broker.execute(
+        command_id="call-stale", tool="conversation.rename",
+        arguments={"conversation_id": "conv-own", "title": "No change"},
+        owner_id="owner@example.test", epoch=lease["epoch"] + 1,
+    )
+    assert stale.error_code == "lease_mismatch"
+    assert repository.get_conversation("owner@example.test", "conv-own")["title"] == "Mine"
+
+    renamed = broker.execute(
+        command_id="call-rename", tool="conversation.rename",
+        arguments={"conversation_id": own["conversation_id"], "title": "Renamed by assistant"},
+        owner_id="owner@example.test", epoch=lease["epoch"],
+    )
+    assert renamed.state == "succeeded"
+    assert renamed.result["title"] == "Renamed by assistant"
+    archived = broker.execute(
+        command_id="call-archive", tool="conversation.archive",
+        arguments={"conversation_id": "conv-own"},
+        owner_id="owner@example.test", epoch=lease["epoch"],
+    )
+    assert archived.result["archived"] is True
+    assert "owner_id" not in str(archived.result)
+    deleted = broker.execute(
+        command_id="call-delete", tool="conversation.delete",
+        arguments={"conversation_id": "conv-own"},
+        owner_id="owner@example.test", epoch=lease["epoch"],
+    )
+    assert deleted.state == "failed"
+    assert deleted.error_code == "unknown_tool"
+    assert repository.get_conversation("owner@example.test", "conv-own") is not None
+
+def test_assistant_service_action_tool_is_gate_and_approval_bounded():
+    tool_names = {item["name"] for item in ToolBroker.tool_definitions()}
+    assert "service.request_action" not in tool_names
+    enabled_names = {item["name"] for item in ToolBroker.tool_definitions(service_actions_enabled=True)}
+    assert "service.request_action" in enabled_names
+    definition = next(item for item in ToolBroker.tool_definitions(service_actions_enabled=True)
+                     if item["name"] == "service.request_action")
+    assert definition["parameters"]["properties"]["action"]["enum"] == ["inspect", "restart"]
+    assert "approval grant" in definition["description"]
+
+def test_assistant_platform_tools_read_safe_catalog_and_use_revision_guard(tmp_path):
+    app = create_app(FleetConfig.from_root(
+        tmp_path, ingest_token="x", dev_operator="owner@example.test",
+        platform_enabled=True,
+    ))
+    repository = app.extensions["fleet"]["platform_repository"]
+    defaults = app.extensions["fleet"]["services"]["platform_defaults"]
+    repository.upsert_model("owner@example.test", {
+        "profile_id": "assistant-model", "provider": "compatible", "model": "safe",
+        "secret_ref": "env://PRIVATE_MODEL_KEY",
+    })
+    repository.upsert_workspace("owner@example.test", {
+        "workspace_id": "assistant-workspace", "name": "Assistant Workspace",
+        "root_path": str(tmp_path / "private-path"),
+    })
+    repository.upsert_node("owner@example.test", {"node_id": "assistant-node"})
+    leases = ResourceLeaseManager()
+    lease = leases.acquire("workspace-1", "owner@example.test")
+    broker = ToolBroker(
+        DirectoryBackend(tmp_path / "workspace"), leases,
+        resource_id="workspace-1", defaults_service=defaults,
+    )
+
+    listed = broker.execute(
+        command_id="defaults-read", tool="platform.get_defaults", arguments={},
+        owner_id="owner@example.test", epoch=lease["epoch"],
+    )
+    assert listed.state == "succeeded"
+    assert "PRIVATE_MODEL_KEY" not in str(listed.result)
+    assert str(tmp_path / "private-path") not in str(listed.result)
+    assert "owner_id" not in str(listed.result)
+
+    payload = {
+        "expected_revision": 0,
+        "model_profile_id": "assistant-model",
+        "workspace_id": "assistant-workspace",
+        "execution_node_id": "assistant-node",
+    }
+    updated = broker.execute(
+        command_id="defaults-write", tool="platform.update_defaults", arguments=payload,
+        owner_id="owner@example.test", epoch=lease["epoch"],
+    )
+    assert updated.state == "succeeded"
+    assert updated.result["defaults"]["revision"] == 1
+    stale = broker.execute(
+        command_id="defaults-stale", tool="platform.update_defaults", arguments=payload,
+        owner_id="owner@example.test", epoch=lease["epoch"],
+    )
+    assert stale.state == "failed"
+    assert stale.error_code == "revision_conflict"
+    assert repository.get_defaults("owner@example.test")["revision"] == 1
+
+def test_assistant_service_action_is_sent_through_configured_approval_service(tmp_path):
+    class ServiceActions:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, owner_id, service_id, action, *, idempotency_key):
+            self.calls.append((owner_id, service_id, action, idempotency_key))
+            return {"ok": True, "approval_required": action == "restart", "grant": {"state": "pending"}}
+
+    actions = ServiceActions()
+    leases = ResourceLeaseManager()
+    lease = leases.acquire("workspace-1", "owner@example.test")
+    broker = ToolBroker(
+        DirectoryBackend(tmp_path / "workspace"), leases,
+        resource_id="workspace-1", service_actions=actions,
+    )
+    result = broker.execute(
+        command_id="run-1:step:2", tool="service.request_action",
+        arguments={"service_id": "service-a", "action": "restart"},
+        owner_id="owner@example.test", epoch=lease["epoch"],
+    )
+    assert result.state == "succeeded"
+    assert result.result["approval_required"] is True
+    assert actions.calls == [("owner@example.test", "service-a", "restart", "run-1:step:2")]
+
 
 def test_worker_emits_bounded_run_events(tmp_path):
     backend = DirectoryBackend(tmp_path / "workspace")

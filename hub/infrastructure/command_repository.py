@@ -5,9 +5,10 @@ import json
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from contextlib import closing
 
-from hub.domain.platform_command import RECEIPT_STATES, PlatformCommand, TERMINAL_COMMAND_STATES
+from hub.domain.platform_command import RECEIPT_STATES, PlatformCommand, TERMINAL_COMMAND_STATES, args_hash
 
 
 class CommandRepositoryError(RuntimeError):
@@ -93,6 +94,10 @@ class CommandRepository:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(platform_commands)")}
             if "owner_id" not in columns:
                 conn.execute("ALTER TABLE platform_commands ADD COLUMN owner_id TEXT")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_platform_commands_owner_run "
+                "ON platform_commands(owner_id,run_id)"
+            )
             # Early M1 databases may contain commands written before the
             # transactional outbox existed. Backfill only the bounded routing
             # event; the command row remains the source of truth.
@@ -125,53 +130,48 @@ class CommandRepository:
         return result
 
     def enqueue(self, command: PlatformCommand, *, idempotency_key: str | None = None,
-                require_signature: bool = False) -> dict[str, Any]:
+                require_signature: bool = False,
+                prepare: Callable[[sqlite3.Connection, PlatformCommand], PlatformCommand] | None = None) -> dict[str, Any]:
+        """Persist command/outbox and any admission preparation in one transaction."""
         now = float(self.clock())
-        conn = None
+        if require_signature and prepare is None and not command.signature:
+            raise CommandRepositoryError("command_signature_required")
         try:
-            conn = self._connect()
-            if require_signature and not command.signature:
-                raise CommandRepositoryError("command_signature_required")
-            conn.execute("BEGIN IMMEDIATE")
-            if idempotency_key:
-                prior = conn.execute("SELECT * FROM platform_commands WHERE idempotency_key=?", (idempotency_key,)).fetchone()
-                if prior:
+            with closing(self._connect()) as conn, conn:
+                conn.execute("BEGIN IMMEDIATE")
+                prior = conn.execute("SELECT * FROM platform_commands WHERE idempotency_key=? LIMIT 1", (idempotency_key,)).fetchone() if idempotency_key else None
+                if prior is not None:
                     existing = self._decode(prior)
+                    expected_digest = existing["args_hash"]
+                    if prepare is not None and command.action == "tool.browser.submit":
+                        expected_arguments = dict(existing["arguments"])
+                        expected_arguments.pop("approval_id", None)
+                        expected_digest = args_hash(expected_arguments)
                     if (existing["owner_id"] != command.owner_id
-                            or existing["args_hash"] != command.args_digest
-                            or existing["target_node"] != command.target_node):
+                            or expected_digest != command.args_digest
+                            or existing["target_node"] != command.target_node
+                            or existing["action"] != command.action
+                            or existing["resource_id"] != command.resource_id
+                            or existing["run_id"] != command.run_id):
                         raise CommandRepositoryError("idempotency_conflict")
-                    conn.execute("COMMIT")
                     return existing
-            conn.execute("INSERT INTO platform_commands(command_id,owner_id,target_node,action,resource_id,arguments,retry_class,expires_at,args_hash,run_id,grant_id,signature,status,created_at,updated_at,idempotency_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (command.command_id, command.owner_id, command.target_node, command.action, command.resource_id, json.dumps(command.arguments, sort_keys=True, separators=(",", ":")), command.retry_class, command.expires_at, command.args_digest, command.run_id, command.grant_id, command.signature, "queued", now, now, idempotency_key))
-            conn.execute(
-                "INSERT INTO platform_command_outbox(command_id,event_type,payload,state,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-                (command.command_id, "command_queued", json.dumps({
-                    "command_id": command.command_id,
-                    "target_node": command.target_node,
-                    "owner_id": command.owner_id,
-                }, sort_keys=True, separators=(",", ":")), "pending", now, now),
-            )
-            row = conn.execute("SELECT * FROM platform_commands WHERE command_id=?", (command.command_id,)).fetchone()
-            conn.execute("COMMIT")
-            return self._decode(row)
-        except CommandRepositoryError:
-            if conn is not None:
-                try: conn.execute("ROLLBACK")
-                except sqlite3.Error: pass
-            raise
-        except sqlite3.IntegrityError:
-            if conn is not None:
-                try: conn.execute("ROLLBACK")
-                except sqlite3.Error: pass
-            raise CommandRepositoryError("command_conflict") from None
-        except (sqlite3.Error, TypeError, ValueError):
-            if conn is not None:
-                try: conn.execute("ROLLBACK")
-                except sqlite3.Error: pass
-            raise CommandRepositoryError("command_store") from None
-        finally:
-            if conn is not None: conn.close()
+                if prepare is not None:
+                    command = prepare(conn, command)
+                if require_signature and not command.signature:
+                    raise CommandRepositoryError("command_signature_required")
+                conn.execute("INSERT INTO platform_commands(command_id,owner_id,target_node,action,resource_id,arguments,retry_class,expires_at,args_hash,run_id,grant_id,signature,status,created_at,updated_at,idempotency_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (command.command_id, command.owner_id, command.target_node, command.action, command.resource_id, json.dumps(command.arguments, sort_keys=True, separators=(",", ":")), command.retry_class, command.expires_at, command.args_digest, command.run_id, command.grant_id, command.signature, "queued", now, now, idempotency_key))
+                payload = {"command_id": command.command_id, "target_node": command.target_node, "owner_id": command.owner_id}
+                if command.action == "tool.browser.submit":
+                    payload["approval_id"] = command.arguments["approval_id"]
+                conn.execute(
+                    "INSERT INTO platform_command_outbox(command_id,event_type,payload,state,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                    (command.command_id, "command_queued", json.dumps(payload, sort_keys=True, separators=(",", ":")), "pending", now, now),
+                )
+                return self._decode(conn.execute("SELECT * FROM platform_commands WHERE command_id=? LIMIT 1", (command.command_id,)).fetchone())
+        except sqlite3.IntegrityError as exc:
+            raise CommandRepositoryError("command_conflict") from exc
+        except (sqlite3.Error, TypeError, ValueError) as exc:
+            raise CommandRepositoryError("command_store") from exc
 
     def claim_for_node(self, node_id: str, worker_id: str, *, owner_id: str | None = None, limit: int = 20, lease_s: float = 60.0) -> list[dict[str, Any]]:
         now = float(self.clock())

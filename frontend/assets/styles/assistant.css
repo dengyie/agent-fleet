@@ -89,6 +89,9 @@ chat-prompt-input button[type=submit]:disabled { opacity: .45; }
 .assistant-window-actions button { font-size: 11px; padding: 4px 8px; min-height: 28px; }
 .assistant-window-events { max-height: 220px; overflow: auto; }
 .assistant-window-event { border-top: 1px solid var(--border-subtle); padding: 6px 0; font-size: 11px; }
+.assistant-window-frame { margin-top: 10px; display: grid; gap: 6px; }
+.assistant-window-frame-image { display: block; width: 100%; max-height: 360px; object-fit: contain; background: #101315; border: 1px solid var(--border); }
+.assistant-window-frame-meta { overflow-wrap: anywhere; }
 .assistant-events { display: grid; gap: 5px; overflow: auto; }
 .assistant-event { color: var(--text-2); font-size: 11px; padding: 7px 0; border-bottom: 1px solid var(--border-subtle); overflow-wrap: anywhere; }
 .assistant-events:empty::before { content: '运行开始后，执行记录将显示在这里'; color: var(--text-3); font-size: 11px; line-height: 1.8; padding: 14px 0; }

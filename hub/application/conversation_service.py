@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import secrets
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from hub.application.task_service import ApplicationError
 from hub.domain.conversation import UserTurn
 from hub.domain.run import Run
 from hub.domain.platform import ACCEPTANCE_TOOL_POLICY
+from hub.domain.browser_submit import RunLookup, SubmitApprovalStore, SubmitApprovalRequest, SubmitApprovalResponse
 from hub.application.platform_memory_context_service import (
     PlatformMemoryContextError,
 )
@@ -40,6 +41,11 @@ class ConversationService:
             "conversation_not_found": 404,
             "run_not_found": 404,
             "conversation_conflict": 409,
+            "conversation_archived": 409,
+            "conversation_not_archived": 409,
+            "conversation_run_active": 409,
+            "conversation_command_unresolved": 409,
+            "invalid_conversation_title": 400,
             "idempotency_conflict": 409,
             "reference_forbidden": 409,
             "invalid_id": 400,
@@ -47,7 +53,16 @@ class ConversationService:
             "invalid_client_token": 400,
             "invalid_message": 400,
             "invalid_limit": 400,
+            "invalid_value": 400,
             "message_too_large": 413,
+            "invalid_memory_context": 400,
+            "invalid_max_items": 400,
+            "invalid_max_bytes": 400,
+            "memory_selector": 400,
+            "invalid_memory_ids": 400,
+            "invalid_memory_id": 400,
+            "invalid_revisions": 400,
+            "invalid_query": 400,
             "memory_context_disabled": 409,
             "memory_selection_stale": 409,
             "revision_conflict": 409,
@@ -57,15 +72,23 @@ class ConversationService:
             "conversation_not_found": "对话不存在",
             "run_not_found": "运行不存在",
             "conversation_conflict": "对话标识冲突",
+            "conversation_archived": "对话已归档，无法继续发送消息",
+            "conversation_not_archived": "请先归档对话，再永久删除",
+            "conversation_run_active": "对话仍有运行中的任务，暂不能删除",
+            "conversation_command_unresolved": "关联命令尚未完成或结果未知，暂不能删除",
+            "invalid_conversation_title": "对话标题必须为 1 到 120 个字符",
             "idempotency_conflict": "幂等键对应的请求内容不同",
             "reference_forbidden": "工作区或运行资源不可用",
             "invalid_limit": "limit 不合法",
+            "invalid_value": "请求数据不合法",
             "platform_store": "平台存储不可用",
             "memory_context_disabled": "记忆上下文未启用",
             "memory_selection_stale": "记忆选择已失效",
             "revision_conflict": "记忆版本已变化，请重新选择",
             "memory_search_unavailable": "记忆搜索不可用",
-        }.get(code, "平台操作失败")
+        }.get(code, "记忆上下文参数不合法"
+              if isinstance(exc, PlatformMemoryContextError) and status == 400
+              else "平台操作失败")
         return ApplicationError(code, detail, status)
 
     @staticmethod
@@ -77,14 +100,16 @@ class ConversationService:
 
     def create(self, owner_id: str, *, title: str = "", workspace_id: str | None = None, overrides: Mapping | None = None) -> dict:
         owner_id = self._owner(owner_id)
+        if overrides is not None and not isinstance(overrides, Mapping):
+            raise ApplicationError("invalid_value", "请求数据不合法", 400)
         conversation_id = _opaque("conv")
         try:
             row = self.repository.create_conversation(
                 owner_id, conversation_id, title=str(title or "")[:120],
-                workspace_id=workspace_id, overrides=overrides or {})
+                workspace_id=workspace_id, overrides={} if overrides is None else overrides)
             return {"ok": True, "conversation": row}
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
     def get(self, owner_id: str, conversation_id: str) -> dict:
         owner_id = self._owner(owner_id)
@@ -116,10 +141,40 @@ class ConversationService:
         except Exception as exc:
             raise self._translate(exc) from None
 
-    def list(self, owner_id: str, *, limit: int = 50) -> dict:
+    def list(self, owner_id: str, *, limit: int = 50,
+             archived: bool = False) -> dict:
         owner_id = self._owner(owner_id)
         try:
-            return {"ok": True, "conversations": self.repository.list_conversations(owner_id, limit=limit)}
+            return {"ok": True, "conversations": self.repository.list_conversations(
+                owner_id, limit=limit, archived=archived)}
+        except Exception as exc:
+            raise self._translate(exc) from None
+
+    def rename(self, owner_id: str, conversation_id: str, title: str) -> dict:
+        owner_id = self._owner(owner_id)
+        if not isinstance(title, str) or not title.strip() or len(title.strip()) > 120:
+            raise ApplicationError("invalid_conversation_title",
+                                   "对话标题必须为 1 到 120 个字符", 400)
+        try:
+            return {"ok": True, "conversation": self.repository.rename_conversation(
+                owner_id, conversation_id, title)}
+        except Exception as exc:
+            raise self._translate(exc) from None
+
+    def set_archived(self, owner_id: str, conversation_id: str, *, archived: bool) -> dict:
+        owner_id = self._owner(owner_id)
+        try:
+            row = self.repository.set_conversation_archived(
+                owner_id, conversation_id, archived=archived, now=float(self.clock()))
+            return {"ok": True, "conversation": row}
+        except Exception as exc:
+            raise self._translate(exc) from None
+
+    def delete_archived(self, owner_id: str, conversation_id: str) -> dict:
+        owner_id = self._owner(owner_id)
+        try:
+            self.repository.delete_archived_conversation(owner_id, conversation_id)
+            return {"ok": True, "deleted": True}
         except Exception as exc:
             raise self._translate(exc) from None
 
@@ -147,6 +202,8 @@ class ConversationService:
              overrides: Mapping | None = None, memory_context: Mapping | None = None,
              acceptance: bool = False) -> dict:
         owner_id = self._owner(owner_id)
+        if overrides is not None and not isinstance(overrides, Mapping):
+            raise ApplicationError("invalid_value", "请求数据不合法", 400)
         expected_policy = ACCEPTANCE_TOOL_POLICY if acceptance else None
 
         def verify_policy(run):
@@ -174,6 +231,9 @@ class ConversationService:
                 return self._turn_response(owner_id, conversation_id, {
                     "created": False, "message": prior, "run": run,
                 })
+            if conversation.get("archived_at") is not None:
+                raise ApplicationError("conversation_archived",
+                                       "对话已归档，无法继续发送消息", 409)
             workspace = None
             if conversation.get("workspace_id"):
                 workspace = self.repository.get_workspace(owner_id, conversation["workspace_id"])
@@ -190,7 +250,7 @@ class ConversationService:
                 owner_id,
                 conversation=conversation.get("overrides") or {},
                 workspace=workspace_defaults,
-                overrides=overrides or {},
+                overrides={} if overrides is None else overrides,
             )
             if acceptance:
                 # Only the dedicated server route selects this fixed policy.
@@ -222,7 +282,7 @@ class ConversationService:
         except ApplicationError:
             raise
         except PlatformMemoryContextError as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
         except Exception as exc:
             raise self._translate(exc) from None
 
@@ -280,92 +340,87 @@ class RunService:
 
 
 class SubmitApprovalService:
-    """Owner-scoped approvals for approval-gated browser.submit dispatches."""
+    """Owner approval use cases; ownership is rechecked by the transactional store."""
 
-    def __init__(self, browser_repository, *, clock=time.time):
+    def __init__(self, browser_repository: SubmitApprovalStore, platform_repository: RunLookup,
+                 *, clock: Callable[[], float] = time.time) -> None:
         self.repository = browser_repository
+        self.platform = platform_repository
         self.clock = clock
 
     @staticmethod
     def _translate(exc: Exception) -> ApplicationError:
         code = getattr(exc, "code", "browser_store")
-        status = {
-            "invalid_selector": 400, "invalid_id": 400, "invalid_owner": 400,
-            "session_not_found": 404, "approval_not_found": 404,
-            "approval_limit": 429, "approval_idempotency_conflict": 409,
-            "approval_required": 409, "approval_expired": 409,
-            "approval_consumed": 409, "approval_revoked": 409,
-        }.get(code, 503)
-        detail = {
-            "invalid_selector": "selector 不合法",
-            "session_not_found": "浏览器会话不存在或已结束",
-            "approval_not_found": "审批不存在",
-            "approval_limit": "审批数量或频率超出限制",
-            "approval_idempotency_conflict": "审批幂等键对应的请求内容不同",
-            "approval_required": "没有可用的有效审批",
-            "approval_expired": "审批已过期",
-            "approval_consumed": "审批已被使用",
-            "approval_revoked": "审批已被撤销",
-            "browser_store": "审批存储不可用",
-        }.get(code, "审批操作失败")
-        return ApplicationError(code, detail, status)
+        statuses = {"invalid_selector": 400, "invalid_session": 400, "invalid_arguments": 400,
+                    "invalid_idempotency_key": 400, "sensitive_field_forbidden": 400,
+                    "session_not_found": 404, "run_not_found": 404, "approval_not_found": 404,
+                    "approval_limit": 429, "approval_idempotency_conflict": 409}
+        return ApplicationError(code if code in statuses else "browser_store", "审批操作失败", statuses.get(code, 503))
 
-    def grant(self, owner_id: str, run_id: str, *, session_id: str, selector: str,
+    def _run(self, owner_id: str, run_id: str) -> dict:
+        row = self.platform.get_run(validate_owner_id(owner_id), validate_id(run_id, "run_id"))
+        if row is None:
+            raise ApplicationError("run_not_found", "运行不存在", 404)
+        return row
+
+    def grant(self, owner_id: str, run_id: str, *, body: object,
               idempotency_key: str | None = None) -> dict:
         try:
-            session = self.repository.get_session(owner_id, session_id)
-            if session is None or session.get("run_id") != run_id or session.get("state") != "open":
-                raise ApplicationError("session_not_found", "浏览器会话不存在或已结束", 404)
-            # node_id comes from the durable session row, never from the
-            # request body, so the approval is bound to the actual target node.
-            approval = self.repository.grant_submit_approval(
+            self._run(owner_id, run_id)
+            request = SubmitApprovalRequest.parse(body)
+            session = self.repository.get_session(owner_id, request.session_id)
+            if session is None or session["run_id"] != run_id:
+                raise ApplicationError("session_not_found", "浏览器会话不存在", 404)
+            row = self.repository.grant_submit_approval(
                 owner_id, workspace_id=session["workspace_id"], run_id=run_id,
-                node_id=session["node_id"], session_id=session_id, selector=selector,
+                node_id=session["node_id"], session_id=request.session_id, selector=request.selector,
                 idempotency_key=idempotency_key, now=float(self.clock()),
             )
-            return {"ok": True, "approval": approval}
+            return {"ok": True, "approval": SubmitApprovalResponse.from_row(row).public()}
         except ApplicationError:
             raise
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
-    def revoke(self, owner_id: str, approval_id: str, *,
-               run_id: str | None = None) -> dict:
+    def revoke(self, owner_id: str, run_id: str, approval_id: str) -> dict:
         try:
-            # Run scope is enforced by the repository query, so a wrong-run
-            # revoke fails without mutating the approval.
-            approval = self.repository.revoke_submit_approval(
-                owner_id, approval_id, run_id=run_id)
-            return {"ok": True, "approval": approval}
+            self._run(owner_id, run_id)
+            row = self.repository.revoke_submit_approval(owner_id, approval_id, run_id=run_id)
+            return {"ok": True, "approval": SubmitApprovalResponse.from_row(row).public()}
+        except ApplicationError:
+            raise
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
-    def get(self, owner_id: str, approval_id: str) -> dict:
+    def get(self, owner_id: str, run_id: str, approval_id: str) -> dict:
         try:
-            approval = self.repository.get_submit_approval(owner_id, approval_id)
-            if approval is None:
+            self._run(owner_id, run_id)
+            row = self.repository.get_submit_approval(owner_id, approval_id)
+            if row is None or row["run_id"] != run_id:
                 raise ApplicationError("approval_not_found", "审批不存在", 404)
-            return {"ok": True, "approval": approval}
+            return {"ok": True, "approval": SubmitApprovalResponse.from_row(row).public()}
         except ApplicationError:
             raise
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
     def consume_submit_approval(self, owner_id: str, run_id: str, *,
                                 session_id: str, selector: str,
-                                command_id: str, now: float | None = None) -> str:
-        """Broker-side atomic consumption. Stable BrowserRepositoryError codes
-        (approval_required/expired/consumed/revoked) surface unchanged so the
-        remote broker can map them to bounded failed receipts."""
+                                command_id: str, now: float | None = None,
+                                workspace_id: str | None = None,
+                                node_id: str | None = None, connection=None) -> str:
+        """Consume approval inside the command repository transaction."""
         return self.repository.consume_submit_approval(
             owner_id, run_id, session_id=session_id, selector=selector,
-            command_id=command_id, now=now,
+            command_id=command_id, now=now, workspace_id=workspace_id,
+            node_id=node_id, connection=connection,
         )
 
     def expire_run_submit_approvals(self, owner_id: str, run_id: str,
                                     *, now: float | None = None) -> int:
-        """Terminalize active approvals when their run reaches a terminal state."""
-        return self.repository.expire_run_submit_approvals(owner_id, run_id, now=now)
+        return self.repository.expire_submit_approvals(
+            owner_id=owner_id, run_id=run_id, now=now,
+        )
 
 
 __all__ = ["ConversationService", "RunService", "SubmitApprovalService"]

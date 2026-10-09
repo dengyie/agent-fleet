@@ -24,9 +24,10 @@ import platform as _platform_mod
 import select
 import signal
 import subprocess
+import threading
 import time
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -460,6 +461,11 @@ class _ManagedEntry:
     native_file_path: str | None = None
     resume_token: str | None = None
     exe_path: str | None = None
+    control_lock: Any = field(default_factory=threading.RLock, repr=False,
+                              compare=False)
+    control_epoch: int = 0
+    resume_pending: object | None = field(default=None, repr=False,
+                                          compare=False)
 
 
 @dataclass
@@ -723,7 +729,17 @@ class Supervisor:
         removed so a stale revivable adoption cannot survive a detach.  An
         unknown ``session_id`` is a no-op (no exception).
         """
-        entry = self._entries.pop(session_id, None)
+        entry = self._entries.get(session_id)
+        if entry is None:
+            return
+        with entry.control_lock:
+            if self._entries.get(session_id) is not entry:
+                return
+            entry.control_epoch += 1
+            self._entries.pop(session_id, None)
+            self._detach_entry(session_id, entry)
+
+    def _detach_entry(self, session_id: str, entry: _ManagedEntry) -> None:
         if entry is not None and isinstance(entry.handle, _AttachedHandle):
             # an ATTACHED (adopted) seat was dropped.  The bounded in-memory
             # tombstone lets a subsequent revoke-side control answer
@@ -838,11 +854,22 @@ class Supervisor:
             return False
 
     def pause_session(self, session_id: str) -> str:
+        entry = self._entries.get(session_id)
+        if entry is None:
+            raise UnknownSessionError(session_id)
+        with entry.control_lock:
+            if self._entries.get(session_id) is not entry:
+                raise UnknownSessionError(session_id)
+            entry.control_epoch += 1
+            return self._pause_session_locked(session_id, entry)
+
+    def _pause_session_locked(self, session_id: str,
+                              entry: _ManagedEntry) -> str:
         """Pause an owned live process group (SIGSTOP)."""
-        m = self.get(session_id)
+        m = entry.manifest
         if m.state in TERMINAL_STATES:
             return m.state
-        handle = self._handle_of(session_id)
+        handle = entry.handle
         if handle is None or not self._group_alive_checked(handle):
             return "no_live_process"
         gate = self._guard_adopted(session_id)
@@ -855,11 +882,22 @@ class Supervisor:
         return PAUSED
 
     def resume_session(self, session_id: str) -> str:
+        entry = self._entries.get(session_id)
+        if entry is None:
+            raise UnknownSessionError(session_id)
+        with entry.control_lock:
+            if self._entries.get(session_id) is not entry:
+                raise UnknownSessionError(session_id)
+            entry.control_epoch += 1
+            return self._resume_session_locked(session_id, entry)
+
+    def _resume_session_locked(self, session_id: str,
+                               entry: _ManagedEntry) -> str:
         """Resume a stopped process group (SIGCONT thaw)."""
-        m = self.get(session_id)
+        m = entry.manifest
         if m.state in TERMINAL_STATES:
             return m.state
-        handle = self._handle_of(session_id)
+        handle = entry.handle
         if handle is None or not self._group_alive_checked(handle):
             return "no_live_process"
         gate = self._guard_adopted(session_id)
@@ -872,15 +910,26 @@ class Supervisor:
         return RUNNING
 
     def quarantine_session(self, session_id: str) -> str:
+        entry = self._entries.get(session_id)
+        if entry is None:
+            raise UnknownSessionError(session_id)
+        with entry.control_lock:
+            if self._entries.get(session_id) is not entry:
+                raise UnknownSessionError(session_id)
+            entry.control_epoch += 1
+            return self._quarantine_session_locked(session_id, entry)
+
+    def _quarantine_session_locked(self, session_id: str,
+                                   entry: _ManagedEntry) -> str:
         """Quarantine a session: SIGSTOP the group before freezing state.
 
         A failed stop is surfaced as ``quarantine_failed`` (bounded), never
         silently reported as success.
         """
-        m = self.get(session_id)
+        m = entry.manifest
         if m.state in TERMINAL_STATES:
             return m.state
-        handle = self._handle_of(session_id)
+        handle = entry.handle
         if handle is None or not self._group_alive_checked(handle):
             return "no_live_process"
         gate = self._guard_adopted(session_id)
@@ -967,6 +1016,74 @@ class Supervisor:
         return claimed
 
     def append_user_turn(self, session_id: str, text: str) -> str:
+        entry = self._entries.get(session_id)
+        if entry is None:
+            raise UnknownSessionError(session_id)
+        with entry.control_lock:
+            if self._entries.get(session_id) is not entry:
+                raise UnknownSessionError(session_id)
+            if entry.resume_pending is not None:
+                return "unsupported_action"
+            epoch = entry.control_epoch
+            outcome = self._prepare_user_turn(session_id, text, entry)
+            reservation = object() if not isinstance(outcome, str) else None
+            if reservation is not None:
+                entry.resume_pending = reservation
+        if isinstance(outcome, str):
+            return outcome
+        m, old, argv, cwd, env = outcome
+        try:
+            handle = self._ops.create(argv, cwd, env)
+        except Exception:
+            with entry.control_lock:
+                if entry.resume_pending is reservation:
+                    entry.resume_pending = None
+                if entry.control_epoch != epoch or m.state in TERMINAL_STATES:
+                    return "terminated" if m.state in TERMINAL_STATES else "unsupported_action"
+                return self._fail_operation(m, "control_failed")
+        with entry.control_lock:
+            if entry.resume_pending is reservation:
+                entry.resume_pending = None
+            if (self._entries.get(session_id) is not entry
+                    or entry.control_epoch != epoch
+                    or (m.state in TERMINAL_STATES
+                        and m.reason != "completed")
+                    or m.state == QUARANTINED):
+                try:
+                    self._ops.group_kill(handle, signal.SIGKILL)
+                except Exception:
+                    pass
+                try:
+                    group_gone = self._wait_gone(handle, timeout=1.0)
+                except Exception:
+                    group_gone = False
+                try:
+                    reaped = bool(self._ops.group_reap(handle, timeout=1.0))
+                except Exception:
+                    reaped = False
+                try:
+                    self._ops.close(handle)
+                except Exception:
+                    pass
+                if not group_gone or not reaped:
+                    self._set_reason(m, "escape_unverified")
+                    return "escape_unverified"
+                if m.state in TERMINAL_STATES:
+                    return m.state
+                return "unsupported_action"
+            if old is not None and entry.handle is old:
+                try:
+                    self._ops.close(old)
+                except Exception:
+                    pass
+            entry.handle = handle
+            _stamp_private_identity(handle, entry)
+            m.state = RUNNING
+            self._set_reason(m, "appended")
+            return "appended"
+
+    def _prepare_user_turn(self, session_id: str, text: str,
+                           entry: _ManagedEntry):
         """Follow-up via native session resume, never stdin /tmp sibling.
 
         ``create(argv, None, {})`` would land in ``/tmp``, inherit a secret-free
@@ -979,7 +1096,9 @@ class Supervisor:
         Private identity lives on the entry so a naturally finished session
         can still resume after ``_release_handle``.
         """
-        m = self.get(session_id)
+        m = entry.manifest
+        if m.state in TERMINAL_STATES and m.reason != "completed":
+            return m.state
         gate = self._guard_adopted(session_id)
         if gate:
             return gate
@@ -992,9 +1111,9 @@ class Supervisor:
             return "resume_unverified"
         if not isinstance(text, str) or not text:
             return "control_failed"
-        if m.state == QUARANTINED:
+        if m.state in (PAUSED, QUARANTINED):
             return "unsupported_action"
-        identity = _native_resume_identity(self._entries.get(session_id))
+        identity = _native_resume_identity(entry)
         if identity is None:
             if m.state in TERMINAL_STATES:
                 return m.state
@@ -1005,22 +1124,7 @@ class Supervisor:
         argv = _native_resume_argv(family, exe, token, text)
         if not validate_command(argv) or not cwd:
             return "unsupported_action"
-        entry = self._entries[session_id]
-        old = entry.handle
-        try:
-            handle = self._ops.create(argv, cwd, env)
-        except Exception:
-            return self._fail_operation(m, "control_failed")
-        if old is not None:
-            try:
-                self._ops.close(old)
-            except Exception:
-                pass
-        entry.handle = handle
-        _stamp_private_identity(handle, entry)
-        m.state = RUNNING
-        self._set_reason(m, "appended")
-        return "appended"
+        return m, entry.handle, argv, cwd, env
 
     def apply_local_profile(self, session_id: str, profile_id: str) -> str:
         """Flip the node-local cc-switch current pointer.  Never pushes keys."""
@@ -1040,11 +1144,35 @@ class Supervisor:
         return self._fail_operation(m, "control_failed")
 
     def terminate_session(self, session_id: str, grace_s: float = 5.0) -> str:
+        entry = self._entries.get(session_id)
+        if entry is None:
+            raise UnknownSessionError(session_id)
+        with entry.control_lock:
+            if self._entries.get(session_id) is not entry:
+                raise UnknownSessionError(session_id)
+            entry.control_epoch += 1
+            return self._terminate_session_locked(session_id, grace_s, entry)
+
+    def _terminate_if_current(self, session_id: str, handle,
+                              grace_s: float) -> bool:
+        entry = self._entries.get(session_id)
+        if entry is None:
+            return False
+        with entry.control_lock:
+            if (self._entries.get(session_id) is not entry
+                    or entry.handle is not handle):
+                return False
+            entry.control_epoch += 1
+            self._terminate_session_locked(session_id, grace_s, entry)
+            return True
+
+    def _terminate_session_locked(self, session_id: str, grace_s: float,
+                                  entry: _ManagedEntry) -> str:
         """Stateful terminate: graceful SIGTERM -> bounded grace -> SIGKILL."""
-        m = self.get(session_id)
+        m = entry.manifest
         if m.state in TERMINAL_STATES:
             return m.state
-        handle = self._handle_of(session_id)
+        handle = entry.handle
         if handle is None or not self._group_alive_checked(handle):
             if handle is None:
                 self._mark_terminated(m, "no_live_process")
@@ -1137,7 +1265,9 @@ class Supervisor:
                     record = json.loads(line)
                     token = record.get("thread_id") if record.get("type") == "thread.started" else None
                     if isinstance(token, str) and token:
-                        self._entries[session_id].resume_token = token
+                        entry = self._entries.get(session_id)
+                        if entry is not None and entry.handle is handle:
+                            entry.resume_token = token
                 except (ValueError, TypeError, AttributeError):
                     pass
             consumer(line)
@@ -1147,6 +1277,14 @@ class Supervisor:
         timed_out = False
 
         while True:
+            entry = self._entries.get(session_id)
+            if entry is None:
+                return ManagedRunResult(exit_code=125, outcome="superseded")
+            with entry.control_lock:
+                if (self._entries.get(session_id) is not entry
+                        or entry.handle is not handle):
+                    return ManagedRunResult(exit_code=125,
+                                            outcome="superseded")
             # 1. completed process?
             try:
                 rc = self._ops.proc_poll(handle)
@@ -1175,26 +1313,34 @@ class Supervisor:
             # else: re-poll + re-check deadline at the top.
 
         if aborted:
-            try:
-                self.terminate_session(session_id, grace_s=1.0)
-            except Exception:
-                pass
-            self._ops.close(handle)
-            self._release_handle(session_id)
+            if not self._terminate_if_current(
+                    session_id, handle, grace_s=1.0):
+                return ManagedRunResult(exit_code=125,
+                                        outcome="superseded")
             return ManagedRunResult(exit_code=130, aborted=True,
                                     outcome="aborted")
         # timed_out
-        try:
-            self.terminate_session(
-                session_id, grace_s=min(2.0, max(0.1, timeout_s / 20)))
-        except Exception:
-            pass
-        self._ops.close(handle)
-        self._release_handle(session_id)
+        if not self._terminate_if_current(
+                session_id, handle,
+                grace_s=min(2.0, max(0.1, timeout_s / 20))):
+            return ManagedRunResult(exit_code=125, outcome="superseded")
         return ManagedRunResult(exit_code=124, timed_out=True,
                                 outcome="timed_out")
 
     def _finish_completed(self, m, handle, session_id, rc, on_line):
+        entry = self._entries.get(session_id)
+        if entry is None:
+            return ManagedRunResult(exit_code=int(rc or 0),
+                                    outcome="superseded")
+        with entry.control_lock:
+            if (self._entries.get(session_id) is not entry
+                    or entry.handle is not handle):
+                return ManagedRunResult(exit_code=int(rc or 0),
+                                        outcome="superseded")
+            return self._finish_completed_locked(
+                m, handle, session_id, rc, on_line)
+
+    def _finish_completed_locked(self, m, handle, session_id, rc, on_line):
         """Bounded completion: drain until EOF, reap, kill stragglers.
 
         The leader (``m.state`` the supervisor knows) has exited, but members of

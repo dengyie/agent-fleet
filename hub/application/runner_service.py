@@ -19,7 +19,8 @@ runner-controlled JSON can never widen which machine's tasks it services.
 import logging
 
 from hub.application.task_service import ApplicationError
-from tools.result_files import sanitize_files
+from tools.result_files import redact_patch, sanitize_files
+from hub.domain.task_result import PatchError, TestSummaryError, normalize_test_summary
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,15 @@ class RunnerService:
         if not isinstance(duration_s, (int, float)):
             duration_s = None
         snapshot = sanitize_files(files)
+        if diff_patch is not None:
+            try:
+                diff_patch, _ = redact_patch(diff_patch)
+            except (PatchError, UnicodeError) as exc:
+                raise ApplicationError("invalid_diff_patch", "patch 必须是有效 UTF-8 文本", 400) from exc
+        try:
+            test_summary = normalize_test_summary(test_summary)
+        except TestSummaryError as exc:
+            raise ApplicationError("invalid_test_summary", "测试摘要不合法", 400) from exc
         out = self._task_op(
             self.repo.complete_task,
             attempt_id=attempt_id, nonce=str(nonce or ""), exit_code=exit_code,

@@ -22,6 +22,37 @@ PYTHONPATH=. python -m tools.platform.acceptance_check \
   --report /private/path/evidence/model-acceptance.json
 ```
 
+### GitHub Actions execution
+
+The feature branch adds `.github/workflows/live-acceptance.yml`. After it is
+merged to `main`, the workflow can run MODEL-LIVE only by manual dispatch. It
+uses the isolated GitHub environment
+`live-acceptance`, which is restricted to the `main` branch; it does not run on
+pull requests or every push, and it does not use the `production` deployment
+secrets. The environment currently has no acceptance values configured. Set
+these values before dispatch:
+
+| Kind | Name | Purpose |
+|---|---|---|
+| Variable | `AGENT_FLEET_ENDPOINT` | Exact HTTPS origin of the deployed service |
+| Variable | `AGENT_FLEET_WORKSPACE` | Dedicated disposable acceptance workspace |
+| Secret | `AGENT_FLEET_USERNAME` | Dedicated acceptance account login |
+| Secret | `AGENT_FLEET_PASSWORD` | Dedicated acceptance account password |
+
+Dispatch with `expected_release` set to the exact deployed release SHA. The
+workflow runs one read-only `workspace.list` task for every enabled model,
+checks logout revocation and the served release manifest, then retains the
+bounded JSON report as a workflow artifact. A dispatch from a non-main ref is
+skipped. The report contains model/run identifiers and statuses but no
+credentials, cookies, file listing or reply text; restrict access to the
+workflow artifact accordingly.
+
+This workflow does not automate MAIL-LIVE, NODE-LIVE or the isolated rollback
+portion of DEPLOY-LIVE. Those still require an explicitly designated mailbox
+with inbox access, a configured test Node, and a separate staging target. The
+existing `CI` workflow continues to run tests on pull requests and to deploy
+only from `main`; a deployment success is not substituted for those checks.
+
 只验证明确指定的模型时重复 `--model PROFILE_ID`，不要同时传 `--all-models`。`--timeout` 默认每模型 150 秒，范围 1–600 秒；同一截止时间覆盖创建对话、提交、状态轮询、事件读取和对话恢复。DNS 等待、逐地址 TCP 连接、TLS 握手、响应头和响应体读取均使用剩余预算，缓慢传输不能重置预算；截止后返回成功终态仍视为未确认。与 provider 共用有界 HTTP 截止机制；同一 host/port 的阻塞 DNS 查询共享一个后台解析线程，全进程最多 8 个查询，等待容量也计入预算。超时后的 DNS 结果不能建立连接或发送请求；连续验收失败不会不断新增线程。验收客户端仍直连配置的 origin，不使用环境代理。登录、目录预检和最终退出校验独立于每模型预算。选项全部显式提供；该工具不从源码读取固定管理员密码，不推断生产域名，也不配置模型、用户或工作区。
 
 每个模型必须同时满足：

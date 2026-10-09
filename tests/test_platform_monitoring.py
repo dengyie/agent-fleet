@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 import threading
 
 import pytest
@@ -130,6 +132,23 @@ def test_scheduler_failure_count_and_bounded_result(tmp_path):
     assert oversized.value.code == "result_too_large"
 
 
+@pytest.mark.parametrize("non_finite", [float("nan"), float("inf"), float("-inf")])
+def test_scheduler_rejects_non_finite_result_without_finishing_lease(tmp_path, non_finite):
+    repository = _scheduler(tmp_path)
+    claim = repository.claim("komari_sync", now=100)
+
+    with pytest.raises(PlatformSchedulerRepositoryError) as error:
+        repository.finish(
+            "komari_sync", claim["lease_id"], now=101, success=True,
+            next_run_at=160, result={"value": non_finite},
+        )
+
+    assert error.value.code == "invalid_result"
+    status = repository.get("komari_sync")
+    assert status["state"] == "running"
+    assert status["last_result"] == {}
+
+
 def test_monitoring_sync_writes_source_error_for_each_owner_and_skips_empty_owner(tmp_path):
     incidents = _IncidentService()
     komari = _Komari(KomariError("source_unavailable"))
@@ -211,6 +230,46 @@ def test_scheduler_status_api_is_gate_scoped_and_does_not_leak_lease(tmp_path):
     assert "platform_monitoring" not in incomplete.extensions["fleet"]["services"]
     assert incomplete.config["KOMARI_SYNC_ENABLED"] is False
     assert incomplete.test_client().get("/api/platform/v1/komari/status").status_code == 404
+
+
+@pytest.mark.parametrize(("stored_result", "cause_type"), [
+    ('{"marker":"persisted-scheduler-secret"', "JSONDecodeError"),
+    ('["persisted-scheduler-secret"]', "ValueError"),
+    ('{"marker":"persisted-scheduler-secret","count":NaN}', "ValueError"),
+])
+def test_corrupt_scheduler_result_is_bounded_on_status_route(tmp_path, stored_result, cause_type):
+    owner = "owner-a@example.test"
+    app = create_app(FleetConfig.from_root(
+        tmp_path, dev_operator=owner, platform_enabled=True,
+        service_monitoring_enabled=True, komari_enabled=True,
+        komari_base_url="https://komari.example.test",
+        komari_nodes_path="/api/nodes", komari_token="opaque-token",
+        komari_sync_enabled=True,
+    ))
+    repository = app.extensions["fleet"]["repositories"]["platform_scheduler"]
+    claim = repository.claim("komari_sync", now=100)
+    repository.finish(
+        "komari_sync", claim["lease_id"], now=101, success=True,
+        next_run_at=160, result={"owners": 1},
+    )
+    marker = "persisted-scheduler-secret"
+    with sqlite3.connect(repository.db_path) as connection:
+        connection.execute(
+            "UPDATE platform_jobs SET last_result=? WHERE job_id=?",
+            (stored_result, "komari_sync"),
+        )
+
+    response = app.test_client().get("/api/platform/v1/komari/status")
+    assert response.status_code == 503
+    body = response.get_json()
+    assert body["ok"] is False
+    assert body["error"] == "scheduler_store"
+    assert marker not in json.dumps(body)
+
+    with pytest.raises(PlatformSchedulerRepositoryError) as error:
+        repository.get("komari_sync")
+    assert error.value.code == "scheduler_store"
+    assert type(error.value.__cause__).__name__ == cause_type
 
 
 def test_background_jobs_only_starts_platform_monitoring_when_gate_is_on(tmp_path, monkeypatch):

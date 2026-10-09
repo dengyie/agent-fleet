@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from hub.infrastructure.platform_backup import BackupError, PlatformBackupService
+from hub.infrastructure.platform_backup import (
+    BackupError,
+    PlatformBackupService,
+    _rename_directory_no_replace,
+    _publish_new_directory,
+)
 from hub.infrastructure.platform_db import PlatformRepository
 from tools.platform.artifacts import ArtifactStore
 
@@ -128,6 +133,33 @@ def test_create_backup_never_overwrites_existing_target(tmp_path):
         PlatformBackupService().create_backup(db_path, artifact_root, target)
     assert exc.value.code == "destination_exists"
     assert marker.read_text(encoding="utf-8") == "keep"
+
+
+def test_publish_does_not_replace_empty_target_created_after_check(
+        tmp_path, monkeypatch):
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (stage / "payload").write_text("new", encoding="utf-8")
+    target = tmp_path / "restored"
+    original_rename = _rename_directory_no_replace
+    target_inode = None
+
+    def create_empty_target_then_rename(source, destination):
+        nonlocal target_inode
+        target.mkdir()
+        target_inode = target.stat().st_ino
+        original_rename(source, destination)
+
+    monkeypatch.setattr("hub.infrastructure.platform_backup._rename_directory_no_replace",
+                        create_empty_target_then_rename)
+
+    with pytest.raises(BackupError) as exc:
+        _publish_new_directory(stage, target)
+
+    assert exc.value.code == "destination_exists"
+    assert target.stat().st_ino == target_inode
+    assert list(target.iterdir()) == []
+    assert (stage / "payload").read_text(encoding="utf-8") == "new"
 
 
 def test_database_corruption_fails_inspection_before_restore_target_creation(tmp_path):

@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
 import math
 from dataclasses import dataclass
 from pathlib import Path
 
 from .directory import DirectoryBackend, ALLOWED_EXECUTABLES, MAX_OUTPUT_BYTES
+from tools.bounded_process import decode_prefix, run_bounded
 
 
 @dataclass(frozen=True)
@@ -48,7 +48,6 @@ class SandboxBackend(DirectoryBackend):
         self._unavailable = not bool(self.launcher)
 
     def _preexec(self):
-        os.setsid()
         try:
             import resource
             resource.setrlimit(resource.RLIMIT_CPU, (self.policy.cpu_seconds, self.policy.cpu_seconds))
@@ -80,24 +79,16 @@ class SandboxBackend(DirectoryBackend):
         tmp.mkdir(exist_ok=True)
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home), "TMPDIR": str(tmp)}
         try:
-            proc = subprocess.Popen(command, cwd=self.root, env=env, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, preexec_fn=self._preexec)
-            try:
-                raw, _ = proc.communicate(timeout=max(0.1, min(timeout_s, self.policy.timeout_seconds)))
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    proc.kill()
-                proc.wait(timeout=2)
-                return self._receipt(command_id, "failed", error_code="timeout")
-            raw = raw or b""
-            truncated = len(raw) > MAX_OUTPUT_BYTES
-            output = raw[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace")
+            proc = run_bounded(command, cwd=self.root, env=env,
+                               timeout_s=max(0.1, min(timeout_s, self.policy.timeout_seconds)),
+                               stdout_limit=MAX_OUTPUT_BYTES + 1, preexec_fn=self._preexec)
+            output, truncated = decode_prefix(proc.stdout, MAX_OUTPUT_BYTES)
             return self._receipt(command_id, "succeeded" if proc.returncode == 0 else "failed",
                                  {"returncode": proc.returncode, "output": output},
                                  error_code=None if proc.returncode == 0 else "process_failed",
                                  truncated=truncated)
+        except subprocess.TimeoutExpired:
+            return self._receipt(command_id, "failed", error_code="timeout")
         except OSError:
             return self._receipt(command_id, "failed", error_code="sandbox_exec_failed")
 

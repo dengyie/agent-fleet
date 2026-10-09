@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import hashlib
 import hmac
+import math
 import secrets
 import sqlite3
 import time
@@ -24,7 +25,7 @@ from platform_schema import (
     validate_owner_id,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_JSON_BYTES = 64 * 1024
 
 
@@ -39,10 +40,14 @@ class PlatformRepositoryError(RuntimeError):
 
 def _json(value: Any) -> str:
     try:
-        result = json.dumps(value or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    except (TypeError, ValueError):
-        raise PlatformRepositoryError("invalid_value") from None
-    if len(result.encode("utf-8")) > MAX_JSON_BYTES:
+        result = json.dumps(
+            value or {}, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        )
+        encoded_size = len(result.encode("utf-8"))
+    except (TypeError, ValueError) as exc:
+        raise PlatformRepositoryError("invalid_value") from exc
+    if encoded_size > MAX_JSON_BYTES:
         raise PlatformRepositoryError("value_too_large")
     return result
 
@@ -129,7 +134,7 @@ class PlatformRepository:
                     conversation_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
                     title TEXT NOT NULL DEFAULT '',
                     workspace_id TEXT, overrides TEXT NOT NULL DEFAULT '{}',
-                    revision INTEGER NOT NULL DEFAULT 0,
+                    revision INTEGER NOT NULL DEFAULT 0, archived_at REAL,
                     FOREIGN KEY(owner_id, workspace_id) REFERENCES workspaces(owner_id, workspace_id)
                 );
                 CREATE TABLE IF NOT EXISTS messages (
@@ -229,6 +234,7 @@ class PlatformRepository:
             # readable without touching any legacy database.
             for table, column, ddl in (
                 ("conversations", "title", "TEXT NOT NULL DEFAULT ''"),
+                ("conversations", "archived_at", "REAL"),
                 ("messages", "content", "TEXT NOT NULL DEFAULT ''"),
                 ("runs", "created_at", "REAL NOT NULL DEFAULT 0"),
                 ("runs", "updated_at", "REAL NOT NULL DEFAULT 0"),
@@ -296,6 +302,10 @@ class PlatformRepository:
             """)
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_message_turn_order "
                          "ON messages(conversation_id, turn_sequence)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_owner_conversation "
+                         "ON runs(owner_id, conversation_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_owner_archive "
+                         "ON conversations(owner_id, archived_at, conversation_id)")
             conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
             conn.execute("COMMIT")
         except PlatformRepositoryError:
@@ -589,7 +599,8 @@ class PlatformRepository:
     def _row_conversation(row) -> dict[str, Any]:
         return {"conversation_id": row["conversation_id"], "owner_id": row["owner_id"],
                 "title": row["title"], "workspace_id": row["workspace_id"],
-                "overrides": _decode(row["overrides"]), "revision": int(row["revision"])}
+                "overrides": _decode(row["overrides"]), "revision": int(row["revision"]),
+                "archived_at": row["archived_at"]}
 
     @staticmethod
     def _row_message(row) -> dict[str, Any]:
@@ -645,6 +656,8 @@ class PlatformRepository:
     def create_conversation(self, owner_id: str, conversation_id: str, *, title: str, workspace_id: str | None, overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
         owner_id = validate_owner_id(owner_id)
         conversation_id = validate_id(conversation_id, "conversation_id")
+        if overrides is not None and not isinstance(overrides, Mapping):
+            raise PlatformRepositoryError("invalid_value")
         if workspace_id is not None:
             workspace_id = validate_id(workspace_id, "workspace_id")
         conn = None
@@ -654,7 +667,7 @@ class PlatformRepository:
                 row = conn.execute("SELECT enabled FROM workspaces WHERE owner_id=? AND workspace_id=?", (owner_id, workspace_id)).fetchone()
                 if not row or not bool(row["enabled"]):
                     raise PlatformRepositoryError("reference_forbidden")
-            conn.execute("INSERT INTO conversations(conversation_id,owner_id,title,workspace_id,overrides,revision) VALUES(?,?,?,?,?,0)", (conversation_id, owner_id, str(title or "")[:120], workspace_id, _json(overrides or {})))
+            conn.execute("INSERT INTO conversations(conversation_id,owner_id,title,workspace_id,overrides,revision) VALUES(?,?,?,?,?,0)", (conversation_id, owner_id, str(title or "")[:120], workspace_id, _json({} if overrides is None else overrides)))
             row = conn.execute("SELECT * FROM conversations WHERE conversation_id=?", (conversation_id,)).fetchone()
             return self._row_conversation(row)
         except PlatformRepositoryError:
@@ -717,9 +730,12 @@ class PlatformRepository:
         finally:
             if conn is not None: conn.close()
 
-    def list_conversations(self, owner_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+    def list_conversations(self, owner_id: str, *, limit: int = 50,
+                           archived: bool = False) -> list[dict[str, Any]]:
         """Return a bounded owner-scoped inbox without message credentials/tokens."""
         owner_id = validate_owner_id(owner_id)
+        if not isinstance(archived, bool):
+            raise PlatformRepositoryError("invalid_value")
         try:
             limit = max(1, min(int(limit), 100))
         except (TypeError, ValueError):
@@ -727,8 +743,9 @@ class PlatformRepository:
         conn = None
         try:
             conn = self._connect()
+            archive_filter = "IS NOT NULL" if archived else "IS NULL"
             rows = conn.execute(
-                """
+                f"""
                 SELECT c.*,
                   (SELECT m.content FROM messages m
                    WHERE m.owner_id=c.owner_id AND m.conversation_id=c.conversation_id
@@ -748,7 +765,7 @@ class PlatformRepository:
                   (SELECT MAX(CAST(m.created_at AS REAL)) FROM messages m
                    WHERE m.owner_id=c.owner_id AND m.conversation_id=c.conversation_id) AS latest_message_at
                 FROM conversations c
-                WHERE c.owner_id=?
+                WHERE c.owner_id=? AND c.archived_at {archive_filter}
                 ORDER BY COALESCE(latest_run_at, latest_message_at, 0) DESC, c.conversation_id DESC
                 LIMIT ?
                 """, (owner_id, limit)).fetchall()
@@ -771,6 +788,197 @@ class PlatformRepository:
         except PlatformRepositoryError:
             raise
         except (sqlite3.Error, PlatformValidationError):
+            raise PlatformRepositoryError("platform_store") from None
+        finally:
+            if conn is not None: conn.close()
+
+    def rename_conversation(self, owner_id: str, conversation_id: str,
+                            title: str) -> dict[str, Any]:
+        owner_id = validate_owner_id(owner_id)
+        conversation_id = validate_id(conversation_id, "conversation_id")
+        if not isinstance(title, str) or not title.strip() or len(title.strip()) > 120:
+            raise PlatformRepositoryError("invalid_conversation_title")
+        conn = None
+        try:
+            conn = self._connect()
+            conn.execute("BEGIN IMMEDIATE")
+            result = conn.execute(
+                "UPDATE conversations SET title=?, revision=revision+1 "
+                "WHERE owner_id=? AND conversation_id=?",
+                (title.strip(), owner_id, conversation_id),
+            )
+            if result.rowcount != 1:
+                conn.execute("ROLLBACK")
+                raise PlatformRepositoryError("conversation_not_found")
+            row = conn.execute(
+                "SELECT * FROM conversations WHERE owner_id=? AND conversation_id=?",
+                (owner_id, conversation_id),
+            ).fetchone()
+            conn.execute("COMMIT")
+            return self._row_conversation(row)
+        except PlatformRepositoryError:
+            raise
+        except (sqlite3.Error, PlatformValidationError):
+            if conn is not None:
+                try: conn.execute("ROLLBACK")
+                except sqlite3.Error: pass
+            raise PlatformRepositoryError("platform_store") from None
+        finally:
+            if conn is not None: conn.close()
+
+    def set_conversation_archived(self, owner_id: str, conversation_id: str,
+                                  *, archived: bool, now: float) -> dict[str, Any]:
+        owner_id = validate_owner_id(owner_id)
+        conversation_id = validate_id(conversation_id, "conversation_id")
+        if not isinstance(archived, bool) or not math.isfinite(float(now)):
+            raise PlatformRepositoryError("invalid_value")
+        conn = None
+        try:
+            conn = self._connect()
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT archived_at FROM conversations "
+                "WHERE owner_id=? AND conversation_id=?",
+                (owner_id, conversation_id),
+            ).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                raise PlatformRepositoryError("conversation_not_found")
+            if bool(row["archived_at"] is not None) != archived:
+                conn.execute(
+                    "UPDATE conversations SET archived_at=?, revision=revision+1 "
+                    "WHERE owner_id=? AND conversation_id=?",
+                    (float(now) if archived else None, owner_id, conversation_id),
+                )
+            result = conn.execute(
+                "SELECT * FROM conversations WHERE owner_id=? AND conversation_id=?",
+                (owner_id, conversation_id),
+            ).fetchone()
+            conn.execute("COMMIT")
+            return self._row_conversation(result)
+        except PlatformRepositoryError:
+            raise
+        except (sqlite3.Error, PlatformValidationError, TypeError, ValueError):
+            if conn is not None:
+                try: conn.execute("ROLLBACK")
+                except sqlite3.Error: pass
+            raise PlatformRepositoryError("platform_store") from None
+        finally:
+            if conn is not None: conn.close()
+
+    def delete_archived_conversation(self, owner_id: str,
+                                     conversation_id: str) -> None:
+        """Delete one archived conversation and its relational transcript atomically."""
+        owner_id = validate_owner_id(owner_id)
+        conversation_id = validate_id(conversation_id, "conversation_id")
+        conn = None
+        try:
+            conn = self._connect()
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT archived_at FROM conversations "
+                "WHERE owner_id=? AND conversation_id=?",
+                (owner_id, conversation_id),
+            ).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                raise PlatformRepositoryError("conversation_not_found")
+            if row["archived_at"] is None:
+                conn.execute("ROLLBACK")
+                raise PlatformRepositoryError("conversation_not_archived")
+            active = conn.execute(
+                "SELECT 1 FROM runs WHERE owner_id=? AND conversation_id=? "
+                "AND state NOT IN ('succeeded','failed','cancelled') LIMIT 1",
+                (owner_id, conversation_id),
+            ).fetchone()
+            if active:
+                conn.execute("ROLLBACK")
+                raise PlatformRepositoryError("conversation_run_active")
+            tables = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            run_scope = "SELECT run_id FROM runs WHERE owner_id=? AND conversation_id=?"
+            if "platform_commands" in tables:
+                unresolved_command = conn.execute(
+                    "SELECT 1 FROM platform_commands WHERE (owner_id=? OR owner_id IS NULL) "
+                    f"AND run_id IN ({run_scope}) "
+                    "AND status NOT IN ('succeeded','failed','expired') LIMIT 1",
+                    (owner_id, owner_id, conversation_id),
+                ).fetchone()
+                if unresolved_command:
+                    conn.execute("ROLLBACK")
+                    raise PlatformRepositoryError("conversation_command_unresolved")
+            for table in ("browser_artifact_tickets", "browser_submit_approvals", "browser_sessions"):
+                if table in tables:
+                    conn.execute(
+                        f"DELETE FROM {table} WHERE owner_id=? AND run_id IN ({run_scope})",
+                        (owner_id, owner_id, conversation_id),
+                    )
+            if "execution_windows" in tables:
+                window_scope = (
+                    "SELECT window_id FROM execution_windows WHERE owner_id=? "
+                    f"AND run_id IN ({run_scope})"
+                )
+                window_params = (owner_id, owner_id, owner_id, conversation_id)
+                for table in (
+                    "execution_window_tickets", "execution_window_leases",
+                    "execution_window_events", "execution_window_frames",
+                ):
+                    if table in tables:
+                        conn.execute(
+                            f"DELETE FROM {table} WHERE owner_id=? "
+                            f"AND window_id IN ({window_scope})", window_params,
+                        )
+                conn.execute(
+                    "DELETE FROM execution_windows WHERE owner_id=? "
+                    f"AND run_id IN ({run_scope})", (owner_id, owner_id, conversation_id),
+                )
+            if "platform_commands" in tables:
+                command_scope = (
+                    "SELECT command_id FROM platform_commands "
+                    "WHERE (owner_id=? OR owner_id IS NULL) "
+                    f"AND run_id IN ({run_scope})"
+                )
+                command_params = (owner_id, owner_id, conversation_id)
+                for table in (
+                    "platform_command_reconciliations", "platform_command_postchecks",
+                    "platform_service_postchecks",
+                ):
+                    if table in tables:
+                        conn.execute(
+                            f"DELETE FROM {table} WHERE command_id IN ({command_scope})",
+                            command_params,
+                        )
+                conn.execute(
+                    "DELETE FROM platform_command_outbox WHERE command_id IN "
+                    f"({command_scope})", command_params,
+                )
+                conn.execute(
+                    "DELETE FROM platform_commands WHERE (owner_id=? OR owner_id IS NULL) "
+                    f"AND run_id IN ({run_scope})", (owner_id, owner_id, conversation_id),
+                )
+            conn.execute(
+                "DELETE FROM run_events WHERE run_id IN "
+                "(SELECT run_id FROM runs WHERE owner_id=? AND conversation_id=?)",
+                (owner_id, conversation_id),
+            )
+            conn.execute(
+                "DELETE FROM legacy_task_links WHERE owner_id=? AND run_id IN "
+                "(SELECT run_id FROM runs WHERE owner_id=? AND conversation_id=?)",
+                (owner_id, owner_id, conversation_id),
+            )
+            conn.execute("DELETE FROM runs WHERE owner_id=? AND conversation_id=?",
+                         (owner_id, conversation_id))
+            conn.execute("DELETE FROM messages WHERE owner_id=? AND conversation_id=?",
+                         (owner_id, conversation_id))
+            conn.execute("DELETE FROM conversations WHERE owner_id=? AND conversation_id=?",
+                         (owner_id, conversation_id))
+            conn.execute("COMMIT")
+        except PlatformRepositoryError:
+            raise
+        except (sqlite3.Error, PlatformValidationError):
+            if conn is not None:
+                try: conn.execute("ROLLBACK")
+                except sqlite3.Error: pass
             raise PlatformRepositoryError("platform_store") from None
         finally:
             if conn is not None: conn.close()
@@ -798,6 +1006,9 @@ class PlatformRepository:
                 if not run:
                     raise PlatformRepositoryError("run_not_found")
                 return {"created": False, "message": self._row_message(prior), "run": self._row_run(run)}
+            if conversation["archived_at"] is not None:
+                conn.execute("ROLLBACK")
+                raise PlatformRepositoryError("conversation_archived")
             conn.execute("INSERT INTO messages(message_id,conversation_id,owner_id,role,content_ref,content,client_token,created_at) VALUES(?,?,?,?,?,?,?,?)", (message_id, conversation_id, owner_id, "user", "inline", text, client_token, str(now)))
             snapshot = _json(config_snapshot)
             conn.execute("INSERT INTO runs(run_id,conversation_id,owner_id,trigger_message_id,state,config_snapshot,cancel_requested,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (run_id, conversation_id, owner_id, message_id, "queued", snapshot, 0, float(now), float(now)))
@@ -1088,7 +1299,7 @@ class PlatformRepository:
         for run in runs:
             run['requests'] = project_requests(grouped.get(run['run_id'], []), run['state'])
             for request in run['requests']:
-                if request.get('status') == 'running':
+                if request.get('status') == 'running' and 'started_at' in request:
                     request['elapsed_ms'] = max(0, round((time.time() - request['started_at']) * 1000))
 
     def get_run(self, owner_id: str, run_id: str) -> dict[str, Any] | None:

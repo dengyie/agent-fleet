@@ -133,3 +133,95 @@ def start_lease_reconciler(callback, stop_event=None, interval_s=60):
     reconcile_leases``). Returns the ``threading.Event`` used to stop it.
     """
     return _start_daemon("lease-reconciler", callback, stop_event, interval_s)
+
+
+def start_transcript_retention(callback, stop_event=None, interval_s=300):
+    """Start a stoppable raw-transcript retention worker.
+
+    Runs one bounded purge batch immediately and then once per interval. A
+    failed batch is logged with bounded diagnostic metadata and retried later.
+    """
+    interval_s = max(1, int(interval_s))
+    stop = stop_event if stop_event is not None else threading.Event()
+
+    def loop():
+        from hub.diagnostics import log_failure
+
+        while not stop.is_set():
+            try:
+                callback()
+            except Exception as exc:
+                log_failure(logger, "transcript_retention_failed", exc)
+            if stop.wait(interval_s):
+                break
+
+    thread = threading.Thread(target=loop, name="transcript-retention", daemon=True)
+    thread.start()
+    return stop
+
+
+def start_browser_session_reconciliation(callback, stop_event=None, interval_s=60):
+    """Start bounded browser-session stale-node reconciliation.
+
+    The callback runs once at startup and then periodically. The repository
+    operation only marks remote state unknown; it never controls Node processes.
+    """
+    interval_s = max(1, int(interval_s))
+    stop = stop_event if stop_event is not None else threading.Event()
+
+    def loop():
+        from hub.diagnostics import log_failure
+
+        while not stop.is_set():
+            try:
+                callback()
+            except Exception as exc:
+                log_failure(logger, "browser_session_reconciliation_failed", exc)
+            if stop.wait(interval_s):
+                break
+
+    thread = threading.Thread(target=loop, name="browser-session-reconciliation", daemon=True)
+    thread.start()
+    return stop
+
+
+def start_browser_capture_staging_cleanup(callback, stop_event=None, interval_s=300):
+    """Run bounded browser artifact staging cleanup under entrypoint control."""
+    interval_s = max(1, int(interval_s))
+    stop = stop_event if stop_event is not None else threading.Event()
+
+    def loop():
+        from hub.diagnostics import log_failure
+
+        while not stop.is_set():
+            try:
+                callback()
+            except Exception as exc:
+                log_failure(logger, "browser_capture_staging_cleanup_failed", exc)
+            if stop.wait(interval_s):
+                break
+
+    thread = threading.Thread(target=loop, name="browser-capture-staging-cleanup", daemon=True)
+    thread.start()
+    return stop
+
+
+def start_browser_capture_retention(callback, stop_event=None, interval_s=300):
+    """Run bounded published browser-capture retention under entrypoint control."""
+    interval_s = max(1, int(interval_s))
+    stop = stop_event if stop_event is not None else threading.Event()
+
+    def loop():
+        from hub.diagnostics import log_failure
+
+        while not stop.is_set():
+            try:
+                callback()
+            except Exception as exc:
+                log_failure(logger, "browser_capture_retention_failed", exc)
+            if stop.wait(interval_s):
+                break
+
+    thread = threading.Thread(target=loop, name="browser-capture-retention", daemon=True)
+    thread.start()
+    return stop

@@ -77,10 +77,16 @@ fleet_overlay_backup_tree() {
 }
 
 fleet_overlay_sync_tree() {
-    local source=$1 target=$2 rel source_path target_path
+    local source=$1 target=$2 rel source_path target_path rsync_status
     if command -v rsync >/dev/null 2>&1; then
-        rsync -a --delete "${FLEET_RSYNC_RUNTIME_EXCLUDES[@]}" "$source/" "$target/"
-        return
+        if rsync -a --delete "${FLEET_RSYNC_RUNTIME_EXCLUDES[@]}" "$source/" "$target/"; then
+            return 0
+        else
+            rsync_status=$?
+            printf 'overlay sync failed (rsync exit=%s): %s -> %s\n' \
+                "$rsync_status" "$source" "$target" >&2
+            return "$rsync_status"
+        fi
     fi
 
     # Minimal-image fallback: replace only paths owned by the release.  This

@@ -32,6 +32,7 @@ that row so a later ``adopt`` is not stuck on a dead-end.  An operator
 from __future__ import annotations
 
 import secrets
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -192,6 +193,10 @@ class AdoptionService:
         self.supervisor = supervisor
         self.transcripts = transcript_repo
         self.clock = clock
+        # Serialize the adopted-seat decision through command admission.  A
+        # revoke must not change the row after control has passed its adopted
+        # check but before the signed command is enqueued.
+        self._admission_lock = threading.RLock()
         #: command_id -> bounded context ({session_id, action, machine_id,
         #: actor}) for every command THIS service enqueues.  ``SupervisorService``
         #: exposes no accessor for a receipt's target/action, so this is the
@@ -383,20 +388,21 @@ class AdoptionService:
         the CAS winner of ``adopted -> revoked`` issues the detach, so a
         concurrent operator revoke and a drift auto-revoke cannot double-fire.
         """
-        try:
-            revoked, captured = self.adoption_repo.revoke_cas(session_id)
-        except AdoptionRepositoryError as exc:
-            raise AdoptionServiceError(exc.code) from None
-        self.transcripts.append_audit(str(actor), "revoke_session",
-                                      target=session_id)
-        if not captured:
-            return
-        envelope = self.supervisor.enqueue(
-            revoked.machine_id, session_id, None, "detach",
-            "operator_detach", nonce=secrets.token_hex(16))
-        self._track(str(envelope.get("command_id") or ""),
-                    session_id=session_id, action="detach",
-                    machine_id=revoked.machine_id, actor=actor)
+        with self._admission_lock:
+            try:
+                revoked, captured = self.adoption_repo.revoke_cas(session_id)
+            except AdoptionRepositoryError as exc:
+                raise AdoptionServiceError(exc.code) from None
+            self.transcripts.append_audit(str(actor), "revoke_session",
+                                          target=session_id)
+            if not captured:
+                return
+            envelope = self.supervisor.enqueue(
+                revoked.machine_id, session_id, None, "detach",
+                "operator_detach", nonce=secrets.token_hex(16))
+            self._track(str(envelope.get("command_id") or ""),
+                        session_id=session_id, action="detach",
+                        machine_id=revoked.machine_id, actor=actor)
 
     def retry(self, session_id: str, actor: str) -> Adoption:
         """Re-issue the signed ``adopt`` for a leftover ``pending`` seat.
@@ -448,23 +454,24 @@ class AdoptionService:
         Both paths are idempotent and funnel a real drift to the same bounded
         audit + a single zero-signal detach.
         """
-        if reason not in _GUARD_CODES:
-            return {"session_id": session_id, "reconciled": False,
-                    "status": "ignored"}
-        try:
-            record = self.adoption_repo.get(session_id)
-            if (record is None
-                    or record.status not in _RECONCILE_STATUSES):
+        with self._admission_lock:
+            if reason not in _GUARD_CODES:
                 return {"session_id": session_id, "reconciled": False,
                         "status": "ignored"}
-            self.adoption_repo.update_status(session_id, "revoked")
-        except AdoptionRepositoryError as exc:
-            raise AdoptionServiceError(exc.code) from None
-        self.transcripts.append_audit(
-            str(actor), _RECONCILE_AUDIT_ACTION, target=session_id,
-            detail={"reason": reason, "kind": "probe_reject"})
-        return {"session_id": session_id, "reconciled": True,
-                "status": "revoked"}
+            try:
+                record = self.adoption_repo.get(session_id)
+                if (record is None
+                        or record.status not in _RECONCILE_STATUSES):
+                    return {"session_id": session_id, "reconciled": False,
+                            "status": "ignored"}
+                self.adoption_repo.update_status(session_id, "revoked")
+            except AdoptionRepositoryError as exc:
+                raise AdoptionServiceError(exc.code) from None
+            self.transcripts.append_audit(
+                str(actor), _RECONCILE_AUDIT_ACTION, target=session_id,
+                detail={"reason": reason, "kind": "probe_reject"})
+            return {"session_id": session_id, "reconciled": True,
+                    "status": "revoked"}
 
     # -- source control (Task 10) ---------------------------------------------------
 
@@ -487,44 +494,45 @@ class AdoptionService:
         (``unsupported_action`` / ``feature_disabled`` / ``invalid_payload`` /
         ``resume_superseded`` / ``duplicate_nonce``).
         """
-        try:
-            record = self.adoption_repo.get(session_id)
-        except AdoptionRepositoryError as exc:
-            raise AdoptionServiceError(exc.code) from None
-        if record is None:
-            raise AdoptionServiceError("invalid_adoption")
-        if record.status == "revoked":
-            raise AdoptionServiceError("adoption_revoked")
-        if record.status != "adopted":
-            raise AdoptionServiceError("invalid_status_transition")
-        if action not in _SOURCE_CONTROL_ACTIONS:
-            raise AdoptionServiceError("unsupported_action")
-        family = str(getattr(record, "agent_family", "") or "")
-        if action == "append_user_turn" and family == "hermes":
-            # Hermes stays observation-only until a capability probe proves
-            # resume; never queue a follow-up turn for it.
-            raise AdoptionServiceError("unsupported_action")
-        enqueue_kwargs = {"nonce": secrets.token_hex(16)}
-        if action in _PAYLOAD_CONTROL_ACTIONS:
-            enqueue_kwargs["payload"] = payload
-        envelope = self.supervisor.enqueue(
-            record.machine_id, session_id, None, action,
-            str(reason_code)[:32], **enqueue_kwargs)
-        # Track the signed control so a drift receipt (``rejected`` +
-        # ``ADOPT_DRIFT_CODES``) can auto-revoke this adopted seat (Task 12).
-        self._track(str(envelope.get("command_id") or ""),
-                    session_id=session_id, action=action,
-                    machine_id=record.machine_id, actor=actor)
-        # Bounded code-only audit: NEVER the pid/path/cmdline — only the
-        # opaque session id and the fixed action token.
-        self.transcripts.append_audit(
-            str(actor), _SOURCE_CONTROL_AUDIT_ACTION, target=session_id,
-            detail={"action": action})
-        return {
-            "status": "pending",
-            "session_id": session_id,
-            "command_id": str(envelope["command_id"]),
-        }
+        with self._admission_lock:
+            try:
+                record = self.adoption_repo.get(session_id)
+            except AdoptionRepositoryError as exc:
+                raise AdoptionServiceError(exc.code) from None
+            if record is None:
+                raise AdoptionServiceError("invalid_adoption")
+            if record.status == "revoked":
+                raise AdoptionServiceError("adoption_revoked")
+            if record.status != "adopted":
+                raise AdoptionServiceError("invalid_status_transition")
+            if action not in _SOURCE_CONTROL_ACTIONS:
+                raise AdoptionServiceError("unsupported_action")
+            family = str(getattr(record, "agent_family", "") or "")
+            if action == "append_user_turn" and family == "hermes":
+                # Hermes stays observation-only until a capability probe proves
+                # resume; never queue a follow-up turn for it.
+                raise AdoptionServiceError("unsupported_action")
+            enqueue_kwargs = {"nonce": secrets.token_hex(16)}
+            if action in _PAYLOAD_CONTROL_ACTIONS:
+                enqueue_kwargs["payload"] = payload
+            envelope = self.supervisor.enqueue(
+                record.machine_id, session_id, None, action,
+                str(reason_code)[:32], **enqueue_kwargs)
+            # Track the signed control so a drift receipt (``rejected`` +
+            # ``ADOPT_DRIFT_CODES``) can auto-revoke this adopted seat (Task 12).
+            self._track(str(envelope.get("command_id") or ""),
+                        session_id=session_id, action=action,
+                        machine_id=record.machine_id, actor=actor)
+            # Bounded code-only audit: NEVER the pid/path/cmdline — only the
+            # opaque session id and the fixed action token.
+            self.transcripts.append_audit(
+                str(actor), _SOURCE_CONTROL_AUDIT_ACTION, target=session_id,
+                detail={"action": action})
+            return {
+                "status": "pending",
+                "session_id": session_id,
+                "command_id": str(envelope["command_id"]),
+            }
 
     # -- exact-capture upgrade (Task 11) --------------------------------------------
 
@@ -545,31 +553,32 @@ class AdoptionService:
         redaction + AEAD + quota + retention + raw-read audit); this surface
         only flips the stored label.  Returns the promoted :class:`Adoption`.
         """
-        try:
-            record = self.adoption_repo.get(session_id)
-        except AdoptionRepositoryError as exc:
-            raise AdoptionServiceError(exc.code) from None
-        if record is None:
-            raise AdoptionServiceError("unknown_session")
-        if record.status == "revoked":
-            raise AdoptionServiceError("adoption_revoked")
-        if record.status != "adopted":
-            raise AdoptionServiceError("capture_quality_immutable")
-        if record.capture_quality == "exact":
-            # Idempotent: already-exact adopted seat, no second audit, no
-            # second repository write.
-            return record
-        try:
-            promoted = self.adoption_repo.update_capture_quality(
-                session_id, "exact")
-        except AdoptionRepositoryError as exc:
-            raise AdoptionServiceError(exc.code) from None
-        # Bounded code-only audit: never a pid/path/cmdline or envelope
-        # internals — only the opaque session id + the quality token.
-        self.transcripts.append_audit(
-            str(actor), _EXACT_CAPTURE_AUDIT_ACTION, target=session_id,
-            detail={"capture_quality": "exact"})
-        return promoted
+        with self._admission_lock:
+            try:
+                record = self.adoption_repo.get(session_id)
+            except AdoptionRepositoryError as exc:
+                raise AdoptionServiceError(exc.code) from None
+            if record is None:
+                raise AdoptionServiceError("unknown_session")
+            if record.status == "revoked":
+                raise AdoptionServiceError("adoption_revoked")
+            if record.status != "adopted":
+                raise AdoptionServiceError("capture_quality_immutable")
+            if record.capture_quality == "exact":
+                # Idempotent: already-exact adopted seat, no second audit, no
+                # second repository write.
+                return record
+            try:
+                promoted = self.adoption_repo.update_capture_quality(
+                    session_id, "exact")
+            except AdoptionRepositoryError as exc:
+                raise AdoptionServiceError(exc.code) from None
+            # Bounded code-only audit: never a pid/path/cmdline or envelope
+            # internals — only the opaque session id + the quality token.
+            self.transcripts.append_audit(
+                str(actor), _EXACT_CAPTURE_AUDIT_ACTION, target=session_id,
+                detail={"capture_quality": "exact"})
+            return promoted
 
     # -- receipt fan-in (Task 12) ---------------------------------------------------
 
@@ -730,30 +739,31 @@ class AdoptionService:
         with the entry still tracked (never popped before the mutation
         succeeds) so a retried drift receipt still revokes.
         """
-        record = self.adoption_repo.get(session_id)
-        if record is None or record.status != "adopted":
-            return {"command_id": cid, "handled": False}
-        _revoked, captured = self.adoption_repo.revoke_cas(session_id)
-        if not captured:
-            # Operator revoke (or another drift) already won the CAS.
-            return {"command_id": cid, "handled": False}
-        # Bounded code-only detail: only the fixed reason + policy token —
-        # never pid/pgid/started_at/exe_path/cmdline/signature/nonce.
-        self.transcripts.append_audit(
-            str(tracked.get("actor") or ""), _DRIFT_AUDIT_ACTION,
-            target=session_id,
-            detail={"reason": reason, "policy": _DRIFT_POLICY_TOKEN})
-        envelope = self.supervisor.enqueue(
-            str(tracked.get("machine_id") or ""), session_id, None,
-            "detach", _DRIFT_DETACH_REASON, nonce=secrets.token_hex(16))
-        detach_cid = str(envelope.get("command_id") or "")
-        if detach_cid:
-            self._track(detach_cid, session_id=session_id, action="detach",
-                        machine_id=str(tracked.get("machine_id") or ""),
-                        actor=str(tracked.get("actor") or ""))
-        return {"command_id": cid, "handled": True,
-                "outcome": "drift_revoked", "session_id": session_id,
-                "detach_enqueued": bool(detach_cid)}
+        with self._admission_lock:
+            record = self.adoption_repo.get(session_id)
+            if record is None or record.status != "adopted":
+                return {"command_id": cid, "handled": False}
+            _revoked, captured = self.adoption_repo.revoke_cas(session_id)
+            if not captured:
+                # Operator revoke (or another drift) already won the CAS.
+                return {"command_id": cid, "handled": False}
+            # Bounded code-only detail: only the fixed reason + policy token —
+            # never pid/pgid/started_at/exe_path/cmdline/signature/nonce.
+            self.transcripts.append_audit(
+                str(tracked.get("actor") or ""), _DRIFT_AUDIT_ACTION,
+                target=session_id,
+                detail={"reason": reason, "policy": _DRIFT_POLICY_TOKEN})
+            envelope = self.supervisor.enqueue(
+                str(tracked.get("machine_id") or ""), session_id, None,
+                "detach", _DRIFT_DETACH_REASON, nonce=secrets.token_hex(16))
+            detach_cid = str(envelope.get("command_id") or "")
+            if detach_cid:
+                self._track(detach_cid, session_id=session_id, action="detach",
+                            machine_id=str(tracked.get("machine_id") or ""),
+                            actor=str(tracked.get("actor") or ""))
+            return {"command_id": cid, "handled": True,
+                    "outcome": "drift_revoked", "session_id": session_id,
+                    "detach_enqueued": bool(detach_cid)}
 
     # -- helpers -----------------------------------------------------------------
 

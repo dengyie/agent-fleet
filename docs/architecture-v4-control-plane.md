@@ -160,7 +160,7 @@ Task detail
 - operator SSO/Cloudflare Access；**done**（边缘 Access；adoptions 另有 Nginx email 注入）
 - runner credential 轮换和吊销；**SOP 本轮**（`deploy/rotate-runner-credential.sh`，默认不连生产）
 - 审计保留策略、告警和备份恢复演练；审计随 SQLite；告警保持 stdout→cron（TG 仍延期）；备份演练 **清单本轮**（`deploy/hk-backup-drill.md`）
-- 部署脚本和回滚验证；§0 手工 SOP **done**；main 自动部署仍禁止
+- 部署脚本和回滚验证；§0 手工 SOP **done**。main 自动部署于 2026-10-04 经用户授权并已实现，部署模式与证据见 [`docs/HANDOFF.md`](HANDOFF.md)；2026-10-09 隔离 Linux overlay 故障注入通过，production UID/LIVE 验收仍开放。
 
 ## 6.5 会话数据面与 Supervisor 控制面（Task 12 扩展）
 
@@ -217,4 +217,3 @@ Operator 表面：`/api/adoptions`、`/api/adoptions/<session_id>/retry`、`/api
 - 把 ingest token、runner credential 或私钥嵌入前端资源；
 - 用“任意 shell”接口替代 adapter 和项目白名单。
 - 在未恢复公网 `/api/status` 之前打开 session / supervisor / adoption gate。
-

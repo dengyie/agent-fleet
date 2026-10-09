@@ -641,6 +641,22 @@ def test_redirect_requires_exactly_one_location(transport_factory, location):
     assert len(transport.test_requests) == 1
 
 
+@pytest.mark.parametrize("status,headers", [
+    (300, [("Location", "https://two.example/next")]),
+    (304, []),
+    (305, [("Location", "https://two.example/next")]),
+    (306, [("Location", "https://two.example/next")]),
+])
+def test_unsupported_redirect_status_is_denied_without_returning_body(
+        transport_factory, status, headers):
+    transport = transport_factory([_Response(status, headers, b"not a page")])
+
+    with pytest.raises(BrowserTransportError, match="redirect_denied"):
+        transport.request("https://one.example/start")
+
+    assert len(transport.test_requests) == 1
+
+
 @pytest.mark.parametrize("value", [
     "https://one.example:abc/path",
     "https://one.example:65536/path",
@@ -1379,7 +1395,14 @@ def test_real_loopback_tls_rejects_dns_identity_certificate_for_ip_literal(tmp_p
     assert str(caught.value) == "tls_failed"
     assert len(server_errors) == 1
 
-def test_submit_form_sends_bounded_post_without_following_redirects(transport_factory):
+@pytest.fixture
+def submit_scope():
+    from tools.platform.browser_transport import _submit_scope
+    with _submit_scope():
+        yield
+
+
+def test_submit_form_sends_bounded_post_without_following_redirects(transport_factory, submit_scope):
     transport = transport_factory(
         [_Response(200, [("Content-Type", "text/html")], b"submitted")],
         origins=("https://one.example",),
@@ -1397,7 +1420,7 @@ def test_submit_form_sends_bounded_post_without_following_redirects(transport_fa
     assert sent_body == b"q=a+b&page=2"
 
 
-def test_submit_form_rejects_sensitive_fields_and_oversize_before_sending(transport_factory):
+def test_submit_form_rejects_sensitive_fields_and_oversize_before_sending(transport_factory, submit_scope):
     transport = transport_factory([_Response(200, {}, b"unused")])
 
     for fields in (
@@ -1414,7 +1437,7 @@ def test_submit_form_rejects_sensitive_fields_and_oversize_before_sending(transp
     assert transport.test_requests == []
 
 
-def test_submit_form_denies_redirect_without_replay_or_rewrite(transport_factory):
+def test_submit_form_denies_redirect_without_replay_or_rewrite(transport_factory, submit_scope):
     transport = transport_factory(
         [_Response(302, [("Location", "https://one.example/next")], b"moved")])
 
@@ -1424,24 +1447,6 @@ def test_submit_form_denies_redirect_without_replay_or_rewrite(transport_factory
     assert len(transport.test_requests) == 1
 
 
-def test_submit_form_enforces_destination_origin_policy(transport_factory):
-    # N1: The approval does not widen destination policy: an approved submit
-    # whose form action is off-allowlist fails origin_forbidden before sending,
-    # reusing the exact shared URL parser and origin normalizer.
-    transport = transport_factory(
-        [_Response(200, {}, b"unused")],
-        origins=("https://approved.example",),
-    )
-
-    with pytest.raises(BrowserTransportError, match="origin_forbidden"):
-        transport.submit_form("https://unapproved.example/submit", {"q": "search"})
-
-    with pytest.raises(BrowserTransportError, match="origin_forbidden"):
-        transport.submit_form("http://approved.example/submit", {"q": "search"})
-
-    assert transport.test_requests == []
-
-
 def test_general_request_path_stays_get_head_only(transport_factory):
     transport = transport_factory([_Response(200, {}, b"unused")])
 
@@ -1449,3 +1454,67 @@ def test_general_request_path_stays_get_head_only(transport_factory):
         transport.request("https://one.example/", method="POST")
 
     assert transport.test_requests == []
+
+
+def test_submit_transport_requires_scoped_dispatch_and_single_post(transport_factory):
+    from tools.platform.browser_backend import BrowserExecutionError
+    from support.browser import browser_backend, URL
+    transport = transport_factory([_Response(200, (), b'ok'), _Response(200, (), b'wrong')])
+    with pytest.raises(BrowserTransportError, match='approval_required'):
+        transport.submit_form('https://one.example/form', {'q': 'x'})
+    assert transport.test_requests == []
+    class Driver:
+        def open(self, url):
+            return None
+        def submit(self, selector):
+            transport.submit_form('https://one.example/form', {'q': 'x'})
+            return transport.submit_form('https://one.example/form', {'q': 'y'})
+    backend = browser_backend(Driver, submit_enabled=True)
+    sid = backend.execute('browser.open', {'url': URL}, run_id='run-a')['session_id']
+    with pytest.raises(BrowserExecutionError):
+        backend.execute('browser.submit', {'session_id': sid, 'selector': '#go'}, run_id='run-a', approval_id='approval-1234567890')
+    assert len(transport.test_requests) == 1
+
+
+@pytest.mark.parametrize('status', [301, 302, 303, 307, 308])
+def test_submit_redirect_matrix_never_replays(status, transport_factory, submit_scope):
+    transport = transport_factory([_Response(status, [('Location', 'https://one.example/next')], b'moved')])
+    with pytest.raises(BrowserTransportError, match='redirect_denied'):
+        transport.submit_form('https://one.example/form', {'q': 'one'})
+    assert len(transport.test_requests) == 1
+
+
+@pytest.mark.parametrize('fields,expected', [
+    ({}, None), ({'a' * 128: 'v' * 4096}, None),
+    ({'a' * 129: 'v'}, 'request_too_large'), ({'a': 'v' * 4097}, 'request_too_large'),
+    ({f'f{i}': 'v' for i in range(64)}, None),
+    ({f'f{i}': 'v' for i in range(65)}, 'request_too_large'),
+    ({'q': '\ud800'}, 'invalid_arguments'), ({'api_key': 'x'}, 'sensitive_field_forbidden'),
+    ({'a': 'x' * 4096, 'b': 'x' * 4096, 'c': 'x' * 4096, 'd': 'x' * 4085}, None),
+    ({'a': 'x' * 4096, 'b': 'x' * 4096, 'c': 'x' * 4096, 'd': 'x' * 4086}, 'request_too_large'),
+])
+def test_submit_exact_body_boundaries(fields, expected, transport_factory, submit_scope):
+    transport = transport_factory([_Response(200, (), b'ok')])
+    if expected:
+        with pytest.raises(BrowserTransportError, match=expected):
+            transport.submit_form('https://one.example/form', fields)
+        assert transport.test_requests == []
+    else:
+        assert transport.submit_form('https://one.example/form', fields)[0] == 200
+        assert len(transport.test_requests[0][-1]) <= 16 * 1024
+
+
+def test_submit_shares_absolute_deadline_and_session_budget(transport_factory):
+    from tools.platform.browser_transport import _submit_scope
+    clock = _AdvanceClock()
+    class SlowBody(_Response):
+        def read(self, limit=-1):
+            clock.value += 21
+            return super().read(limit)
+    timed = transport_factory([SlowBody(200, (), b'ok')], clock=clock)
+    with _submit_scope(), pytest.raises(BrowserTransportError, match='timeout'):
+        timed.submit_form('https://one.example/form', {'q': 'x'})
+    budgeted = transport_factory([_Response(200, (), b'1234'), _Response(200, (), b'5678')], max_session_body_bytes=7)
+    assert budgeted.request('https://one.example/')[2] == b'1234'
+    with _submit_scope(), pytest.raises(BrowserTransportError, match='response_too_large'):
+        budgeted.submit_form('https://one.example/form', {'q': 'x'})

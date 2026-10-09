@@ -10,7 +10,7 @@ const [origin, conversation] = process.argv.slice(2);
     const errors = []; page.on('pageerror', e => errors.push(e.message));
     let conversationReads = 0;
     page.on('request', r => {if (r.url().endsWith('/conversations/' + conversation)) conversationReads++;});
-    await page.goto(origin + '/conversation/' + conversation);
+    await page.goto(origin + '/conversation/' + conversation, {waitUntil: 'domcontentloaded'});
     const requests = page.locator('.request-metadata');
     await requests.nth(1).waitFor();
     assert.equal(await requests.count(),2,'both 429 and pending retry must be visible');

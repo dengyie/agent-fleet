@@ -49,7 +49,9 @@ class LocalRunWorkerService:
                  remote_waiter=None, usage_meter=None, sandbox_launcher=None,
                  browser_enabled: bool = False, browser_network_enabled: bool = False,
                  browser_allowed_origins: tuple[str, ...] = (), browser_resolver=None,
-                 browser_submit_enabled: bool = False, submit_approvals=None):
+                 browser_submit_enabled: bool = False, submit_approvals=None,
+                 conversation_service=None, service_actions=None,
+                 defaults_service=None):
         self.repository = repository
         self.run_events = run_events
         self.worker_id = worker_id or ("local-worker_" + secrets.token_hex(8))
@@ -71,8 +73,11 @@ class LocalRunWorkerService:
         self.browser_network_enabled = bool(browser_network_enabled)
         self.browser_allowed_origins = tuple(browser_allowed_origins or ())
         self.browser_resolver = browser_resolver
-        self.browser_submit_enabled = bool(browser_submit_enabled)
+        self.browser_submit_enabled = bool(browser_submit_enabled and browser_enabled and browser_network_enabled)
         self.submit_approvals = submit_approvals
+        self.conversation_service = conversation_service
+        self.service_actions = service_actions
+        self.defaults_service = defaults_service
 
     def _finish(self, claim: dict[str, Any], state: str, *, text: str = "", usage=None) -> dict[str, Any]:
         # Run termination is deterministic: once this Run leaves the queue
@@ -122,10 +127,13 @@ class LocalRunWorkerService:
         heartbeat = None
         try:
             config = claim.get("config_snapshot") or {}
+            context_message = build_context_message(config)
             policy = config.get("tool_policy")
             if policy not in (None, ACCEPTANCE_TOOL_POLICY):
                 raise RuntimeError("tool_policy_unavailable")
             allowed_tools = frozenset({"workspace.list"}) if policy == ACCEPTANCE_TOOL_POLICY else None
+            remote_allowed_tools = (allowed_tools if allowed_tools is not None else
+                                    ToolBroker.TOOLS - ToolBroker.LOCAL_ONLY_TOOLS)
             workspace_id = config.get("workspace_id") or claim.get("conversation_workspace_id")
             if not workspace_id:
                 raise RuntimeError("workspace_unavailable")
@@ -167,6 +175,7 @@ class LocalRunWorkerService:
             if remote and self.remote_delivery is None:
                 raise RuntimeError("remote_delivery_unavailable")
             remote_browser_enabled = False
+            remote_submit_enabled = False
             if remote and self.browser_enabled:
                 node = self.repository.get_node(claim["owner_id"], execution_node_id)
                 capabilities = node.get("capabilities") if isinstance(node, dict) else {}
@@ -174,6 +183,8 @@ class LocalRunWorkerService:
                     node and node.get("enabled") and isinstance(capabilities, dict)
                     and capabilities.get("browser.session")
                 )
+                remote_submit_enabled = bool(remote_browser_enabled and self.browser_submit_enabled
+                                             and capabilities.get("browser.submit") and self.submit_approvals is not None)
             backend = SandboxBackend(Path(workspace["root_path"]), launcher=self.sandbox_launcher) if not remote else None
             provider_profile = None
             profile_id = config.get("model_profile_id")
@@ -202,15 +213,14 @@ class LocalRunWorkerService:
                     self.remote_delivery, node_id=execution_node_id,
                     resource_id=workspace["workspace_id"], run_id=claim["run_id"],
                     waiter=self.remote_waiter,
-                    allowed_tools=allowed_tools,
+                    allowed_tools=remote_allowed_tools,
                     event_sink=lambda kind, payload: self._event(claim, kind, payload),
                     browser_enabled=remote_browser_enabled,
+                    browser_submit_enabled=remote_submit_enabled,
+                    submit_approvals=self.submit_approvals,
                     browser_network_enabled=self.browser_network_enabled,
                     browser_allowed_origins=self.browser_allowed_origins,
                     browser_resolver=self.browser_resolver,
-                    browser_submit_enabled=(
-                        self.browser_submit_enabled and remote_browser_enabled),
-                    submit_approvals=self.submit_approvals,
                 )
             else:
                 broker = ToolBroker(
@@ -219,6 +229,9 @@ class LocalRunWorkerService:
                     diagnostics=self.diagnostics,
                     artifact_workspace_id=workspace["workspace_id"],
                     allowed_tools=allowed_tools,
+                    conversation_service=self.conversation_service,
+                    service_actions=self.service_actions,
+                    defaults_service=self.defaults_service,
                 )
             runtime = NativeAssistantRuntime(
                 provider, broker, limits=self.limits,
@@ -228,10 +241,7 @@ class LocalRunWorkerService:
             worker = PersistentAssistantWorker(runtime, self.run_events)
             messages = list(claim.get("messages") or [])
             memory_snapshot = config.get("memory_context")
-            if isinstance(memory_snapshot, dict) and memory_snapshot.get("enabled"):
-                context_message = build_context_message(config)
-                if context_message is None:
-                    raise PlatformMemoryContextError("memory_context_invalid")
+            if context_message is not None:
                 selected_ids = [
                     str(item.get("memory_id"))[:128]
                     for item in (memory_snapshot.get("items") or [])
@@ -251,10 +261,9 @@ class LocalRunWorkerService:
                 run_id=claim["run_id"], owner_id=claim["owner_id"],
                 epoch=lease["epoch"], messages=messages,
                 tools=ToolBroker.tool_definitions(
-                    allowed_tools,
-                    browser_enabled=remote_browser_enabled,
-                    browser_submit_enabled=(
-                        self.browser_submit_enabled and remote_browser_enabled)),
+                    remote_allowed_tools if remote else allowed_tools,
+                    browser_enabled=remote_browser_enabled, browser_submit_enabled=remote_submit_enabled,
+                    service_actions_enabled=not remote and self.service_actions is not None),
                 should_cancel=should_cancel,
                 lease_id=lease_id, worker_id=self.worker_id,
                 attempt=int(claim.get("attempt") or 1),

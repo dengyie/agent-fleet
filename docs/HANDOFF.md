@@ -79,7 +79,7 @@ python3 tools/agent-self-report.py --endpoint https://hub.example.com --name <ma
 2026-09-08 收口把「能延期的」标成了 `deferred-with-condition`，也把 **v4 原文尚未兑现的产品面** 误标成 done。2026-09-09 起清单分两栏：
 
 - **已落地**：现网 LIVE 以私有运维笔记为准（公开仓 orphan `main` 不是 overlay）。
-- **v4 初始目标未完成（本轮必做）**：见 `docs/superpowers/specs/2026-09-09-v4-initial-goal-completion-design.md` 与 plan `docs/superpowers/plans/2026-09-09-v4-initial-goal-completion.md`。
+- **v4 初始目标代码已完成并合入本地 `main`**：实现和本地证据见 `docs/superpowers/specs/2026-09-09-v4-initial-goal-completion-design.md` 与 plan `docs/superpowers/plans/2026-09-09-v4-initial-goal-completion.md`；LIVE overlay、生产恢复和 Phase 4/5 实发仍需独立验收。
 - **条件触发延期**：仍不是待办（WebSocket / frontend-v2 / 通用密钥下发等）；main 自动部署已按用户 2026-10-04 指令实施，见下表。
 
 历史计划里的未勾 checkbox 仍不是待办。
@@ -100,12 +100,12 @@ python3 tools/agent-self-report.py --endpoint https://hub.example.com --name <ma
 | 备份恢复演练清单 | **done（2026-09-11 真切回再切回 `da54e48`）** | ops | 先 `cp -a` LIVE → `bak-20260911-pre-rollback-drill`，tar 覆盖 `bak-20260911-pre-da54e48`（`182e034`），拨测 `/diff`=404；再覆盖回 `da54e48`，`/diff` 无 operator=401。禁止 `ln -sfn`。 | pre-rollback bak |
 | WebSocket | **deferred-with-condition** | eng | 触发=实测 SSE+10s 轮询不够。需单独 spec（auth/proxy/reconnect/origin/downgrade）。无替换计划。 | 保持 SSE |
 | 更多 agent 专用采集器 | **deferred-with-condition** | eng | 触发=具体机器/家族需求。须有界 metadata + 隔离失败 + fixture。不预做。 | 删 collector |
-| Exact capture 生产升级 | **deferred-with-condition** | ops | 路由已接；默认 `best_effort`。触发=加密/配额/留存/审计核查通过后 operator 显式 `capture-exact`。不随 gate 自动开。 | 不调用 upgrade |
+| Exact capture 生产升级 | **deferred-with-condition** | ops | Hub 侧 `/api/adoptions/<session_id>/capture-exact` 已提供 operator-only 的 Adoption 标签升级与 `capture_exact` 审计；probe 侧 adopt bridge 仍固定以 `best_effort` 采集，没有 signed source-upgrade 协议。2026-10-09 起，只有 ingest token、没有 source-capability 证明的 `exact` 事件会在创建 session 或写入 redacted/raw transcript 前以 `capture_source_unverified` 拒绝；API 的 `exact` 标签仍不表示 transcript 已变为 exact。触发=补齐受管 source/capability 证明、signed probe-side upgrade、加密/配额/留存/审计核查并完成端到端验收；不随 gate 自动开。 | 不调用 upgrade |
 | `agent_profiles` P2 / 密钥下发 | **deferred-with-condition** | eng | 触发=单独安全设计获批。控制面永不下发密钥；Phase 5 只翻本机 `is_current`。 | 保持禁令 |
 | LLM classifier / 自动 terminate | **deferred-with-condition** | eng | 触发=确定性 policy + 审计稳定。classifier 不得成为唯一不可逆控制依据。 | 不接入 |
 | Hermes 结构化 spawn/resume | **deferred-with-condition** | eng | 触发=runtime capability probe 证明。在此之前 Hermes 永久 `unsupported_action`。 | 保持拒绝 |
 | TG/微信直推（`hub/notifier.py`） | **deferred-with-condition** | ops | 现有 stdout→cron 已满足不乱通知。触发=需要 Hermes send_message 且不把 bot token 写入 fleet。 | 保持 print |
-| main 自动部署 | **implemented** | ops | 2026-10-04 用户授权；采用 production 环境、专用受限 SSH key、root-owned receiver 和 systemd 部署事务，保留原 LIVE/数据/gates；失败回滚代码与前端。 | 合入 main 后触发；未完成或失败看部署报告，不把 PR 绿等同上线 |
+| main 自动部署 | **implemented** | ops | 2026-10-04 用户授权；采用 production 环境、专用受限 SSH key、root-owned receiver 和 systemd 部署事务，保留原 LIVE/数据/gates；失败回滚代码与前端。2026-10-09 隔离 Linux overlay 安装器故障注入恢复旧代码、运行态和 Hub 健康；使用 `FLEET_USER=root`，不代表生产 UID 或生产部署验收。 | 合入 main 后触发；未完成或失败看部署报告，不把 PR 绿等同上线 |
 | 远端机常驻 probe/runner | **deferred-with-condition** | ops | 节点已在 `/api/status` 上墙。触发=该机需要常驻 ingest 或 runner。 | 停 cron/LaunchAgent |
 | frontend-v2 替换生产 SPA | **deferred-with-condition** | eng | 触发=独立 frontend release + `--frontend-dir` 拨测获批。当前真相源=`frontend/`。 | 保持 tracked SPA |
 | Hub 拓扑 | **done（2026-09-01）** | ops | 边缘 → Nginx → 容器内 hub `:8790`。LIVE=bind-mount 时禁止 `ln -sfn`。 | bak 目录 tar 覆盖 |

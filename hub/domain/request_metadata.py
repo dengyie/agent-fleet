@@ -1,4 +1,5 @@
 """Allowlisted public projection of durable provider request lifecycle events."""
+import math
 from typing import Any, Iterable, Mapping, cast
 
 from tools.platform.request_metadata import RequestMetadata, normalized_tokens
@@ -6,6 +7,7 @@ from tools.platform.request_metadata import RequestMetadata, normalized_tokens
 
 REQUEST_EVENT_KINDS = ('provider_request_started', 'provider_request_finished')
 TERMINAL_STATES = {'succeeded', 'failed', 'unknown', 'cancelled'}
+MAX_JSON_DATE_EPOCH_SECONDS = 8_640_000_000_000
 
 
 def project_requests(events: Iterable[Mapping[str, Any]], state: str) -> list[RequestMetadata]:
@@ -22,6 +24,17 @@ def project_requests(events: Iterable[Mapping[str, Any]], state: str) -> list[Re
             'usage', 'cost', 'cost_unavailable_reason') if k in data})
         record['request_id'] = ':'.join(str(x) for x in key)
         record['usage'] = normalized_tokens(data.get('usage'))
+        if 'started_at' in record:
+            started_at = record['started_at']
+            try:
+                timestamp = float(started_at) if type(started_at) in (int, float) else None
+            except (OverflowError, ValueError):
+                timestamp = None
+            if (timestamp is None or not math.isfinite(timestamp)
+                    or abs(timestamp) > MAX_JSON_DATE_EPOCH_SECONDS):
+                record.pop('started_at')
+            else:
+                record['started_at'] = timestamp
         if record.get('status') == 'running' and state in TERMINAL_STATES:
             record['status'] = 'unknown'
         records[key] = record
