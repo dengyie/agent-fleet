@@ -1,4 +1,4 @@
-import { uiIcon, pagePath } from '../routes.js';
+import { uiIcon, pagePath, navigatePage } from '../routes.js';
 import {
   getConversations, renameConversation, archiveConversation,
   restoreConversation, deleteConversation,
@@ -30,13 +30,22 @@ export function resolveRoute(location = window.location) {
 }
 export function mountNavigation(route, store) {
   document.querySelectorAll('[data-icon]').forEach(slot => slot.replaceChildren(uiIcon(slot.dataset.icon, {size: 18})));
-  const copy = labels[route.page] || ['页面不存在', '页面不存在', '请从左侧导航选择一个工作空间页面。', 'NOT FOUND'];
-  ['route-label', 'page-title', 'page-description', 'page-eyebrow'].forEach((id, i) => { document.getElementById(id).textContent = copy[i]; });
-  document.title = copy[0] + ' · Agent Fleet';
-  document.body.dataset.page = route.page;
-  document.querySelectorAll('[data-nav]').forEach(link => {
-    if (link.dataset.nav === route.page) link.setAttribute('aria-current', 'page');
-  });
+  let currentRoute = route;
+  function updateRouteMetadata() {
+    const copy = labels[currentRoute.page] || ['页面不存在', '页面不存在', '请从左侧导航选择一个工作空间页面。', 'NOT FOUND'];
+    ['route-label', 'page-title', 'page-description', 'page-eyebrow'].forEach((id, i) => { document.getElementById(id).textContent = copy[i]; });
+    document.title = copy[0] + ' · Agent Fleet';
+    document.body.dataset.page = currentRoute.page;
+    document.querySelectorAll('[data-nav]').forEach(link => {
+      if (link.dataset.nav === currentRoute.page) link.setAttribute('aria-current', 'page');
+      else link.removeAttribute('aria-current');
+    });
+    document.querySelectorAll('#sidebar-conversations a, #sidebar-nodes a').forEach(link => {
+      if (new URL(link.href, window.location.href).pathname === window.location.pathname) link.setAttribute('aria-current', 'page');
+      else link.removeAttribute('aria-current');
+    });
+  }
+  updateRouteMetadata();
   const sidebar = document.getElementById('sidebar');
   const backdrop = document.getElementById('sidebar-backdrop');
   const button = document.getElementById('mobile-menu');
@@ -276,7 +285,7 @@ export function mountNavigation(route, store) {
     } else {
       addHistoryAction(menu, '归档', () => runHistoryAction(async () => {
         await archiveConversation(row.conversation_id);
-        if (resolveRoute().id === row.conversation_id) window.location.replace(pagePath('assistant'));
+        if (resolveRoute().id === row.conversation_id) navigatePage(pagePath('assistant'), {replace: true});
       }));
     }
     entry.appendChild(menu);
@@ -348,7 +357,7 @@ export function mountNavigation(route, store) {
     const conversationId = deleteConversationId;
     deleteConfirm.disabled = true;
     runHistoryAction(() => deleteConversation(conversationId)).then(succeeded => {
-      if (succeeded && resolveRoute().id === conversationId) window.location.replace(pagePath('assistant'));
+      if (succeeded && resolveRoute().id === conversationId) navigatePage(pagePath('assistant'), {replace: true});
     }).finally(() => {
       deleteConfirm.disabled = false;
       deleteDialog.close();
@@ -377,11 +386,11 @@ export function mountNavigation(route, store) {
       const link = document.createElement('a'); link.href = pagePath('machine', machine.machine);
       const dot = document.createElement('i'); dot.className = machine.online ? 'node-dot online' : 'node-dot'; link.appendChild(dot);
       const text = document.createElement('span'); text.textContent = machine.machine; link.appendChild(text);
-      if (route.page === 'machine' && route.id === machine.machine) link.setAttribute('aria-current', 'page');
+      if (currentRoute.page === 'machine' && currentRoute.id === machine.machine) link.setAttribute('aria-current', 'page');
       list.appendChild(link);
     }
   });
-  return () => {
+  const dispose = () => {
     disposed = true;
     collapse.removeEventListener('click', onCollapse);
     expand.removeEventListener('click', onExpand);
@@ -404,4 +413,10 @@ export function mountNavigation(route, store) {
     backdrop.removeEventListener('click', onBackdrop);
     document.removeEventListener('keydown', onKeydown);
   };
+  dispose.updateRoute = nextRoute => {
+    currentRoute = nextRoute;
+    updateRouteMetadata();
+    if (mobile.matches) resetDrawer();
+  };
+  return dispose;
 }

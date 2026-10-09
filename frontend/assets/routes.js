@@ -13,6 +13,10 @@ export function pagePath(...segments) {
   return buildPath("", segments);
 }
 
+export function navigatePage(path, {replace = false} = {}) {
+  window.dispatchEvent(new CustomEvent('fleet:navigate', {detail: {path, replace}}));
+}
+
 /**
  * 将若干路径段编码后接在 base 之后。base 为 API 基址或页面基址。
  * 段中的任何 '/' 或 "." / ".." 都视为非法（防止路径穿越/层级混入）。

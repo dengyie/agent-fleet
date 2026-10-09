@@ -8,7 +8,7 @@
 
 | 链路 | 必经阶段 | 关键断言与测试入口 | 矩阵 |
 |---|---|---|---|
-| 账号生命周期 | 邀请 → 发码 → 注册 → 登录 → 改密/重置 → 撤销旧会话 → 停用 | `test_full_flow.py::test_invitation_registration_recovery_and_owner_isolation` 验证跨账号 404、旧 Cookie 失效；`test_accounts.py` 验证过期/重复验证码；浏览器验证守卫和退出 | AUTH-01…04、MAIL-01 |
+| 账号生命周期 | 邀请 → 发码 → 注册 → 登录 → 同文档页面切换/历史前进后退 → 每分钟 session 检查 → 改密/重置 → 撤销旧会话 → 停用 | `test_frontend_browser.py::test_assistant_auth_in_real_browser` 通过真实 Chromium 断言站内切页和浏览器历史保留同一 document、不重复查询 `/api/operator/session`；`test_full_flow.py::test_invitation_registration_recovery_and_owner_isolation` 验证跨账号 404、旧 Cookie 失效；`test_accounts.py` 验证过期/重复验证码；浏览器验证守卫和退出 | AUTH-01…04、MAIL-01 |
 | 助手与产物 | 页面 → 账号 Cookie → 提交 → SQLite → scheduler → provider factory → 严格模型 HTTP → list/write/read/artifact → 最终回复 → 下载 → 刷新恢复 | `test_full_flow.py` 比较产物字节和 SHA-256、唯一 Run、重建 app 后的结果；`test_full_flow_browser.py` 验证关闭页面后继续完成、重新打开恢复、502 可见 | ASSIST-01…02、MODEL-01…02、FILES-01 |
 | Run workspace artifact | conversation 的冻结 workspace → `workspace.write` → `workspace.artifact` → ArtifactStore manifest → owner/workspace API list/download | `test_platform_run_worker.py::test_worker_artifact_is_listed_and_downloadable_in_conversation_workspace` 以真实 Flask/SQLite/worker 验证生成产物通过现有路由可见且下载字节一致 | FILES-01 |
 | 本地验收 | CLI 登录 → readiness → 专用 acceptance-turns → 冻结策略 → 新 worker → 模型 HTTP → Broker → 真实目录 → events → 恢复 → logout → JSON 报告；前端打包拒绝复用含未清单文件的输出目录 | `test_acceptance_flow.py::test_acceptance_http_chain_closes_report_and_node_journal[local]` 和 `test_platform_acceptance_check.py` 要求真实 list、最终回复、恢复和旧 Cookie 撤销全部成立；`test_release_layout.py::DeploymentSafetyTests::test_package_refuses_existing_output_with_unlisted_files` 锁定精确 release 目录 | RELEASE-01 |

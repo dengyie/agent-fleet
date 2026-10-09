@@ -1111,7 +1111,7 @@ class ViewBoundaryTests(unittest.TestCase):
         # 任务导航用 pagePath("task", taskId)
         self.assertIn("pagePath('task', task.task_id)", machine)
         self.assertIn("pagePath('session', task.session_id)", machine)
-        self.assertIn("import { pagePath } from '../routes.js'", machine)
+        self.assertIn("import { pagePath, navigatePage, uiIcon } from '../routes.js'", machine)
         for source in (fleet, machine):
             self.assertIn('setAttribute', source)
 

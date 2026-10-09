@@ -10,8 +10,7 @@
  * 显式状态：loading / error / task 空列表 / 无时间线数据。
  */
 
-import { pagePath } from '../routes.js';
-import { uiIcon } from '../routes.js';
+import { pagePath, navigatePage, uiIcon } from '../routes.js';
 
 var MSG_LOADING = '加载中…';
 var MSG_NO_TASKS = '暂无任务';
@@ -620,9 +619,9 @@ function createTaskForm(host, machineName, clientMethods, storeRef, isActive,
           }
           if (typeof window !== 'undefined' && window.location) {
             if (typeof task.session_id === 'string' && task.session_id) {
-              window.location.href = pagePath('session', task.session_id);
+              navigatePage(pagePath('session', task.session_id));
             } else {
-              window.location.href = pagePath('task', task.task_id);
+              navigatePage(pagePath('task', task.task_id));
             }
           }
           return;

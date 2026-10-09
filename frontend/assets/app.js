@@ -21,18 +21,23 @@ import './ui/AutoScrollAnchor.js';
 function protectConsole() {
   const client = {...api, ...platform};
   const store = new FleetStore();
-  const route = resolveRoute();
+  let route = resolveRoute();
   const sse = new SseClient(store, {client});
   const shell = document.querySelector('.console-layout');
   const gate = document.getElementById('access-state');
   const retry = gate.querySelector('button');
-  let teardown, unsubscribe, mounted = false, checking = false, redirecting = false, account = null;
+  let teardown, disposeNavigation, mounted = false, checking = false, redirecting = false, account = null;
   let lastSessionCheckAt = 0;
+  function disposeRoute() {
+    if (typeof teardown === 'function') teardown();
+    teardown = undefined;
+    document.getElementById('route-view').replaceChildren();
+  }
   function disposeView() {
     shell.hidden = true; sse.stop();
-    if (typeof teardown === 'function') teardown();
-    if (unsubscribe) unsubscribe();
-    teardown = unsubscribe = undefined;
+    if (disposeNavigation) disposeNavigation();
+    disposeNavigation = undefined;
+    disposeRoute();
     for (const id of ['route-view', 'sidebar-conversations', 'sidebar-nodes']) {
       document.getElementById(id).replaceChildren();
     }
@@ -42,8 +47,7 @@ function protectConsole() {
     redirecting = true; disposeView();
     redirectToLogin();
   }
-  function mount() {
-    unsubscribe = mountNavigation(route, store);
+  function mountRoute() {
     const target = document.getElementById('route-view');
     target.replaceChildren();
     const mountEntity = {machine: mountMachine, task: mountTask, session: mountSession};
@@ -53,6 +57,62 @@ function protectConsole() {
     else if (route.page === 'monitoring') teardown = mountMonitoring(target, client);
     else if (mountEntity[route.page] && route.id) teardown = mountEntity[route.page](target, route.id, store, client);
     else target.textContent = '页面不存在或缺少标识，请从导航重新进入。';
+  }
+  function renderRoute(nextRoute) {
+    if (typeof teardown === 'function') teardown();
+    teardown = undefined;
+    route = nextRoute;
+    if (disposeNavigation && typeof disposeNavigation.updateRoute === 'function') {
+      disposeNavigation.updateRoute(route);
+    }
+    mountRoute();
+  }
+  function navigateTo(url, {replace = false, fromHistory = false} = {}) {
+    let target;
+    try { target = new URL(url, window.location.href); } catch (_) { return false; }
+    if (target.origin !== window.location.origin) return false;
+    let nextRoute = resolveRoute(target);
+    if (nextRoute.page === 'invalid') return false;
+    const forbiddenForAccount = account && account.role !== 'admin' && !['assistant', 'account'].includes(nextRoute.page);
+    if (forbiddenForAccount) {
+      target = new URL('/assistant', window.location.origin);
+      nextRoute = resolveRoute(target);
+      replace = true;
+    }
+    const nextUrl = target.pathname + target.search + target.hash;
+    if ((!fromHistory || forbiddenForAccount) && nextUrl !== window.location.pathname + window.location.search + window.location.hash) {
+      window.history[replace ? 'replaceState' : 'pushState'](null, '', nextUrl);
+    }
+    if (mounted && (route.page !== nextRoute.page || route.id !== nextRoute.id || fromHistory)) {
+      renderRoute(nextRoute);
+    } else {
+      route = nextRoute;
+    }
+    return true;
+  }
+  function onNavigationClick(event) {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const anchor = event.target instanceof Element ? event.target.closest('a[href]') : null;
+    if (!anchor || anchor.hasAttribute('download') || (anchor.target && anchor.target !== '_self')) return;
+    let target;
+    try { target = new URL(anchor.href, window.location.href); } catch (_) { return; }
+    if (target.origin !== window.location.origin || (target.pathname === window.location.pathname &&
+        target.search === window.location.search)) return;
+    if (resolveRoute(target).page === 'invalid') return;
+    event.preventDefault();
+    navigateTo(target);
+  }
+  function onFleetNavigate(event) {
+    const detail = event.detail || {};
+    if (typeof detail.path === 'string') navigateTo(detail.path, {replace: detail.replace === true});
+  }
+  function onPopState() { navigateTo(window.location.href, {fromHistory: true}); }
+  document.addEventListener('click', onNavigationClick);
+  window.addEventListener('fleet:navigate', onFleetNavigate);
+  window.addEventListener('popstate', onPopState);
+  function mount() {
+    disposeNavigation = mountNavigation(route, store);
+    mountRoute();
     if ((!account || account.role === 'admin') && route.page !== 'fleet') client.getStatus().then(status => store.setStatus(status)).catch(() => {
       document.getElementById('sidebar-nodes').textContent = '节点列表暂时不可用';
     });
@@ -81,7 +141,10 @@ function protectConsole() {
         document.querySelector('[data-nav="fleet"]').hidden = true;
         document.querySelector('[data-nav="monitoring"]').hidden = true;
         document.getElementById("sidebar-nodes").textContent = "节点由管理员分配";
-        if (!["assistant", "account"].includes(route.page)) { window.location.replace("/assistant"); return; }
+        if (!["assistant", "account"].includes(route.page)) {
+          window.history.replaceState(null, '', '/assistant');
+          route = resolveRoute();
+        }
       }
       if (redirecting) return;
       if (!mounted) mount();
