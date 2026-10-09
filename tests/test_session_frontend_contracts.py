@@ -278,8 +278,9 @@ class SessionFrontendModuleTests(unittest.TestCase):
         source = SESSION_JS.read_text()
         self.assertIn('export function mountSession(root, sessionId, store, client)',
                       source)
-        # The teardown contract mirrors task/machine views.
-        self.assertIn('return function teardown', source)
+        self.assertIn('function teardown()', source)
+        self.assertIn('teardown.suspend', source)
+        self.assertIn('teardown.resume', source)
         self.assertIn('disposed', source)
 
     def test_session_view_has_explicit_states(self):

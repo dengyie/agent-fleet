@@ -87,14 +87,15 @@ export function mountAssistant(target, options) {
     {id: 'context', title: '上下文', sections: contextSections}
   ]);
   var conversationId = options.conversationId || null; var conversationWorkspaceId = null; var conversationArchived = false; var activeRunId = null; var latestRunId = null; var cursor = 0; var polling = false; var windowEventCursor = 0; var windowPolling = false; var windowState = { loading: false, error: null, window: null, mode: 'disconnected', events: [], holderId: token(), leaseToken: null, leaseExpiresAt: 0 };
-  var disposed = false; var timers = new Set();
-  function later(fn, delay) { if (disposed) return; var timer = setTimeout(function () { timers.delete(timer); if (!disposed) fn(); }, delay); timers.add(timer); }
+  var disposed = false; var suspended = false; var timers = new Set();
+  var windowPollAgain = false; var windowPollDelay = 1200;
+  function later(fn, delay) { if (disposed || suspended) return; var timer = setTimeout(function () { timers.delete(timer); if (!disposed && !suspended) fn(); }, delay); timers.add(timer); }
   var requestClockActive = false;
   function startRequestClock() {
-    if (requestClockActive || disposed) return;
+    if (requestClockActive || disposed || suspended) return;
     requestClockActive = true;
     function tick() {
-      if (!disposed && tickMessageRequests(messageHost)) later(tick, 250);
+      if (!disposed && !suspended && tickMessageRequests(messageHost)) later(tick, 250);
       else requestClockActive = false;
     }
     tick();
@@ -144,7 +145,7 @@ export function mountAssistant(target, options) {
     return (error && (error.detail || error.message || error.code)) || '执行窗口不可用';
   }
   async function pollExecutionWindow() {
-    if (disposed || windowPolling || !windowState.window || !windowState.window.window_id) return;
+    if (disposed || suspended || windowPolling || !windowState.window || !windowState.window.window_id) return;
     windowPolling = true;
     try {
       var windowId = windowState.window.window_id;
@@ -180,15 +181,24 @@ export function mountAssistant(target, options) {
           else if (renewError && (renewError.code === 'window_expired' || renewError.code === 'window_closed')) setWindowState({ mode: renewError.code === 'window_expired' ? 'expired' : 'closed', window: Object.assign({}, windowState.window, { state: renewError.code === 'window_expired' ? 'expired' : 'closed' }), leaseToken: null });
         }
       }
-      if (windowState.window.state !== 'closed' && windowState.window.state !== 'expired') later(pollExecutionWindow, 1200);
+      windowPollDelay = 1200;
     } catch (error) {
       if (error && (error.code === 'not_found' || error.code === 'execution_windows_disabled')) {
         setWindowState({ window: null, mode: 'disconnected', error: null, leaseToken: null });
       } else {
         setWindowState({ error: windowError(error) });
-        later(pollExecutionWindow, 2000);
+        windowPollDelay = 2000;
       }
-    } finally { windowPolling = false; }
+    } finally {
+      windowPolling = false;
+      if (!disposed && !suspended && windowState.window &&
+          windowState.window.state !== 'closed' && windowState.window.state !== 'expired') {
+        var delay = windowPollAgain ? 0 : windowPollDelay;
+        windowPollAgain = false;
+        windowPollDelay = 1200;
+        later(pollExecutionWindow, delay);
+      }
+    }
   }
   var windowConnection = null;
   function connectExecutionWindow(runId, create) {
@@ -432,17 +442,17 @@ export function mountAssistant(target, options) {
     if (latestRunId) refreshLegacy(latestRunId);
   }
   async function poll() {
-    if (disposed || polling || !activeRunId) return;
+    if (disposed || suspended || polling || !activeRunId) return;
     polling = true;
     var runId = activeRunId;
     try {
       var runData = await getRun(runId);
-      if (disposed) return;
+      if (disposed || suspended) return;
       var run = runData.run || runData;
       showRunModel(run); setStatus(run.state || 'unknown');
       updateRunRequests(messageHost, run); startRequestClock();
       var eventData = await getRunEvents(runId, cursor);
-      if (disposed) return;
+      if (disposed || suspended) return;
       var events = eventData.events || [];
       if (events.length) {
         cursor = eventData.next_cursor || events[events.length - 1].sequence || cursor;
@@ -458,10 +468,10 @@ export function mountAssistant(target, options) {
         lockPendingTurn();
       }
     } catch (error) {
-      if (!disposed) { showError(eventHost, error); setStatus('连接中断，稍后恢复'); }
+      if (!disposed && !suspended) { showError(eventHost, error); setStatus('连接中断，稍后恢复'); }
     } finally {
       polling = false;
-      if (!disposed && activeRunId) later(poll, 1200);
+      if (!disposed && !suspended && activeRunId) later(poll, 1200);
     }
   }
   memorySearch.addEventListener('click', function () { refreshMemoryItems(memoryQuery.value); });
@@ -557,5 +567,28 @@ export function mountAssistant(target, options) {
     }
   }
   initialize();
-  return function teardown() { disposed = true; inspectorUi.dispose(); timers.forEach(clearTimeout); timers.clear(); };
+  function teardown() {
+    disposed = true;
+    inspectorUi.dispose();
+    timers.forEach(clearTimeout);
+    timers.clear();
+  }
+  teardown.suspend = function () {
+    if (disposed || suspended) return;
+    suspended = true;
+    requestClockActive = false;
+    timers.forEach(clearTimeout);
+    timers.clear();
+  };
+  teardown.resume = function () {
+    if (disposed || !suspended) return;
+    suspended = false;
+    if (activeRunId) poll();
+    if (windowState.window && windowState.window.window_id) {
+      if (windowPolling) windowPollAgain = true;
+      else later(pollExecutionWindow, 0);
+    }
+    if (tickMessageRequests(messageHost)) startRequestClock();
+  };
+  return teardown;
 }

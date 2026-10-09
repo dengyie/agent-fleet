@@ -1,4 +1,5 @@
 """Static presentation is independent of API state and template rendering."""
+import hashlib
 from pathlib import Path
 import pytest
 from hub.bootstrap import create_app
@@ -36,6 +37,19 @@ def test_static_and_api_namespaces_do_not_overlap(tmp_path):
         assert response.is_json
     for route in ['/assets/../config.js', '/assets/%2e%2e/config.js', '/assets/missing.js']:
         assert client.get(route).status_code == 404
+
+
+def test_mango_logo_and_favicon_assets_are_served_from_the_static_release(tmp_path):
+    app = create_app(FleetConfig.from_root(tmp_path, frontend_dir=ROOT / 'frontend'))
+    client = app.test_client()
+    for route, filename, digest in (
+        ('/assets/brand/mango-ddf462d0.png', 'mango-ddf462d0.png', 'ddf462d0256bb6af05032b1aaca63440'),
+        ('/assets/brand/mango-cdd3ec60.ico', 'mango-cdd3ec60.ico', 'cdd3ec60deb3e534592285102d9f46a4'),
+    ):
+        response = client.get(route)
+        assert response.status_code == 200
+        assert hashlib.md5(response.data).hexdigest() == digest
+        assert response.data == (ROOT / 'frontend/assets/brand' / filename).read_bytes()
 
 
 def test_asset_symlink_cannot_escape_release(tmp_path):

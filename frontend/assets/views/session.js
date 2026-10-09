@@ -531,14 +531,17 @@ function pollControlReceipt(clientMethods, viewState, paint, commandId, attempt)
       typeof clientMethods.getControlReceipt !== 'function') {
     return;
   }
+  viewState.receiptPending = {commandId: commandId, attempt: attempt};
+  if (viewState.suspended) return;
   Promise.resolve()
     .then(function () {
       return clientMethods.getControlReceipt(commandId);
     })
     .then(function (receipt) {
-      if (viewState.disposed || !receipt || typeof receipt.status !== 'string') {
+      if (viewState.disposed || viewState.suspended || !receipt || typeof receipt.status !== 'string') {
         return;
       }
+      viewState.receiptPending = null;
       var status = receipt.status;
       var reason = (typeof receipt.reason === 'string' && receipt.reason)
         ? (' · ' + receipt.reason) : '';
@@ -546,10 +549,10 @@ function pollControlReceipt(clientMethods, viewState, paint, commandId, attempt)
       viewState.controlError = null;
       paint();
       if (['queued', 'delivered', 'accepted', 'executing'].indexOf(status) !== -1) {
+        viewState.receiptPending = {commandId: commandId, attempt: attempt + 1};
         viewState.receiptTimer = setTimeout(function () {
-          if (viewState.disposed) {
-            return;
-          }
+          viewState.receiptTimer = null;
+          if (viewState.disposed || viewState.suspended) return;
           pollControlReceipt(clientMethods, viewState, paint, commandId, attempt + 1);
         }, 1000);
       }
@@ -801,6 +804,9 @@ export function mountSession(root, sessionId, store, client) {
     controlBusy: false,
     controlNotice: null,
     controlError: null,
+    suspended: false,
+    receiptPending: null,
+    receiptTimer: null,
     localProfiles: [],
     followUpText: '',
     pageStarts: [0],
@@ -813,6 +819,10 @@ export function mountSession(root, sessionId, store, client) {
 
   function refreshFromSummary() {
     if (viewState.disposed || typeof store.getState !== 'function') {
+      return;
+    }
+    if (viewState.suspended) {
+      summaryRefreshPending = true;
       return;
     }
     if (summaryRefreshInFlight) {
@@ -828,6 +838,7 @@ export function mountSession(root, sessionId, store, client) {
     var key = String(summary.event_seq || '') + ':' +
       String(summary.sequence || '') + ':' + String(summary.status || '');
     if (!key || key === lastSummaryKey) {
+      summaryRefreshPending = false;
       return;
     }
     lastSummaryKey = key;
@@ -856,20 +867,21 @@ export function mountSession(root, sessionId, store, client) {
       // Keep the last durable view; the next newer summary retries.
     }).then(function () {
       summaryRefreshInFlight = false;
-      if (summaryRefreshPending && !viewState.disposed) {
+      if (summaryRefreshPending && !viewState.disposed && !viewState.suspended) {
         summaryRefreshPending = false;
         refreshFromSummary();
       }
     });
   }
 
-  var unsubscribe = store.subscribe(function () {
+  function onStoreChange() {
     if (viewState.disposed) {
       return;
     }
     render();
     refreshFromSummary();
-  });
+  }
+  var unsubscribe = store.subscribe(onStoreChange);
 
   function render() {
     if (disposed) {
@@ -1053,14 +1065,37 @@ export function mountSession(root, sessionId, store, client) {
   render();
   loadSync();
 
-  return function teardown() {
+  function teardown() {
     disposed = true;
     viewState.disposed = true;
     if (viewState.receiptTimer) {
       clearTimeout(viewState.receiptTimer);
       viewState.receiptTimer = null;
     }
-    unsubscribe();
+    viewState.receiptPending = null;
+    if (unsubscribe) unsubscribe();
+    unsubscribe = null;
     removeAllChildren(root);
+  }
+  teardown.suspend = function () {
+    viewState.suspended = true;
+    if (viewState.receiptTimer) {
+      clearTimeout(viewState.receiptTimer);
+      viewState.receiptTimer = null;
+    }
+    if (unsubscribe) unsubscribe();
+    unsubscribe = null;
   };
+  teardown.resume = function () {
+    if (disposed || !viewState.suspended) return;
+    viewState.suspended = false;
+    unsubscribe = store.subscribe(onStoreChange);
+    render();
+    refreshFromSummary();
+    if (viewState.receiptPending) {
+      pollControlReceipt(clientMethods, viewState, paint, viewState.receiptPending.commandId,
+        viewState.receiptPending.attempt);
+    }
+  };
+  return teardown;
 }

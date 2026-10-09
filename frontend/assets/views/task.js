@@ -405,10 +405,11 @@ export function mountTask(root, taskId, store, client) {
     return !disposed;
   }
 
-  var unsubscribe = store.subscribe(function () {
+  function onStoreChange() {
     render();
     maybeLoadFiles();
-  });
+  }
+  var unsubscribe = store.subscribe(onStoreChange);
 
   function render() {
     if (disposed) {
@@ -870,10 +871,22 @@ export function mountTask(root, taskId, store, client) {
   // 首屏：总是拉取最新详情（含 result），填充 store 后重绘。
   loadTask();
 
-  return function teardown() {
+  function teardown() {
     disposed = true;      // 护栏：此后 render / 异步回调 / 按钮委托一律 no-op
     root.removeEventListener('click', onRootClick);
-    unsubscribe();
+    if (unsubscribe) unsubscribe();
+    unsubscribe = null;
     removeAllChildren(root);
+  }
+  teardown.suspend = function () {
+    if (unsubscribe) unsubscribe();
+    unsubscribe = null;
   };
+  teardown.resume = function () {
+    if (disposed || unsubscribe) return;
+    unsubscribe = store.subscribe(onStoreChange);
+    render();
+    maybeLoadFiles();
+  };
+  return teardown;
 }

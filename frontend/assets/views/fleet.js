@@ -384,9 +384,8 @@ export function mountFleet(root, store, client) {
     sessionError: null,
   };
 
-  var unsubscribe = store.subscribe(function () {
-    render();
-  });
+  function onStoreChange() { render(); }
+  var unsubscribe = store.subscribe(onStoreChange);
 
   function render() {
     if (disposed) {
@@ -507,11 +506,22 @@ export function mountFleet(root, store, client) {
       render();
     });
 
-  return function teardown() {
+  function teardown() {
     disposed = true;
-    unsubscribe();
+    if (unsubscribe) unsubscribe();
+    unsubscribe = null;
     removeAllChildren(root);
+  }
+  teardown.suspend = function () {
+    if (unsubscribe) unsubscribe();
+    unsubscribe = null;
   };
+  teardown.resume = function () {
+    if (disposed || unsubscribe) return;
+    unsubscribe = store.subscribe(onStoreChange);
+    render();
+  };
+  return teardown;
 }
 
 function noop() {}

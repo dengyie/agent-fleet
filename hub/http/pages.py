@@ -53,6 +53,6 @@ def configuration():
 
 @bp.route('/assets/<path:filename>')
 def asset(filename):
-    if Path(filename).suffix not in {'.js', '.css', '.svg', '.png', '.woff2'}:
+    if Path(filename).suffix not in {'.js', '.css', '.svg', '.png', '.ico', '.woff2'}:
         abort(404)
     return _file('assets/' + filename, asset=True)

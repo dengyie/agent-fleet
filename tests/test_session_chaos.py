@@ -857,10 +857,11 @@ class RollbackIndependenceTests(unittest.TestCase):
         files = [p for p in frontend.rglob("*") if p.is_file()]
         self.assertTrue(files)
         for relative in files:
-            source = relative.read_text()
+            source = relative.read_bytes()
             for token in ("X-Agent-Fleet-Token", "X-Runner-Credential",
                           "BEGIN PRIVATE KEY"):
-                self.assertNotIn(token, source, f"{relative.name} leaked token")
+                self.assertNotIn(token.encode(), source,
+                                 f"{relative.name} leaked token")
 
 
 if __name__ == "__main__":

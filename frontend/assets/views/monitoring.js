@@ -360,6 +360,10 @@ export function mountMonitoring(target, api) {
   var incidents = [];
   var selectedId = null;
   var detailRequest = 0;
+  var refreshRequest = 0;
+  var nodeRequest = 0;
+  var disposed = false;
+  var suspended = false;
 
   function setNotice(text, className) {
     notice.setAttribute('class', 'monitoring-notice' + (className ? ' ' + className : ''));
@@ -396,6 +400,7 @@ export function mountMonitoring(target, api) {
   }
 
   async function selectService(serviceId) {
+    if (disposed || suspended) return;
     selectedId = serviceId;
     renderServices();
     var requestId = detailRequest + 1;
@@ -407,20 +412,22 @@ export function mountMonitoring(target, api) {
     }
     try {
       var data = await client.getPlatformService(serviceId);
-      if (requestId !== detailRequest) return;
+      if (disposed || suspended || requestId !== detailRequest) return;
       if (!data || !data.service || typeof data.service !== 'object') {
         throw new Error('服务详情格式无效');
       }
       renderDetail(detailHost, data, client, function () { return selectService(serviceId); });
     } catch (error) {
-      if (requestId === detailRequest) showDetailError(error);
+      if (!disposed && !suspended && requestId === detailRequest) showDetailError(error);
     }
   }
 
   async function refreshNodes() {
-    if (typeof client.getStatus !== 'function') return;
+    if (disposed || suspended || typeof client.getStatus !== 'function') return;
+    var requestId = ++nodeRequest;
     try {
       var data = await client.getStatus();
+      if (disposed || suspended || requestId !== nodeRequest) return;
       clear(nodePanel);
       nodePanel.appendChild(el('h2', null, '节点监控'));
       nodePanel.appendChild(el('p', 'meta', '来自节点最近一次上报；离线节点的指标仅供历史参考。'));
@@ -436,15 +443,23 @@ export function mountMonitoring(target, api) {
       });
       if (!rows.childElementCount) rows.appendChild(el('p', 'meta', '暂无节点上报'));
       nodePanel.appendChild(rows);
-    } catch (error) { renderState(nodePanel, 'monitoring-error', '节点监控加载失败：' + errorText(error)); }
+    } catch (error) {
+      if (!disposed && !suspended && requestId === nodeRequest) {
+        renderState(nodePanel, 'monitoring-error', '节点监控加载失败：' + errorText(error));
+      }
+    }
   }
 
-  async function refresh() {
+  async function refresh({quiet = false} = {}) {
+    if (disposed || suspended) return;
+    var requestId = ++refreshRequest;
     refreshNodes();
-    refreshButton.disabled = true;
-    setNotice('正在同步监控数据…');
-    renderState(serviceList, 'monitoring-loading', '正在加载服务列表…');
-    renderState(detailHost, 'monitoring-loading', '选择服务查看详情');
+    if (!quiet) {
+      refreshButton.disabled = true;
+      setNotice('正在同步监控数据…');
+      renderState(serviceList, 'monitoring-loading', '正在加载服务列表…');
+      renderState(detailHost, 'monitoring-loading', '选择服务查看详情');
+    }
     try {
       if (typeof client.getPlatformServices !== 'function' ||
           typeof client.getPlatformIncidents !== 'function') {
@@ -454,6 +469,7 @@ export function mountMonitoring(target, api) {
         client.getPlatformServices(MAX_SERVICES),
         client.getPlatformIncidents(MAX_INCIDENTS),
       ]);
+      if (disposed || suspended || requestId !== refreshRequest) return;
       services = validateServiceRows(data[0]);
       incidents = validateIncidents(data[1]);
       if (selectedId && !services.some(function (row) {
@@ -471,6 +487,11 @@ export function mountMonitoring(target, api) {
         renderState(detailHost, 'monitoring-empty', '暂无服务详情');
       }
     } catch (error) {
+      if (disposed || suspended || requestId !== refreshRequest) return;
+      if (quiet) {
+        setNotice('监控数据暂时不可用，仍显示上次结果', 'bad');
+        return;
+      }
       services = [];
       incidents = [];
       clear(summary);
@@ -479,10 +500,31 @@ export function mountMonitoring(target, api) {
       renderIncidents(incidentPanel, incidents);
       setNotice('监控数据不可用', 'bad');
     } finally {
-      refreshButton.disabled = false;
+      if (!disposed && !quiet) refreshButton.disabled = false;
     }
   }
 
   refreshButton.addEventListener('click', refresh);
   refresh();
+  function teardown() {
+    disposed = true;
+    suspended = true;
+    detailRequest += 1;
+    refreshRequest += 1;
+    nodeRequest += 1;
+    clear(target);
+  }
+  teardown.suspend = function () {
+    if (disposed || suspended) return;
+    suspended = true;
+    detailRequest += 1;
+    refreshRequest += 1;
+    nodeRequest += 1;
+  };
+  teardown.resume = function () {
+    if (disposed || !suspended) return;
+    suspended = false;
+    refresh({quiet: true});
+  };
+  return teardown;
 }
