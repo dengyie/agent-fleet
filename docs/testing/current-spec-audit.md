@@ -662,7 +662,7 @@ live job or report is marked passed for these checks. Real Chromium process
 egress isolation, Browserbase/credential decisions, notification rules and
 metadata-retention scope remain open product/infra work.
 
-## 2026-10-09 unknown browser mutation takeover fence
+## 2026-10-10 unknown browser mutation takeover fence
 
 A regression reproduced the `receipt_timeout` path: a claimed
 `tool.browser.click` was durably changed to `unknown`, then
@@ -678,6 +678,12 @@ replay the command, or infer Node termination. The regression is bound to
 `WINDOW-01` in `docs/testing/journeys.json`. The pre-fix test failed with
 `DID NOT RAISE ExecutionWindowRepositoryError`; after the fix, the focused
 execution-window, Node HTTP, submit approval and delivery suites passed **108
-tests**. Full journey, committed package and GitHub Linux CI evidence will be
-recorded after integration. Browser/submit production gates remain default-off;
-this is a control-plane fence and does not prove real Chromium termination.
+tests**. After integration, PR CI passed **3149 tests and 160 subtests**; the
+required journey report passed **29/29 journeys and 461 selectors**, with
+3149 JUnit cases and zero failures, errors, or skips. Main CI run 37968458252 passed
+test, release-evidence, package, and deploy. Its receiver receipt is
+**deployed / succeeded** for SHA f4a8178e3ac2ecfa69a5ba420c9b4ce62b53ed75; the rollback backup is /var/lib/agent-fleet-deploy/37968458252-f6ysx8j_.
+The public frontend manifest reports the full SHA, /healthz returns 200, and
+an anonymous /api/operator/session request returns 401. Browser/submit
+production gates remain default-off; this control-plane fence does not prove
+real Chromium termination.
