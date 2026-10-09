@@ -396,6 +396,12 @@ T3.6 adds a default-off browser contract to the existing Hub/Node command plane.
 
 The effective gates are `platform_browser_enabled` and `platform_browser_network_enabled`, each forced off unless the platform gate and its parent browser gate are enabled. External navigation additionally requires an exact configured origin, an HTTP(S) URL without embedded credentials, and global DNS/IP addresses. Loopback is allowed for disposable local fixtures. The later T3.7 slice implements redirect-chain validation and DNS-to-sockaddr pinning in the offline transport contract; that transport is not wired into a real browser driver, so browser-process egress enforcement and production network enablement remain out of scope.
 
+The local Node runtime also fails closed for state-changing browser capability:
+until a driver proves the complete T3.7 egress boundary, `browser.submit` is
+disabled and omitted from the Node executor allowlist and manifest even when a
+configuration requests the child submit flag. A configuration flag cannot
+advertise a capability whose network enforcement is unavailable.
+
 The only browser capability is `browser.session`. It expands to the fixed browser tool allowlist only when the Node is enabled and has a configured driver; a declared capability without a driver is omitted from the runtime manifest and local tool allowlist. Remote Run assembly checks the selected owner-scoped Node catalog entry before exposing browser tools to the model; the local runtime repeats its own availability check and has no Hub workspace-executor fallback. Arbitrary JavaScript, CDP evaluation, shell, raw commands, host PIDs, profile upload, cookies, credentials, and secrets are not part of the contract.
 
 Hub admission and Node execution both validate bounded browser arguments. Deterministic policy/backend errors are terminal `failed` receipts with stable codes; an exception after dispatch whose outcome cannot be determined remains `unknown` and is never automatically replayed. Screenshot output must be a real PNG with the `89 50 4e 47 0d 0a 1a 0a` signature and is limited to `256 KiB`. It is uploaded through a one-time ticket using the node credential and separate upload headers, then replaced by bounded artifact metadata before journal, receipt, Run event, or model serialization. The ticket stores only a token digest and enforces owner/workspace/run/node/command scope, expiry, size, hash, idempotency, reset, and consumed replay semantics.

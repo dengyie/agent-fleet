@@ -166,6 +166,32 @@ def test_node_runtime_forces_browser_external_network_off_without_egress_proof(t
         )
 
 
+def test_node_runtime_does_not_advertise_submit_without_egress_proof(tmp_path):
+    class Driver:
+        def open(self, _url):
+            return None
+
+        def submit(self, _selector):
+            return {"state": "submitted"}
+
+    config = NodeRuntimeConfig(
+        node_id="node-a", credential="node-a:secret",
+        workspace_root=tmp_path / "workspace",
+        journal_path=tmp_path / "journal.db",
+        hub_url="https://hub.invalid", public_key=PUBLIC_KEY,
+        capabilities=frozenset({"browser.session"}), browser_enabled=True,
+        browser_network_enabled=True, browser_submit_enabled=True,
+        browser_allowed_origins=("https://one.example",),
+        browser_driver_factory=Driver,
+    )
+    runtime = NodeRuntime(config, transport=object())
+
+    assert runtime.browser_backend.network_enabled is False
+    assert runtime.browser_backend.submit_enabled is False
+    assert "browser.submit" not in runtime.executor.allowed_tools
+    assert "browser.submit" not in runtime.manifest()["capabilities"]
+
+
 class _Transport:
     def __init__(self, client):
         self.client = client
@@ -536,8 +562,8 @@ def test_node_runtime_submit_gate_requires_browser_and_default_off(tmp_path):
         browser_submit_enabled=True, browser_network_enabled=True, browser_driver_factory=Driver,
     )
     submit_runtime = NodeRuntime(submit_config, transport=object())
-    assert "browser.submit" in submit_runtime.executor.allowed_tools
-    assert submit_runtime.browser_backend.submit_enabled is True
+    assert "browser.submit" not in submit_runtime.executor.allowed_tools
+    assert submit_runtime.browser_backend.submit_enabled is False
     with pytest.raises(BrowserBackendError, match="network_disabled"):
         submit_runtime.browser_backend.execute(
             "browser.open", {"url": "http://localhost:3000"}, run_id="run-a")
