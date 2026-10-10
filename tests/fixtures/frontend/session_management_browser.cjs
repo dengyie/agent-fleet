@@ -11,7 +11,7 @@ const origin = process.argv[2];
     fs.mkdirSync('/tmp/agent-fleet-management-evidence', {recursive: true});
     for (const width of [390, 1440]) {
       await page.setViewportSize({width, height: 1000});
-      await page.goto(origin + '/session/questions-' + width);
+      await page.goto(origin + '/session/questions-' + width, {waitUntil: 'domcontentloaded'});
       await page.locator('.session-agent-state').filter({hasText:'等待用户回答'}).waitFor();
       for (const kind of ['single', 'multi', 'text', 'confirm']) {
         const card = page.locator('[data-request-id="' + kind + '"]');
@@ -40,7 +40,7 @@ const origin = process.argv[2];
       }
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
       await page.screenshot({path:`/tmp/agent-fleet-management-evidence/questions-${width}.png`, fullPage:true});
-      await page.goto(origin + '/session/questions-' + width + '?sequence=5');
+      await page.goto(origin + '/session/questions-' + width + '?sequence=5', {waitUntil: 'domcontentloaded'});
       await page.locator('#session-event-5.session-event-match').waitFor();
       assert.equal(await page.locator('#session-event-5').evaluate(node => document.activeElement === node), true);
     }

@@ -210,6 +210,14 @@ def test_unknown_test_numbers_and_unmanaged_state_are_not_facts():
     assert snapshot["tests"] == {}
 
 
+def test_structured_test_results_survive_snapshot_budget():
+    summary = {"passed": 12, "failed": 0, "skipped": 2, "errors": 0,
+               "framework": "pytest", "duration_s": 1.25}
+    snapshot = build_handoff_snapshot({}, [], {"test_summary": summary})
+    assert snapshot["tests"] == summary
+    assert "pytest" in render_handoff_prompt(snapshot)
+
+
 def test_latest_complete_message_and_bounded_policy_signals():
     snapshot = build_handoff_snapshot({"handoff_signals": [{"severity": "warn", "reason": "API_KEY=hidden-value"}]},
         [event(1, "assistant_message", {"text": "complete", "is_complete": True}),

@@ -528,12 +528,10 @@ class SessionService:
                             raise SessionServiceError(reconcile_exc.code) from reconcile_exc
                     return {"session_id": session_id,
                             "command_id": existing["command_id"], "status": "queued"}
-                if supports_idempotency and callable(find_idempotency):
-                    # A crash can occur after reserving the answer but before
-                    # inserting its command. The stable outbox key makes this
-                    # retry safe even if another request is enqueueing it now.
-                    pass
-                else:
+                # A crash can occur after reserving the answer but before
+                # inserting its command. Retry is safe only when the outbox
+                # can deduplicate the stable key.
+                if not supports_idempotency or not callable(find_idempotency):
                     raise SessionServiceError(exc.code) from exc
             else:
                 raise SessionServiceError(exc.code) from exc

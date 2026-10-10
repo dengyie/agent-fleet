@@ -79,7 +79,7 @@ class SessionSearchService:
                 metadata = self.task_repository.get_session_search_metadata(
                     session["attempt_id"], session.get("machine_id", "")) or {}
             count = 0
-            for row in rows:
+            for index, row in enumerate(rows):
                 result = self.index_event(
                     row, machine_id=session.get("machine_id"),
                     project_id=metadata.get("project"),
@@ -87,6 +87,13 @@ class SessionSearchService:
                 )
                 count += int(result["indexed"])
                 if result["code"] is not None:
+                    queue_pending = getattr(self.repository, "queue_pending_events", None)
+                    if callable(queue_pending) and index + 1 < len(rows):
+                        queue_pending(
+                            rows[index + 1:], machine_id=session.get("machine_id"),
+                            project_id=metadata.get("project"),
+                            agent_family=metadata.get("agent_type") or session.get("agent_family"),
+                        )
                     return {"indexed": count, "code": result["code"]}
             return {"indexed": count, "code": None}
         except (TranscriptError, SessionError, sqlite3.Error, OSError):

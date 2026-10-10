@@ -800,6 +800,12 @@ function renderSignalPanel(host, signals) {
 
 function noop() {}
 
+function normalizeSequence(value) {
+  var sequence = typeof value === 'string' ? value : '';
+  return /^[1-9][0-9]{0,18}$/.test(sequence) &&
+    BigInt(sequence) <= 9223372036854775807n ? sequence : '';
+}
+
 /**
  * @param {Element} root      挂载点
  * @param {string}  sessionId 会话 id（URL 已解码的 opaque 标识）
@@ -808,7 +814,7 @@ function noop() {}
  *                            getSessionSignals）
  * @returns {function} teardown
  */
-export function mountSession(root, sessionId, store, client) {
+export function mountSession(root, sessionId, store, client, routeSequence) {
   if (!root || !store || typeof sessionId !== 'string' || !sessionId) {
     return noop;
   }
@@ -820,8 +826,9 @@ export function mountSession(root, sessionId, store, client) {
   }
 
   var disposed = false;
-  var sequenceParam = new URLSearchParams(window.location.search).get('sequence') || '';
-  var targetSequence = /^[1-9][0-9]{0,18}$/.test(sequenceParam) && BigInt(sequenceParam) <= 9223372036854775807n ? sequenceParam : '';
+  var sequenceParam = routeSequence === undefined
+    ? new URLSearchParams(window.location.search).get('sequence') : routeSequence;
+  var targetSequence = normalizeSequence(sequenceParam);
   var jumpPending = Boolean(targetSequence);
   var handoffHost = h('section', 'panel session-handoff-host');
   var disposeHandoff = mountHandoffPanel(handoffHost, {api: clientMethods, sessionId: sessionId});
@@ -847,6 +854,7 @@ export function mountSession(root, sessionId, store, client) {
   var lastSummaryKey = '';
   var summaryRefreshInFlight = false;
   var summaryRefreshPending = false;
+  var pageGeneration = 0;
 
   function refreshFromSummary() {
     if (viewState.disposed || typeof store.getState !== 'function') {
@@ -874,10 +882,12 @@ export function mountSession(root, sessionId, store, client) {
     }
     lastSummaryKey = key;
     summaryRefreshInFlight = true;
+    var generation = pageGeneration;
+    var afterSequence = viewState.pageStarts[viewState.pageStarts.length - 1];
     var jobs = [];
     if (typeof clientMethods.getSessionEvents === 'function') {
-      jobs.push(clientMethods.getSessionEvents(sessionId, 101, viewState.pageStarts[viewState.pageStarts.length - 1]).then(function (events) {
-        if (!viewState.disposed && events && Array.isArray(events.events)) {
+      jobs.push(clientMethods.getSessionEvents(sessionId, 101, afterSequence).then(function (events) {
+        if (!viewState.disposed && generation === pageGeneration && events && Array.isArray(events.events)) {
           viewState.hasNextPage = events.events.length > 100;
           viewState.events = events.events.slice(0, 100);
         }
@@ -885,13 +895,13 @@ export function mountSession(root, sessionId, store, client) {
     }
     if (typeof clientMethods.getSession === 'function') {
       jobs.push(clientMethods.getSession(sessionId).then(function (detail) {
-        if (!viewState.disposed && detail && detail.session) {
+        if (!viewState.disposed && generation === pageGeneration && detail && detail.session) {
           viewState.session = detail.session;
         }
       }));
     }
     Promise.all(jobs).then(function () {
-      if (!viewState.disposed) {
+      if (!viewState.disposed && generation === pageGeneration) {
         render();
       }
     }).catch(function () {
@@ -999,12 +1009,14 @@ export function mountSession(root, sessionId, store, client) {
     previous.disabled = viewState.pageStarts.length < 2;
     previous.addEventListener('click', function () {
       viewState.pageStarts.pop();
+      pageGeneration += 1;
       viewState.loading = true; render(); loadSync();
     });
     var next = h('button', null, '下一页');
     next.disabled = !viewState.hasNextPage;
     next.addEventListener('click', function () {
       viewState.pageStarts.push(viewState.events[viewState.events.length - 1].sequence);
+      pageGeneration += 1;
       viewState.loading = true; render(); loadSync();
     });
     pages.appendChild(previous);
@@ -1025,18 +1037,21 @@ export function mountSession(root, sessionId, store, client) {
     var signalsPanel = h('section', 'panel');
     renderSignalPanel(signalsPanel, viewState.signals);
     root.appendChild(signalsPanel);
-    if (jumpPending) {
+    if (targetSequence) {
       var target = document.getElementById('session-event-' + targetSequence);
       if (target) {
         target.classList.add('session-event-match');
-        target.focus();
-        target.scrollIntoView({block: 'center'});
-        jumpPending = false;
+        if (jumpPending) {
+          target.focus();
+          target.scrollIntoView({block: 'center'});
+          jumpPending = false;
+        }
       }
     }
   }
 
   function loadSync() {
+    var generation = pageGeneration;
     var jobs = [
       clientMethods.getSession(sessionId),
       clientMethods.getSessionEvents(sessionId, 101, viewState.pageStarts[viewState.pageStarts.length - 1]),
@@ -1053,7 +1068,7 @@ export function mountSession(root, sessionId, store, client) {
     }
     Promise.all(jobs)
       .then(function (results) {
-        if (disposed) {
+        if (disposed || generation !== pageGeneration) {
           return;
         }
         var detail = results[0] || null;
@@ -1074,7 +1089,7 @@ export function mountSession(root, sessionId, store, client) {
         if (flags.apply_local_profile && typeof machineId === 'string' &&
             machineId && typeof clientMethods.getMachine === 'function') {
           return clientMethods.getMachine(machineId).then(function (machine) {
-            if (disposed) {
+            if (disposed || generation !== pageGeneration) {
               return;
             }
             if (typeof store.setMachine === 'function') {
@@ -1085,7 +1100,7 @@ export function mountSession(root, sessionId, store, client) {
               ? current.local_profiles : [];
             render();
           }).catch(function () {
-            if (disposed) {
+            if (disposed || generation !== pageGeneration) {
               return;
             }
             viewState.localProfiles = [];
@@ -1095,13 +1110,28 @@ export function mountSession(root, sessionId, store, client) {
         render();
       })
       .catch(function (err) {
-        if (disposed) {
+        if (disposed || generation !== pageGeneration) {
           return;
         }
         viewState.loading = false;
         viewState.error = (err && err.detail) ? err.detail : '未知错误';
         render();
       });
+  }
+
+  function updateSequence(value) {
+    var nextSequence = normalizeSequence(value);
+    if (nextSequence === targetSequence) return;
+    targetSequence = nextSequence;
+    jumpPending = Boolean(nextSequence);
+    var currentMatch = root.querySelector('.session-event-match');
+    if (currentMatch) currentMatch.classList.remove('session-event-match');
+    viewState.pageStarts = [nextSequence ? String(BigInt(nextSequence) - 1n) : 0];
+    pageGeneration += 1;
+    viewState.loading = true;
+    viewState.error = null;
+    render();
+    loadSync();
   }
 
   // 首帧即渲染（loading 态），随后异步拉取数据。
@@ -1142,5 +1172,6 @@ export function mountSession(root, sessionId, store, client) {
         viewState.receiptPending.attempt);
     }
   };
+  teardown.updateSequence = updateSequence;
   return teardown;
 }

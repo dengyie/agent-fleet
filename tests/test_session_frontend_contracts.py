@@ -276,7 +276,7 @@ class SessionFrontendModuleTests(unittest.TestCase):
 
     def test_session_view_exports_mount_session(self):
         source = SESSION_JS.read_text()
-        self.assertIn('export function mountSession(root, sessionId, store, client)',
+        self.assertIn('export function mountSession(root, sessionId, store, client, routeSequence)',
                       source)
         self.assertIn('function teardown()', source)
         self.assertIn('teardown.suspend', source)

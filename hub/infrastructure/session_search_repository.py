@@ -421,6 +421,19 @@ class SessionSearchRepository:
         except (TypeError, ValueError, OSError, sqlite3.Error, SessionSearchRepositoryError):
             return
 
+    def queue_pending_events(self, events: list[Mapping[str, Any]], *,
+                             machine_id: str | None = None,
+                             project_id: str | None = None,
+                             agent_family: str | None = None) -> None:
+        """Queue a bounded accepted batch after one index write fails."""
+        if not isinstance(events, list) or len(events) > 100:
+            return
+        for event in events:
+            if isinstance(event, Mapping):
+                self._queue_pending(event, machine_id=machine_id,
+                                    project_id=project_id,
+                                    agent_family=agent_family)
+
     def _replay_pending(self) -> None:
         while True:
             conn = self._connect()

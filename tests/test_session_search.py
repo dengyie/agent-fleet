@@ -304,6 +304,40 @@ class SessionSearchApiTests(unittest.TestCase):
         rows = self.client.get("/api/sessions/session-1/events").get_json()["events"]
         self.assertEqual(len(rows), 1)
 
+    def test_batch_index_failure_queues_remaining_durable_events(self) -> None:
+        search = self.app.extensions["fleet"]["services"]["session_search"]
+        repository = search.repository
+        connect = repository._connect
+        failed = {"once": False}
+
+        def transient_once():
+            if not failed["once"]:
+                failed["once"] = True
+                raise sqlite3.OperationalError("transient index failure")
+            return connect()
+
+        rows = []
+        for sequence in range(1, 4):
+            row = event(event_id=f"evt-{sequence}", sequence=sequence,
+                        text=f"恢复批次{sequence}")
+            row.pop("agent_family")
+            row.pop("project_id")
+            row.update(schema_version=1, stream_id="stream-1",
+                       capture_quality="structured", source="bridge",
+                       process_group_id="group-1", attempt_id="attempt-1")
+            rows.append(row)
+
+        with patch.object(repository, "_connect", side_effect=transient_once):
+            response = self.client.post(
+                "/api/session-events", json=rows,
+                headers={"X-Agent-Fleet-Token": "ingest-test"})
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.get_json()["accepted_through"], 3)
+        result = self.client.get("/api/session-search?q=恢复批次3")
+        self.assertEqual(result.status_code, 200, result.get_json())
+        self.assertEqual([item["sequence"] for item in result.get_json()["items"]], [3])
+
     def test_index_reads_persisted_projection_instead_of_input(self) -> None:
         sessions = self.app.extensions["fleet"]["services"]["sessions"]
         original = sessions.transcript_repo.read_redacted_events

@@ -28,7 +28,8 @@ export function resolveRoute(location = window.location) {
     try { id = decodeURIComponent(id); } catch (_) { return {page: 'invalid', id: null}; }
   }
   if (page === 'conversation') return {page: 'assistant', id};
-  return {page: labels[page] ? page : 'invalid', id};
+  return {page: labels[page] ? page : 'invalid', id,
+    sequence: page === 'session' ? query.get('sequence') : null};
 }
 export function mountNavigation(route, store) {
   document.querySelectorAll('[data-icon]').forEach(slot => slot.replaceChildren(uiIcon(slot.dataset.icon, {size: 18})));

@@ -17,7 +17,7 @@ const origin = process.argv[2];
     fs.mkdirSync(output, {recursive: true});
     for (const width of [1440, 390]) {
       await page.setViewportSize({width, height: 900});
-      await page.goto(origin + '/session-search');
+      await page.goto(origin + '/session-search', {waitUntil: 'domcontentloaded'});
       await page.getByRole('searchbox', {name: '搜索内容', exact: true}).fill('登录');
       await page.getByLabel('机器', {exact: true}).fill('search-node');
       await page.getByLabel('项目', {exact: true}).fill('search-project');
@@ -36,8 +36,19 @@ const origin = process.argv[2];
       await page.locator('#session-event-143').waitFor();
       assert.equal(await page.locator('#session-event-143').isVisible(), true);
       assert.ok((await page.locator('#session-event-143').textContent()).includes('登录完成'));
+      await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate', {
+        detail: {path: '/session-search'}
+      })));
+      const cachedSearchLink = page.locator('.session-search-result a').first();
+      await cachedSearchLink.evaluate(node => {
+        node.href = '/session/search-session?sequence=144';
+      });
+      await cachedSearchLink.click();
+      await page.locator('#session-event-144.session-event-match').waitFor();
+      assert.equal(await page.locator('#session-event-144').evaluate(node =>
+        document.activeElement === node), true);
     }
-    await page.goto(origin + '/session-search');
+    await page.goto(origin + '/session-search', {waitUntil: 'domcontentloaded'});
     await page.getByRole('searchbox', {name: '搜索内容', exact: true}).fill('记录');
     await page.getByRole('button', {name: '搜索', exact: true}).click();
     await page.getByText('本页 50 条结果', {exact: true}).waitFor();
@@ -52,7 +63,7 @@ const origin = process.argv[2];
     await large.click();
     await page.locator('#session-event-9007199254740993').waitFor();
     assert.equal(await page.locator('#session-event-9007199254740993 .session-event-seq').textContent(), '#9007199254740993');
-    await page.goto(origin + '/session-search');
+    await page.goto(origin + '/session-search', {waitUntil: 'domcontentloaded'});
     await page.getByRole('searchbox', {name: '搜索内容', exact: true}).fill('登录');
     await page.route('**/api/session-search?**', route => route.fulfill({status: 503, json: {ok: false, error: 'search_disabled'}}));
     await page.getByRole('button', {name: '搜索', exact: true}).click();

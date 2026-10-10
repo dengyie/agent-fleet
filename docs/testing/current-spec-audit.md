@@ -719,9 +719,9 @@ the journey report is clean with all 29 required journeys passed. The receiver
 receipt is `deployed/succeeded`, with backup
 `/var/lib/agent-fleet-deploy/37984348242-5b9_jbc1`.
 
-Independent production probes returned the same SHA from
-`https://agent.mangoqwq.com/manifest.json`, `/healthz` HTTP 200, and anonymous
-`/api/operator/session` HTTP 401. This closes merge/package/deploy evidence for
+Independent production probes confirmed the deployed SHA in the public
+manifest, `/healthz` HTTP 200, and anonymous `/api/operator/session` HTTP 401.
+This closes merge/package/deploy evidence for
 the capability-advertisement repair. It does not prove a real browser driver or
 three-layer process/socket egress boundary; browser and submit gates remain
 default-off. `MODEL-LIVE`, `MAIL-LIVE`, `NODE-LIVE`, and `DEPLOY-LIVE` external

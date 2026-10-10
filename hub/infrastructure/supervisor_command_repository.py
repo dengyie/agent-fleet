@@ -202,35 +202,6 @@ class SupervisorCommandRepository:
         finally:
             conn.close()
 
-    def list_available(self, machine: str, now_s: float, limit: int) -> list[dict[str, Any]]:
-        conn = self._connect()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute(
-                "SELECT * FROM supervisor_commands WHERE machine_id=? AND "
-                "status IN ('queued','delivered') AND lease_until_s<=? AND expires_s>=? "
-                "ORDER BY issued_s ASC, command_id ASC LIMIT ?",
-                (machine, float(now_s), float(now_s), int(limit)),
-            ).fetchall()
-            return [self._decode(row) for row in rows]  # type: ignore[misc]
-        except (sqlite3.Error, OSError) as exc:
-            conn.rollback()
-            raise SupervisorCommandRepositoryError("command_unavailable") from exc
-        finally:
-            conn.rollback()
-            conn.close()
-
-    def mark_delivered(self, command_id: str, lease_until_s: float) -> None:
-        conn = self._connect()
-        try:
-            conn.execute("UPDATE supervisor_commands SET status='delivered', lease_until_s=? "
-                         "WHERE command_id=? AND status IN ('queued','delivered')",
-                         (float(lease_until_s), command_id))
-        except (sqlite3.Error, OSError) as exc:
-            raise SupervisorCommandRepositoryError("command_unavailable") from exc
-        finally:
-            conn.close()
-
     def claim_available(self, machine: str, now_s: float, limit: int,
                         lease_until_s: float) -> list[dict[str, Any]]:
         """Atomically lease a poll batch so concurrent workers cannot double-send."""
