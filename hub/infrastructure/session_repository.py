@@ -28,14 +28,18 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from hub.domain.session import accepts_agent_state
 
 from session_schema import (
+    AGENT_STATE_CONFIDENCES,
+    AGENT_STATE_SOURCES,
+    AGENT_STATES,
     CAPTURE_QUALITIES,
     is_valid_session_id,
     normalize_managed,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _FAMILY_REJECT_MARKERS = ("/", "\\", "token", "key", "secret", "private", "password")
 
@@ -79,6 +83,7 @@ class SessionRepository:
 
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
+        self.management_available = False
 
     # -- connection / schema ---------------------------------------------------
 
@@ -94,8 +99,8 @@ class SessionRepository:
             raise
         return conn
 
-    def _migrate_v2(self, conn) -> None:
-        """Idempotent v1->v2: add the ``agent_family`` column.
+    def _migrate_v3(self, conn) -> None:
+        """Idempotent v1/v2->v3: add family and lifecycle summary columns.
 
         Only the harmless "column already present" failure is swallowed; any
         other failure (locked/read-only DB) is re-raised so a broken
@@ -104,17 +109,32 @@ class SessionRepository:
         """
         cols = {row["name"] for row in conn.execute(
             "PRAGMA table_info(sessions)")}
-        if "agent_family" in cols:
-            return
-        try:
-            conn.execute("ALTER TABLE sessions ADD COLUMN agent_family TEXT")
-        except sqlite3.OperationalError:
-            # Another writer added the column concurrently between our
-            # PRAGMA and the ALTER; verify rather than swallow.
-            cols = {row["name"] for row in conn.execute(
-                "PRAGMA table_info(sessions)")}
-            if "agent_family" not in cols:
-                raise
+        additions = {
+            "agent_family": "TEXT",
+            "current_state": "TEXT NOT NULL DEFAULT 'unknown'",
+            "state_source": "TEXT NOT NULL DEFAULT 'unknown'",
+            "state_confidence": "TEXT NOT NULL DEFAULT 'low'",
+            "state_sequence": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, declaration in additions.items():
+            if name in cols:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE sessions ADD COLUMN {name} {declaration}")
+            except sqlite3.OperationalError:
+                # Another writer may have completed this idempotent migration
+                # between PRAGMA and ALTER; verify before continuing.
+                cols = {row["name"] for row in conn.execute(
+                    "PRAGMA table_info(sessions)")}
+                if name not in cols:
+                    raise
+        conn.execute("CREATE TABLE IF NOT EXISTS interaction_requests ("
+            "session_id TEXT NOT NULL,request_id TEXT NOT NULL,sequence INTEGER NOT NULL,"
+            "payload TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',client_token TEXT,"
+            "answer TEXT,command_id TEXT,PRIMARY KEY(session_id,request_id),UNIQUE(session_id,client_token))")
+        stream_columns = {row["name"] for row in conn.execute("PRAGMA table_info(stream_state)")}
+        if "capability_sequence" not in stream_columns:
+            conn.execute("ALTER TABLE stream_state ADD COLUMN capability_sequence INTEGER NOT NULL DEFAULT 0")
 
     def init(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -137,6 +157,10 @@ class SessionRepository:
                     process_group_id TEXT,
                     attempt_id TEXT,
                     agent_family TEXT,
+                    current_state TEXT NOT NULL DEFAULT 'unknown',
+                    state_source TEXT NOT NULL DEFAULT 'unknown',
+                    state_confidence TEXT NOT NULL DEFAULT 'low',
+                    state_sequence INTEGER NOT NULL DEFAULT 0,
                     finished_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS stream_state (
@@ -154,11 +178,20 @@ class SessionRepository:
                     ON sessions(machine_id);
                 """
             )
-            self._migrate_v2(conn)
-            conn.execute(
-                "INSERT OR REPLACE INTO meta (key, value)"
-                " VALUES ('schema_version', ?)",
-                (str(SCHEMA_VERSION),))
+            # v2 remains required by legacy ingestion; v3 is an optional read model.
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
+            if "agent_family" not in columns:
+                conn.execute("ALTER TABLE sessions ADD COLUMN agent_family TEXT")
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                self._migrate_v3(conn)
+                conn.execute("INSERT OR REPLACE INTO meta (key,value) VALUES ('schema_version',?)",
+                             (str(SCHEMA_VERSION),))
+                conn.commit()
+                self.management_available = True
+            except sqlite3.Error:
+                conn.rollback()
+                self.management_available = False
         finally:
             conn.close()
 
@@ -203,6 +236,10 @@ class SessionRepository:
         status = row.get("status")
         if status not in _KNOWN_STATUS:
             status = "unknown"
+        try:
+            state_sequence = max(0, int(row.get("state_sequence") or 0))
+        except (TypeError, ValueError, OverflowError):
+            state_sequence = 0
         return {
             "session_id": str(row.get("session_id") or ""),
             "machine_id": str(row.get("machine_id") or ""),
@@ -212,6 +249,16 @@ class SessionRepository:
             "process_group_id": row.get("process_group_id"),
             "attempt_id": row.get("attempt_id"),
             "agent_family": str(row.get("agent_family") or "")[:64],
+            "current_state": (row.get("current_state")
+                              if row.get("current_state") in AGENT_STATES
+                              else "unknown"),
+            "state_source": (row.get("state_source")
+                             if row.get("state_source") in AGENT_STATE_SOURCES
+                             else "unknown"),
+            "state_confidence": (row.get("state_confidence")
+                                 if row.get("state_confidence") in AGENT_STATE_CONFIDENCES
+                                 else "low"),
+            "state_sequence": state_sequence,
             "started_at": row.get("started_at"),
             "updated_at": row.get("updated_at"),
             "finished_at": row.get("finished_at"),
@@ -370,6 +417,56 @@ class SessionRepository:
         finally:
             conn.close()
         return self._clean_row(row)
+
+    def update_agent_state(self, session_id: str, state: str, source: str,
+                           confidence: str, sequence: int) -> dict[str, Any] | None:
+        """Apply one candidate lifecycle state using deterministic precedence.
+
+        Event history remains authoritative in the transcript store.  This
+        method only updates the bounded session summary and never upgrades an
+        unmanaged session.  Newer sequence wins; source and confidence break
+        ties, while a lower-confidence reverse transition cannot displace the
+        current state unless it comes from a more authoritative source.
+        """
+        self._validate_session_id(session_id)
+        if not self.management_available:
+            raise SessionError("feature_unavailable")
+        if state not in AGENT_STATES or source not in AGENT_STATE_SOURCES:
+            raise SessionError("invalid_agent_state")
+        if confidence not in AGENT_STATE_CONFIDENCES:
+            raise SessionError("invalid_agent_state")
+        if source == "pty" and (state not in ("unknown", "idle") or confidence != "low"):
+            raise SessionError("invalid_agent_state")
+        if (isinstance(sequence, bool) or not isinstance(sequence, int)
+                or not 1 <= sequence <= (1 << 63) - 1):
+            raise SessionError("invalid_event_sequence")
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT managed,current_state,state_source,state_confidence,state_sequence"
+                " FROM sessions WHERE session_id=?", (session_id,)).fetchone()
+            if row is None:
+                conn.rollback()
+                return None
+            if accepts_agent_state(row, state, source, confidence, sequence):
+                now = _now_iso()
+                conn.execute(
+                    "UPDATE sessions SET current_state=?, state_source=?,"
+                    " state_confidence=?, state_sequence=?, updated_at=?"
+                    " WHERE session_id=?",
+                    (state, source, confidence, sequence, now, session_id),
+                )
+            conn.commit()
+            result = conn.execute(
+                "SELECT * FROM sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return self._clean_row(result) if result is not None else None
 
     def close_session(self, session_id: str, status: str,
                       finished_at: str) -> dict[str, Any] | None:
@@ -575,11 +672,105 @@ class SessionRepository:
 
     # -- capabilities -------------------------------------------------------------------
 
-    def set_capabilities(self, session_id: str, capabilities: list) -> None:
+    def project_interaction(self, session_id: str, sequence: int, kind: str, payload: dict) -> None:
+        """Project only accepted question records, preserving the first request identity."""
         self._validate_session_id(session_id)
-        bounded = [str(c)[:128] for c in (capabilities or [])][:256]
         conn = self._connect()
         try:
+            if kind == "interaction_request":
+                conn.execute("INSERT INTO interaction_requests"
+                    " (session_id,request_id,sequence,payload) VALUES (?,?,?,?)"
+                    " ON CONFLICT(session_id,request_id) DO UPDATE SET payload=excluded.payload"
+                    " WHERE interaction_requests.payload='{}'",
+                    (session_id, payload["request_id"], sequence, json.dumps(payload)))
+            elif kind == "interaction_response":
+                conn.execute("INSERT INTO interaction_requests"
+                    " (session_id,request_id,sequence,payload,status) VALUES (?,?,?,'{}','answered')"
+                    " ON CONFLICT(session_id,request_id) DO UPDATE SET status='answered'"
+                    " WHERE interaction_requests.status='pending' AND interaction_requests.sequence<excluded.sequence",
+                    (session_id, payload["request_id"], sequence))
+            elif kind == "session_close":
+                conn.execute("UPDATE interaction_requests SET status='expired'"
+                    " WHERE session_id=? AND status='pending' AND sequence<?", (session_id, sequence))
+        finally:
+            conn.close()
+
+    def get_interaction(self, session_id: str, request_id: str) -> dict | None:
+        self._validate_session_id(session_id)
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT payload FROM interaction_requests"
+                " WHERE session_id=? AND request_id=?", (session_id, request_id)).fetchone()
+            body = json.loads(row["payload"]) if row else None
+            return body if body and "question_type" in body else None
+        finally:
+            conn.close()
+
+    def reserve_interaction(self, session_id: str, request_id: str, client_token: str,
+                            answer: dict) -> dict | None:
+        """Durable claim BEFORE issuing I/O; interrupted dispatch never issues twice."""
+        encoded = json.dumps(answer, sort_keys=True, separators=(",", ":"))
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT status,client_token,answer,command_id"
+                " FROM interaction_requests WHERE session_id=? AND request_id=?",
+                (session_id, request_id)).fetchone()
+            if row is None or row["status"] == "expired":
+                raise SessionError("interaction_expired")
+            if row["status"] != "pending":
+                if row["client_token"] != client_token or row["answer"] != encoded:
+                    raise SessionError("interaction_answered")
+                if not row["command_id"]:
+                    raise SessionError("interaction_pending" if row["status"] == "dispatching" else "interaction_unavailable")
+                return {"session_id": session_id, "command_id": row["command_id"], "status": "queued"}
+            conn.execute("UPDATE interaction_requests SET status='dispatching',client_token=?,answer=?"
+                " WHERE session_id=? AND request_id=?", (client_token, encoded, session_id, request_id))
+            conn.commit()
+            return None
+        except sqlite3.IntegrityError as exc:
+            raise SessionError("interaction_answered") from exc
+        finally:
+            if conn.in_transaction:
+                conn.rollback()
+            conn.close()
+
+    def finish_interaction(self, session_id: str, request_id: str, command_id: str | None) -> None:
+        conn = self._connect()
+        try:
+            cur = conn.execute("UPDATE interaction_requests SET status=?,command_id=?"
+                " WHERE session_id=? AND request_id=? AND status='dispatching'",
+                ("answered" if command_id else "failed", command_id, session_id, request_id))
+            if cur.rowcount != 1:
+                raise SessionError("interaction_pending" if command_id else "interaction_unavailable")
+        finally:
+            conn.close()
+
+    def interaction_command(self, session_id: str, request_id: str) -> str | None:
+        self._validate_session_id(session_id)
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT command_id FROM interaction_requests WHERE session_id=? AND request_id=?",
+                (session_id, request_id)).fetchone()
+            return row["command_id"] if row and row["command_id"] else None
+        finally:
+            conn.close()
+
+    def set_capabilities(self, session_id: str, capabilities: list, *, sequence: int | None = None) -> None:
+        self._validate_session_id(session_id)
+        if sequence is not None and (type(sequence) is not int or not 1 <= sequence <= (1 << 63) - 1):
+            raise SessionError("invalid_event_sequence")
+        bounded = [str(c)[:128] for c in (capabilities or [])][:256]
+        encoded = json.dumps(bounded, ensure_ascii=True)
+        conn = self._connect()
+        try:
+            if sequence is not None:
+                conn.execute("INSERT INTO stream_state (session_id,capabilities,capability_sequence) VALUES (?,?,?)"
+                    " ON CONFLICT(session_id) DO UPDATE SET capabilities=excluded.capabilities,"
+                    " capability_sequence=excluded.capability_sequence WHERE excluded.capability_sequence>stream_state.capability_sequence",
+                    (session_id, encoded, sequence))
+                return
             conn.execute(
                 "INSERT INTO stream_state (session_id, last_sequence,"
                 " ack_sequence, capabilities) VALUES (?, 0, 0, ?)"

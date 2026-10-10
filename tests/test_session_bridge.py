@@ -653,7 +653,7 @@ class NativeTranscriptShapeTests(BridgeBase):
         self.assertTrue(bridge.ingest_native(str(path)) > 0)
         rows = bridge.spool.read_after(0, 20, 1 << 20)
         kinds = [r.get("kind") for r in rows]
-        self.assertEqual([k for k in kinds if k != "session_start"],
+        self.assertEqual([k for k in kinds if k not in ("session_start", "agent_state_changed")],
                          ["user_message"])
 
 
@@ -812,7 +812,7 @@ class PiTranscriptShapeTests(BridgeBase):
         assistant = next(r for r in rows if r["kind"] == "assistant_message")
         self.assertEqual(assistant["payload"]["text"], "done")
         # the empty assistant row yields nothing; thinking never leaks
-        self.assertEqual([k for k in kinds if k != "session_start"],
+        self.assertEqual([k for k in kinds if k not in ("session_start", "agent_state_changed")],
                          ["user_message", "assistant_message"])
 
     def test_tool_call_and_tool_result_roles_map(self):
@@ -884,7 +884,7 @@ class PiTranscriptShapeTests(BridgeBase):
         self.assertTrue(bridge.ingest_native(str(path)) > 0)
         rows = bridge.spool.read_after(0, 20, 1 << 20)
         shaped = [(r["kind"], r["payload"]) for r in rows
-                  if r["kind"] != "session_start"]
+                  if r["kind"] not in ("session_start", "agent_state_changed")]
         self.assertEqual([k for k, _ in shaped],
                          ["assistant_message", "tool_call",
                           "assistant_message", "tool_call"])

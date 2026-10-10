@@ -41,6 +41,9 @@ from typing import Any, Mapping
 
 import session_schema
 from session_schema import (
+    AGENT_STATE_CONFIDENCES,
+    AGENT_STATE_SOURCES,
+    AGENT_STATES,
     EVENT_KINDS,
     SCHEMA_VERSION,
     normalize_managed,
@@ -689,6 +692,8 @@ class SessionBridge:
         start = self._build("session_start", payload={
             "agent_family": self._agent_family,
             "adapter": self.source or "metadata",
+            "interactive_questions": self._manifest.get("interactive_questions") is True
+                and self.source in ("hooks", "structured_stream", "native_transcript"),
         })
         self._emit_direct(start)
         self._started = True
@@ -857,6 +862,8 @@ class SessionBridge:
         return self._handle_raw("structured_stream", raw)
 
     def _handle_raw(self, source: str, raw) -> bool:
+        if source not in self.sources:
+            return False
         if self._preserve_source:
             self.record_source(raw)
         if source == "structured_stream":
@@ -884,12 +891,32 @@ class SessionBridge:
                 raise RuntimeError("source_record_not_persisted")
 
     def _handle_structured(self, raw) -> bool:
-        return self._emit_all(self._normalize(raw))
+        events = self._normalize(raw)
+        state = self._state_event_from_raw("structured_stream", raw)
+        if isinstance(events, dict):
+            events = [events]
+        else:
+            events = list(events or [])
+        if state is not None:
+            events.append(state)
+        elif self.managed:
+            events.extend(self._states_from_events("structured_stream", events))
+        return self._emit_all(events, source="structured_stream")
 
     def _handle_native(self, raw) -> bool:
-        return self._emit_all(self._normalize(raw))
+        events = self._normalize(raw)
+        state = self._state_event_from_raw("native_transcript", raw)
+        if isinstance(events, dict):
+            events = [events]
+        else:
+            events = list(events or [])
+        if state is not None:
+            events.append(state)
+        elif self.managed:
+            events.extend(self._states_from_events("native_transcript", events))
+        return self._emit_all(events, source="native_transcript")
 
-    def _emit_all(self, events) -> bool:
+    def _emit_all(self, events, source: str | None = None) -> bool:
         """Emit every shaped event in order; True if ANY was accepted.
 
         ``events`` is a list (multi-event shaping) or a single dict (full-
@@ -899,18 +926,67 @@ class SessionBridge:
             events = [events]
         accepted = False
         for event in (events or []):
+            if source and event:
+                event = dict(event, source=source)
             if self._emit_event(event):
                 accepted = True
         return accepted
+
+    def _states_from_events(self, source: str, events: list[dict]) -> list[dict]:
+        """Known structural records, never text heuristics, describe active work."""
+        for event in reversed(events):
+            kind = event.get("kind")
+            mapping = {"session_start": ("running", "session_started"),
+                "user_message": ("running", "user_prompt_submitted"),
+                "tool_call": ("running", "tool_started"), "tool_result": ("running", "tool_finished"),
+                "session_close": ("completed", "session_ended")}
+            if kind not in mapping:
+                continue
+            state, reason = mapping[kind]
+            return [self._build("agent_state_changed", payload={"state": state,
+                "source": source, "confidence": "medium", "reason": reason})]
+        return []
 
     def _handle_hook(self, raw) -> bool:
         if self._hook_adapter is None:
             return False
         try:
             event = self._hook_adapter.normalize(raw)
+            state = self._hook_adapter.state_event(raw)
         except Exception:
             return False
-        return self._emit_event(event)
+        accepted = self._emit_event(event)
+        if state is not None:
+            accepted = self._emit_event(state) or accepted
+        question = self._hook_adapter.interaction_event(raw)
+        if question is not None:
+            accepted = self._emit_event(question) or accepted
+            waiting = self._hook_adapter.state_event({"type": "AskUserQuestion",
+                "event_id": question["event_id"]})
+            self._emit_event(waiting)
+        return accepted
+
+    def _state_event_from_raw(self, source: str, raw: Mapping) -> dict | None:
+        """Build a lifecycle event only from explicit structured state data."""
+        if not isinstance(raw, Mapping):
+            return None
+        value = raw.get("agent_state", raw.get("state"))
+        if value not in AGENT_STATES:
+            return None
+        confidence = raw.get("state_confidence", "medium")
+        if confidence not in AGENT_STATE_CONFIDENCES:
+            confidence = "medium"
+        event = self._build("agent_state_changed", payload={
+            "state": value,
+            "source": source,
+            "confidence": confidence,
+            "reason": "explicit_state",
+        })
+        event["source"] = source
+        try:
+            return validate_event(event)
+        except (ValueError, TypeError):
+            return None
 
     def _handle_pty(self, raw) -> bool:
         if self._pty_adapter is None:
@@ -1030,6 +1106,21 @@ class SessionBridge:
         """
         if event is None:
             return None
+        if event.get("kind") == "agent_state_changed":
+            source = event.get("source", self.source)
+            source = "hook" if source == "hooks" else source
+            if source not in AGENT_STATE_SOURCES:
+                return None
+            payload = dict(event["payload"], source=source)
+            if not self.managed:
+                payload.update(state="unknown", confidence="low", reason="unmanaged_source")
+            if source == "pty":
+                payload.update(state="unknown", confidence="low", reason="unstructured_source")
+            event = dict(event, payload=payload)
+        if event.get("kind") in ("interaction_request", "interaction_response"):
+            if (self._manifest.get("interactive_questions") is not True
+                    or event.get("source") not in ("hook", "hooks", "structured_stream", "native_transcript")):
+                return None
         if self.managed:
             return event
         kind = event.get("kind")
@@ -1053,6 +1144,11 @@ class SessionBridge:
         break is not a quality change.  The source name never leaks raw text;
         the reason stays a bounded token.
         """
+        state_source = "hook" if source == "hooks" else source
+        if state_source in AGENT_STATE_SOURCES:
+            self._emit_event(self._build("agent_state_changed", payload={
+                "state": "unknown", "source": state_source,
+                "confidence": "low", "reason": "source_disconnected"}))
         current = self.capture_quality or "structured"
         if current not in ("exact", "structured"):
             return

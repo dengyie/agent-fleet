@@ -192,6 +192,37 @@ class NonceStore:
         except OSError:
             self._dir = None  # fail-closed: used() returns True
 
+    def _receipt_marker(self, command_id: str) -> Path:
+        digest = hashlib.sha256(("receipt:" + str(command_id)).encode("utf-8")).hexdigest()
+        return self._dir / f"{digest}.json"
+
+    def receipt(self, command_id: str) -> dict | None:
+        if self._dir is None or not isinstance(command_id, str) or not command_id:
+            return None
+        try:
+            marker = self._receipt_marker(command_id)
+            if not marker.exists():
+                return None
+            value = json.loads(marker.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else None
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return None
+
+    def save_receipt(self, command_id: str, body: Mapping[str, Any]) -> bool:
+        if self._dir is None or not isinstance(command_id, str) or not command_id:
+            return False
+        try:
+            marker = self._receipt_marker(command_id)
+            if marker.exists():
+                return True
+            tmp = marker.with_suffix(".tmp")
+            tmp.write_text(json.dumps(dict(body), ensure_ascii=True, separators=(",", ":")),
+                           encoding="utf-8")
+            os.replace(tmp, marker)
+            return True
+        except OSError:
+            return False
+
     def _marker(self, nonce: str) -> Path:
         digest = hashlib.sha256(str(nonce).encode("utf-8")).hexdigest()
         return self._dir / f"{digest}.used"
@@ -316,6 +347,13 @@ class ControlClient:
 
     def _handle_command(self, command: Mapping[str, Any]) -> None:
         cid = str(command.get("command_id") or "")[:160]
+        previous = self._nonces.receipt(cid)
+        if previous is not None:
+            try:
+                self._transport("/api/supervisor/receipts", previous, self._headers())
+            except Exception:
+                pass
+            return
         target = command.get("target")
         session_id = target.get("session_id") if isinstance(target, dict) else None
         attempt_id = target.get("attempt_id") if isinstance(target, dict) else None
@@ -383,6 +421,13 @@ class ControlClient:
             nonce_used=self._nonces.used,
         )
         if not ok:
+            if code == "nonce_replay" and previous is None:
+                # The durable nonce may have been written immediately before
+                # a process crash. Without a persisted receipt, the local
+                # side effect is indeterminate; never relabel that state as
+                # an ordinary rejection and never replay the command.
+                self._receipt(cid, "failed", "execution_unknown")
+                return
             self._receipt(cid, "rejected", code)
             return
 
@@ -642,6 +687,7 @@ class ControlClient:
             "reason": str(reason)[:120],
             "received_at": _rfc3339(),
         }
+        self._nonces.save_receipt(cid, body)
         try:
             self._transport("/api/supervisor/receipts", body, self._headers())
         except Exception:

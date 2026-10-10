@@ -1075,3 +1075,11 @@ button[disabled] {
   .monitoring-evidence-row { align-items: flex-start; flex-wrap: wrap; }
   .monitoring-evidence-time { margin-left: 0; width: 100%; }
 }
+/* AI management additions inherit the existing panel and button system. */
+.session-question { border: 1px solid var(--border, #d1d5db); border-radius: 10px; padding: 16px; margin: 12px 0; min-width: 0; overflow-wrap: anywhere; }
+.session-question-options { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.session-question-options button { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
+.session-question-options button[aria-pressed="true"] { outline: 2px solid var(--accent, #4384e8); }
+.session-question textarea { display: block; box-sizing: border-box; width: 100%; margin: 8px 0; }
+.session-event-match { outline: 2px solid var(--accent, #4384e8); outline-offset: 2px; }
+.session-agent-state { overflow-wrap: anywhere; }

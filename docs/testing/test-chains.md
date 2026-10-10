@@ -43,6 +43,8 @@
 | MONITOR-01、ACTION-01、SCHEDULE-01 | 监控证据 → 事件 → 只读诊断/审批操作 → 定时触发；分别验证资源/owner/revision 与去重边界 |
 | SESSION-01、SSE-01、ADOPT-01 | runner 会话正文交付、事件分页重连、接管撤销；native 续聊必须绑定私有身份并恢复同一会话，缺少身份不得启动 sibling；terminate/quarantine/pause/resume 必须 fence 在途续聊，未确认回收时返回 `escape_unverified`；旧进程完成回调不得覆盖新 handle，同一会话只允许一个 native resume 在途，暂停会话不得启动 sibling；跨 session 并发追加不得突破机器级加密 spool 配额；同一 session 并发 transcript ingest 不得突破 raw retention 配额；只有 ingest token 而无 source-capability 证明的 `exact` 事件必须在创建 session 或写入 redacted/raw transcript 前拒绝，signed source upgrade 仍未接通；raw retention 每批有界、删除与审计原子提交，并且只在 transcript gate 开启时运行；接管控制入队、exact capture 升级与撤销 CAS 必须串行，撤销后不得再排入控制命令或完成质量升级；exact 升级必须隔离 operator/ingest 鉴权，拒绝 revoked/pending/unknown/非法 session，重复升级只写一条审计，exact 事件同时保留 redacted 流和加密 raw；会话缺少正文不能算任务成功 |
 | BACKUP-01 | SQLite在线快照 → 加密及key-id校验 → 独立目录恢复 → integrity/FK与产物校验；覆盖失败清理、真正原子 no-overwrite（包括目标目录竞态）和有界retention |
+| AGENT-MGMT-01、INTERACTION-01、HANDOFF-01、SEARCH-01、USAGE-SUMMARY-01 | 生命周期状态、问题回答、接力新 attempt、脱敏搜索和未知用量均需其专项测试与浏览器 fixture |
+| BACKUP-01 | SQLite backup API → 加密备份 → 独立目录恢复 → integrity/FK 与产物校验 |
 | UI-01 | 控制台路由、页面操作、长文本/Markdown/恶意 HTML；与助手贯穿浏览器用例共同验证 UI |
 
 列出任一组当前绑定的完整 selector，无需手抄可能过期的清单：
@@ -57,6 +59,26 @@ for row in matrix['journeys']:
         print('  ' + selector)
 PY
 ```
+
+## Agent 管理扩展回归链
+
+CoDock-inspired 管理能力沿用原有 operator 身份和持久化边界。状态测试覆盖来源优先级、
+sequence 重放、非受管降级、PTY 低置信度和 schema 迁移故障；问题卡片测试覆盖能力声明、
+并发回答、重试幂等、响应先于请求及公开 DTO 脱敏。接力测试覆盖确定性快照、路径筛选、
+跨项目拒绝、事务内回执和并发 token 冲突。搜索测试验证中文双字、过滤游标、raw 排除、
+增量索引失败隔离和 gate 关闭。用量测试验证 owner scope、UTC 边界、90 天/1000 桶限制、
+幂等结算及未知费用/Token 不伪装成零。
+
+390px 与 1440px 浏览器 fixture 分别验证会话管理、接力、中文搜索跳转和用量页；这些
+结果是浏览器 fixture 的验收证据，不代表真实节点或生产服务验收。
+
+| 链路 | 主要入口 |
+|---|---|
+| 生命周期和迁移 | test_agent_lifecycle.py、test_session_management_review.py |
+| 问题卡片和重试 | test_session_interactions.py、test_session_question_retry.py、test_session_management_browser.py |
+| 接力预览与新任务 | test_handoff.py、test_handoff_routes.py、test_codock_management_security.py |
+| 脱敏搜索与定位 | test_session_search.py、test_session_search_browser.py |
+| 用量汇总与费用来源 | test_platform_usage_summary.py |
 
 ## 审查问题的固定回归入口
 

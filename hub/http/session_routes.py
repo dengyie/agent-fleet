@@ -17,12 +17,29 @@
 from flask import Blueprint, current_app, g, jsonify, request
 
 from hub.application.session_service import SessionService, SessionServiceError
+from hub.application.session_search_service import SessionSearchServiceError
 from hub.auth import require_ingest_token, require_operator, require_runner
 from hub.http.errors import ApplicationError, error_response, get_request_id
 
 bp = Blueprint("sessions", __name__)
 
 _MAX_QUERY_LIMIT = 1000
+
+
+@bp.route("/api/session-search")
+@require_operator
+def api_session_search():
+    service = current_app.extensions.get("fleet", {}).get("services", {}).get("session_search")
+    if service is None:
+        return error_response(ApplicationError("search_disabled", "会话搜索尚未启用", 503))
+    allowed = {"q", "machine", "project", "agent", "from", "to", "limit", "after"}
+    if any(key not in allowed or len(request.args.getlist(key)) != 1 for key in request.args):
+        return error_response(ApplicationError("invalid_filter", "搜索参数不合法", 400))
+    filters = {key: value for key, value in request.args.items() if key != "q" and value != ""}
+    try:
+        return jsonify(service.search(request.args.get("q", ""), **filters))
+    except SessionSearchServiceError as exc:
+        return error_response(ApplicationError(exc.code, "会话搜索请求未完成", exc.status))
 
 
 def _sessions() -> SessionService:
@@ -128,9 +145,13 @@ def api_session_detail(session_id):
 def api_session_message(session_id):
     from hub.application.supervisor_service import SupervisorServiceError
     data = request.get_json(silent=True)
-    if not isinstance(data, dict) or not isinstance(data.get("text"), str):
+    if not isinstance(data, dict):
+        return error_response(ApplicationError("invalid_message", "请求必须为对象", 400))
+    if "request_id" not in data and (set(data) != {"text"} or not isinstance(data.get("text"), str)):
         return error_response(ApplicationError("invalid_message", "text 必须是字符串", 400))
     try:
+        if "request_id" in data:
+            return jsonify(_sessions().answer_interaction(session_id, data)), 202
         return jsonify(_sessions().send_message(session_id, data["text"])), 202
     except SessionServiceError as exc:
         return _session_error(exc)
@@ -168,3 +189,28 @@ __all__ = [
     "api_sessions",
     "bp",
 ]
+
+
+def _handoffs():
+    service = current_app.extensions.get("fleet", {}).get("services", {}).get("handoffs")
+    if service is None:
+        raise ApplicationError("handoff_unavailable", "接力服务不可用", 503)
+    return service
+
+
+@bp.route("/api/sessions/<session_id>/handoff", methods=["GET"])
+@require_operator
+def api_handoff_preview(session_id):
+    try:
+        return jsonify(_handoffs().preview(session_id))
+    except ApplicationError as exc:
+        return error_response(exc)
+
+
+@bp.route("/api/sessions/<session_id>/handoff", methods=["POST"])
+@require_operator
+def api_handoff_create(session_id):
+    try:
+        return jsonify(_handoffs().create(session_id, request.get_json(silent=True), g.operator)), 202
+    except ApplicationError as exc:
+        return error_response(exc)

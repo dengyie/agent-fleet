@@ -32,6 +32,10 @@ REQUIRED_PATHS=(
   assets/views/machine.js
   assets/views/task.js
   assets/views/session.js
+  assets/views/session-handoff.js
+  assets/views/session-questions.js
+  assets/views/session-search.js
+  assets/views/usage.js
   assets/views/monitoring.js
   assets/views/assistant.js
   assets/views/assistant/panels.js

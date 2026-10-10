@@ -45,6 +45,56 @@ python -m tools.session.sync --config /path/to/runner.yaml \
 - VPS 已有会话需要先纳管，单独同步历史不等于取得可控制的活动进程。原生身份、工作目录或源会话已不存在时不新建一个伪装成原会话的进程。
 - 普通 runner 的临时任务仍清理 worktree；查看这些任务的完整对话不代表能在已清理目录继续执行。长驻/纳管会话的续聊单独验收。
 
+## Agent 状态、问题卡片与接力
+
+受管会话的 public_session_dto 暴露 current_state、state_source 和
+state_confidence。候选状态来自 Hook、structured stream、native transcript、
+PTY 和 Supervisor；合并优先级为 Supervisor、Hook、structured stream、
+native transcript、PTY。序号较旧的事件不能覆盖新状态。PTY 静默只保留
+unknown 或低置信度 idle。非受管会话不提升为结构化状态，仍保持
+best_effort。完整状态变化保留在事件时间线中。
+
+只有 probe 声明 interactive_questions 能力后，interaction_request 才能产生
+可回答的问题卡片。回答使用
+POST /api/sessions/<id>/messages，请求包含 request_id、client_token、
+selected 和/或 text；Hub 校验问题状态、选项及重复提交，并通过现有签名
+Supervisor append_user_turn 入队。接口返回 202 表示已入队，实际执行需继续
+查看 control receipt 和后续事件。不得直接写 PTY stdin。网络结果不明确时，
+使用同一答案和 client token 重试。
+
+会话页可以预览并创建独立任务接力：
+
+- GET /api/sessions/<id>/handoff 只生成确定性脱敏预览，不创建任务。
+- POST /api/sessions/<id>/handoff 接收目标机器、Agent、项目、可选补充指令和
+  client_token，成功后返回新 task_id、attempt_id、handoff_id。
+- 接力快照只汇集有界状态、目标、相对文件路径、测试结果和事件引用；路径越界、
+  symlink、密钥文件以及 raw transcript 不进入预览。非受管会话不能创建接力。
+- 接力创建须通过现有 task 白名单、人工确认闸和身份边界；重复 token 返回原回执，
+  同 token 不同请求返回 409。源会话保持原状态。
+
+## 脱敏 transcript 搜索
+
+operator 搜索入口为 GET /api/session-search，兼容路径为
+GET /api/v1/session-search。默认 gate
+AGENT_FLEET_SESSION_SEARCH_ENABLED=0，并依赖会话仓库已启用。索引从已持久化的
+脱敏事件生成，只纳入有界消息和工具文本；source_record、加密 raw、内部思考和
+未脱敏输入不入索引。FTS5 用于常规检索，中文双字查询使用 bigram 辅助表；初始化
+失败时只关闭搜索，不影响 transcript 确认。
+
+查询长度为 2–128 个字符，每页最多 50 条，snippet 最多 400 字符；筛选支持机器、
+项目、Agent 和 UTC 时间，游标分页保持稳定顺序。结果返回会话、事件序号、高亮及
+筛选维度，点击结果会打开会话并定位对应事件。索引写入失败只返回固定诊断，不回滚
+已确认的 transcript。历史回填不在本版本范围内；索引按现有 ingest 增量建立。
+
+## 用量看板
+
+operator 用量 API 为 GET /api/platform/v1/usage，按 UTC 日期、项目、机器、Agent
+和模型筛选或分组。查询最多覆盖 90 天、最多生成 1000 个桶，成本使用 Decimal
+字符串表示。费用来源固定为 provider、configured 或 unknown；Token 不完整、
+缺少计价或旧记录无法证明完整时保留 unknown，不以零冒充实际成本。聚合按既有
+reservation / usage event 去重，流式 transcript 不重复计费。页面中的配置价格是估算，
+不作为账单数据。
+
 ## 验证依据
 
 `tests/test_runner_conversation.py` 覆盖完整行、Codex item、长 Unicode 源记录、源字段保留、断线重传去重、原生历史/增量同步、机器绑定、普通任务会话关联、受管会话追加消息和完成后原生身份保留。

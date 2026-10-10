@@ -38,6 +38,8 @@ def _file(relative: str, *, asset: bool = False):
 @bp.route('/account')
 @bp.route('/assistant')
 @bp.route('/monitoring')
+@bp.route('/session-search')
+@bp.route('/usage')
 @bp.route('/machine/<entity>')
 @bp.route('/task/<entity>')
 @bp.route('/session/<entity>')

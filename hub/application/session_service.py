@@ -26,6 +26,8 @@ from __future__ import annotations
 import json
 import secrets
 import sqlite3
+import inspect
+import hashlib
 from collections.abc import Mapping, Sequence
 
 from session_schema import (
@@ -37,6 +39,8 @@ from session_schema import (
 
 from hub.infrastructure.session_repository import SessionError
 from hub.infrastructure.transcript_repository import TranscriptError
+from hub.domain.interaction import normalize_answer, validate_answer_ids
+from tools.session.redact import Redactor
 
 DEFAULT_QUERY_LIMIT = 100
 _MAX_QUERY_LIMIT = 1000
@@ -59,6 +63,11 @@ class SessionServiceError(RuntimeError):
         "batch_too_many": 400,
         "batch_too_large": 400,
         "invalid_json": 400,
+        "interaction_expired": 409,
+        "interaction_answered": 409,
+        "interaction_pending": 409,
+        "interaction_unavailable": 503,
+        "feature_unavailable": 503,
     }
 
     def __init__(self, code: str, detail: str = "") -> None:
@@ -89,10 +98,12 @@ def _bounded_limit(value, default: int = DEFAULT_QUERY_LIMIT) -> int:
 class SessionService:
     """Application service owning the session ingest + operator query use cases."""
 
-    def __init__(self, session_repo, transcript_repo, event_publisher=None) -> None:
+    def __init__(self, session_repo, transcript_repo, event_publisher=None,
+                 search_service=None) -> None:
         self.session_repo = session_repo
         self.transcript_repo = transcript_repo
         self.event_publisher = event_publisher
+        self.search_service = search_service
         self.supervisor = None
 
     # -- write use case -----------------------------------------------------
@@ -119,6 +130,9 @@ class SessionService:
         batch_key: tuple[str, str] | None = None
         rejected: list[dict] = []
         accepted_sequences: dict[str, set[int]] = {}
+        search_events: dict[str, list[str]] = {}
+        projected_events: dict[str, list[str]] = {}
+        search_diagnostic = None
         stored_count = 0
 
         for index, raw in enumerate(events):
@@ -150,7 +164,10 @@ class SessionService:
                 continue
             sequence = int(clean["sequence"])
             try:
-                self.session_repo.upsert_session(self._session_spec_from_event(clean))
+                bound_session = self.session_repo.upsert_session(self._session_spec_from_event(clean))
+                if clean.get("kind") == "agent_state_changed" and not bound_session.get("managed"):
+                    clean["capture_quality"] = "best_effort"
+                    clean["payload"].update(state="unknown", confidence="low", reason="unmanaged_source")
                 self.session_repo.init_stream(session_id)
                 self.session_repo.note_event(
                     session_id, clean["event_id"], sequence, clean["kind"])
@@ -167,17 +184,24 @@ class SessionService:
 
             try:
                 result = self.transcript_repo.ingest(clean)
-            except Exception:
+            except Exception as exc:
                 # Transcript persistence failure is a bounded session error,
                 # isolated from the legacy observation ingest route.
                 raise SessionServiceError(
-                    "session_unavailable", "会话存储不可用，观测链路不受影响") from None
+                    "session_unavailable", "会话存储不可用，观测链路不受影响") from exc
 
             stored = result.status in ("accepted", "duplicate") or (
                 result.status == "gap" and result.reason != "raw_quota_exceeded")
             if stored:
                 stored_count += 1
                 accepted_sequences.setdefault(session_id, set()).add(sequence)
+                if self.search_service is not None and clean.get("kind") in {
+                    "user_message", "assistant_message", "tool_call", "tool_result"
+                }:
+                    search_events.setdefault(session_id, []).append(clean["event_id"])
+                if clean.get("kind") in {"agent_state_changed", "interaction_request",
+                        "interaction_response", "session_start", "session_metadata", "session_close"}:
+                    projected_events.setdefault(session_id, []).append(clean["event_id"])
                 if clean.get("kind") == "session_close":
                     self._close_session_from_event(clean)
                 if result.status != "duplicate":
@@ -185,6 +209,16 @@ class SessionService:
             else:
                 rejected.append({"index": index,
                                  "code": result.reason or "rejected"})
+
+        for projected_session_id, ids in projected_events.items():
+            self._project_events(projected_session_id, ids)
+
+        if self.search_service is not None:
+            for search_session_id, event_ids in search_events.items():
+                outcome = self.search_service.index_accepted(
+                    self.transcript_repo, self.session_repo, search_session_id, event_ids)
+                if outcome and outcome.get("code"):
+                    search_diagnostic = "search_unavailable"
 
         if batch_key is not None and accepted_sequences:
             session_id, _ = batch_key
@@ -228,7 +262,13 @@ class SessionService:
         else:
             status = "rejected"
 
+        diagnostics = {}
+        if search_diagnostic:
+            diagnostics["search_diagnostic"] = search_diagnostic
+        if getattr(self.session_repo, "management_available", True) is False:
+            diagnostics["management_diagnostic"] = "feature_unavailable"
         return {
+            **diagnostics,
             "ok": True,
             "status": status,
             "stream_id": stream_id or "",
@@ -236,6 +276,46 @@ class SessionService:
             "next_cursor": secrets.token_hex(16),
             "rejected": rejected,
         }
+
+    def _apply_agent_state(self, event: Mapping) -> None:
+        payload = event.get("payload")
+        if not isinstance(payload, Mapping):
+            return
+        updater = getattr(self.session_repo, "update_agent_state", None)
+        if not callable(updater):
+            return
+        try:
+            updater(
+                event["session_id"],
+                payload.get("state"),
+                payload.get("source"),
+                payload.get("confidence"),
+                int(event["sequence"]),
+            )
+        except (SessionError, sqlite3.Error, OSError) as exc:
+            raise SessionServiceError(
+                "session_unavailable", "会话状态存储不可用") from exc
+
+    def _project_events(self, session_id: str, event_ids: list[str]) -> None:
+        """Use stored content, including replay, rather than caller duplicate payloads."""
+        reader = getattr(self.transcript_repo, "read_redacted_events", None)
+        if not callable(reader) or getattr(self.session_repo, "management_available", True) is False:
+            return
+        try:
+            rows = reader(session_id, event_ids)
+            for event in rows:
+                kind, payload = event["kind"], event.get("payload") or {}
+                if kind == "agent_state_changed":
+                    self._apply_agent_state(event)
+                elif kind in ("session_start", "session_metadata") and "interactive_questions" in payload:
+                    self.session_repo.set_capabilities(session_id,
+                        ["interactive_questions"] if payload["interactive_questions"] is True else [],
+                        sequence=event["sequence"])
+                elif kind in ("interaction_request", "interaction_response", "session_close"):
+                    clean = Redactor(passthrough=False).redact_event(event)[0]
+                    self.session_repo.project_interaction(session_id, event["sequence"], kind, clean["payload"])
+        except (SessionError, TranscriptError, sqlite3.Error, OSError, ValueError) as exc:
+            raise SessionServiceError("session_unavailable") from exc
 
     def _publish_session_summary(self, event: Mapping) -> None:
         publisher = self.event_publisher
@@ -348,11 +428,15 @@ class SessionService:
             candidate["payload"] = payload
         ok, clean = try_validate_event(candidate)
         if ok:
+            if clean["kind"] in ("interaction_request", "interaction_response"):
+                clean = Redactor(passthrough=False).redact_event(clean)[0]
+            if sequence > (1 << 53) - 1:
+                clean["sequence"] = str(sequence)
             return clean
         return {
             "event_id": candidate["event_id"],
             "session_id": candidate["session_id"],
-            "sequence": candidate["sequence"],
+            "sequence": str(sequence) if sequence > (1 << 53) - 1 else sequence,
             "kind": candidate["kind"],
             "capture_quality": candidate["capture_quality"],
             "emitted_at": candidate["emitted_at"],
@@ -392,7 +476,94 @@ class SessionService:
             raise SessionServiceError("session_unavailable") from None
         if not row:
             raise SessionServiceError("session_not_found")
+        row["capabilities"] = self.session_repo.get_capabilities(session_id)
         return {"session": public_session_dto(row)}
+
+    def answer_interaction(self, session_id: str, data: Mapping) -> dict:
+        """Answer once through the signed append-user-turn channel, never PTY input."""
+        session = self.get_session(session_id)["session"]
+        if getattr(self.session_repo, "management_available", True) is False:
+            raise SessionServiceError("feature_unavailable")
+        if not session.get("managed"):
+            raise SessionServiceError("session_not_managed")
+        if "interactive_questions" not in session.get("capabilities", []):
+            raise SessionServiceError("interaction_unavailable")
+        if session.get("status") in ("closed", "failed") or session.get("current_state") in ("completed", "failed", "stopped"):
+            raise SessionServiceError("interaction_expired")
+        if self.supervisor is None:
+            raise SessionServiceError("control_unavailable")
+        enqueue = self.supervisor.enqueue
+        try:
+            supports_idempotency = "idempotency_key" in inspect.signature(enqueue).parameters
+        except (TypeError, ValueError):
+            supports_idempotency = False
+        try:
+            request_id, token = validate_answer_ids(data)
+            command_key = "interaction:" + hashlib.sha256(
+                f"{session_id}\0{request_id}\0{token}".encode("utf-8")).hexdigest()
+            question = self.session_repo.get_interaction(session_id, request_id)
+            if question is None:
+                raise SessionServiceError("interaction_expired")
+            answer, text = normalize_answer(question, data)
+            receipt = self.session_repo.reserve_interaction(session_id, request_id, token, answer)
+            if receipt is not None:
+                return receipt
+        except ValueError as exc:
+            raise SessionServiceError("invalid_interaction_answer") from exc
+        except SessionError as exc:
+            if exc.code == "interaction_pending":
+                existing = None
+                find_idempotency = getattr(self.supervisor, "find_idempotency", None)
+                if callable(find_idempotency):
+                    try:
+                        existing = find_idempotency(command_key)
+                    except Exception as reconcile_exc:
+                        raise SessionServiceError("interaction_unavailable") from reconcile_exc
+                if existing and existing.get("command_id"):
+                    try:
+                        self.session_repo.finish_interaction(
+                            session_id, request_id, existing["command_id"])
+                    except SessionError as reconcile_exc:
+                        if reconcile_exc.code != "interaction_pending":
+                            raise SessionServiceError(reconcile_exc.code) from reconcile_exc
+                    return {"session_id": session_id,
+                            "command_id": existing["command_id"], "status": "queued"}
+                if supports_idempotency and callable(find_idempotency):
+                    # A crash can occur after reserving the answer but before
+                    # inserting its command. The stable outbox key makes this
+                    # retry safe even if another request is enqueueing it now.
+                    pass
+                else:
+                    raise SessionServiceError(exc.code) from exc
+            else:
+                raise SessionServiceError(exc.code) from exc
+        except (sqlite3.Error, OSError) as exc:
+            raise SessionServiceError("interaction_unavailable") from exc
+        try:
+            enqueue_kwargs = {"payload": {"text": text}}
+            if supports_idempotency:
+                enqueue_kwargs["idempotency_key"] = command_key
+            command = enqueue(
+                session["machine_id"], session_id, session.get("attempt_id"),
+                "append_user_turn", "operator_requested", **enqueue_kwargs)
+        except Exception as exc:
+            # Keep the durable reservation in ``dispatching``. A retry looks
+            # up the stable command key first, then safely enqueues if the
+            # previous attempt never committed a command.
+            raise SessionServiceError("interaction_unavailable") from exc
+        try:
+            self.session_repo.finish_interaction(session_id, request_id, command["command_id"])
+        except (sqlite3.Error, OSError, SessionError) as exc:
+            try:
+                persisted_command_id = self.session_repo.interaction_command(
+                    session_id, request_id)
+            except (sqlite3.Error, OSError, SessionError):
+                persisted_command_id = None
+            if persisted_command_id == command["command_id"]:
+                return {"session_id": session_id,
+                        "command_id": command["command_id"], "status": "queued"}
+            raise SessionServiceError("interaction_pending") from exc
+        return {"session_id": session_id, "command_id": command["command_id"], "status": "queued"}
 
     def send_message(self, session_id: str, text: str) -> dict:
         """Queue a follow-up for a managed session through the existing channel."""

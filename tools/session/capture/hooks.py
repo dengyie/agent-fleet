@@ -71,6 +71,18 @@ _TYPE_TO_KIND = {
     "SessionStart": "session_start",
 }
 
+_TYPE_TO_STATE = {
+    "SessionStart": ("running", "high", "session_started"),
+    "UserPromptSubmit": ("running", "high", "user_prompt_submitted"),
+    "PreToolUse": ("running", "high", "tool_started"),
+    "PostToolUse": ("running", "high", "tool_finished"),
+    "SessionEnd": ("completed", "high", "session_ended"),
+    "Stop": ("stopped", "high", "agent_stopped"),
+    "PermissionRequest": ("waiting_for_approval", "high", "approval_required"),
+    "AskUserQuestion": ("waiting_for_user", "high", "user_input_required"),
+    "InputRequest": ("waiting_for_user", "high", "user_input_required"),
+}
+
 # Bounded per-kind source-text key hints.  ``tool_call``/``tool_result`` use
 # their own field allowlist instead.
 _TEXT_KEYS = {
@@ -122,12 +134,15 @@ def _safe_event_id(value: Any, prefix: str) -> str:
     (plain short id matching :func:`_is_hook_safe_id`); anything else —
     including JWT-, session-token-, cookie- or secret-shaped values — is
     replaced by a generated opaque id so it can never smuggle a token value
-    into the durable record.
+    into the durable record. If a generated fallback is needed, the Bridge
+    persists it before upload so transport retries remain stable.
     """
     if _is_hook_safe_id(value):
         return value
-    h = hashlib.sha256(secrets.token_bytes(16)).hexdigest()[:24]
-    return f"{prefix}_{h}"
+    # Content is not an event identity: users can submit the same prompt twice.
+    # The Bridge persists this opaque id in its durable spool before upload, so
+    # upload retries keep the same id without aliasing separate hook arrivals.
+    return f"{prefix}_{secrets.token_hex(12)}"
 
 
 def _is_hook_safe_id(value: Any) -> bool:
@@ -200,6 +215,7 @@ class HookAdapter:
                  stream_id: str = "",
                  agent_family: str = ""):
         self.enabled = bool(manifest.get("hooks"))
+        self.interactive_questions = manifest.get("interactive_questions") is True
         self.session_id = session_id
         self.machine_id = machine_id
         self.stream_id = stream_id
@@ -222,7 +238,7 @@ class HookAdapter:
             str(k): v for k, v in raw.items()
             if str(k).lower() not in _FORBIDDEN_RAW_FIELDS
         }
-        kind = _TYPE_TO_KIND.get(str(raw.get("type") or ""))
+        kind = _TYPE_TO_KIND.get(str(raw.get("hook_event_name") or raw.get("type") or ""))
         if not kind:
             return None
 
@@ -305,6 +321,90 @@ class HookAdapter:
             payload[largest] = payload[largest][: max(1, largest_len // 2)]
             event["payload"] = payload
         return None
+
+    def state_event(self, raw: Mapping[str, Any]) -> dict | None:
+        """Map a recognized hook to a bounded lifecycle state event."""
+        if not self.enabled or not isinstance(raw, Mapping):
+            return None
+        mapped = _TYPE_TO_STATE.get(str(raw.get("hook_event_name") or raw.get("type") or ""))
+        if mapped is None:
+            return None
+        state, confidence, reason = mapped
+        hook_id = _safe_event_id(raw.get("event_id"), "hook")
+        event: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
+            "event_id": "state_" + hashlib.sha256(hook_id.encode()).hexdigest()[:32],
+            "stream_id": self.stream_id or "hook_stream",
+            "machine_id": self.machine_id or "local",
+            "session_id": self.session_id or "session",
+            "sequence": 1,
+            "kind": "agent_state_changed",
+            "capture_quality": "structured",
+            "source": "hook",
+            "emitted_at": _iso_now(),
+            "payload": {
+                "state": state,
+                "source": "hook",
+                "confidence": confidence,
+                "reason": reason,
+            },
+        }
+        try:
+            return validate_event(event)
+        except (ValueError, TypeError):
+            return None
+
+    def interaction_event(self, raw: Mapping[str, Any]) -> dict | None:
+        """Accept explicit question records only from declared hook capability."""
+        if not self.enabled or not self.interactive_questions or not isinstance(raw, Mapping):
+            return None
+        name = raw.get("hook_event_name") or raw.get("type")
+        body = raw
+        if name == "PreToolUse" and raw.get("tool_name") == "AskUserQuestion":
+            name = "AskUserQuestion"
+            body = raw.get("tool_input")
+        if name not in ("AskUserQuestion", "InputRequest", "Inquirer") or not isinstance(body, Mapping):
+            return None
+        if isinstance(body.get("questions"), list):
+            if len(body["questions"]) != 1 or not isinstance(body["questions"][0], Mapping):
+                return None
+            body = body["questions"][0]
+        request_id = body.get("request_id") or raw.get("tool_use_id")
+        if not _is_hook_safe_id(request_id):
+            return None
+        options = body.get("options", body.get("choices", []))
+        if not isinstance(options, list) or len(options) > 32:
+            return None
+        normalized = []
+        for index, option in enumerate(options):
+            if isinstance(option, str):
+                normalized.append({"id": "option_" + str(index), "label": option})
+            elif isinstance(option, Mapping):
+                normalized.append({"id": option.get("id", "option_" + str(index)),
+                                   "label": option.get("label", option.get("name"))})
+            else:
+                return None
+        raw_type = body.get("type")
+        if raw_type is not None and not isinstance(raw_type, str):
+            return None
+        question_type = body.get("question_type") or {
+            "list": "single", "checkbox": "multi", "input": "text", "confirm": "confirm",
+        }.get(raw_type) or ("multi" if body.get("multiSelect") is True else "single")
+        if question_type == "confirm" and not normalized:
+            normalized = [{"id": "yes", "label": "Yes"}, {"id": "no", "label": "No"}]
+        payload = {"request_id": request_id, "question_type": question_type,
+                   "prompt": body.get("prompt", body.get("question", body.get("message"))),
+                   "options": normalized, "allow_custom": body.get("allow_custom", False),
+                   "tool_name": str(name)}
+        event = {"schema_version": SCHEMA_VERSION, "event_id": "question_" + hashlib.sha256(
+            request_id.encode()).hexdigest()[:32], "stream_id": self.stream_id or "hook_stream",
+            "machine_id": self.machine_id or "local", "session_id": self.session_id or "session",
+            "sequence": 1, "kind": "interaction_request", "capture_quality": "structured",
+            "source": "hooks", "emitted_at": _iso_now(), "payload": payload}
+        try:
+            return validate_event(event)
+        except SessionValidationError:
+            return None
 
 
 def _serialize_tool_body(value: Any, fallback: Any) -> str:

@@ -60,9 +60,30 @@ EVENT_KINDS = frozenset({
     'capture_gap',
     'policy_signal',
     'supervisor_state_changed',
+    'agent_state_changed',
+    'interaction_request',
+    'interaction_response',
 })
 
 CAPTURE_QUALITIES = ('exact', 'structured', 'best_effort')
+
+AGENT_STATES = (
+    'running', 'waiting_for_user', 'waiting_for_approval', 'idle',
+    'completed', 'failed', 'stopped', 'unknown',
+)
+AGENT_STATE_SOURCES = (
+    'hook', 'structured_stream', 'native_transcript', 'pty', 'supervisor',
+)
+AGENT_STATE_CONFIDENCES = ('high', 'medium', 'low')
+INTERACTION_QUESTION_TYPES = ('single', 'multi', 'text', 'confirm')
+
+MAX_INTERACTION_OPTIONS = 32
+MAX_INTERACTION_OPTION_LABEL = 256
+MAX_INTERACTION_PROMPT = 2000
+MAX_INTERACTION_TEXT = 2000
+MAX_INTERACTION_TOOL_NAME = 128
+MAX_INTERACTION_REASON = 128
+MAX_INTERACTION_SELECTED = 32
 
 SCHEMA_VERSION = 1
 
@@ -110,8 +131,8 @@ _FORBIDDEN_PAYLOAD_KEYS = frozenset({
 # whitelisted, so a process_spawn may carry ``process_family``/``owner`` and a
 # ``process_group_id`` binding but never ``cmd``/``argv``/``env``/``cwd``/``pid``.
 _GENERIC_PAYLOAD_FIELDS: dict[str, tuple[str, ...]] = {
-    'session_start': ('agent_family', 'adapter', 'cli_version'),
-    'session_metadata': ('agent_family', 'adapter', 'task_id', 'agent_ref'),
+    'session_start': ('agent_family', 'adapter', 'cli_version', 'interactive_questions'),
+    'session_metadata': ('agent_family', 'adapter', 'task_id', 'agent_ref', 'interactive_questions'),
     'process_spawn': ('process_family', 'owner', 'group_binding',
                       'process_group_id'),
     'process_exit': ('exit_code', 'duration_s', 'reason'),
@@ -121,6 +142,17 @@ _GENERIC_PAYLOAD_FIELDS: dict[str, tuple[str, ...]] = {
     'policy_signal': ('severity', 'policy', 'reason', 'detail'),
     'supervisor_state_changed': ('old_state', 'new_state', 'reason'),
 }
+
+_AGENT_STATE_PAYLOAD_FIELDS = frozenset({
+    'state', 'source', 'confidence', 'reason',
+})
+_INTERACTION_REQUEST_PAYLOAD_FIELDS = frozenset({
+    'request_id', 'question_type', 'prompt', 'options', 'allow_custom',
+    'tool_name',
+})
+_INTERACTION_RESPONSE_PAYLOAD_FIELDS = frozenset({
+    'request_id', 'selected', 'text',
+})
 
 # Opaque identifiers must never encode a path separator or a secret marker.
 # ``key`` is restored so 'api_key', 'private', etc. never shape an opaque ID.
@@ -314,6 +346,144 @@ def _tool_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _reject_unknown_payload_fields(
+    payload: Mapping[str, Any], allowed: frozenset[str],
+) -> None:
+    if any(field not in allowed for field in payload):
+        raise SessionValidationError('unknown_payload_field',
+                                     'payload contains an unknown field')
+
+
+def _enum_payload(value: Any, allowed: tuple[str, ...], name: str) -> str:
+    if not isinstance(value, str) or value not in allowed:
+        raise SessionValidationError('invalid_payload_value',
+                                     f'{name} is not an allowed value')
+    return value
+
+
+def _agent_state_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the candidate lifecycle state emitted by a capture source."""
+    payload = {key: value for key, value in payload.items()
+               if key in _AGENT_STATE_PAYLOAD_FIELDS}
+    clean = {
+        'state': _enum_payload(payload.get('state'), AGENT_STATES, 'state'),
+        'source': _enum_payload(payload.get('source'), AGENT_STATE_SOURCES,
+                                'source'),
+        'confidence': _enum_payload(payload.get('confidence'),
+                                    AGENT_STATE_CONFIDENCES, 'confidence'),
+        'reason': _payload_text(payload.get('reason'), 'reason',
+                                MAX_INTERACTION_REASON),
+    }
+    reasons = ('session_started', 'user_prompt_submitted', 'tool_started', 'tool_finished',
+               'session_ended', 'agent_stopped', 'approval_required', 'user_input_required',
+               'prompt_required', 'explicit_state', 'source_disconnected', 'source_unavailable',
+               'unmanaged_source', 'unstructured_source', 'supervisor_state', 'process_exited')
+    _enum_payload(clean['reason'], reasons, 'reason')
+    if clean['source'] == 'pty' and (clean['state'] not in ('unknown', 'idle') or clean['confidence'] != 'low'):
+        raise SessionValidationError('invalid_payload_value', 'PTY state is best effort')
+    return clean
+
+
+def _interaction_options(value: Any) -> list[dict[str, str]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise SessionValidationError('invalid_payload_type',
+                                     'options must be a list')
+    if len(value) > MAX_INTERACTION_OPTIONS:
+        raise SessionValidationError('options_too_many',
+                                     'options exceed the maximum count')
+
+    clean: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for option in value:
+        if not isinstance(option, Mapping):
+            raise SessionValidationError('invalid_payload_type',
+                                         'option must be an object')
+        if set(option) != {'id', 'label'}:
+            raise SessionValidationError('unknown_payload_field',
+                                         'option fields are not allowed')
+        option_id = _opaque(option.get('id'), 'option_id')
+        if option_id in seen:
+            raise SessionValidationError('duplicate_option_id',
+                                         'option ids must be unique')
+        seen.add(option_id)
+        label = _payload_text(option.get('label'), 'option_label',
+                              MAX_INTERACTION_OPTION_LABEL)
+        if not label:
+            raise SessionValidationError('invalid_payload_value',
+                                         'option label must not be empty')
+        clean.append({'id': option_id, 'label': label})
+    return clean
+
+
+def _interaction_request_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    _reject_unknown_payload_fields(payload, _INTERACTION_REQUEST_PAYLOAD_FIELDS)
+    request_id = _opaque(payload.get('request_id'), 'request_id')
+    question_type = _enum_payload(payload.get('question_type'),
+                                  INTERACTION_QUESTION_TYPES, 'question_type')
+    prompt = _payload_text(payload.get('prompt'), 'prompt',
+                           MAX_INTERACTION_PROMPT)
+    if not prompt:
+        raise SessionValidationError('invalid_payload_value',
+                                     'prompt must not be empty')
+    allow_custom = payload.get('allow_custom', False)
+    if not isinstance(allow_custom, bool):
+        raise SessionValidationError('invalid_payload_type',
+                                     'allow_custom must be boolean')
+    clean: dict[str, Any] = {
+        'request_id': request_id,
+        'question_type': question_type,
+        'prompt': prompt,
+        'options': _interaction_options(payload.get('options')),
+        'allow_custom': allow_custom,
+    }
+    if len(prompt) + sum(len(option['label']) for option in clean['options']) > MAX_INTERACTION_PROMPT:
+        raise SessionValidationError('payload_too_large', 'question text exceeds limit')
+    if 'tool_name' in payload:
+        tool_name = _payload_text(payload.get('tool_name'), 'tool_name',
+                                  MAX_INTERACTION_TOOL_NAME)
+        if not tool_name:
+            raise SessionValidationError('invalid_payload_value',
+                                         'tool_name must not be empty')
+        clean['tool_name'] = tool_name
+    return clean
+
+
+def _selected_values(value: Any) -> Any:
+    if isinstance(value, str):
+        return _opaque(value, 'selected')
+    if not isinstance(value, list):
+        raise SessionValidationError('invalid_payload_type',
+                                     'selected must be an id or list of ids')
+    if len(value) > MAX_INTERACTION_SELECTED:
+        raise SessionValidationError('selected_too_many',
+                                     'selected values exceed the maximum count')
+    selected: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        item_id = _opaque(item, 'selected')
+        if item_id in seen:
+            raise SessionValidationError('duplicate_selected_id',
+                                         'selected ids must be unique')
+        seen.add(item_id)
+        selected.append(item_id)
+    return selected
+
+
+def _interaction_response_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    _reject_unknown_payload_fields(payload, _INTERACTION_RESPONSE_PAYLOAD_FIELDS)
+    clean: dict[str, Any] = {
+        'request_id': _opaque(payload.get('request_id'), 'request_id'),
+    }
+    if 'selected' in payload:
+        clean['selected'] = _selected_values(payload['selected'])
+    if 'text' in payload:
+        clean['text'] = _payload_text(payload.get('text'), 'text',
+                                      MAX_INTERACTION_TEXT)
+    return clean
+
+
 def _sane_redaction(redaction: Mapping[str, Any]) -> dict[str, Any]:
     """Allowlist the redaction metadata to bounded public values."""
     state = redaction.get('state')
@@ -352,6 +522,11 @@ def _generic_payload(payload: Mapping[str, Any], kind: str) -> dict[str, Any]:
             continue
         if field in payload:
             value = payload[field]
+            if field == 'interactive_questions':
+                if not isinstance(value, bool):
+                    raise SessionValidationError('invalid_payload_type', 'capability must be boolean')
+                clean[field] = value
+                continue
             if isinstance(value, (bool, int, float)):
                 clean[field] = value
             else:
@@ -495,6 +670,12 @@ def validate_event(event: Mapping[str, Any]) -> dict[str, Any]:
                                     _MAX_NOTE),
             'quality': gap_quality,
         }
+    elif kind == 'agent_state_changed':
+        clean_payload = _agent_state_payload(plain_payload)
+    elif kind == 'interaction_request':
+        clean_payload = _interaction_request_payload(plain_payload)
+    elif kind == 'interaction_response':
+        clean_payload = _interaction_response_payload(plain_payload)
     else:
         # Generic kinds (session_start, session_metadata, process_spawn,
         # process_exit, step_start, step_end, session_close, policy_signal,
@@ -643,6 +824,23 @@ def public_session_dto(session: Mapping[str, Any]) -> dict[str, Any]:
         'capture_quality': quality,
         'control_capability': 'available' if managed else 'unavailable',
     }
+    current_state = session.get('current_state')
+    state_source = session.get('state_source')
+    state_confidence = session.get('state_confidence')
+    if not managed:
+        current_state = 'unknown'
+        state_source = 'unknown'
+        state_confidence = 'low'
+    else:
+        if current_state not in AGENT_STATES:
+            current_state = 'unknown'
+        if state_source not in AGENT_STATE_SOURCES:
+            state_source = 'unknown'
+        if state_confidence not in AGENT_STATE_CONFIDENCES:
+            state_confidence = 'low'
+    dto['current_state'] = current_state
+    dto['state_source'] = state_source
+    dto['state_confidence'] = state_confidence
     if managed:
         attempt = _public_id(session.get('attempt_id'))
         if attempt:
@@ -673,8 +871,13 @@ def public_session_dto(session: Mapping[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
+    'AGENT_STATE_CONFIDENCES',
+    'AGENT_STATE_SOURCES',
+    'AGENT_STATES',
     'CAPTURE_QUALITIES',
     'EVENT_KINDS',
+    'INTERACTION_QUESTION_TYPES',
+    'MAX_INTERACTION_OPTIONS',
     'SCHEMA_VERSION',
     'SessionValidationError',
     'MAX_BATCH_BYTES',

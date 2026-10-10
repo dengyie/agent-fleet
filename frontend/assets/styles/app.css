@@ -1,7 +1,9 @@
 @import url('./tokens.css');
 @import url('./shell.css');
 @import url('./features.css');
+@import url('./session-search.css');
 @import url('./assistant.css');
 @import url('./components.css');
+@import url('./usage.css');
 
 @import url('./login.css');

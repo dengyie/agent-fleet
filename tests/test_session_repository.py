@@ -89,8 +89,8 @@ class SessionRepositoryTests(unittest.TestCase):
         self.repo.init()
 
     def test_init_records_schema_version(self):
-        self.assertEqual(SCHEMA_VERSION, 2)
-        self.assertEqual(self.repo.schema_version(), 2)
+        self.assertEqual(SCHEMA_VERSION, 3)
+        self.assertEqual(self.repo.schema_version(), 3)
 
     def test_upsert_and_get_session(self):
         spec = _spec()

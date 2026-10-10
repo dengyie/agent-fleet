@@ -11,6 +11,8 @@ const labels = {
   machine: ['计算节点', '节点详情', '资源状态、运行中的任务与纳管会话。', 'COMPUTE NODE'],
   task: ['任务', '任务详情', '跟踪执行过程，查看结果与交付文件。', 'TASK DETAIL'],
   session: ['会话', '会话详情', '连接你的执行会话，保留完整工作上下文。', 'SESSION'],
+  'session-search': ['会话搜索', '会话搜索', '搜索脱敏会话记录，定位消息与工具结果。', 'SESSION SEARCH'],
+  usage: ['用量看板', '用量看板', '按日期、项目、机器、Agent 和模型查看用量与费用来源。', 'USAGE'],
 };
 export function resolveRoute(location = window.location) {
   const parts = location.pathname.split('/').filter(Boolean);

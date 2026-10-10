@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import secrets
 import sqlite3
+import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Generator, Mapping
 
 from platform_schema import validate_id, validate_owner_id
+from tools.platform.request_metadata import decimal_amount, normalized_tokens, request_cost
 
 
 MAX_COUNTER = 10_000_000
@@ -86,6 +89,7 @@ class UsageRepository:
         self.db_path = Path(db_path)
         self.path = self.db_path
         self.enforce_limits = bool(enforce_limits)
+        self._summary_error: sqlite3.Error | None = None
 
     def _connect(self):
         conn = sqlite3.connect(str(self.db_path), timeout=10, isolation_level=None)
@@ -154,11 +158,37 @@ class UsageRepository:
                     ON platform_usage_reservations(owner_id, model_key, expires_at);
                 """
             )
-        except sqlite3.Error:
-            raise UsageRepositoryError("usage_store") from None
+        except sqlite3.Error as exc:
+            raise UsageRepositoryError("usage_store") from exc
         finally:
             if conn is not None:
                 conn.close()
+        # A failed additive read-model migration only disables this new API.
+        # The existing admission/settlement ledger remains usable.
+        try:
+            self._migrate_summary()
+            self._summary_error = None
+        except sqlite3.Error as exc:
+            self._summary_error = exc
+
+    def _migrate_summary(self) -> None:
+        conn = self._connect()
+        try:
+            # Old ledger rows cannot prove omitted tokens meant zero.
+            conn.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(platform_usage_events)")}
+            for name, declaration in (
+                ("summary_complete", "INTEGER NOT NULL DEFAULT 0"),
+                ("summary_project", "TEXT"), ("summary_machine", "TEXT"),
+                ("summary_agent", "TEXT"), ("summary_model", "TEXT"),
+                ("estimated_cost", "TEXT"), ("cost_source", "TEXT NOT NULL DEFAULT 'unknown'"),
+            ):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE platform_usage_events ADD COLUMN {name} {declaration}")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_usage_summary ON platform_usage_events(owner_id,occurred_at,event_id)")
+            conn.execute("COMMIT")
+        finally:
+            conn.close()
 
     @staticmethod
     def _model_key(value: Any) -> str:
@@ -367,8 +397,67 @@ class UsageRepository:
             if conn is not None:
                 conn.close()
 
+    @staticmethod
+    def _dimension(value: Any, *, model: bool = False) -> str | None:
+        if not isinstance(value, str) or not value or len(value) > (160 if model else 128):
+            return None
+        if model:
+            return value if not any(ord(char) < 32 or ord(char) == 127 for char in value) else None
+        try:
+            return validate_id(value)
+        except ValueError:
+            return None
+
+    def _settlement_summary(self, conn: sqlite3.Connection, reservation: UsageReservation,
+                            usage: Mapping[str, Any] | None,
+                            metadata: Mapping[str, Any] | None) -> tuple[Any, ...]:
+        """Freeze public dimensions and cost at settlement, never at read time."""
+        tables = {row["name"] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('runs','model_profiles','run_events')")}
+        config: dict[str, Any] = {}
+        profile: dict[str, Any] = {}
+        detail = dict(metadata or {})
+        if "runs" in tables:
+            row = conn.execute("SELECT config_snapshot FROM runs WHERE owner_id=? AND run_id=?",
+                               (reservation.owner_id, reservation.run_id)).fetchone()
+            config = json.loads(row["config_snapshot"]) if row is not None else {}
+        if "model_profiles" in tables:
+            row = conn.execute("SELECT model,provider_config FROM model_profiles WHERE owner_id=? AND profile_id=?",
+                               (reservation.owner_id, reservation.model_key)).fetchone()
+            profile = dict(row) if row is not None else {}
+        if metadata is None and "run_events" in tables and "runs" in tables:
+            row = conn.execute(
+                "SELECT e.payload FROM run_events e JOIN runs r ON r.run_id=e.run_id "
+                "WHERE r.owner_id=? AND e.run_id=? AND e.kind='provider_request_finished' "
+                "AND json_extract(e.payload,'$.attempt')=? AND json_extract(e.payload,'$.step')=? "
+                "ORDER BY e.sequence DESC LIMIT 1",
+                (reservation.owner_id, reservation.run_id, reservation.attempt, reservation.step),
+            ).fetchone()
+            detail = json.loads(row["payload"]) if row is not None else {}
+        tokens = normalized_tokens(usage)
+        detail_usage = detail.get("usage")
+        if isinstance(detail_usage, Mapping):
+            tokens = normalized_tokens({**detail_usage, **{field: tokens[field] for field in
+                                                         ("input_tokens", "output_tokens", "total_tokens")}})
+        complete = tokens["input_tokens"] is not None and tokens["output_tokens"] is not None
+        cost = detail.get("cost")
+        amount = decimal_amount(cost.get("amount")) if isinstance(cost, Mapping) else None
+        source = cost.get("source") if isinstance(cost, Mapping) else None
+        if amount is not None and source in {"provider", "configured"} and cost.get("currency") == "USD":
+            if source == "configured" and not complete:
+                amount, source = None, "unknown"
+        else:
+            provider_config = json.loads(profile.get("provider_config") or "{}")
+            estimate = None if detail.get("cost_unavailable_reason") else request_cost(tokens, pricing=provider_config.get("pricing"))
+            amount, source = (estimate["amount"], estimate["source"]) if estimate else (None, "unknown")
+        model = detail.get("response_model") or detail.get("model") or profile.get("model") or reservation.model_key
+        return (int(complete), self._dimension(config.get("workspace_id")),
+                self._dimension(config.get("execution_node_id")),
+                self._dimension(config.get("agent_family")), self._dimension(model, model=True), amount, source)
+
     def settle(self, reservation: UsageReservation, usage: Mapping[str, Any] | None,
-               outcome: str, *, now: float | None = None) -> dict[str, int]:
+               outcome: str, *, now: float | None = None,
+               metadata: Mapping[str, Any] | None = None) -> dict[str, int]:
         if not isinstance(reservation, UsageReservation):
             raise UsageRepositoryError("invalid_reservation")
         if outcome not in {"succeeded", "failed", "unknown"}:
@@ -376,16 +465,27 @@ class UsageRepository:
         normalized = normalize_usage(usage)
         if outcome == "unknown" and usage is None:
             normalized = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-        occurred_at = float(now) if now is not None else reservation.created_at
+        try:
+            occurred_at = float(now) if now is not None else reservation.created_at
+        except (ValueError, TypeError) as exc:
+            raise UsageRepositoryError("invalid_usage_clock") from exc
+        if not math.isfinite(occurred_at):
+            raise UsageRepositoryError("invalid_usage_clock")
         conn = None
         try:
             conn = self._connect()
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
-                "SELECT input_tokens,output_tokens,total_tokens FROM platform_usage_events WHERE reservation_id=?",
-                (reservation.reservation_id,),
+                "SELECT owner_id,model_key,run_id,attempt,step,input_tokens,output_tokens,total_tokens "
+                "FROM platform_usage_events WHERE reservation_id=? OR (run_id=? AND attempt=? AND step=?) LIMIT 1",
+                (reservation.reservation_id, reservation.run_id, reservation.attempt, reservation.step),
             ).fetchone()
             if existing is not None:
+                identity = ("owner_id", "model_key", "run_id", "attempt", "step")
+                if any(existing[key] != getattr(reservation, key) for key in identity):
+                    raise UsageRepositoryError("usage_owner_conflict")
+                conn.execute("DELETE FROM platform_usage_reservations WHERE run_id=? AND attempt=? AND step=?",
+                             (reservation.run_id, reservation.attempt, reservation.step))
                 conn.execute("COMMIT")
                 return {"input_tokens": int(existing["input_tokens"]), "output_tokens": int(existing["output_tokens"]), "total_tokens": int(existing["total_tokens"])}
             row = conn.execute(
@@ -398,13 +498,16 @@ class UsageRepository:
                 owner_id, model_key, run_id = reservation.owner_id, reservation.model_key, reservation.run_id
             else:
                 owner_id, model_key, run_id = row["owner_id"], row["model_key"], row["run_id"]
-            conn.execute(
-                "INSERT INTO platform_usage_events(event_id,reservation_id,owner_id,model_key,run_id,attempt,step,input_tokens,output_tokens,total_tokens,outcome,occurred_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                ("usageevt_" + secrets.token_hex(12), reservation.reservation_id,
-                 owner_id, model_key, run_id, reservation.attempt, reservation.step,
-                 normalized["input_tokens"], normalized["output_tokens"],
-                 normalized["total_tokens"], outcome, occurred_at),
-            )
+                if any(row[key] != getattr(reservation, key) for key in ("owner_id", "model_key", "run_id", "attempt", "step")):
+                    raise UsageRepositoryError("usage_owner_conflict")
+            columns = "event_id,reservation_id,owner_id,model_key,run_id,attempt,step,input_tokens,output_tokens,total_tokens,outcome,occurred_at"
+            values = ("usageevt_" + secrets.token_hex(12), reservation.reservation_id,
+                      owner_id, model_key, run_id, reservation.attempt, reservation.step,
+                      normalized["input_tokens"], normalized["output_tokens"], normalized["total_tokens"], outcome, occurred_at)
+            if self._summary_error is None:
+                values += self._settlement_summary(conn, reservation, usage, metadata)
+                columns += ",summary_complete,summary_project,summary_machine,summary_agent,summary_model,estimated_cost,cost_source"
+            conn.execute("INSERT INTO platform_usage_events(" + columns + ") VALUES(" + ",".join("?" for _ in values) + ")", values)
             conn.execute("DELETE FROM platform_usage_reservations WHERE reservation_id=?", (reservation.reservation_id,))
             conn.execute(
                 "INSERT INTO platform_run_usage(owner_id,run_id,input_tokens,output_tokens,total_tokens,provider_requests,updated_at) VALUES(?,?,?,?,?,?,?) "
@@ -414,22 +517,10 @@ class UsageRepository:
             )
             conn.execute("COMMIT")
             return normalized
-        except sqlite3.IntegrityError:
-            if conn is not None:
-                try:
-                    conn.execute("ROLLBACK")
-                except sqlite3.Error:
-                    pass
-            # The competing insert contains the canonical result; recurse into
-            # the idempotent read path.
-            return self.settle(reservation, usage, outcome, now=occurred_at)
-        except sqlite3.Error:
-            if conn is not None:
-                try:
-                    conn.execute("ROLLBACK")
-                except sqlite3.Error:
-                    pass
-            raise UsageRepositoryError("usage_store") from None
+        except (sqlite3.Error, ValueError, TypeError) as exc:
+            # Closing the connection rolls back this short transaction. An
+            # unexpected integrity failure must not recurse indefinitely.
+            raise UsageRepositoryError("usage_store") from exc
         finally:
             if conn is not None:
                 conn.close()
@@ -449,6 +540,46 @@ class UsageRepository:
             return {key: int(row[key]) for key in ("input_tokens", "output_tokens", "total_tokens", "provider_requests")}
         except sqlite3.Error:
             raise UsageRepositoryError("usage_store") from None
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def iter_summary_events(self, owner_id: str, *, from_time: float, to_time: float,
+                            filters: Mapping[str, str]) -> Generator[dict[str, Any], None, None]:
+        """Read an owner/time-indexed snapshot in bounded chunks, without N+1 reads."""
+        if self._summary_error is not None:
+            raise UsageRepositoryError("usage_summary_unavailable") from self._summary_error
+        owner_id = validate_owner_id(owner_id)
+        dimensions = {"project": "summary_project", "machine": "summary_machine",
+                      "agent": "summary_agent", "model": "COALESCE(summary_model,model_key)"}
+        predicates = ["owner_id=?", "occurred_at>=?", "occurred_at<?"]
+        values: list[Any] = [owner_id, from_time, to_time]
+        for key, value in filters.items():
+            if key not in dimensions:
+                raise UsageRepositoryError("invalid_usage_query")
+            predicates.append(dimensions[key] + "=?")
+            values.append(value)
+        conn = None
+        try:
+            conn = self._connect()
+            conn.execute("BEGIN")
+            cursor_time, cursor_id = from_time, ""
+            while True:
+                rows = conn.execute(
+                    "SELECT event_id,occurred_at,input_tokens,output_tokens,total_tokens,summary_complete,"
+                    "summary_project AS project,summary_machine AS machine,summary_agent AS agent,"
+                    "COALESCE(summary_model,model_key) AS model,estimated_cost,cost_source "
+                    "FROM platform_usage_events WHERE " + " AND ".join(predicates) +
+                    " AND (occurred_at,event_id)>(?,?) ORDER BY occurred_at,event_id LIMIT 512",
+                    (*values, cursor_time, cursor_id),
+                ).fetchall()
+                if not rows:
+                    return
+                for row in rows:
+                    yield dict(row)
+                cursor_time, cursor_id = rows[-1]["occurred_at"], rows[-1]["event_id"]
+        except sqlite3.Error as exc:
+            raise UsageRepositoryError("usage_store") from exc
         finally:
             if conn is not None:
                 conn.close()

@@ -940,8 +940,8 @@ class AgentControlClientTestsTests(unittest.TestCase):
         self._client(pipe1).poll_once()
         pipe2 = _Pipe([cmd])
         self._client(pipe2).poll_once()
-        self.assertEqual(pipe2.uploads[0]["status"], "rejected")
-        self.assertEqual(pipe2.uploads[0]["reason"], "nonce_replay")
+        self.assertEqual(pipe2.uploads[0]["status"], "succeeded")
+        self.assertEqual(pipe2.uploads[0]["reason"], pipe1.uploads[0]["reason"])
 
     def test_nonce_persists_across_restart(self):
         nonce_dir = self.tmp / "used" / "restart"
@@ -950,7 +950,20 @@ class AgentControlClientTestsTests(unittest.TestCase):
         self._client(pipe1, nonce_dir=nonce_dir).poll_once()
         pipe2 = _Pipe([cmd])
         self._client(pipe2, nonce_dir=nonce_dir).poll_once()
-        self.assertEqual(pipe2.uploads[0]["status"], "rejected")
+        self.assertEqual(pipe2.uploads[0]["status"], "succeeded")
+
+    def test_nonce_without_receipt_is_unknown_execution_not_nonce_replay(self):
+        from tools.supervisor.control_client import NonceStore
+
+        nonce_dir = self.tmp / "used" / "receipt-crash"
+        store = NonceStore(path=nonce_dir)
+        self.assertTrue(store.mark("ur-crash"))
+        cmd = self._cmd(nonce="ur-crash")
+        pipe = _Pipe([cmd])
+        self._client(pipe, nonce_dir=nonce_dir).poll_once()
+        self.assertEqual(pipe.uploads[0]["status"], "failed")
+        self.assertEqual(pipe.uploads[0]["reason"], "execution_unknown")
+        self.assertEqual(self.sup.get(self.session_id).state, "running")
 
     def test_unknown_session_rejected(self):
         cmd = self._cmd(session="sess_dead", action="pause",

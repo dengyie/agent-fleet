@@ -25,6 +25,8 @@
 import { pagePath } from '../routes.js';
 import { uiIcon } from '../routes.js';
 import { renderSourceControl } from './machine.js';
+import { mountHandoffPanel } from './session-handoff.js';
+import { renderQuestions, disposeQuestions } from './session-questions.js';
 
 var MSG_LOADING = '加载中…';
 var MSG_ERROR = '加载失败：';
@@ -63,7 +65,13 @@ var KIND_LABELS = {
   capture_gap: '采集缺口',
   policy_signal: '策略信号',
   supervisor_state_changed: '监督状态变化',
+  agent_state_changed: 'Agent 状态变化',
+  interaction_request: '问题请求',
+  interaction_response: '问题回答',
 };
+var AGENT_STATE_LABELS = {running: '运行中', waiting_for_user: '等待用户回答',
+  waiting_for_approval: '等待审批', idle: '空闲', completed: '已完成',
+  failed: '失败', stopped: '已停止', unknown: '未知'};
 var KIND_FALLBACK_LABEL = '会话事件';
 
 /* -- 控制状态白名单：状态名永远不进 class，只进 textContent ------------------ */
@@ -210,6 +218,15 @@ function renderBadges(host, session) {
     badges.appendChild(h('span', 'badge badge-status', session.status));
   }
   host.appendChild(badges);
+  host.appendChild(h('p', 'session-agent-state',
+    'Agent：' + (AGENT_STATE_LABELS[session.current_state] || '未知') +
+    ' · 来源 ' + (session.state_source || 'unknown') + ' · 置信度 ' + (session.state_confidence || 'low')));
+  if (session.current_state === 'waiting_for_user') {
+    host.appendChild(h('p', 'meta', '请查看问题卡片或追加用户回合。'));
+  }
+  if (session.current_state === 'waiting_for_approval') {
+    host.appendChild(h('p', 'meta', '请检查对应审批请求后决定；状态展示不会自动放行。'));
+  }
 }
 
 /* -- 事件时间线（有界） ------------------------------------------------------ */
@@ -234,11 +251,13 @@ function renderEventList(host, events) {
 
 function renderEventRow(ev) {
   var li = h('li', 'session-event');
+  li.id = 'session-event-' + ev.sequence;
+  li.tabIndex = -1;
   var kindName = KIND_LABELS[ev.kind] || KIND_FALLBACK_LABEL;
   var left = h('span', 'session-event-kind', kindName);
   li.appendChild(left);
 
-  var seqEl = (typeof ev.sequence === 'number') ?
+  var seqEl = (typeof ev.sequence === 'number' || typeof ev.sequence === 'string') ?
     h('span', 'session-event-seq', '#' + String(ev.sequence)) : null;
   if (seqEl) {
     li.appendChild(seqEl);
@@ -272,6 +291,13 @@ function renderPayloadBody(ev) {
     return null;
   }
   var nodes = [];
+  if (kind === 'agent_state_changed') {
+    return [h('p', null, (AGENT_STATE_LABELS[p.state] || '未知') +
+      ' · ' + p.source + ' · ' + p.confidence + ' · ' + p.reason)];
+  }
+  if (kind === 'interaction_request') return [h('p', null, p.prompt)];
+  if (kind === 'interaction_response') return [h('p', null, '回答 ' + p.request_id +
+    ' · ' + (Array.isArray(p.selected) ? p.selected.join(', ') : p.selected || '') + ' ' + (p.text || ''))];
   function textNode(text) {
     var s = ellipsis(text, MAX_TEXT_RENDER);
     if (s) {
@@ -794,6 +820,11 @@ export function mountSession(root, sessionId, store, client) {
   }
 
   var disposed = false;
+  var sequenceParam = new URLSearchParams(window.location.search).get('sequence') || '';
+  var targetSequence = /^[1-9][0-9]{0,18}$/.test(sequenceParam) && BigInt(sequenceParam) <= 9223372036854775807n ? sequenceParam : '';
+  var jumpPending = Boolean(targetSequence);
+  var handoffHost = h('section', 'panel session-handoff-host');
+  var disposeHandoff = mountHandoffPanel(handoffHost, {api: clientMethods, sessionId: sessionId});
   var viewState = {
     disposed: false,
     loading: true,
@@ -809,7 +840,7 @@ export function mountSession(root, sessionId, store, client) {
     receiptTimer: null,
     localProfiles: [],
     followUpText: '',
-    pageStarts: [0],
+    pageStarts: [targetSequence ? String(BigInt(targetSequence) - 1n) : 0],
     hasNextPage: false,
   };
 
@@ -936,6 +967,9 @@ export function mountSession(root, sessionId, store, client) {
     root.appendChild(meta);
 
     renderBadges(root, session);
+    root.appendChild(handoffHost);
+    renderQuestions(root, {events: viewState.events, session: session, api: clientMethods,
+      state: viewState, paint: render, enabled: controlFeatures(store).append_user_turn});
 
     if (typeof session.machine_id === 'string' && session.machine_id) {
       var link = h('a', 'machine-link',
@@ -991,6 +1025,15 @@ export function mountSession(root, sessionId, store, client) {
     var signalsPanel = h('section', 'panel');
     renderSignalPanel(signalsPanel, viewState.signals);
     root.appendChild(signalsPanel);
+    if (jumpPending) {
+      var target = document.getElementById('session-event-' + targetSequence);
+      if (target) {
+        target.classList.add('session-event-match');
+        target.focus();
+        target.scrollIntoView({block: 'center'});
+        jumpPending = false;
+      }
+    }
   }
 
   function loadSync() {
@@ -1068,6 +1111,8 @@ export function mountSession(root, sessionId, store, client) {
   function teardown() {
     disposed = true;
     viewState.disposed = true;
+    disposeHandoff();
+    disposeQuestions(viewState);
     if (viewState.receiptTimer) {
       clearTimeout(viewState.receiptTimer);
       viewState.receiptTimer = null;

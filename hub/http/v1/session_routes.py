@@ -16,9 +16,13 @@ from hub.http.session_routes import (
     api_session_detail,
     api_session_policy_signals,
     api_sessions,
+    api_session_search,
 )
 
 bp = Blueprint("sessions_v1", __name__, url_prefix="/api/v1")
+
+bp.route("/session-search", methods=("GET",),
+         endpoint="v1_session_search")(api_session_search)
 
 bp.route("/session-events", methods=("POST",),
          endpoint="v1_session_events")(api_session_events)
