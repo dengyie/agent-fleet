@@ -397,6 +397,8 @@ def create_app(
     session_service = None
     session_repo = None
     transcript_repo = None
+    session_search_service = None
+    search_status = None
     if config.session_repositories_enabled:
         from hub.application.session_service import SessionService
         from hub.infrastructure.session_repository import SessionRepository
@@ -420,7 +422,19 @@ def create_app(
                 key=load_encryption_key(config),
             )
             transcript_repo.init()
-        session_service = SessionService(session_repo, transcript_repo)
+        if config.session_search_enabled:
+            from hub.application.session_search_service import SessionSearchService
+            from hub.infrastructure.session_search_repository import SessionSearchRepository
+            search_repo = (repositories or {}).get("session_search")
+            if search_repo is None:
+                search_repo = SessionSearchRepository(
+                    config.session_search_db or config.root / "var" / "sessions" / "search.db",
+                    enabled=True,
+                )
+            session_search_service = SessionSearchService(search_repo)
+            search_status = session_search_service.initialize_optional()
+        session_service = SessionService(
+            session_repo, transcript_repo, search_service=session_search_service)
 
     if publisher is None:
         event_repository = (repositories or {}).get("events")
@@ -445,6 +459,8 @@ def create_app(
     task_repository = (repositories or {}).get("task")
     if task_repository is None:
         task_repository = SqliteTaskRepository(config.task_db)
+    if session_search_service is not None and config.tasks_enabled:
+        session_search_service.task_repository = task_repository
     task_service = TaskService(
         task_repo=task_repository,
         observation_repo=observation_repository,
@@ -471,6 +487,7 @@ def create_app(
     # (fail-closed issuance) and no route is registered.  Signing key/credential
     # VALUES are never logged or printed; only their resolved source is noted.
     from hub.application.supervisor_service import SupervisorService
+    from hub.infrastructure.supervisor_command_repository import SupervisorCommandRepository
     from hub.auth import (
         load_supervisor_credentials,
         load_supervisor_signing_key,
@@ -483,6 +500,11 @@ def create_app(
         if config.supervisor_signing_raw is not None
         else load_supervisor_signing_key()
     )
+    supervisor_command_repository = None
+    if config.supervisor_enabled:
+        command_db = (getattr(config, "supervisor_command_db", None)
+                      or config.root / "var" / "supervisor" / "commands.db")
+        supervisor_command_repository = SupervisorCommandRepository(command_db)
     supervisor_service = SupervisorService(
         signing_key=supervisor_key,
         ttl_s=float(config.supervisor_ttl_s or 3600.0),
@@ -490,6 +512,7 @@ def create_app(
             getattr(config, "append_user_turn_enabled", False)),
         apply_local_profile_enabled=bool(
             getattr(config, "apply_local_profile_enabled", False)),
+        command_repository=supervisor_command_repository,
     )
 
     if session_service is not None and config.supervisor_enabled:
@@ -572,6 +595,7 @@ def create_app(
         supervisor_service.set_adoption(adoption_service)
 
     app = Flask(__name__, template_folder=None, static_folder=None)
+    app.config["SESSION_SEARCH_DIAGNOSTIC"] = search_status
     app.config["MAX_CONTENT_LENGTH"] = 256 * 1024
     app.config["INGEST_TOKEN"] = config.ingest_token
     app.config["DEV_OPERATOR"] = config.dev_operator
@@ -693,7 +717,9 @@ def create_app(
             app.extensions["fleet"]["services"]["submit_approvals"] = submit_approval_service
         app.extensions["fleet"]["services"]["run_events"] = run_event_service
         if usage_repository is not None:
+            from hub.application.usage_summary_service import UsageSummaryService
             app.extensions["fleet"]["services"]["usage_repository"] = usage_repository
+            app.extensions["fleet"]["services"]["usage_summary"] = UsageSummaryService(usage_repository)
         if platform_worker_service is not None:
             app.extensions["fleet"]["services"]["platform_worker"] = platform_worker_service
         if platform_run_scheduler is not None:
@@ -754,6 +780,15 @@ def create_app(
         app.extensions["fleet"]["services"]["sessions"] = session_service
     if transcript_repo is not None:
         app.extensions["fleet"]["repositories"]["transcript"] = transcript_repo
+    if session_service is not None:
+        from hub.application.handoff_service import HandoffService
+        app.extensions["fleet"]["services"]["handoffs"] = HandoffService(
+            session_repo, transcript_repo, task_service,
+            enabled=bool(app.config.get("TASKS_ENABLED") and config.supervisor_enabled),
+            task_store_available=bool(app.config.get("TASKS_ENABLED")),
+        )
+    if session_search_service is not None:
+        app.extensions["fleet"]["services"]["session_search"] = session_search_service
     if control_router is not None:
         app.extensions["fleet"]["services"]["control_router"] = control_router
     if adoption_service is not None:

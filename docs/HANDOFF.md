@@ -277,6 +277,33 @@ deploy/package-frontend-release.sh /tmp/agent-fleet-frontend 99.0.0
   完整 `pytest -q` 通过；旧“/api/*”、`/api/v1`、观察 / 会话 / 任务 / runner / SSE
   与前端契约保持不变。
 
+### CoDock-inspired AI 管理扩展（2026-10-11，代码已落在隔离分支）
+
+本轮在既有 Session / Supervisor / platform ledger 上增加生命周期状态、结构化问题卡片、
+会话接力、脱敏 transcript 搜索和用量看板。实现计划：
+[CoDock-inspired AI Management](superpowers/plans/2026-10-11-codock-inspired-ai-management.md)。
+
+- AGENT_FLEET_SESSION_SEARCH_ENABLED 默认关闭；开启前仍需启用 session repository。
+  搜索使用单独的 var/sessions/search.db，只索引持久化脱敏文本。FTS5 或 migration
+  初始化失败会关闭搜索读模型，不影响 session ingest。关闭方式：移除此 gate 或设为
+  0 后重启 Hub。
+- SessionRepository 的 schema v3 扩展生命周期投影和 interaction_requests。
+  初始化降级会让管理投影不可用，并保留原 session/transcript 读写路径；不要删除
+  var/sessions 或 transcript root 进行回滚。
+- 接力路由是 GET/POST /api/sessions/<id>/handoff，创建会检查任务/Supervisor 可用性，
+  新建 task/attempt 并在 task SQLite 中持久化 handoff_receipts。它使用 operator
+  身份，不能用 ingest、runner 或 Supervisor credential。关闭 Supervisor/任务 gate
+  即停止创建；保留 task DB 可让同一 client token 的重试继续得到原回执。
+- 问题回答复用 POST /api/sessions/<id>/messages 和签名的
+  append_user_turn，要求 managed session 与 interactive_questions capability。
+  未受管会话保持 best_effort，不允许回答或创建接力。
+- 搜索路由为 /api/session-search（/api/v1/session-search 为兼容别名）；
+  用量汇总位于 /api/platform/v1/usage 并沿用 operator owner scope。用量 summary
+  migration 失败只关闭新汇总查询，保留既有 usage ledger 和预算结算。
+- API 和 SPA 均为增量扩展。发布顺序为 backend 先于 frontend；关闭 gate 或回滚前端
+  可以撤回新增页面。数据库采用 additive migration，应保留文件以支持幂等重启与回滚。
+  本轮未在生产环境部署或打开搜索 gate。
+
 ## 七、安全红线
 
 - token 不进入 git、聊天、文档或日志。

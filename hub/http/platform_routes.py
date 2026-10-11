@@ -107,6 +107,19 @@ def get_models():
     return _invoke(lambda: jsonify(_service().list_models(g.operator)))
 
 
+@bp.get("/usage")
+@require_operator
+def get_usage():
+    def _get():
+        service = current_app.extensions.get("fleet", {}).get("services", {}).get("usage_summary")
+        if service is None:
+            raise ApplicationError("usage_unavailable", "用量数据暂时不可用", 503)
+        if any(len(request.args.getlist(key)) != 1 for key in request.args):
+            raise ApplicationError("invalid_usage_query", "用量查询参数不合法", 400)
+        return jsonify(service.summary(g.operator, request.args.to_dict()))
+    return _invoke(_get)
+
+
 @bp.get("/workspaces")
 @require_operator
 def get_workspaces():

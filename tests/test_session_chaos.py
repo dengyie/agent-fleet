@@ -759,7 +759,11 @@ class SourceDisconnectTests(unittest.TestCase):
         bridge = self._bridge()
         bridge.ingest_native(str(path))
         replay = bridge.spool.read_after(0, 100, 1 << 16)
-        self.assertEqual([e["kind"] for e in replay], ["user_message"])
+        kinds = [event["kind"] for event in replay]
+        self.assertIn("user_message", kinds)
+        self.assertIn("agent_state_changed", kinds)
+        self.assertNotIn("capture_quality_changed", kinds)
+        self.assertNotIn("capture_gap", kinds)
 
 
 # --------------------------------------------------------------------------- #

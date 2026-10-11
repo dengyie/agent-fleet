@@ -225,6 +225,83 @@ if (fixture === 'task_reject') {
   assertModel(() => contracts.parseTaskList({ ok: true, tasks: [{ task_id: 't-1', machine: 'mac', agent_type: 'codex', project: 'p', state: 'queued', requested_by: 'op', created_at: 'c', expires_at: 'e', instruction: 'x' }] }),
     (m) => m.ok === true && m.tasks.length === 1 && m.tasks[0].task_id === 't-1',
     'task_list_parse');
+} else if (fixture === 'session_contracts') {
+  const managed = contracts.parseSession({ session: {
+    machine_id: 'mac', session_id: 'sess_1', managed: true,
+    capture_quality: 'structured', current_state: 'running',
+    state_source: 'supervisor', state_confidence: 'high'
+  }});
+  if (managed.session.current_state === 'running' &&
+      managed.session.state_source === 'supervisor' &&
+      managed.session.state_confidence === 'high') ok('session_state.managed');
+  else fail('session_state.managed', JSON.stringify(managed));
+  const unmanaged = contracts.parseSession({ session: {
+    machine_id: 'mac', session_id: 'sess_2', managed: false,
+    current_state: 'running', state_source: 'supervisor',
+    state_confidence: 'high'
+  }});
+  if (unmanaged.session.current_state === 'unknown' &&
+      unmanaged.session.state_source === 'unknown' &&
+      unmanaged.session.state_confidence === 'low') ok('session_state.unmanaged_degrades');
+  else fail('session_state.unmanaged_degrades', JSON.stringify(unmanaged));
+  const stateEvent = contracts.parseSessionEvents({ events: [{
+    event_id: 'evt_1', session_id: 'sess_1', sequence: 1,
+    kind: 'agent_state_changed', capture_quality: 'structured',
+    payload: { state: 'waiting_for_user', source: 'hook', confidence: 'medium',
+      reason: 'prompt_required' }
+  }]});
+  if (stateEvent.events[0].payload.state === 'waiting_for_user') ok('session_state.event');
+  else fail('session_state.event', JSON.stringify(stateEvent));
+  const request = contracts.parseSessionEvents({ events: [{
+    event_id: 'evt_2', session_id: 'sess_1', sequence: 2,
+    kind: 'interaction_request', capture_quality: 'structured',
+    payload: { request_id: 'req_1', question_type: 'single', prompt: 'Pick',
+      options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+      allow_custom: true }
+  }]});
+  if (request.events[0].payload.options.length === 2 &&
+      request.events[0].payload.allow_custom === true) ok('interaction_request.clean');
+  else fail('interaction_request.clean', JSON.stringify(request));
+  const response = contracts.parseSessionEvents({ events: [{
+    event_id: 'evt_3', session_id: 'sess_1', sequence: 3,
+    kind: 'interaction_response', capture_quality: 'structured',
+    payload: { request_id: 'req_1', selected: ['a', 'b'], text: 'A and B' }
+  }]});
+  if (response.events[0].payload.selected.length === 2) ok('interaction_response.clean');
+  else fail('interaction_response.clean', JSON.stringify(response));
+  assertThrows(() => contracts.parseSessionEvents({ events: [{
+    event_id: 'evt_4', session_id: 'sess_1', sequence: 4,
+    kind: 'agent_state_changed', payload: {
+      state: 'waiting_for_secret', source: 'hook', confidence: 'high'
+    }
+  }] }), 'session_state.rejects_unknown');
+  assertThrows(() => contracts.parseSessionEvents({ events: [{
+    event_id: 'evt_5', session_id: 'sess_1', sequence: 5,
+    kind: 'interaction_request', payload: {
+      request_id: 'req_2', question_type: 'single', prompt: 'Pick',
+      options: [{ id: 'a', label: 'A' }, { id: 'a', label: 'Again' }]
+    }
+  }] }), 'interaction_request.rejects_duplicate');
+  const tooMany = [];
+  for (let i = 0; i < 33; i += 1) tooMany.push({ id: 'option_' + i, label: 'x' });
+  assertThrows(() => contracts.parseSessionEvents({ events: [{
+    event_id: 'evt_6', session_id: 'sess_1', sequence: 6,
+    kind: 'interaction_request', payload: {
+      request_id: 'req_3', question_type: 'multi', prompt: 'Pick', options: tooMany
+    }
+  }] }), 'interaction_request.rejects_limit');
+  assertThrows(() => contracts.parseSessionEvents({ events: [{
+    event_id: 'evt_7', session_id: 'sess_1', sequence: 7,
+    kind: 'interaction_response', payload: {
+      request_id: 'req_1', text: { raw: 'x' }
+    }
+  }] }), 'interaction_response.rejects_raw_object');
+  assertThrows(() => contracts.parseSessionEvents({ events: [{
+    event_id: 'evt_8', session_id: 'sess_1', sequence: 8,
+    kind: 'interaction_response', payload: {
+      request_id: 'req_1', text: 'ok', unexpected: 'field'
+    }
+  }] }), 'interaction_response.rejects_unknown');
 } else if (fixture === 'store_lifecycle') {
   const storeMod = await import(process.env.FLEET_STORE_URL);
   const S = storeMod.FleetStore;
@@ -848,6 +925,11 @@ class ApiClientContractFixtureTests(unittest.TestCase):
                          'node unavailable; skipping JS fixture')
     def test_status_events_sse_parsers_validate_synthetic_payloads(self):
         self._run_fixture('misc')
+
+    @unittest.skipUnless(shutil.which('node'),
+                         'node unavailable; skipping JS fixture')
+    def test_session_state_and_interaction_contracts(self):
+        self._run_fixture('session_contracts')
 
     @unittest.skipUnless(shutil.which('node'),
                          'node unavailable; skipping JS fixture')

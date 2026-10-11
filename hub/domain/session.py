@@ -20,7 +20,11 @@ from collections.abc import Mapping
 from typing import Any
 
 from session_schema import (
+    AGENT_STATE_CONFIDENCES,
+    AGENT_STATE_SOURCES,
+    AGENT_STATES,
     CAPTURE_QUALITIES,
+    INTERACTION_QUESTION_TYPES,
     normalize_managed as _schema_normalize_managed,
     partition_batch as _schema_partition_batch,
     public_session_dto as _schema_public_session_dto,
@@ -141,7 +145,33 @@ def public_session_dto(session: Mapping[str, Any]) -> dict[str, Any]:
     return _schema_public_session_dto(session)
 
 
+_SOURCE_RANK = {"pty": 1, "native_transcript": 2, "structured_stream": 3,
+                "hook": 4, "supervisor": 5}
+_CONFIDENCE_RANK = {"low": 1, "medium": 2, "high": 3}
+
+
+def accepts_agent_state(current: Mapping[str, Any], state: str, source: str,
+                        confidence: str, sequence: int) -> bool:
+    """O(1) ordered candidate selection; loss of the owning source is unknown."""
+    previous_sequence = current["state_sequence"] or 0
+    source_rank = _SOURCE_RANK.get(source, 0)
+    previous_rank = _SOURCE_RANK.get(current["state_source"], 0)
+    previous_confidence = _CONFIDENCE_RANK.get(current["state_confidence"], 0)
+    incoming_confidence = _CONFIDENCE_RANK[confidence]
+    if not current["managed"] or sequence < previous_sequence or source_rank < previous_rank:
+        return False
+    if sequence == previous_sequence:
+        return (source_rank, incoming_confidence) > (previous_rank, previous_confidence)
+    if state == "unknown":
+        return True
+    return state == current["current_state"] or incoming_confidence >= previous_confidence
+
+
 __all__ = [
+    'AGENT_STATE_CONFIDENCES',
+    'AGENT_STATE_SOURCES',
+    'AGENT_STATES',
+    'INTERACTION_QUESTION_TYPES',
     'normalize_managed',
     'partition_batch',
     'public_session_dto',

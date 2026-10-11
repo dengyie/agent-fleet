@@ -23,6 +23,10 @@ import {
   parseSessionList,
   parseSessionEvents,
   parseSessionSignals,
+  parseHandoffPreview,
+  parseHandoffReceipt,
+  parseSessionSearch,
+  parseUsageSummary,
   parseAgentTypes,
   parseAdoption,
   parseAdoptionList,
@@ -217,6 +221,10 @@ export async function getOperatorSession() {
   return data;
 }
 
+export async function getUsageSummary(filters) {
+  return parseUsageSummary(await request('/platform/v1/usage' + queryString(filters || {})));
+}
+
 export async function getStatus() {
   return parseStatus(await request(API.status));
 }
@@ -331,6 +339,10 @@ export async function listSessions(filters) {
   return parseSessionList(await request(API.sessions + queryString(filters || {})));
 }
 
+export async function searchSessions(filters) {
+  return parseSessionSearch(await request('/session-search' + queryString(filters || {})));
+}
+
 export async function getSession(sessionId) {
   return parseSession(await request(
     API.sessions + '/' + encodeURIComponent(sessionId)));
@@ -348,9 +360,28 @@ export async function sendSessionMessage(sessionId, text) {
   }));
 }
 
+export async function answerSessionQuestion(sessionId, answer) {
+  return parseControlEnqueue(await request(API.sessions + '/' + encodeURIComponent(sessionId) + '/messages', {
+    method: 'POST', headers: JSON_HEADERS, body: answer
+  }));
+}
+
 export async function getSessionSignals(sessionId) {
   return parseSessionSignals(await request(
     API.sessions + '/' + encodeURIComponent(sessionId) + '/policy-signals'));
+}
+
+export async function getSessionHandoff(sessionId) {
+  return parseHandoffPreview(await request(
+    API.sessions + '/' + encodeURIComponent(sessionId) + '/handoff'));
+}
+
+export async function createSessionHandoff(sessionId, input) {
+  // The panel owns its token across retries, including lost responses.
+  return parseHandoffReceipt(await request(
+    API.sessions + '/' + encodeURIComponent(sessionId) + '/handoff', {
+      method: 'POST', headers: JSON_HEADERS, body: input,
+    }));
 }
 
 /* -- adoption + source control（Phase 2：纳管座位与五动作；路径只在本模块） */

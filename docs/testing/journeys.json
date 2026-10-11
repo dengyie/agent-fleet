@@ -723,6 +723,73 @@
         "tests/test_release_evidence.py::test_verifies_clean_complete_release_evidence",
         "tests/test_release_evidence.py::test_rejects_release_evidence_that_does_not_meet_contract"
       ]
+    },
+    {
+      "id": "AGENT-MGMT-01",
+      "title": "Agent 生命周期状态与迁移降级",
+      "layer": "integration",
+      "acceptance": "状态按来源优先级和 sequence 合并；非受管状态降级；PTY 不伪报等待；新管理迁移失败不阻断旧会话采集",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_agent_lifecycle.py::test_priority_replay_and_restart",
+        "tests/test_agent_lifecycle.py::test_unmanaged_state_degrades",
+        "tests/test_agent_lifecycle.py::test_pty_cannot_assert_wait_or_high_confidence",
+        "tests/test_agent_lifecycle.py::test_new_migration_failure_keeps_legacy_session_store",
+        "tests/test_session_management_review.py::test_capability_replay_cannot_reenable_a_later_revocation"
+      ]
+    },
+    {
+      "id": "INTERACTION-01",
+      "title": "Agent 结构化问题卡片回答",
+      "layer": "integration",
+      "acceptance": "只有声明 interactive_questions 的受管会话可以回答；答案经 Supervisor 入队并幂等；无 PTY 直写；响应重放不重新打开已回答问题",
+      "boundary": "disposable Hub; supervisor commands simulated",
+      "tests": [
+        "tests/test_session_interactions.py::test_concurrent_answer_only_enqueues_once",
+        "tests/test_session_interactions.py::test_interrupted_dispatch_cannot_enqueue_again",
+        "tests/test_session_management_review.py::test_response_before_request_does_not_reopen_an_answered_question",
+        "tests/test_session_question_retry.py::test_question_retry_and_memory_boundaries"
+      ]
+    },
+    {
+      "id": "HANDOFF-01",
+      "title": "会话接力创建独立任务",
+      "layer": "integration",
+      "acceptance": "预览不创建任务；确认后生成新 task/attempt；重试返回同一回执；跨项目、路径逃逸和非受管创建失败关闭",
+      "boundary": "disposable Hub; runner and external services simulated",
+      "tests": [
+        "tests/test_handoff.py::test_concurrent_retry_same_receipt_and_confirmation_gate",
+        "tests/test_handoff.py::test_conflicting_requests_racing_at_commit_return_one_receipt_and_one_409",
+        "tests/test_handoff_routes.py::test_foreign_credentials_cannot_preview_or_create",
+        "tests/test_handoff_routes.py::test_handoff_in_real_browser"
+      ]
+    },
+    {
+      "id": "SEARCH-01",
+      "title": "脱敏会话全文搜索与事件定位",
+      "layer": "integration",
+      "acceptance": "中文双字搜索、稳定游标分页和详情定位可用；raw/source_record 不入索引；关闭 gate 或索引失败不影响 transcript",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_session_search.py::SessionSearchRepositoryTests::test_cjk_two_character_search_and_filters",
+        "tests/test_session_search.py::SessionSearchRepositoryTests::test_cursor_pagination_is_stable_and_bounded",
+        "tests/test_session_search.py::SessionSearchApiTests::test_default_off_and_missing_fts_leave_ingest_available",
+        "tests/test_session_search_browser.py::test_session_search_in_real_browser"
+      ]
+    },
+    {
+      "id": "USAGE-SUMMARY-01",
+      "title": "Owner-scoped 用量汇总看板",
+      "layer": "integration",
+      "acceptance": "重复结算不重复计数；provider/configured/unknown 来源准确；未知 Token 或费用保留未知；查询按 UTC 和 owner 隔离",
+      "boundary": "disposable Hub; external services simulated",
+      "tests": [
+        "tests/test_platform_usage_summary.py::test_settlement_is_idempotent_and_snapshots_configured_decimal_cost",
+        "tests/test_platform_usage_summary.py::test_incomplete_usage_is_unknown_never_fabricated_zero",
+        "tests/test_platform_usage_summary.py::test_dimension_filters_owner_isolation_and_utc_exclusive_boundaries",
+        "tests/test_platform_usage_summary.py::test_summary_migration_failure_does_not_disable_existing_ledger",
+        "tests/test_platform_usage_summary.py::test_usage_summary_in_real_browser"
+      ]
     }
   ],
   "external_checks": [

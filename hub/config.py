@@ -30,6 +30,8 @@ class FleetConfig:
     session_repositories_enabled: bool = False
     session_db: Path | None = None
     session_transcript_root: Path | None = None
+    session_search_enabled: bool = False
+    session_search_db: Path | None = None
     # Optional restricted transcript encryption source (additive). Exactly one
     # of these is consulted by ``tools.session.crypto.load_encryption_key`` at
     # bootstrap time and passed to the transcript repository constructor.  Key
@@ -45,6 +47,7 @@ class FleetConfig:
     supervisor_signing_raw: bytes | None = None
     supervisor_signing_key_src: Mapping[str, Any] | None = None
     supervisor_ttl_s: float = 3600.0
+    supervisor_command_db: Path | None = None
     # ---- additive adoption-control-plane settings (Task 4) ----
     # NOT reordered/renamed above; purely additive fields appended at the end
     # so no existing position/meaning changes. Disabled (default) keeps
@@ -148,6 +151,8 @@ class FleetConfig:
         session_repositories_enabled: bool = False,
         session_db: Path | None = None,
         session_transcript_root: Path | None = None,
+        session_search_enabled: bool = False,
+        session_search_db: Path | None = None,
         session_encryption_raw: bytes | None = None,
         session_encryption_key_src: Mapping[str, Any] | None = None,
         supervisor_enabled: bool = False,
@@ -155,6 +160,7 @@ class FleetConfig:
         supervisor_signing_raw: bytes | None = None,
         supervisor_signing_key_src: Mapping[str, Any] | None = None,
         supervisor_ttl_s: float = 3600.0,
+        supervisor_command_db: Path | None = None,
         adoption_repositories_enabled: bool = False,
         adoption_db: Path | None = None,
         append_user_turn_enabled: bool = False,
@@ -324,6 +330,11 @@ class FleetConfig:
             session_repositories_enabled=bool(session_repositories_enabled),
             session_db=session_db_path,
             session_transcript_root=session_transcript_root_path,
+            session_search_enabled=bool(session_search_enabled),
+            session_search_db=(Path(session_search_db).expanduser()
+                               if session_search_db is not None
+                               else root / "var" / "sessions" / "search.db")
+            if session_search_enabled else None,
             session_encryption_raw=session_encryption_raw,
             session_encryption_key_src=session_encryption_key_src,
             supervisor_enabled=bool(supervisor_enabled),
@@ -331,6 +342,10 @@ class FleetConfig:
             supervisor_signing_raw=supervisor_signing_raw,
             supervisor_signing_key_src=supervisor_signing_key_src,
             supervisor_ttl_s=float(supervisor_ttl_s or 3600.0),
+            supervisor_command_db=(Path(supervisor_command_db).expanduser()
+                                   if supervisor_command_db is not None
+                                   else root / "var" / "supervisor" / "commands.db")
+            if supervisor_enabled else None,
             adoption_repositories_enabled=bool(adoption_repositories_enabled),
             adoption_db=adoption_db_path,
             append_user_turn_enabled=bool(append_user_turn_enabled),

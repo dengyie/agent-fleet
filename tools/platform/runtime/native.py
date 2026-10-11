@@ -66,7 +66,8 @@ class NativeAssistantRuntime:
             try:
                 usage = normalize_usage(response.usage)
                 if reservation is not None:
-                    self.usage_meter.settle(reservation, usage, "succeeded", now=float(self.clock()))
+                    self.usage_meter.settle(reservation, response.usage, "succeeded", now=float(self.clock()),
+                                            metadata=getattr(response, "metadata", None))
             except Exception as exc:
                 if reservation is not None:
                     self._settle_unknown(reservation, run_id=run_id, step=step, attempt=attempt)

@@ -10,6 +10,8 @@ import { mountFleet } from './views/fleet.js';
 import { mountMachine } from './views/machine.js';
 import { mountTask } from './views/task.js';
 import { mountSession } from './views/session.js';
+import { mountSessionSearch } from './views/session-search.js';
+import { mountUsage } from './views/usage.js';
 import { mountAssistant } from './views/assistant.js';
 import { mountMonitoring } from './views/monitoring.js';
 import { mountLogin, redirectToLogin } from './shell/operator.js';
@@ -83,6 +85,11 @@ function protectConsole() {
     else if (route.page === 'fleet') view.teardown = mountFleet(target, store, client);
     else if (route.page === 'assistant') view.teardown = mountAssistant(target, {conversationId: route.id, account});
     else if (route.page === 'monitoring') view.teardown = mountMonitoring(target, client);
+    else if (route.page === 'session-search') view.teardown = mountSessionSearch(target, client);
+    else if (route.page === 'usage') view.teardown = mountUsage(target, client);
+    else if (route.page === 'session' && route.id) {
+      view.teardown = mountSession(target, route.id, store, client, route.sequence);
+    }
     else if (mountEntity[route.page] && route.id) view.teardown = mountEntity[route.page](target, route.id, store, client);
     else target.textContent = '页面不存在或缺少标识，请从导航重新进入。';
   }
@@ -90,6 +97,9 @@ function protectConsole() {
     const key = routeKey(nextRoute);
     if (activeRouteView && activeRouteView.key === key) {
       route = nextRoute;
+      if (typeof activeRouteView.teardown?.updateSequence === 'function') {
+        activeRouteView.teardown.updateSequence(route.sequence);
+      }
       if (disposeNavigation && typeof disposeNavigation.updateRoute === 'function') disposeNavigation.updateRoute(route);
       return;
     }
@@ -103,6 +113,9 @@ function protectConsole() {
       routeViews.delete(key);
       routeViews.set(key, view);
       resumeRouteView(view);
+      if (typeof view.teardown?.updateSequence === 'function') {
+        view.teardown.updateSequence(nextRoute.sequence);
+      }
     } else {
       const host = document.createElement('div');
       host.className = 'route-view-entry';
@@ -136,12 +149,8 @@ function protectConsole() {
     if ((!fromHistory || forbiddenForAccount) && nextUrl !== currentUrl.pathname + currentUrl.search + currentUrl.hash) {
       window.history[replace ? 'replaceState' : 'pushState'](null, '', nextUrl);
     }
-    if (mounted && routeKey(route) !== routeKey(nextRoute)) {
-      renderRoute(nextRoute);
-    } else {
-      route = nextRoute;
-      if (disposeNavigation && typeof disposeNavigation.updateRoute === 'function') disposeNavigation.updateRoute(route);
-    }
+    if (mounted) renderRoute(nextRoute);
+    else route = nextRoute;
     return true;
   }
   function onNavigationClick(event) {
@@ -199,7 +208,7 @@ function protectConsole() {
         document.querySelector('[data-nav="fleet"]').hidden = true;
         document.querySelector('[data-nav="monitoring"]').hidden = true;
         document.getElementById("sidebar-nodes").textContent = "节点由管理员分配";
-        if (!["assistant", "account"].includes(route.page)) {
+        if (!["assistant", "account", "usage"].includes(route.page)) {
           window.history.replaceState(null, '', '/assistant');
           route = resolveRoute();
         }

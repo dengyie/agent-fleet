@@ -92,7 +92,8 @@ var SESSION_FIELDS = ['machine_id', 'session_id', 'managed', 'capture_quality',
                       'control_capability', 'attempt_id', 'process_group_id',
                       'agent_family', 'status', 'started_at', 'updated_at',
                       'finished_at',
-                      'capabilities'];
+                      'capabilities', 'current_state', 'state_source',
+                      'state_confidence'];
 
 // 每个 session event 的可见 envelope 字段（公开事件行；payload 有逐 kind 白名单）
 var SESSION_EVENT_FIELDS = ['schema_version', 'event_id', 'stream_id',
@@ -110,7 +111,10 @@ var EVENT_PAYLOAD_FIELDS = ['text', 'is_complete',
                             'process_family', 'owner', 'group_binding',
                             'process_group_id', 'exit_code', 'duration_s',
                             'step_id', 'step_name', 'severity', 'policy',
-                            'detail', 'quality', 'old_state', 'new_state'];
+                            'detail', 'quality', 'old_state', 'new_state',
+                            'state', 'source', 'confidence', 'request_id',
+                            'question_type', 'prompt', 'options',
+                            'allow_custom', 'selected'];
 
 // policy-signal 索引：bounded operator 表面（session_service.policy_signals）
 var SESSION_SIGNAL_FIELDS = ['session_id', 'emitted_at', 'severity', 'reason'];
@@ -645,6 +649,131 @@ export function parseSessionSignals(data) {
   return out;
 }
 
+function handoffObject(value, fields) {
+  requireObject(value, 'handoff');
+  if (Object.keys(value).some(key => fields.indexOf(key) === -1)) {
+    throw new ContractError('invalid_handoff', '接力响应含未知字段');
+  }
+  return value;
+}
+
+function handoffText(value, limit) {
+  if (typeof value !== 'string' || value.length > limit * 2) {
+    throw new ContractError('invalid_handoff', '接力文本格式不正确');
+  }
+  return value;
+}
+
+function handoffId(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/.test(value)) {
+    throw new ContractError('invalid_handoff', '接力标识格式不正确');
+  }
+  return value;
+}
+
+function handoffList(value, limit, parse) {
+  if (!Array.isArray(value) || value.length > limit) {
+    throw new ContractError('invalid_handoff', '接力列表超过上限');
+  }
+  return value.map(parse);
+}
+
+export function parseHandoffPreview(data) {
+  handoffObject(data, ['snapshot', 'prompt', 'source_project', 'can_create', 'targets']);
+  const row = handoffObject(data.snapshot, ['objective', 'current_state', 'completed',
+    'changed_files', 'tests', 'last_conclusion', 'open_items', 'source_event_refs', 'capture_quality']);
+  if (typeof data.can_create !== 'boolean' || capQualities.indexOf(row.capture_quality) === -1 ||
+      agentStates.indexOf(row.current_state) === -1 ||
+      JSON.stringify(row).length > 24000) {
+    throw new ContractError('invalid_handoff', '接力预览格式不正确');
+  }
+  const tests = handoffObject(row.tests, ['framework', 'passed', 'failed', 'skipped', 'errors', 'duration_s']);
+  for (const key of Object.keys(tests)) {
+    const valid = key === 'framework' ? ['pytest', 'unittest', 'unknown'].includes(tests[key]) :
+      typeof tests[key] === 'number' && Number.isFinite(tests[key]) && tests[key] >= 0 &&
+      (key === 'duration_s' || Number.isSafeInteger(tests[key]));
+    if (!valid) throw new ContractError('invalid_handoff', '接力测试结果格式不正确');
+  }
+  return {
+    snapshot: {
+      objective: handoffText(row.objective, 3000), current_state: handoffText(row.current_state, 64),
+      completed: handoffList(row.completed, 52, value => handoffText(value, 2000)),
+      changed_files: handoffList(row.changed_files, 100, value => handoffText(value, 260)),
+      tests: Object.assign({}, tests), last_conclusion: handoffText(row.last_conclusion, 3000),
+      open_items: handoffList(row.open_items, 24, value => handoffText(value, 240)),
+      source_event_refs: handoffList(row.source_event_refs, 100, value => {
+        handoffObject(value, ['event_id', 'sequence']);
+        if (typeof value.sequence !== 'string' || !/^[0-9]{1,19}$/.test(value.sequence)) {
+          throw new ContractError('invalid_handoff', '接力事件序号格式不正确');
+        }
+        return { event_id: handoffId(value.event_id), sequence: value.sequence };
+      }),
+      capture_quality: row.capture_quality,
+    },
+    prompt: handoffText(data.prompt, 2000), can_create: data.can_create,
+    source_project: data.source_project === null ? null : handoffId(data.source_project),
+    targets: handoffList(data.targets, 200, value => {
+      handoffObject(value, ['machine', 'project', 'agents']);
+      return { machine: handoffId(value.machine), project: handoffId(value.project),
+        agents: handoffList(value.agents, 32, handoffId) };
+    }),
+  };
+}
+
+export function parseHandoffReceipt(data) {
+  handoffObject(data, ['task_id', 'attempt_id', 'handoff_id']);
+  return { task_id: handoffId(data.task_id), attempt_id: handoffId(data.attempt_id),
+    handoff_id: handoffId(data.handoff_id) };
+}
+
+/** Search exposes only bounded redacted snippets and stable event references. */
+export function parseSessionSearch(data) {
+  requireObject(data, 'session_search_response');
+  rejectInternalKey(data, 'session_search_response');
+  if (!Array.isArray(data.items) || data.items.length > 50 ||
+      (data.next_cursor !== null && (typeof data.next_cursor !== 'string' || data.next_cursor.length > 4096))) {
+    throw new ContractError('invalid_search_response', '搜索响应不合法');
+  }
+  var kinds = ['user_message', 'assistant_message', 'tool_call', 'tool_result'];
+  function identifier(value, nullable) {
+    if (nullable && value === null) return null;
+    if (typeof value !== 'string' || !value || value.length > 256 || /[\\/\u0000-\u001f]/.test(value)) {
+      throw new ContractError('invalid_search_response', '搜索标识不合法');
+    }
+    return value;
+  }
+  return {
+    items: data.items.map(function (row) {
+      requireObject(row, 'search_result');
+      rejectInternalKey(row, 'search_result');
+      var sequence = row.sequence;
+      var validSequence = typeof sequence === 'number' ? Number.isSafeInteger(sequence) && sequence > 0
+        : typeof sequence === 'string' && /^[1-9][0-9]{0,18}$/.test(sequence) && BigInt(sequence) <= 9223372036854775807n;
+      if (!validSequence || !kinds.includes(row.kind) || typeof row.snippet !== 'string' ||
+          Array.from(row.snippet).length > 400 || typeof row.emitted_at !== 'string' ||
+          row.emitted_at.length > 32 || !Number.isFinite(Date.parse(row.emitted_at)) ||
+          !Array.isArray(row.highlight) || row.highlight.length > 200) {
+        throw new ContractError('invalid_search_response', '搜索内容不合法');
+      }
+      var length = Array.from(row.snippet).length;
+      var end = 0;
+      var spans = row.highlight.map(function (span) {
+        if (!Array.isArray(span) || span.length !== 2 || !Number.isInteger(span[0]) ||
+            !Number.isInteger(span[1]) || span[0] < end || span[1] <= span[0] || span[1] > length) {
+          throw new ContractError('invalid_search_response', '搜索高亮不合法');
+        }
+        end = span[1];
+        return [span[0], span[1]];
+      });
+      return {session_id: identifier(row.session_id), sequence: sequence, kind: row.kind,
+        snippet: row.snippet, highlight: spans, emitted_at: row.emitted_at,
+        machine_id: identifier(row.machine_id, true), project_id: identifier(row.project_id, true),
+        agent_family: identifier(row.agent_family, true)};
+    }),
+    next_cursor: data.next_cursor,
+  };
+}
+
 /**
  * 解析控制回执列表（前瞻：未来 operator 控制详情接口；现无该 HTTP route）。
  * 只保留 command_id/action/attempt_id/status 等公开字段，拒绝 nonce/token。
@@ -749,6 +878,17 @@ export function parseControlEnqueue(data) {
 
 // capture quality 三档枚举（与 session_schema.CAPTURE_QUALITIES 一致）
 var capQualities = ['exact', 'structured', 'best_effort'];
+var agentStates = ['running', 'waiting_for_user', 'waiting_for_approval',
+                   'idle', 'completed', 'failed', 'stopped', 'unknown'];
+var agentStateSources = ['hook', 'structured_stream', 'native_transcript',
+                         'pty', 'supervisor'];
+var agentStateConfidences = ['high', 'medium', 'low'];
+var interactionQuestionTypes = ['single', 'multi', 'text', 'confirm'];
+var MAX_INTERACTION_OPTIONS = 32;
+var MAX_INTERACTION_OPTION_LABEL = 256;
+var MAX_INTERACTION_PROMPT = 2000;
+var MAX_INTERACTION_TEXT = 2000;
+var MAX_INTERACTION_SELECTED = 32;
 
 function rejectInternalKey(row, label) {
   for (var i = 0; i < REJECTED_SESSION_KEYS.length; i += 1) {
@@ -794,6 +934,186 @@ function clampQuality(v) {
   return (capQualities.indexOf(String(v)) !== -1) ? String(v) : 'best_effort';
 }
 
+function strictEnum(value, allowed, code, label) {
+  if (typeof value !== 'string' || allowed.indexOf(value) === -1) {
+    throw new ContractError(code, label + ' 不在白名单');
+  }
+  return value;
+}
+
+function rejectUnknownPayloadKeys(payload, allowed) {
+  var keys = Object.keys(payload);
+  for (var i = 0; i < keys.length; i += 1) {
+    if (allowed.indexOf(keys[i]) === -1) {
+      throw new ContractError('unknown_payload_field',
+                              'payload 含未知字段');
+    }
+  }
+}
+
+function parseAgentStatePayload(payload) {
+  var allowed = ['state', 'source', 'confidence', 'reason'];
+  rejectUnknownPayloadKeys(payload, allowed);
+  var out = {
+    state: strictEnum(payload.state, agentStates, 'invalid_agent_state',
+                      'state'),
+    source: strictEnum(payload.source, agentStateSources,
+                       'invalid_agent_state_source', 'source'),
+    confidence: strictEnum(payload.confidence, agentStateConfidences,
+                           'invalid_agent_state_confidence', 'confidence'),
+    reason: '',
+  };
+  if (payload.reason !== undefined) {
+    if (payload.reason === null || typeof payload.reason === 'object') {
+      throw new ContractError('invalid_payload_type',
+                              'reason 必须是原始值');
+    }
+    out.reason = String(payload.reason).slice(0, 128);
+  }
+  if (out.source === 'pty' && (['unknown', 'idle'].indexOf(out.state) === -1 || out.confidence !== 'low')) {
+    throw new ContractError('invalid_agent_state', 'PTY 状态必须是低置信度');
+  }
+  return out;
+}
+
+function parseInteractionOptions(value) {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new ContractError('invalid_payload_type', 'options 必须是数组');
+  }
+  if (value.length > MAX_INTERACTION_OPTIONS) {
+    throw new ContractError('options_too_many', 'options 超出数量上限');
+  }
+  var out = [];
+  var seen = Object.create(null);
+  for (var i = 0; i < value.length; i += 1) {
+    var option = value[i];
+    requireObject(option, 'interaction.option');
+    var optionKeys = Object.keys(option);
+    if (optionKeys.length !== 2 || option.id === undefined ||
+        option.label === undefined) {
+      throw new ContractError('unknown_payload_field',
+                              'option 字段不在白名单');
+    }
+    var id = boundOpaque(option.id, 'option_id');
+    if (!id) {
+      throw new ContractError('invalid_option', 'option 缺少 id');
+    }
+    if (Object.prototype.hasOwnProperty.call(seen, id)) {
+      throw new ContractError('duplicate_option_id', 'option id 重复');
+    }
+    seen[id] = true;
+    if (option.label === null || typeof option.label === 'object') {
+      throw new ContractError('invalid_payload_type',
+                              'option label 必须是原始值');
+    }
+    var label = String(option.label).slice(0, MAX_INTERACTION_OPTION_LABEL);
+    if (!label) {
+      throw new ContractError('invalid_option', 'option 缺少 label');
+    }
+    out.push({id: id, label: label});
+  }
+  return out;
+}
+
+function parseInteractionRequestPayload(payload) {
+  var allowed = ['request_id', 'question_type', 'prompt', 'options',
+                 'allow_custom', 'tool_name'];
+  rejectUnknownPayloadKeys(payload, allowed);
+  var requestId = boundOpaque(payload.request_id, 'request_id');
+  if (!requestId) {
+    throw new ContractError('invalid_request_id', 'request_id 无效');
+  }
+  if (payload.prompt === undefined || payload.prompt === null ||
+      typeof payload.prompt === 'object') {
+    throw new ContractError('invalid_payload_type',
+                            'prompt 必须是原始值');
+  }
+  var prompt = String(payload.prompt).slice(0, MAX_INTERACTION_PROMPT);
+  if (!prompt) {
+    throw new ContractError('invalid_prompt', 'prompt 不能为空');
+  }
+  var out = {
+    request_id: requestId,
+    question_type: strictEnum(payload.question_type,
+                              interactionQuestionTypes,
+                              'invalid_question_type', 'question_type'),
+    prompt: prompt,
+    options: parseInteractionOptions(payload.options),
+    allow_custom: payload.allow_custom === true,
+  };
+  if (Array.from(out.prompt).length + out.options.reduce((total, option) => total + Array.from(option.label).length, 0) > MAX_INTERACTION_PROMPT) {
+    throw new ContractError('invalid_prompt', '问题文本超限');
+  }
+  if (payload.allow_custom !== undefined &&
+      typeof payload.allow_custom !== 'boolean') {
+    throw new ContractError('invalid_payload_type',
+                            'allow_custom 必须是布尔值');
+  }
+  if (payload.tool_name !== undefined) {
+    if (payload.tool_name === null || typeof payload.tool_name === 'object') {
+      throw new ContractError('invalid_payload_type',
+                              'tool_name 必须是原始值');
+    }
+    out.tool_name = String(payload.tool_name).slice(0, 128);
+  }
+  return out;
+}
+
+function parseInteractionSelected(value) {
+  if (typeof value === 'string') {
+    var one = boundOpaque(value, 'selected');
+    if (!one) {
+      throw new ContractError('invalid_selected', 'selected 无效');
+    }
+    return one;
+  }
+  if (!Array.isArray(value)) {
+    throw new ContractError('invalid_payload_type',
+                            'selected 必须是 id 或 id 数组');
+  }
+  if (value.length > MAX_INTERACTION_SELECTED) {
+    throw new ContractError('selected_too_many', 'selected 超出数量上限');
+  }
+  var out = [];
+  var seen = Object.create(null);
+  for (var i = 0; i < value.length; i += 1) {
+    var id = boundOpaque(value[i], 'selected');
+    if (!id) {
+      throw new ContractError('invalid_selected', 'selected 含无效 id');
+    }
+    if (Object.prototype.hasOwnProperty.call(seen, id)) {
+      throw new ContractError('duplicate_selected_id', 'selected id 重复');
+    }
+    seen[id] = true;
+    out.push(id);
+  }
+  return out;
+}
+
+function parseInteractionResponsePayload(payload) {
+  var allowed = ['request_id', 'selected', 'text'];
+  rejectUnknownPayloadKeys(payload, allowed);
+  var requestId = boundOpaque(payload.request_id, 'request_id');
+  if (!requestId) {
+    throw new ContractError('invalid_request_id', 'request_id 无效');
+  }
+  var out = {request_id: requestId};
+  if (payload.selected !== undefined) {
+    out.selected = parseInteractionSelected(payload.selected);
+  }
+  if (payload.text !== undefined) {
+    if (payload.text === null || typeof payload.text === 'object') {
+      throw new ContractError('invalid_payload_type',
+                              'text 必须是原始值');
+    }
+    out.text = String(payload.text).slice(0, MAX_INTERACTION_TEXT);
+  }
+  return out;
+}
+
 function parseSessionRow(row) {
   requireObject(row, 'session');
   rejectInternalKey(row, 'session');
@@ -816,6 +1136,19 @@ function parseSessionRow(row) {
   if (!managed) {
     // 非受管会话不应携带 attempt_id（后端 DTO 同样去掉）
     delete out.attempt_id;
+    out.current_state = 'unknown';
+    out.state_source = 'unknown';
+    out.state_confidence = 'low';
+  } else {
+    out.current_state = (typeof out.current_state === 'string' &&
+      agentStates.indexOf(out.current_state) !== -1)
+      ? out.current_state : 'unknown';
+    out.state_source = (typeof out.state_source === 'string' &&
+      agentStateSources.indexOf(out.state_source) !== -1)
+      ? out.state_source : 'unknown';
+    out.state_confidence = (typeof out.state_confidence === 'string' &&
+      agentStateConfidences.indexOf(out.state_confidence) !== -1)
+      ? out.state_confidence : 'low';
   }
   // bounded opaque 标识（与后端 _public_id 一致）
   out.session_id = boundOpaque(out.session_id, 'session_id');
@@ -830,7 +1163,11 @@ function boundOpaque(v, label) {
   if (typeof v !== 'string' || !v) {
     return '';
   }
-  if (v.length > 256 || /[\/\\]/.test(v)) {
+  var lowered = v.toLowerCase();
+  if (v.length > 256 || /[\/\\]/.test(v) ||
+      lowered.indexOf('token') !== -1 || lowered.indexOf('secret') !== -1 ||
+      lowered.indexOf('private') !== -1 || lowered.indexOf('password') !== -1 ||
+      lowered.indexOf('key') !== -1) {
     throw new ContractError('invalid_opaque_id', label + ' 不是合法 opaque id');
   }
   return v.slice(0, 128);
@@ -846,7 +1183,9 @@ function parseSessionEventRow(row) {
   if (typeof out.session_id !== 'string') {
     out.session_id = '';
   }
-  if (typeof out.sequence !== 'number' || !isFinite(out.sequence)) {
+  var sequenceNumber = typeof out.sequence === 'number' && Number.isSafeInteger(out.sequence) && out.sequence > 0;
+  var sequenceString = typeof out.sequence === 'string' && /^[1-9][0-9]{0,18}$/.test(out.sequence) && BigInt(out.sequence) <= 9223372036854775807n;
+  if (!sequenceNumber && !sequenceString) {
     throw new ContractError('invalid_session_event',
                             '事件缺少有效 sequence');
   }
@@ -862,6 +1201,15 @@ function parseSessionEventRow(row) {
 function parseEventPayload(kind, payload) {
   if (!isObject(payload)) {
     throw new ContractError('invalid_event_payload', '事件 payload 必须是对象');
+  }
+  if (kind === 'agent_state_changed') {
+    return parseAgentStatePayload(payload);
+  }
+  if (kind === 'interaction_request') {
+    return parseInteractionRequestPayload(payload);
+  }
+  if (kind === 'interaction_response') {
+    return parseInteractionResponsePayload(payload);
   }
   var out = {};
   var keys = Object.keys(payload);
@@ -993,4 +1341,49 @@ export function parseTaskFile(data) {
   out.truncated = out.truncated === true;
   out.redacted = out.redacted === true;
   return out;
+}
+
+/* Usage DTOs preserve decimal amounts and integers beyond JS's exact range. */
+export function parseUsageSummary(data) {
+  requireObject(data, 'usage_summary');
+  const fail = () => { throw new ContractError('invalid_usage_summary', '用量响应不合法'); };
+  const dimensions = ['day', 'project', 'machine', 'agent', 'model'];
+  const counters = ['requests', 'input_tokens', 'output_tokens', 'total_tokens', 'unknown_count'];
+  const topFields = ['ok', 'from', 'to', 'group_by', 'currency', 'items'];
+  if (Object.keys(data).some(key => !topFields.includes(key)) || data.ok !== true || data.currency !== 'USD') fail();
+  const validTime = value => typeof value === 'string' && value.length <= 40 && value.endsWith('Z') && Number.isFinite(Date.parse(value));
+  if (!validTime(data.from) || !validTime(data.to) || Date.parse(data.to) <= Date.parse(data.from) || Date.parse(data.to) - Date.parse(data.from) > 90 * 86400000) fail();
+  if (!Array.isArray(data.group_by) || !data.group_by.length || data.group_by.length > 5 || new Set(data.group_by).size !== data.group_by.length || data.group_by.some(key => !dimensions.includes(key))) fail();
+  if (!Array.isArray(data.items) || data.items.length > 1000) fail();
+  const validCounter = value => (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) || (typeof value === 'string' && /^(0|[1-9]\d{0,39})$/.test(value));
+  const fields = [...data.group_by, ...counters, 'estimated_cost', 'cost_source'];
+  const items = data.items.map(item => {
+    requireObject(item, 'usage_item');
+    if (Object.keys(item).some(key => !fields.includes(key)) || fields.some(key => !Object.prototype.hasOwnProperty.call(item, key))) fail();
+    const row = {};
+    for (const key of data.group_by) {
+      const value = item[key];
+      if (key === 'day') {
+        if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(Date.parse(value + 'T00:00:00Z'))) fail();
+      } else if (value !== null && (typeof value !== 'string' || !value || value.length > (key === 'model' ? 160 : 128) || /[\x00-\x1f\x7f]/.test(value))) fail();
+      row[key] = value;
+    }
+    for (const key of counters) {
+      if (item[key] === null && key.endsWith('_tokens')) { row[key] = null; continue; }
+      if (!validCounter(item[key])) fail();
+      row[key] = item[key];
+    }
+    if (BigInt(row.unknown_count) > BigInt(row.requests)) fail();
+    const tokenValues = ['input_tokens', 'output_tokens', 'total_tokens'].map(key => row[key]);
+    if (tokenValues.some(value => value === null) && tokenValues.some(value => value !== null)) fail();
+    if (row.total_tokens !== null && BigInt(row.total_tokens) < BigInt(row.input_tokens) + BigInt(row.output_tokens)) fail();
+    if (!['provider', 'configured', 'unknown'].includes(item.cost_source)) fail();
+    if (item.cost_source === 'unknown') {
+      if (item.estimated_cost !== null) fail();
+    } else if (typeof item.estimated_cost !== 'string' || item.estimated_cost.length > 64 || !/^(0|[1-9]\d{0,39})(\.\d{1,18})?$/.test(item.estimated_cost)) fail();
+    if ((row.total_tokens === null || item.cost_source === 'unknown') && BigInt(row.unknown_count) === 0n) fail();
+    row.estimated_cost = item.estimated_cost; row.cost_source = item.cost_source;
+    return row;
+  });
+  return {ok: true, from: data.from, to: data.to, group_by: [...data.group_by], currency: 'USD', items};
 }

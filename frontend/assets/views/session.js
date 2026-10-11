@@ -25,6 +25,8 @@
 import { pagePath } from '../routes.js';
 import { uiIcon } from '../routes.js';
 import { renderSourceControl } from './machine.js';
+import { mountHandoffPanel } from './session-handoff.js';
+import { renderQuestions, disposeQuestions } from './session-questions.js';
 
 var MSG_LOADING = '加载中…';
 var MSG_ERROR = '加载失败：';
@@ -63,7 +65,13 @@ var KIND_LABELS = {
   capture_gap: '采集缺口',
   policy_signal: '策略信号',
   supervisor_state_changed: '监督状态变化',
+  agent_state_changed: 'Agent 状态变化',
+  interaction_request: '问题请求',
+  interaction_response: '问题回答',
 };
+var AGENT_STATE_LABELS = {running: '运行中', waiting_for_user: '等待用户回答',
+  waiting_for_approval: '等待审批', idle: '空闲', completed: '已完成',
+  failed: '失败', stopped: '已停止', unknown: '未知'};
 var KIND_FALLBACK_LABEL = '会话事件';
 
 /* -- 控制状态白名单：状态名永远不进 class，只进 textContent ------------------ */
@@ -210,6 +218,15 @@ function renderBadges(host, session) {
     badges.appendChild(h('span', 'badge badge-status', session.status));
   }
   host.appendChild(badges);
+  host.appendChild(h('p', 'session-agent-state',
+    'Agent：' + (AGENT_STATE_LABELS[session.current_state] || '未知') +
+    ' · 来源 ' + (session.state_source || 'unknown') + ' · 置信度 ' + (session.state_confidence || 'low')));
+  if (session.current_state === 'waiting_for_user') {
+    host.appendChild(h('p', 'meta', '请查看问题卡片或追加用户回合。'));
+  }
+  if (session.current_state === 'waiting_for_approval') {
+    host.appendChild(h('p', 'meta', '请检查对应审批请求后决定；状态展示不会自动放行。'));
+  }
 }
 
 /* -- 事件时间线（有界） ------------------------------------------------------ */
@@ -234,11 +251,13 @@ function renderEventList(host, events) {
 
 function renderEventRow(ev) {
   var li = h('li', 'session-event');
+  li.id = 'session-event-' + ev.sequence;
+  li.tabIndex = -1;
   var kindName = KIND_LABELS[ev.kind] || KIND_FALLBACK_LABEL;
   var left = h('span', 'session-event-kind', kindName);
   li.appendChild(left);
 
-  var seqEl = (typeof ev.sequence === 'number') ?
+  var seqEl = (typeof ev.sequence === 'number' || typeof ev.sequence === 'string') ?
     h('span', 'session-event-seq', '#' + String(ev.sequence)) : null;
   if (seqEl) {
     li.appendChild(seqEl);
@@ -272,6 +291,13 @@ function renderPayloadBody(ev) {
     return null;
   }
   var nodes = [];
+  if (kind === 'agent_state_changed') {
+    return [h('p', null, (AGENT_STATE_LABELS[p.state] || '未知') +
+      ' · ' + p.source + ' · ' + p.confidence + ' · ' + p.reason)];
+  }
+  if (kind === 'interaction_request') return [h('p', null, p.prompt)];
+  if (kind === 'interaction_response') return [h('p', null, '回答 ' + p.request_id +
+    ' · ' + (Array.isArray(p.selected) ? p.selected.join(', ') : p.selected || '') + ' ' + (p.text || ''))];
   function textNode(text) {
     var s = ellipsis(text, MAX_TEXT_RENDER);
     if (s) {
@@ -774,6 +800,12 @@ function renderSignalPanel(host, signals) {
 
 function noop() {}
 
+function normalizeSequence(value) {
+  var sequence = typeof value === 'string' ? value : '';
+  return /^[1-9][0-9]{0,18}$/.test(sequence) &&
+    BigInt(sequence) <= 9223372036854775807n ? sequence : '';
+}
+
 /**
  * @param {Element} root      挂载点
  * @param {string}  sessionId 会话 id（URL 已解码的 opaque 标识）
@@ -782,7 +814,7 @@ function noop() {}
  *                            getSessionSignals）
  * @returns {function} teardown
  */
-export function mountSession(root, sessionId, store, client) {
+export function mountSession(root, sessionId, store, client, routeSequence) {
   if (!root || !store || typeof sessionId !== 'string' || !sessionId) {
     return noop;
   }
@@ -794,6 +826,12 @@ export function mountSession(root, sessionId, store, client) {
   }
 
   var disposed = false;
+  var sequenceParam = routeSequence === undefined
+    ? new URLSearchParams(window.location.search).get('sequence') : routeSequence;
+  var targetSequence = normalizeSequence(sequenceParam);
+  var jumpPending = Boolean(targetSequence);
+  var handoffHost = h('section', 'panel session-handoff-host');
+  var disposeHandoff = mountHandoffPanel(handoffHost, {api: clientMethods, sessionId: sessionId});
   var viewState = {
     disposed: false,
     loading: true,
@@ -809,13 +847,14 @@ export function mountSession(root, sessionId, store, client) {
     receiptTimer: null,
     localProfiles: [],
     followUpText: '',
-    pageStarts: [0],
+    pageStarts: [targetSequence ? String(BigInt(targetSequence) - 1n) : 0],
     hasNextPage: false,
   };
 
   var lastSummaryKey = '';
   var summaryRefreshInFlight = false;
   var summaryRefreshPending = false;
+  var pageGeneration = 0;
 
   function refreshFromSummary() {
     if (viewState.disposed || typeof store.getState !== 'function') {
@@ -843,10 +882,12 @@ export function mountSession(root, sessionId, store, client) {
     }
     lastSummaryKey = key;
     summaryRefreshInFlight = true;
+    var generation = pageGeneration;
+    var afterSequence = viewState.pageStarts[viewState.pageStarts.length - 1];
     var jobs = [];
     if (typeof clientMethods.getSessionEvents === 'function') {
-      jobs.push(clientMethods.getSessionEvents(sessionId, 101, viewState.pageStarts[viewState.pageStarts.length - 1]).then(function (events) {
-        if (!viewState.disposed && events && Array.isArray(events.events)) {
+      jobs.push(clientMethods.getSessionEvents(sessionId, 101, afterSequence).then(function (events) {
+        if (!viewState.disposed && generation === pageGeneration && events && Array.isArray(events.events)) {
           viewState.hasNextPage = events.events.length > 100;
           viewState.events = events.events.slice(0, 100);
         }
@@ -854,13 +895,13 @@ export function mountSession(root, sessionId, store, client) {
     }
     if (typeof clientMethods.getSession === 'function') {
       jobs.push(clientMethods.getSession(sessionId).then(function (detail) {
-        if (!viewState.disposed && detail && detail.session) {
+        if (!viewState.disposed && generation === pageGeneration && detail && detail.session) {
           viewState.session = detail.session;
         }
       }));
     }
     Promise.all(jobs).then(function () {
-      if (!viewState.disposed) {
+      if (!viewState.disposed && generation === pageGeneration) {
         render();
       }
     }).catch(function () {
@@ -936,6 +977,9 @@ export function mountSession(root, sessionId, store, client) {
     root.appendChild(meta);
 
     renderBadges(root, session);
+    root.appendChild(handoffHost);
+    renderQuestions(root, {events: viewState.events, session: session, api: clientMethods,
+      state: viewState, paint: render, enabled: controlFeatures(store).append_user_turn});
 
     if (typeof session.machine_id === 'string' && session.machine_id) {
       var link = h('a', 'machine-link',
@@ -965,12 +1009,14 @@ export function mountSession(root, sessionId, store, client) {
     previous.disabled = viewState.pageStarts.length < 2;
     previous.addEventListener('click', function () {
       viewState.pageStarts.pop();
+      pageGeneration += 1;
       viewState.loading = true; render(); loadSync();
     });
     var next = h('button', null, '下一页');
     next.disabled = !viewState.hasNextPage;
     next.addEventListener('click', function () {
       viewState.pageStarts.push(viewState.events[viewState.events.length - 1].sequence);
+      pageGeneration += 1;
       viewState.loading = true; render(); loadSync();
     });
     pages.appendChild(previous);
@@ -991,9 +1037,21 @@ export function mountSession(root, sessionId, store, client) {
     var signalsPanel = h('section', 'panel');
     renderSignalPanel(signalsPanel, viewState.signals);
     root.appendChild(signalsPanel);
+    if (targetSequence) {
+      var target = document.getElementById('session-event-' + targetSequence);
+      if (target) {
+        target.classList.add('session-event-match');
+        if (jumpPending) {
+          target.focus();
+          target.scrollIntoView({block: 'center'});
+          jumpPending = false;
+        }
+      }
+    }
   }
 
   function loadSync() {
+    var generation = pageGeneration;
     var jobs = [
       clientMethods.getSession(sessionId),
       clientMethods.getSessionEvents(sessionId, 101, viewState.pageStarts[viewState.pageStarts.length - 1]),
@@ -1010,7 +1068,7 @@ export function mountSession(root, sessionId, store, client) {
     }
     Promise.all(jobs)
       .then(function (results) {
-        if (disposed) {
+        if (disposed || generation !== pageGeneration) {
           return;
         }
         var detail = results[0] || null;
@@ -1031,7 +1089,7 @@ export function mountSession(root, sessionId, store, client) {
         if (flags.apply_local_profile && typeof machineId === 'string' &&
             machineId && typeof clientMethods.getMachine === 'function') {
           return clientMethods.getMachine(machineId).then(function (machine) {
-            if (disposed) {
+            if (disposed || generation !== pageGeneration) {
               return;
             }
             if (typeof store.setMachine === 'function') {
@@ -1042,7 +1100,7 @@ export function mountSession(root, sessionId, store, client) {
               ? current.local_profiles : [];
             render();
           }).catch(function () {
-            if (disposed) {
+            if (disposed || generation !== pageGeneration) {
               return;
             }
             viewState.localProfiles = [];
@@ -1052,13 +1110,28 @@ export function mountSession(root, sessionId, store, client) {
         render();
       })
       .catch(function (err) {
-        if (disposed) {
+        if (disposed || generation !== pageGeneration) {
           return;
         }
         viewState.loading = false;
         viewState.error = (err && err.detail) ? err.detail : '未知错误';
         render();
       });
+  }
+
+  function updateSequence(value) {
+    var nextSequence = normalizeSequence(value);
+    if (nextSequence === targetSequence) return;
+    targetSequence = nextSequence;
+    jumpPending = Boolean(nextSequence);
+    var currentMatch = root.querySelector('.session-event-match');
+    if (currentMatch) currentMatch.classList.remove('session-event-match');
+    viewState.pageStarts = [nextSequence ? String(BigInt(nextSequence) - 1n) : 0];
+    pageGeneration += 1;
+    viewState.loading = true;
+    viewState.error = null;
+    render();
+    loadSync();
   }
 
   // 首帧即渲染（loading 态），随后异步拉取数据。
@@ -1068,6 +1141,8 @@ export function mountSession(root, sessionId, store, client) {
   function teardown() {
     disposed = true;
     viewState.disposed = true;
+    disposeHandoff();
+    disposeQuestions(viewState);
     if (viewState.receiptTimer) {
       clearTimeout(viewState.receiptTimer);
       viewState.receiptTimer = null;
@@ -1097,5 +1172,6 @@ export function mountSession(root, sessionId, store, client) {
         viewState.receiptPending.attempt);
     }
   };
+  teardown.updateSequence = updateSequence;
   return teardown;
 }

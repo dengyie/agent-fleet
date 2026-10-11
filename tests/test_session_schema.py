@@ -52,8 +52,8 @@ def load_fixture(name):
 
 
 class EventKindTests(unittest.TestCase):
-    def test_sixteen_event_kinds(self):
-        self.assertEqual(len(EVENT_KINDS), 16)
+    def test_nineteen_event_kinds(self):
+        self.assertEqual(len(EVENT_KINDS), 19)
 
     def test_spec_event_kinds_present(self):
         expected = {
@@ -61,7 +61,8 @@ class EventKindTests(unittest.TestCase):
             'assistant_message', 'tool_call', 'tool_result',
             'process_spawn', 'process_exit', 'step_start', 'step_end',
             'session_close', 'capture_quality_changed', 'capture_gap',
-            'policy_signal', 'supervisor_state_changed',
+            'policy_signal', 'supervisor_state_changed', 'agent_state_changed',
+            'interaction_request', 'interaction_response',
         }
         self.assertEqual(EVENT_KINDS, frozenset(expected))
 
@@ -151,6 +152,133 @@ class QualityChangeEnvelopeTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             validate_event(event)
+
+
+class AgentStateAndInteractionContractTests(unittest.TestCase):
+    def test_agent_state_changed_allowlist_and_bounds(self):
+        clean = validate_event(base_event(
+            kind='agent_state_changed',
+            payload={
+                'state': 'waiting_for_approval',
+                'source': 'hook',
+                'confidence': 'high',
+                'reason': 'approval_required',
+                'raw': 'must_drop',
+            },
+        ))
+        self.assertEqual(clean['payload'], {
+            'state': 'waiting_for_approval',
+            'source': 'hook',
+            'confidence': 'high',
+            'reason': 'approval_required',
+        })
+
+    def test_agent_state_changed_rejects_unknown_enum(self):
+        for field, value in (
+                ('state', 'waiting_for_secret'),
+                ('source', 'raw_transcript'),
+                ('confidence', 'certain')):
+            with self.subTest(field=field):
+                payload = {
+                    'state': 'running', 'source': 'hook', 'confidence': 'high',
+                }
+                payload[field] = value
+                with self.assertRaises(ValueError):
+                    validate_event(base_event(kind='agent_state_changed',
+                                               payload=payload))
+
+    def test_interaction_request_normalizes_options(self):
+        clean = validate_event(base_event(
+            kind='interaction_request',
+            payload={
+                'request_id': 'req_1',
+                'question_type': 'single',
+                'prompt': 'Choose a profile',
+                'options': [
+                    {'id': 'profile_a', 'label': 'Profile A'},
+                    {'id': 'profile_b', 'label': 'Profile B'},
+                ],
+                'allow_custom': True,
+                'tool_name': 'AskUserQuestion',
+            },
+        ))
+        self.assertEqual(clean['payload']['request_id'], 'req_1')
+        self.assertEqual(len(clean['payload']['options']), 2)
+        self.assertTrue(clean['payload']['allow_custom'])
+
+    def test_interaction_request_rejects_duplicate_and_excess_options(self):
+        duplicate = [
+            {'id': 'same', 'label': 'A'}, {'id': 'same', 'label': 'B'},
+        ]
+        with self.assertRaises(ValueError):
+            validate_event(base_event(
+                kind='interaction_request',
+                payload={'request_id': 'req_1', 'question_type': 'single',
+                         'prompt': 'Pick', 'options': duplicate},
+            ))
+        too_many = [{'id': f'option_{i}', 'label': 'x'} for i in range(33)]
+        with self.assertRaises(ValueError):
+            validate_event(base_event(
+                kind='interaction_request',
+                payload={'request_id': 'req_1', 'question_type': 'multi',
+                         'prompt': 'Pick', 'options': too_many},
+            ))
+
+    def test_interaction_request_rejects_nested_option_values_and_unknown_fields(self):
+        for payload in (
+            {'request_id': 'req_1', 'question_type': 'single', 'prompt': 'Pick',
+             'options': [{'id': 'a', 'label': {'raw': 'x'}}]},
+            {'request_id': 'req_1', 'question_type': 'single', 'prompt': 'Pick',
+             'unexpected': 'field'},
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    validate_event(base_event(kind='interaction_request',
+                                               payload=payload))
+
+    def test_interaction_response_only_allows_response_fields(self):
+        clean = validate_event(base_event(
+            kind='interaction_response',
+            payload={'request_id': 'req_1', 'selected': ['a', 'b'],
+                     'text': 'custom response'},
+        ))
+        self.assertEqual(clean['payload']['selected'], ['a', 'b'])
+        with self.assertRaises(ValueError):
+            validate_event(base_event(
+                kind='interaction_response',
+                payload={'request_id': 'req_1', 'selected': ['a'],
+                         'raw': {'secret': 'x'}},
+            ))
+
+
+class PublicDtoAgentStateTests(unittest.TestCase):
+    def test_dto_exposes_valid_agent_state(self):
+        dto = public_session_dto({
+            'machine_id': 'host-1', 'session_id': 'sess_xyz', 'managed': True,
+            'current_state': 'running', 'state_source': 'supervisor',
+            'state_confidence': 'high',
+        })
+        self.assertEqual(dto['current_state'], 'running')
+        self.assertEqual(dto['state_source'], 'supervisor')
+        self.assertEqual(dto['state_confidence'], 'high')
+
+    def test_dto_unknown_and_unmanaged_state_degrade(self):
+        unknown = public_session_dto({
+            'machine_id': 'host-1', 'session_id': 'sess_xyz', 'managed': True,
+            'current_state': 'not_a_state', 'state_source': 'raw',
+            'state_confidence': 'certain',
+        })
+        self.assertEqual(unknown['current_state'], 'unknown')
+        self.assertEqual(unknown['state_source'], 'unknown')
+        self.assertEqual(unknown['state_confidence'], 'low')
+        unmanaged = public_session_dto({
+            'machine_id': 'host-1', 'session_id': 'sess_xyz', 'managed': False,
+            'current_state': 'running', 'state_source': 'supervisor',
+            'state_confidence': 'high',
+        })
+        self.assertEqual(unmanaged['current_state'], 'unknown')
+        self.assertEqual(unmanaged['state_source'], 'unknown')
+        self.assertEqual(unmanaged['state_confidence'], 'low')
 
 
 class ValidateBatchTests(unittest.TestCase):

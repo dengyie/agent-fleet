@@ -17,6 +17,8 @@ from hub.domain.task_result import (
     normalize_test_summary as _normalize_test_summary,
 )
 
+from hub.domain.handoff import HandoffConflict
+
 
 LEASE_TTL_S = 300
 TASK_TTL_S = 24 * 3600
@@ -48,6 +50,14 @@ CREATE TABLE IF NOT EXISTS leases (
   nonce TEXT NOT NULL,
   leased_at TEXT NOT NULL,
   expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS handoff_receipts (
+  client_token TEXT PRIMARY KEY,
+  request_digest TEXT NOT NULL,
+  source_session_id TEXT NOT NULL,
+  handoff_id TEXT NOT NULL UNIQUE,
+  task_id TEXT NOT NULL REFERENCES tasks(task_id),
+  attempt_id TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_lease_task ON leases(task_id);
 CREATE TABLE IF NOT EXISTS results (
@@ -235,8 +245,11 @@ class SqliteTaskRepository:
             if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
                 raise sqlite3.IntegrityError("task schema migration violates foreign keys")
 
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_attempt ON tasks(attempt_id)")
+
     def create_task(self, *, machine, agent_type, project, instruction, requested_by,
-                    client_token=None, ttl_s=TASK_TTL_S, now=None, confirm=False):
+                    client_token=None, ttl_s=TASK_TTL_S, now=None, confirm=False,
+                    handoff=None):
         """创建任务；(client_token 命中, False) 幂等返回已有任务。
 
         超长 instruction 服务端截断至 2000 字符后再 INSERT（不依赖 SQLite CHECK
@@ -252,13 +265,26 @@ class SqliteTaskRepository:
                     existing = conn.execute(
                         "SELECT * FROM tasks WHERE client_token=?", (client_token,)).fetchone()
                     if existing:
+                        if handoff is not None:
+                            receipt = conn.execute(
+                                "SELECT request_digest FROM handoff_receipts WHERE client_token=?",
+                                (client_token,)).fetchone()
+                            if not receipt or receipt["request_digest"] != handoff["request_digest"]:
+                                raise HandoffConflict()
                         return dict(existing), False
+                attempt_id = uuid.uuid4().hex
                 conn.execute(
                     "INSERT INTO tasks (task_id, client_token, machine, agent_type, project,"
                     " instruction, requested_by, state, attempt_id, created_at, expires_at)"
                     " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     (task_id, client_token, machine, agent_type, project, instruction,
-                     requested_by, "queued", uuid.uuid4().hex, _iso(now), _iso(now + ttl_s)))
+                     requested_by, "queued", attempt_id, _iso(now), _iso(now + ttl_s)))
+                if handoff is not None:
+                    conn.execute(
+                        "INSERT INTO handoff_receipts (client_token, request_digest, source_session_id,"
+                        " handoff_id, task_id, attempt_id) VALUES (?,?,?,?,?,?)",
+                        (client_token, handoff["request_digest"], handoff["source_session_id"],
+                         "h-" + uuid.uuid4().hex, task_id, attempt_id))
                 if confirm:
                     conn.execute(
                         "INSERT INTO task_gates (task_id, kind, state, requested_by,"
@@ -284,6 +310,49 @@ class SqliteTaskRepository:
         elif raw in ("", None):
             out["test_summary"] = None
         return out
+
+    def get_handoff_receipt(self, client_token: str) -> dict | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT request_digest, handoff_id, task_id, attempt_id"
+                " FROM handoff_receipts WHERE client_token=?", (client_token,)).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def get_task_for_attempt(self, attempt_id: str) -> dict | None:
+        """Indexed source binding; retain the result of this exact attempt."""
+        conn = self._connect()
+        try:
+            binding = conn.execute(
+                "SELECT task_id FROM tasks WHERE attempt_id=? UNION ALL"
+                " SELECT task_id FROM leases WHERE attempt_id=? UNION ALL"
+                " SELECT task_id FROM results WHERE attempt_id=? LIMIT 1",
+                (attempt_id, attempt_id, attempt_id)).fetchone()
+            if not binding:
+                return None
+            row = conn.execute(
+                "SELECT task_id, project, machine, instruction FROM tasks WHERE task_id=?",
+                (binding["task_id"],)).fetchone()
+            result = conn.execute(
+                "SELECT exit_code, log_summary, test_summary FROM results WHERE attempt_id=?",
+                (attempt_id,)).fetchone()
+            return {**dict(row), "result": self._decode_result(result)} if row else None
+        finally:
+            conn.close()
+
+    def get_session_search_metadata(self, attempt_id: str, machine_id: str) -> dict | None:
+        """Resolve an existing session attempt without exposing task content."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT project,agent_type FROM tasks WHERE attempt_id=? AND machine=? LIMIT 1",
+                (attempt_id, machine_id),
+            ).fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            conn.close()
 
     def get_task(self, task_id):
         conn = self._connect()

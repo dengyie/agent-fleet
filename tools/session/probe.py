@@ -150,6 +150,7 @@ class CapabilityManifest:
     structured_stream: bool = False
     hooks: bool = False
     pty: bool = False
+    interactive_questions: bool = False
     supported_event_kinds: tuple[str, ...] = ()
     quality_by_kind: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     diagnostics: list[str] = field(default_factory=list)
@@ -219,6 +220,7 @@ def _build_manifest(
         structured_stream=bool(caps.get("structured_stream", False)),
         hooks=bool(caps.get("hooks", False)),
         pty=bool(caps.get("pty", False)),
+        interactive_questions=caps.get("interactive_questions") is True,
         supported_event_kinds=tuple(kinds),
         quality_by_kind=dict(qualities or {}),
         diagnostics=list(diagnostics or [])[:MAX_DIAGNOSTICS],
@@ -526,6 +528,7 @@ def as_dict(manifest: CapabilityManifest) -> dict[str, Any]:
         "structured_stream": manifest.structured_stream,
         "hooks": manifest.hooks,
         "pty": manifest.pty,
+        "interactive_questions": manifest.interactive_questions,
         "supported_event_kinds": sorted(manifest.supported_event_kinds),
         "quality_by_kind": {
             kind: sorted(quals)

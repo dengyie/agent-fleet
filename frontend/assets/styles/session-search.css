@@ -1,0 +1,10 @@
+.session-search-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.session-search-form label { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.session-search-form input { box-sizing: border-box; width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: inherit; }
+.session-search-form .session-search-query { grid-column: 1 / -1; }
+.session-search-form button { align-self: end; justify-self: start; }
+.session-search-results { list-style: none; padding: 0; display: grid; gap: 16px; }
+.session-search-result { min-width: 0; overflow-wrap: anywhere; }
+.session-search-snippet { white-space: pre-wrap; line-height: 1.65; }
+.session-search-snippet mark { background: #fbe59a; color: #382900; border-radius: 3px; }
+@media (max-width: 640px) { .session-search-form { grid-template-columns: minmax(0, 1fr); } }

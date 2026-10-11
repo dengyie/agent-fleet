@@ -143,6 +143,7 @@ def start_lease_reconciler(interval_s=60):
 #: ``<FLEET_HOME>/var`` (persistent in the release dir); no key on the host
 #: means raw capture is fail-closed while redacted/audit surfaces work.
 _SESSION_ENABLE_ENV = "AGENT_FLEET_SESSION_REPOSITORIES_ENABLED"
+_SESSION_SEARCH_ENABLE_ENV = "AGENT_FLEET_SESSION_SEARCH_ENABLED"
 _SUPERVISOR_ENABLE_ENV = "AGENT_FLEET_SUPERVISOR_ENABLED"
 _ADOPTION_ENABLE_ENV = "AGENT_FLEET_ADOPTION_REPOSITORIES_ENABLED"
 _APPEND_TURN_ENABLE_ENV = "AGENT_FLEET_APPEND_USER_TURN_ENABLED"
@@ -267,6 +268,7 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
              runner_credentials=None, project_whitelist=None,
              serve_frontend=True, frontend_dir=None,
              session_repositories_enabled=None,
+             session_search_enabled=None,
              supervisor_enabled=None,
              adoption_repositories_enabled=None,
              append_user_turn_enabled=None,
@@ -311,6 +313,8 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         )
     session_on = _feature_on(
         session_repositories_enabled, env=_SESSION_ENABLE_ENV)
+    session_search_on = _feature_on(
+        session_search_enabled, env=_SESSION_SEARCH_ENABLE_ENV)
     supervisor_on = _feature_on(
         supervisor_enabled, env=_SUPERVISOR_ENABLE_ENV)
     adoption_on = _feature_on(
@@ -428,6 +432,7 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         serve_frontend=serve_frontend,
         frontend_dir=frontend_dir,
         session_repositories_enabled=session_on,
+        session_search_enabled=session_search_on,
         supervisor_enabled=supervisor_on,
         adoption_repositories_enabled=adoption_on,
         append_user_turn_enabled=append_turn_on,
