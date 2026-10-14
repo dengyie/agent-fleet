@@ -2,6 +2,8 @@
 
 在 Agent Fleet 侧栏打开 **Muse**（`/muse`），导入 `muse.ai` 登录态即可使用原生会话。Hub 直接与 Muse 通信；使用期间不需要 Chrome、CDP、9222、Playwright 或浏览器扩展。Muse 继续在其自身的云环境执行任务。一个 Fleet 用户可以保存多个 Muse 账号；账号切换会同时切换会话、审批、操作记录和独立登录态。
 
+账号密码资料卡自动登录目前尚未实现。当前仍需从已登录 Muse 浏览器导入 Cookie。未来的凭据登录需要单独批准的认证浏览器安全契约，不能复用通用 `browser.*`，也不能在本功能之外暗含 MFA 接管；实施方案及当前运行时准入阻塞记录在[账号密码登录计划](../superpowers/plans/2026-10-15-muse-credential-login.md)。
+
 ## 使用
 
 1. 更新包含本功能的前后端版本，并安装 `requirements.txt`（新增 `websocket-client>=1.8,<2`）。沿用 Fleet 的平台开关 `platform_enabled`；普通 Fleet 用户也能访问自己的 Muse 工作区。
