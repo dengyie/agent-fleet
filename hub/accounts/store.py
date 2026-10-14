@@ -6,8 +6,10 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 
 from werkzeug.security import check_password_hash, generate_password_hash
 from hub.diagnostics import log_failure
@@ -50,6 +52,10 @@ def digest(value):
 
 
 class AccountStore:
+    BACKGROUND_OPERATION_LEASE_SECONDS = 120
+    BACKGROUND_OPERATION_RENEW_SECONDS = 30
+    DEACTIVATION_WAIT_SECONDS = 125
+
     def __init__(self, path, *, clock=time.time):
         self.path = Path(path)
         self.clock = clock
@@ -75,6 +81,13 @@ class AccountStore:
                 CREATE INDEX IF NOT EXISTS invitations_email ON invitations(email);
                 CREATE TABLE IF NOT EXISTS limits (
                     key TEXT PRIMARY KEY, start REAL NOT NULL, count INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS background_operation_leases (
+                    user_id TEXT NOT NULL, token TEXT NOT NULL, expires REAL NOT NULL,
+                    PRIMARY KEY(user_id, token));
+                CREATE INDEX IF NOT EXISTS background_operation_leases_expiry
+                    ON background_operation_leases(user_id, expires);
+                CREATE TABLE IF NOT EXISTS background_operation_barriers (
+                    user_id TEXT PRIMARY KEY, token TEXT NOT NULL, expires REAL NOT NULL);
             ''')
             # executescript commits the initial transaction. Serialize schema
             # upgrades so concurrent Hub processes cannot race this ALTER.
@@ -345,6 +358,63 @@ class AccountStore:
         with self.connect() as db:
             return [self.public(row) for row in db.execute('SELECT * FROM users WHERE id>? ORDER BY id LIMIT 100', (after,))]
 
+    def is_active(self, user_id):
+        """Authorize background account work without a browser session."""
+        with self.connect() as db:
+            row = db.execute('SELECT active FROM users WHERE id=?', (user_id,)).fetchone()
+            return bool(row and row['active'])
+
+    @contextmanager
+    def background_operation(self, user_id):
+        """Fence bounded autonomous work against account deactivation."""
+        token = uuid.uuid4().hex
+        now = self.clock()
+        acquired = False
+        with self.connect() as db:
+            db.execute('DELETE FROM background_operation_leases WHERE expires<=?', (now,))
+            db.execute('DELETE FROM background_operation_barriers WHERE expires<=?', (now,))
+            active = db.execute('SELECT active FROM users WHERE id=?', (user_id,)).fetchone()
+            barrier = db.execute('SELECT 1 FROM background_operation_barriers WHERE user_id=?',
+                                 (user_id,)).fetchone()
+            if active and active['active'] and not barrier:
+                db.execute('INSERT INTO background_operation_leases VALUES (?,?,?)',
+                           (user_id, token, now + self.BACKGROUND_OPERATION_LEASE_SECONDS))
+                acquired = True
+        renew_stop = threading.Event()
+        renewer = None
+        if acquired:
+            renewer = threading.Thread(
+                target=self._renew_background_operation,
+                args=(user_id, token, renew_stop),
+                name='account-background-lease', daemon=True)
+            renewer.start()
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                renew_stop.set()
+                renewer.join(timeout=2)
+                with self.connect() as db:
+                    db.execute('DELETE FROM background_operation_leases WHERE user_id=? AND token=?',
+                               (user_id, token))
+
+    def _renew_background_operation(self, user_id, token, stop):
+        while not stop.wait(self.BACKGROUND_OPERATION_RENEW_SECONDS):
+            try:
+                now = self.clock()
+                with self.connect() as db:
+                    updated = db.execute(
+                        'UPDATE background_operation_leases SET expires=? '
+                        'WHERE user_id=? AND token=? AND expires>?',
+                        (now + self.BACKGROUND_OPERATION_LEASE_SECONDS, user_id, token, now),
+                    ).rowcount
+                if updated != 1:
+                    return
+            except Exception:
+                # A missed heartbeat leaves the bounded lease to expire; it
+                # cannot grant another operation while the original is live.
+                continue
+
     def manage(self, actor, user_id, *, changes, expected_revision):
         if type(expected_revision) is not int or expected_revision < 0:
             fail('precondition_required', '请重新加载账号信息后操作', 428)
@@ -353,24 +423,72 @@ class AccountStore:
         if ('role' in changes and changes['role'] not in ('user', 'admin')) or (
                 'active' in changes and type(changes['active']) is not bool):
             fail('invalid_user', '账号角色或状态无效')
-        with self.connect() as db:
-            admin = db.execute('SELECT * FROM users WHERE id=? AND active=1 AND role="admin"', (actor,)).fetchone()
-            if not admin:
-                fail('forbidden', '需要管理员权限', 403)
-            row = db.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
-            if not row:
-                fail('not_found', '账号不存在', 404)
-            if row['revision'] != expected_revision:
-                fail('revision_conflict', '账号信息已被修改，请查看最新状态后重试', 409)
-            role = changes.get('role', row['role'])
-            active = changes.get('active', bool(row['active']))
-            if row['role'] == 'admin' and row['active'] and (role != 'admin' or not active):
-                count = db.execute('SELECT count(*) FROM users WHERE role="admin" AND active=1').fetchone()[0]
-                if count <= 1:
-                    fail('last_admin', '不能停用或降级最后一个管理员', 409)
-            db.execute('UPDATE users SET role=?,active=?,revision=revision+1 WHERE id=?', (role, int(active), user_id))
-            db.execute('DELETE FROM sessions WHERE user_id=?', (user_id,))
-            return self.public(db.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone())
+        barrier_token = uuid.uuid4().hex
+        barrier_expires = self.clock() + 300
+        deactivation_deadline = time.monotonic() + self.DEACTIVATION_WAIT_SECONDS
+        owns_barrier = False
+        try:
+            while True:
+                wait_for_operation = False
+                with self.connect() as db:
+                    admin = db.execute('SELECT * FROM users WHERE id=? AND active=1 AND role="admin"',
+                                       (actor,)).fetchone()
+                    if not admin:
+                        fail('forbidden', '需要管理员权限', 403)
+                    row = db.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+                    if not row:
+                        fail('not_found', '账号不存在', 404)
+                    if row['revision'] != expected_revision:
+                        fail('revision_conflict', '账号信息已被修改，请查看最新状态后重试', 409)
+                    role = changes.get('role', row['role'])
+                    active = changes.get('active', bool(row['active']))
+                    if row['role'] == 'admin' and row['active'] and (role != 'admin' or not active):
+                        count = db.execute('SELECT count(*) FROM users WHERE role="admin" AND active=1').fetchone()[0]
+                        if count <= 1:
+                            fail('last_admin', '不能停用或降级最后一个管理员', 409)
+
+                    stopping_background_work = bool(row['active'] and not active)
+                    if stopping_background_work:
+                        now = self.clock()
+                        db.execute('DELETE FROM background_operation_leases WHERE expires<=?', (now,))
+                        db.execute('DELETE FROM background_operation_barriers WHERE expires<=?', (now,))
+                        barrier = db.execute(
+                            'SELECT token FROM background_operation_barriers WHERE user_id=?',
+                            (user_id,),
+                        ).fetchone()
+                        if not owns_barrier and barrier is None:
+                            db.execute('INSERT INTO background_operation_barriers VALUES (?,?,?)',
+                                       (user_id, barrier_token, barrier_expires))
+                            owns_barrier = True
+                            barrier = {'token': barrier_token}
+                        if not owns_barrier or barrier['token'] != barrier_token:
+                            wait_for_operation = True
+                        else:
+                            lease = db.execute(
+                                'SELECT 1 FROM background_operation_leases WHERE user_id=? LIMIT 1',
+                                (user_id,),
+                            ).fetchone()
+                            wait_for_operation = lease is not None
+
+                    if not wait_for_operation:
+                        db.execute('UPDATE users SET role=?,active=?,revision=revision+1 WHERE id=?',
+                                   (role, int(active), user_id))
+                        db.execute('DELETE FROM sessions WHERE user_id=?', (user_id,))
+                        if owns_barrier:
+                            db.execute('DELETE FROM background_operation_barriers WHERE user_id=? AND token=?',
+                                       (user_id, barrier_token))
+                            owns_barrier = False
+                        result = self.public(db.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone())
+                if not wait_for_operation:
+                    return result
+                if time.monotonic() >= deactivation_deadline:
+                    fail('account_busy', '账号仍有自动操作进行，请稍后重试', 409)
+                time.sleep(0.05)
+        finally:
+            if owns_barrier:
+                with self.connect() as db:
+                    db.execute('DELETE FROM background_operation_barriers WHERE user_id=? AND token=?',
+                               (user_id, barrier_token))
 
     def bootstrap_admin(self, email, password, *, login_name=None):
         email = email_address(email)

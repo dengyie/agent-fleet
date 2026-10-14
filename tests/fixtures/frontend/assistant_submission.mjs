@@ -31,6 +31,9 @@ class Element {
 globalThis.document = {
   createElement: tag => new Element(tag), createElementNS: (_, tag) => new Element(tag),
   createTextNode: text => { const node = new Element('#text'); node.textContent = text; return node; },
+  hidden: false,
+  addEventListener() {},
+  removeEventListener() {},
 };
 globalThis.DOMParser = class { parseFromString() { return {documentElement: new Element('svg')}; } };
 const [origin, modulePath, scenario] = process.argv.slice(2);

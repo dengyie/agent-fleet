@@ -25,6 +25,7 @@ from hub.application.platform_memory_context_service import (
 )
 from tools.platform.tool_broker import ToolBroker
 from tools.platform.remote_tool_broker import RemoteToolBroker
+from tools.browser_bridge.contract import WEB_AGENT_TOOLS
 from hub.domain.platform import ACCEPTANCE_TOOL_POLICY
 
 
@@ -176,6 +177,13 @@ class LocalRunWorkerService:
                 raise RuntimeError("remote_delivery_unavailable")
             remote_browser_enabled = False
             remote_submit_enabled = False
+            remote_web_agent_enabled = False
+            if remote:
+                agent_node = self.repository.get_node(claim["owner_id"], execution_node_id)
+                agent_caps = agent_node.get("capabilities", {}) if agent_node and agent_node.get("enabled") else {}
+                enabled_agent_tools = {name for name in WEB_AGENT_TOOLS if agent_caps.get(name) is True}
+                remote_web_agent_enabled = bool(enabled_agent_tools)
+                remote_allowed_tools = (remote_allowed_tools - WEB_AGENT_TOOLS) | (remote_allowed_tools & enabled_agent_tools)
             if remote and self.browser_enabled:
                 node = self.repository.get_node(claim["owner_id"], execution_node_id)
                 capabilities = node.get("capabilities") if isinstance(node, dict) else {}
@@ -216,6 +224,7 @@ class LocalRunWorkerService:
                     allowed_tools=remote_allowed_tools,
                     event_sink=lambda kind, payload: self._event(claim, kind, payload),
                     browser_enabled=remote_browser_enabled,
+                    web_agent_enabled=remote_web_agent_enabled,
                     browser_submit_enabled=remote_submit_enabled,
                     submit_approvals=self.submit_approvals,
                     browser_network_enabled=self.browser_network_enabled,
@@ -263,6 +272,7 @@ class LocalRunWorkerService:
                 tools=ToolBroker.tool_definitions(
                     remote_allowed_tools if remote else allowed_tools,
                     browser_enabled=remote_browser_enabled, browser_submit_enabled=remote_submit_enabled,
+                    web_agent_enabled=remote_web_agent_enabled,
                     service_actions_enabled=not remote and self.service_actions is not None),
                 should_cancel=should_cancel,
                 lease_id=lease_id, worker_id=self.worker_id,

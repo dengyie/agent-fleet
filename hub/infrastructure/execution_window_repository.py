@@ -134,13 +134,15 @@ class ExecutionWindowRepository:
             CREATE TABLE IF NOT EXISTS execution_windows (
               window_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, run_id TEXT NOT NULL,
               state TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}',
+              writer_epoch INTEGER NOT NULL DEFAULT 0,
+              next_event_sequence INTEGER NOT NULL DEFAULT 0,
               created_at REAL NOT NULL, expires_at REAL NOT NULL,
               attached_at REAL, closed_at REAL, updated_at REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_execution_windows_owner
               ON execution_windows(owner_id, updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_execution_windows_run
-              ON execution_windows(owner_id, run_id);
+              ON execution_windows(owner_id, run_id, window_id);
             CREATE TABLE IF NOT EXISTS execution_window_tickets (
               ticket_id TEXT PRIMARY KEY, window_id TEXT NOT NULL, owner_id TEXT NOT NULL,
               token_hash TEXT NOT NULL UNIQUE, expires_at REAL NOT NULL,
@@ -152,8 +154,9 @@ class ExecutionWindowRepository:
             CREATE TABLE IF NOT EXISTS execution_window_leases (
               lease_id TEXT PRIMARY KEY, window_id TEXT NOT NULL, owner_id TEXT NOT NULL,
               holder_id TEXT NOT NULL, lease_token_hash TEXT NOT NULL UNIQUE,
+              writer_epoch INTEGER NOT NULL DEFAULT 0,
               expires_at REAL NOT NULL, created_at REAL NOT NULL,
-              released_at REAL, revoked_at REAL,
+              released_at REAL, revoked_at REAL, expired_at REAL,
               FOREIGN KEY(window_id) REFERENCES execution_windows(window_id)
             );
             CREATE INDEX IF NOT EXISTS idx_execution_window_leases_active
@@ -177,8 +180,60 @@ class ExecutionWindowRepository:
             );
             CREATE INDEX IF NOT EXISTS idx_execution_window_frames_artifact
               ON execution_window_frames(owner_id, window_id, artifact_id);
+            CREATE TABLE IF NOT EXISTS execution_window_frame_reads (
+              window_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
+              last_read_at REAL NOT NULL,
+              FOREIGN KEY(window_id) REFERENCES execution_windows(window_id)
+            );
             """)
+            conn.execute("BEGIN IMMEDIATE")
+            window_columns = {row[1] for row in conn.execute(
+                "PRAGMA table_info(execution_windows)")}
+            window_epoch_added = "writer_epoch" not in window_columns
+            cursor_added = "next_event_sequence" not in window_columns
+            if window_epoch_added:
+                conn.execute(
+                    "ALTER TABLE execution_windows ADD COLUMN writer_epoch INTEGER NOT NULL DEFAULT 0")
+            if cursor_added:
+                conn.execute(
+                    "ALTER TABLE execution_windows ADD COLUMN next_event_sequence INTEGER NOT NULL DEFAULT 0")
+                conn.execute(
+                    "UPDATE execution_windows SET next_event_sequence=COALESCE(("
+                    "SELECT MAX(sequence) FROM execution_window_events e "
+                    "WHERE e.window_id=execution_windows.window_id),0)"
+                )
+            lease_columns = {row[1] for row in conn.execute(
+                "PRAGMA table_info(execution_window_leases)")}
+            lease_epoch_added = "writer_epoch" not in lease_columns
+            if lease_epoch_added:
+                conn.execute(
+                    "ALTER TABLE execution_window_leases ADD COLUMN writer_epoch INTEGER NOT NULL DEFAULT 0")
+            expired_at_added = "expired_at" not in lease_columns
+            if expired_at_added:
+                conn.execute(
+                    "ALTER TABLE execution_window_leases ADD COLUMN expired_at REAL")
+            if window_epoch_added or lease_epoch_added:
+                # Legacy leases were only window-scoped. Fence every one during
+                # upgrade so two windows from the same run cannot both remain writers.
+                conn.execute(
+                    "UPDATE execution_windows SET writer_epoch=writer_epoch+1")
+                conn.execute(
+                    "UPDATE execution_window_leases SET revoked_at=COALESCE(revoked_at, ?) "
+                    "WHERE released_at IS NULL AND revoked_at IS NULL AND expired_at IS NULL",
+                    (time.time(),),
+                )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_execution_window_leases_live "
+                "ON execution_window_leases(owner_id,window_id,writer_epoch,expires_at) "
+                "WHERE released_at IS NULL AND revoked_at IS NULL AND expired_at IS NULL"
+            )
+            conn.execute("COMMIT")
         except (sqlite3.Error, OSError):
+            if conn is not None and conn.in_transaction:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
             raise ExecutionWindowRepositoryError("window_store") from None
         finally:
             if conn is not None:
@@ -214,10 +269,75 @@ class ExecutionWindowRepository:
         return ttl
 
     def _expire_if_needed(self, conn, row, now: float):
-        if row and row["state"] not in TERMINAL_WINDOW_STATES and float(row["expires_at"]) <= now:
-            conn.execute("UPDATE execution_windows SET state='expired',updated_at=? WHERE window_id=? AND state NOT IN ('closed','expired')", (now, row["window_id"]))
-            row = conn.execute("SELECT * FROM execution_windows WHERE window_id=?", (row["window_id"],)).fetchone()
+        if row is None:
+            return None
+        self._expire_run_writer_lease(conn, row["owner_id"], row["run_id"], now)
+        if row["state"] not in TERMINAL_WINDOW_STATES and float(row["expires_at"]) <= now:
+            conn.execute(
+                "UPDATE execution_window_leases SET expired_at=? "
+                "WHERE owner_id=? AND window_id=? AND released_at IS NULL "
+                "AND revoked_at IS NULL AND expired_at IS NULL",
+                (now, row["owner_id"], row["window_id"]),
+            )
+            conn.execute(
+                "UPDATE execution_windows SET state='expired',updated_at=? "
+                "WHERE window_id=? AND state NOT IN ('closed','expired')",
+                (now, row["window_id"]),
+            )
+        row = conn.execute(
+            "SELECT * FROM execution_windows WHERE window_id=?", (row["window_id"],),
+        ).fetchone()
         return row
+
+    @staticmethod
+    def _bump_run_epoch(conn, owner_id: str, run_id: str) -> int:
+        conn.execute(
+            "UPDATE execution_windows SET writer_epoch=writer_epoch+1 "
+            "WHERE owner_id=? AND run_id=?",
+            (owner_id, run_id),
+        )
+        row = conn.execute(
+            "SELECT COALESCE(MAX(writer_epoch),0) FROM execution_windows "
+            "WHERE owner_id=? AND run_id=?",
+            (owner_id, run_id),
+        ).fetchone()
+        return int(row[0])
+
+    def _expire_run_writer_lease(self, conn, owner_id: str, run_id: str,
+                                 now: float) -> bool:
+        row = conn.execute(
+            "SELECT l.lease_id FROM execution_window_leases l "
+            "JOIN execution_windows w ON w.owner_id=l.owner_id AND w.window_id=l.window_id "
+            "WHERE l.owner_id=? AND w.run_id=? AND l.writer_epoch=w.writer_epoch "
+            "AND l.released_at IS NULL AND l.revoked_at IS NULL "
+            "AND l.expired_at IS NULL AND l.expires_at<=? LIMIT 1",
+            (owner_id, run_id, now),
+        ).fetchone()
+        if row is None:
+            return False
+        conn.execute(
+            "UPDATE execution_window_leases SET expired_at=? WHERE lease_id=? "
+            "AND expired_at IS NULL AND released_at IS NULL AND revoked_at IS NULL",
+            (now, row["lease_id"]),
+        )
+        if conn.execute("SELECT changes()").fetchone()[0] != 1:
+            return False
+        self._bump_run_epoch(conn, owner_id, run_id)
+        return True
+
+    @staticmethod
+    def _next_event_sequence(conn, window_id: str) -> int:
+        conn.execute(
+            "UPDATE execution_windows SET next_event_sequence=next_event_sequence+1 "
+            "WHERE window_id=?", (window_id,),
+        )
+        row = conn.execute(
+            "SELECT next_event_sequence FROM execution_windows WHERE window_id=?",
+            (window_id,),
+        ).fetchone()
+        if row is None:
+            raise ExecutionWindowRepositoryError("window_not_found")
+        return int(row[0])
 
     def create_window(self, owner_id: str, run_id: str, *, ttl_s: float = 900.0, metadata: Mapping[str, Any] | None = None) -> dict[str, Any]:
         try:
@@ -241,8 +361,16 @@ class ExecutionWindowRepository:
             if run is None:
                 conn.execute("ROLLBACK")
                 raise ExecutionWindowRepositoryError("run_not_found")
+            writer_epoch = int(conn.execute(
+                "SELECT COALESCE(MAX(writer_epoch),0) FROM execution_windows "
+                "WHERE owner_id=? AND run_id=?", (owner_id, run_id),
+            ).fetchone()[0])
             expires = now + ttl
-            conn.execute("INSERT INTO execution_windows(window_id,owner_id,run_id,state,metadata,created_at,expires_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (window_id, owner_id, run_id, "pending", encoded, now, expires, now))
+            conn.execute(
+                "INSERT INTO execution_windows(window_id,owner_id,run_id,state,metadata,writer_epoch,created_at,expires_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (window_id, owner_id, run_id, "pending", encoded, writer_epoch, now, expires, now),
+            )
             conn.execute("INSERT INTO execution_window_tickets(ticket_id,window_id,owner_id,token_hash,expires_at,created_at) VALUES(?,?,?,?,?,?)", (ticket_id, window_id, owner_id, _token_hash(ticket), expires, now))
             row = conn.execute("SELECT * FROM execution_windows WHERE window_id=?", (window_id,)).fetchone()
             conn.execute("COMMIT")
@@ -311,17 +439,10 @@ class ExecutionWindowRepository:
                 params.append(run_id)
             query = "SELECT * FROM execution_windows WHERE " + " AND ".join(where) + " ORDER BY updated_at DESC, window_id DESC LIMIT ?"
             rows = conn.execute(query, (*params, limit)).fetchall()
-            expired_ids = [
-                row["window_id"] for row in rows
-                if row["state"] not in TERMINAL_WINDOW_STATES
-                and float(row["expires_at"]) <= now
-            ]
-            if expired_ids:
+            if rows:
                 conn.execute("BEGIN IMMEDIATE")
-                conn.executemany(
-                    "UPDATE execution_windows SET state='expired',updated_at=? WHERE owner_id=? AND window_id=? AND state NOT IN ('closed','expired')",
-                    [(now, owner_id, window_id) for window_id in expired_ids],
-                )
+                for row in rows:
+                    self._expire_if_needed(conn, row, now)
                 conn.execute("COMMIT")
                 rows = conn.execute(query, (*params, limit)).fetchall()
             windows = [public_window(self._window(row)) for row in rows]
@@ -421,8 +542,10 @@ class ExecutionWindowRepository:
             active = conn.execute(
                 "SELECT l.* FROM execution_window_leases l JOIN execution_windows w "
                 "ON w.owner_id=l.owner_id AND w.window_id=l.window_id "
-                "WHERE l.owner_id=? AND w.run_id=? AND w.state='attached' AND w.expires_at>? "
-                "AND l.released_at IS NULL AND l.revoked_at IS NULL AND l.expires_at>? "
+                "WHERE l.owner_id=? AND w.run_id=? AND l.writer_epoch=w.writer_epoch "
+                "AND w.state='attached' AND w.expires_at>? "
+                "AND l.released_at IS NULL AND l.revoked_at IS NULL "
+                "AND l.expired_at IS NULL AND l.expires_at>? "
                 "ORDER BY l.created_at DESC LIMIT 1",
                 (owner_id, row["run_id"], now, now),
             ).fetchone()
@@ -436,8 +559,7 @@ class ExecutionWindowRepository:
                 inflight = conn.execute(
                     f"SELECT 1 FROM platform_commands WHERE owner_id=? AND run_id=? "
                     # Unknown means the remote side effect may still be running.
-                    f"AND status IN ('leased','accepted','running','unknown') "
-                    f"AND action IN ({marks}) LIMIT 1",
+                    f"AND status IN ('leased','accepted','running','unknown') AND action IN ({marks}) LIMIT 1",
                     (owner_id, row["run_id"], *mutations),
                 ).fetchone()
                 if inflight is not None:
@@ -448,11 +570,22 @@ class ExecutionWindowRepository:
                     (json.dumps({"state": "failed", "result": {}, "error_code": "writer_lease_active"},
                                 sort_keys=True, separators=(",", ":")), now, owner_id, row["run_id"], *mutations),
                 )
-            conn.execute("UPDATE execution_window_leases SET revoked_at=? WHERE owner_id=? AND window_id=? AND released_at IS NULL AND revoked_at IS NULL", (now, owner_id, window_id))
+            conn.execute(
+                "UPDATE execution_window_leases SET revoked_at=? WHERE owner_id=? "
+                "AND window_id IN (SELECT window_id FROM execution_windows "
+                "WHERE owner_id=? AND run_id=?) AND released_at IS NULL "
+                "AND revoked_at IS NULL AND expired_at IS NULL",
+                (now, owner_id, owner_id, row["run_id"]),
+            )
+            writer_epoch = self._bump_run_epoch(conn, owner_id, row["run_id"])
             token = secrets.token_urlsafe(32); lease_id = "lease_" + secrets.token_urlsafe(18); expires = min(float(row["expires_at"]), now + ttl)
-            conn.execute("INSERT INTO execution_window_leases(lease_id,window_id,owner_id,holder_id,lease_token_hash,expires_at,created_at) VALUES(?,?,?,?,?,?,?)", (lease_id, window_id, owner_id, holder_id, _token_hash(token), expires, now))
+            conn.execute(
+                "INSERT INTO execution_window_leases(lease_id,window_id,owner_id,holder_id,lease_token_hash,writer_epoch,expires_at,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (lease_id, window_id, owner_id, holder_id, _token_hash(token), writer_epoch, expires, now),
+            )
             conn.execute("COMMIT")
-            return {"lease": {"lease_id": lease_id, "window_id": window_id, "holder_id": holder_id, "expires_at": expires}, "lease_token": token}
+            return {"lease": {"lease_id": lease_id, "window_id": window_id, "holder_id": holder_id, "writer_epoch": writer_epoch, "expires_at": expires}, "lease_token": token}
         except ExecutionWindowRepositoryError:
             if conn is not None:
                 try: conn.execute("ROLLBACK")
@@ -472,7 +605,9 @@ class ExecutionWindowRepository:
             "SELECT 1 FROM execution_windows w JOIN execution_window_leases l "
             "ON l.owner_id=w.owner_id AND l.window_id=w.window_id "
             "WHERE w.owner_id=? AND w.run_id=? AND w.state='attached' AND w.expires_at>? "
-            "AND l.released_at IS NULL AND l.revoked_at IS NULL AND l.expires_at>? LIMIT 1",
+            "AND l.writer_epoch=w.writer_epoch AND l.released_at IS NULL "
+            "AND l.revoked_at IS NULL AND l.expired_at IS NULL "
+            "AND l.expires_at>? LIMIT 1",
             (owner_id, run_id, now, now),
         ).fetchone()
         if row is not None:
@@ -532,10 +667,15 @@ class ExecutionWindowRepository:
                     artifact_id, sha256, ticket["workspace_id"]):
                 raise ExecutionWindowRepositoryError("event_conflict")
             return self._event(prior)
-        sequence = int(connection.execute(
-            "SELECT COALESCE(MAX(sequence),0)+1 FROM execution_window_events WHERE window_id=?",
-            (window_id,),
-        ).fetchone()[0])
+        connection.execute(
+            "DELETE FROM execution_window_events WHERE owner_id=? AND window_id=? "
+            "AND kind='browser.frame'", (owner_id, window_id),
+        )
+        connection.execute(
+            "DELETE FROM execution_window_frames WHERE owner_id=? AND window_id=?",
+            (owner_id, window_id),
+        )
+        sequence = self._next_event_sequence(connection, window_id)
         captured_at = datetime.fromtimestamp(moment, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         payload = {
             "artifact_id": artifact_id, "sha256": sha256, "content_type": "image/png",
@@ -560,30 +700,100 @@ class ExecutionWindowRepository:
         ).fetchone()
         return self._event(row)
 
-    def get_frame_artifact(self, owner_id: str, window_id: str, artifact_id: str) -> dict[str, Any] | None:
-        owner_id, window_id = self._owner_window(owner_id, window_id)
+    @staticmethod
+    def _latest_frame(conn, owner_id: str, window_id: str, artifact_id: str,
+                      now: float):
+        return conn.execute(
+            "SELECT f.workspace_id,f.artifact_id,f.sha256,f.width,f.height,f.captured_at "
+            "FROM execution_windows w JOIN execution_window_frames f "
+            "ON f.owner_id=w.owner_id AND f.window_id=w.window_id "
+            "JOIN execution_window_events e ON e.owner_id=f.owner_id "
+            "AND e.window_id=f.window_id AND e.sequence=f.sequence "
+            "JOIN browser_artifact_tickets t ON t.owner_id=f.owner_id "
+            "AND t.window_id=f.window_id AND t.artifact_id=f.artifact_id "
+            "AND t.sha256=f.sha256 "
+            "WHERE w.owner_id=? AND w.window_id=? AND w.state='attached' "
+            "AND w.expires_at>? AND f.artifact_id=? AND e.kind='browser.frame' "
+            "AND t.state='consumed' AND t.content_type='image/png' "
+            "AND f.sequence=(SELECT MAX(latest.sequence) FROM execution_window_frames latest "
+            "WHERE latest.owner_id=f.owner_id AND latest.window_id=f.window_id) LIMIT 1",
+            (owner_id, window_id, now, artifact_id),
+        ).fetchone()
+
+    @staticmethod
+    def _frame_artifact_id(artifact_id: str) -> str:
         if (not isinstance(artifact_id, str) or not artifact_id
                 or len(artifact_id) > 128
-                or any(ord(char) < 0x20 or ord(char) == 0x7f for char in artifact_id)):
+                or any(ord(char) < 0x20 or ord(char) == 0x7F for char in artifact_id)):
             raise ExecutionWindowRepositoryError("invalid_event_payload") from None
+        return artifact_id
+
+    def get_frame_artifact(self, owner_id: str, window_id: str, artifact_id: str) -> dict[str, Any] | None:
+        owner_id, window_id = self._owner_window(owner_id, window_id)
+        artifact_id = self._frame_artifact_id(artifact_id)
+        now = float(self.clock())
         conn = None
         try:
             conn = self._connect()
-            row = conn.execute(
-                "SELECT f.workspace_id,f.artifact_id,f.sha256,f.width,f.height,f.captured_at "
-                "FROM execution_window_frames f JOIN execution_window_events e "
-                "ON e.owner_id=f.owner_id AND e.window_id=f.window_id AND e.sequence=f.sequence "
-                "JOIN browser_artifact_tickets t ON t.owner_id=f.owner_id AND t.window_id=f.window_id "
-                "AND t.artifact_id=f.artifact_id AND t.sha256=f.sha256 "
-                "WHERE f.owner_id=? AND f.window_id=? AND f.artifact_id=? AND e.kind='browser.frame' "
-                "AND t.state='consumed' AND t.content_type='image/png' LIMIT 1",
-                (owner_id, window_id, artifact_id),
-            ).fetchone()
+            row = self._latest_frame(conn, owner_id, window_id, artifact_id, now)
             return dict(row) if row is not None else None
         except sqlite3.Error:
             raise ExecutionWindowRepositoryError("window_store") from None
         finally:
             if conn is not None: conn.close()
+
+    def claim_frame_artifact_read(self, owner_id: str, window_id: str,
+                                  artifact_id: str, *, now: float | None = None
+                                  ) -> dict[str, Any]:
+        owner_id, window_id = self._owner_window(owner_id, window_id)
+        artifact_id = self._frame_artifact_id(artifact_id)
+        moment = float(self.clock() if now is None else now)
+        conn = None
+        try:
+            conn = self._connect()
+            conn.execute("BEGIN IMMEDIATE")
+            window = self._load_for_update(conn, owner_id, window_id, moment)
+            frame = None
+            retry_after = 0.0
+            if window is not None and window["state"] == "attached":
+                row = self._latest_frame(conn, owner_id, window_id, artifact_id, moment)
+                if row is not None:
+                    previous = conn.execute(
+                        "SELECT last_read_at FROM execution_window_frame_reads "
+                        "WHERE owner_id=? AND window_id=?",
+                        (owner_id, window_id),
+                    ).fetchone()
+                    if previous is not None:
+                        retry_after = min(
+                            1.0, max(0.0, float(previous["last_read_at"]) + 1.0 - moment),
+                        )
+                    if retry_after == 0.0:
+                        conn.execute(
+                            "INSERT INTO execution_window_frame_reads(window_id,owner_id,last_read_at) "
+                            "VALUES(?,?,?) ON CONFLICT(window_id) DO UPDATE SET "
+                            "owner_id=excluded.owner_id,last_read_at=excluded.last_read_at",
+                            (window_id, owner_id, moment),
+                        )
+                        frame = dict(row)
+            conn.execute("COMMIT")
+            return {"frame": frame, "retry_after": retry_after}
+        except ExecutionWindowRepositoryError:
+            if conn is not None:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+            raise
+        except sqlite3.Error:
+            if conn is not None:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+            raise ExecutionWindowRepositoryError("window_store") from None
+        finally:
+            if conn is not None:
+                conn.close()
 
     def _lease_action(self, owner_id: str, window_id: str, holder_id: str, lease_token: str, action: str, *, ttl_s: float | None = None, now: float | None = None) -> dict[str, Any]:
         owner_id, window_id = self._owner_window(owner_id, window_id)
@@ -598,15 +808,19 @@ class ExecutionWindowRepository:
                 raise ExecutionWindowRepositoryError("window_closed")
             lease = conn.execute("SELECT * FROM execution_window_leases WHERE owner_id=? AND window_id=? AND holder_id=? AND lease_token_hash=? AND released_at IS NULL AND revoked_at IS NULL", (owner_id, window_id, holder_id, _token_hash(lease_token))).fetchone()
             if lease is None: raise ExecutionWindowRepositoryError("lease_not_found")
-            if float(lease["expires_at"]) <= now: raise ExecutionWindowRepositoryError("lease_expired")
+            if lease["expired_at"] is not None or float(lease["expires_at"]) <= now:
+                raise ExecutionWindowRepositoryError("lease_expired")
+            if int(lease["writer_epoch"]) != int(row["writer_epoch"]):
+                raise ExecutionWindowRepositoryError("lease_not_found")
             if action == "renew":
                 ttl = self._ttl(ttl_s, minimum=5.0, maximum=600.0, code="invalid_lease_ttl")
                 expires = min(float(row["expires_at"]), now + ttl)
                 conn.execute("UPDATE execution_window_leases SET expires_at=? WHERE lease_id=? AND released_at IS NULL AND revoked_at IS NULL", (expires, lease["lease_id"]))
-                result = {"lease_id": lease["lease_id"], "window_id": window_id, "holder_id": holder_id, "expires_at": expires}
+                result = {"lease_id": lease["lease_id"], "window_id": window_id, "holder_id": holder_id, "writer_epoch": lease["writer_epoch"], "expires_at": expires}
             else:
                 conn.execute("UPDATE execution_window_leases SET released_at=? WHERE lease_id=? AND released_at IS NULL AND revoked_at IS NULL", (now, lease["lease_id"]))
-                result = {"lease_id": lease["lease_id"], "window_id": window_id, "holder_id": holder_id, "released_at": now}
+                writer_epoch = self._bump_run_epoch(conn, owner_id, row["run_id"])
+                result = {"lease_id": lease["lease_id"], "window_id": window_id, "holder_id": holder_id, "writer_epoch": writer_epoch, "released_at": now}
             conn.execute("COMMIT")
             return {"lease": result}
         except ExecutionWindowRepositoryError:
@@ -635,12 +849,21 @@ class ExecutionWindowRepository:
             conn = self._connect(); conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT * FROM execution_windows WHERE owner_id=? AND window_id=?", (owner_id, window_id)).fetchone()
             if row is None: raise ExecutionWindowRepositoryError("window_not_found")
+            row = self._expire_if_needed(conn, row, now)
             if row["state"] == "closed":
                 conn.execute("COMMIT"); return {"window": public_window(self._window(row))}
             if row["state"] == "expired": raise ExecutionWindowRepositoryError("window_expired")
+            active_writer = conn.execute(
+                "SELECT 1 FROM execution_window_leases WHERE owner_id=? AND window_id=? "
+                "AND writer_epoch=? AND released_at IS NULL AND revoked_at IS NULL "
+                "AND expired_at IS NULL AND expires_at>? LIMIT 1",
+                (owner_id, window_id, row["writer_epoch"], now),
+            ).fetchone() is not None
             conn.execute("UPDATE execution_windows SET state='closing',updated_at=? WHERE window_id=?", (now, window_id))
             conn.execute("UPDATE execution_window_tickets SET revoked_at=? WHERE window_id=? AND revoked_at IS NULL", (now, window_id))
             conn.execute("UPDATE execution_window_leases SET revoked_at=? WHERE window_id=? AND released_at IS NULL AND revoked_at IS NULL", (now, window_id))
+            if active_writer:
+                self._bump_run_epoch(conn, owner_id, row["run_id"])
             conn.execute("UPDATE execution_windows SET state='closed',closed_at=?,updated_at=? WHERE window_id=?", (now, now, window_id))
             saved = conn.execute("SELECT * FROM execution_windows WHERE window_id=?", (window_id,)).fetchone()
             conn.execute("COMMIT")
@@ -696,15 +919,17 @@ class ExecutionWindowRepository:
             if row["state"] != "attached":
                 raise ExecutionWindowRepositoryError("window_not_attached")
             lease = conn.execute(
-                "SELECT lease_id,expires_at FROM execution_window_leases "
+                "SELECT lease_id,expires_at,expired_at,writer_epoch FROM execution_window_leases "
                 "WHERE owner_id=? AND window_id=? AND holder_id=? AND lease_token_hash=? "
                 "AND released_at IS NULL AND revoked_at IS NULL",
                 (owner_id, window_id, holder_id.strip(), _token_hash(lease_token)),
             ).fetchone()
             if lease is None:
                 raise ExecutionWindowRepositoryError("lease_not_found")
-            if float(lease["expires_at"]) <= now:
+            if lease["expired_at"] is not None or float(lease["expires_at"]) <= now:
                 raise ExecutionWindowRepositoryError("lease_expired")
+            if int(lease["writer_epoch"]) != int(row["writer_epoch"]):
+                raise ExecutionWindowRepositoryError("lease_not_found")
             existing = conn.execute(
                 "SELECT window_id,sequence,client_event_id,kind,payload,created_at "
                 "FROM execution_window_events WHERE owner_id=? AND window_id=? AND client_event_id=?",
@@ -715,11 +940,7 @@ class ExecutionWindowRepository:
                     raise ExecutionWindowRepositoryError("event_conflict")
                 conn.execute("COMMIT")
                 return self._event(existing)
-            next_row = conn.execute(
-                "SELECT COALESCE(MAX(sequence),0)+1 AS next_sequence "
-                "FROM execution_window_events WHERE window_id=?", (window_id,),
-            ).fetchone()
-            sequence = int(next_row["next_sequence"])
+            sequence = self._next_event_sequence(conn, window_id)
             conn.execute(
                 "INSERT INTO execution_window_events(window_id,owner_id,sequence,client_event_id,kind,payload,created_at) "
                 "VALUES(?,?,?,?,?,?,?)",

@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from hub.domain.platform_command import args_hash, verify_command
+from tools.browser_bridge.contract import WEB_AGENT_TOOLS
 
 
 class BrowserSessionSyncError(RuntimeError):
@@ -170,7 +171,9 @@ class NodeClient:
 
     def _signature_ok(self, command: Mapping):
         if self.public_key is None:
-            signature_ok = not self.require_signature and command.get("action") != "tool.browser.submit"
+            action = command.get("action")
+            protected = {"tool.browser.submit"} | {"tool." + tool for tool in WEB_AGENT_TOOLS}
+            signature_ok = not self.require_signature and action not in protected
         else:
             signature_ok = verify_command(command, self.public_key)
         if not signature_ok:

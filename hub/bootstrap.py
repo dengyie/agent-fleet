@@ -814,6 +814,19 @@ def create_app(
         from hub.http.legacy_task_routes import bp as legacy_task_bp
         from hub.http.execution_window_routes import bp as execution_window_bp
         app.register_blueprint(platform_bp)
+        from hub.http.muse_routes import bp as muse_bp
+        from hub.application.muse_service import MuseService
+        from hub.infrastructure.muse_repository import MuseRepository
+        muse_accounts = app.extensions.get('accounts')
+        muse_service = MuseService(MuseRepository(config.state_dir / 'muse'),
+                                   owner_enabled=muse_accounts.is_active if muse_accounts else None,
+                                   owner_operation=muse_accounts.background_operation if muse_accounts else None)
+        app.extensions['fleet']['services']['muse'] = muse_service
+        # Lazy persistence; only imported, explicitly opted-in accounts are
+        # polled. A blank installation makes no outbound Muse requests.
+        if muse_service.repository.path.exists():
+            muse_service.start()
+        app.register_blueprint(muse_bp)
         app.register_blueprint(conversation_bp)
         app.register_blueprint(node_bp)
         app.register_blueprint(artifact_bp)

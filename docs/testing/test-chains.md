@@ -176,3 +176,13 @@ macOS 上依赖 `/proc` 和真实 stop/resume 的测试可能跳过；保留具�
 远程链路 fixture 保留本地默认工作区并显式选择 `remote`；readiness 只预检默认配置，所选节点能否执行由后续实际 command/receipt 决定。CLI 报告里的 `remote_execution=not_tested` 是通用的外部节点验收声明，不能因为 loopback 用例通过就改成生产节点已验收。
 
 遇到不确定提交，先读取报告中的 conversation_id/client_token/run_id 并按[恢复步骤](release-acceptance.md#不确定结果的只读定位)查询；禁止为了得到绿色报告直接重复整个验收命令。证据中不要保存凭据、Cookie、验证码、原始 provider 正文或数据库。截图只允许一次性 fixture 数据。
+
+## Muse 本地浏览器桥接
+
+`WEB-AGENT-01` 贯穿 RemoteToolBroker、Hub 命令签名、Node HTTP poll/receipt、持久化桥接任务和结果读取。真实 Chromium 夹具验证固定 CDP 操作、页面范围、中文按钮、草稿保护与消息游标。这是可选旧桥接，夹具通过不能代替真实发送验收。详见 [桥接说明](../platform/muse-browser-bridge.md)。
+
+## Muse 原生工作区
+
+`MUSE-WORKSPACE` 将独立 Noise 协议对端、私有加密 SQLite、真实账号 HTTP 边界和 Chromium 页面连起来：登录导入、owner 隔离、原生 side chat、独立草稿、截图/文件卡片、单次审批、撤销及未知投递不重放。协议测试不依赖 Muse 服务，UI fixture 替换远端响应，不证明上游兼容性。
+
+`MUSE-LIVE` 对应新的无浏览器客户端：2026-10-14 用户授权的一次专用子会话发送，经过新进程读取确认 `FLEET_OK`，详见 [Muse 工作区验收](../platform/muse-workspace.md#验证)。真实自动审批未执行，仍以隔离夹具证明其范围与去重；本地门禁不得自动把外部检查标记成发布验收通过。

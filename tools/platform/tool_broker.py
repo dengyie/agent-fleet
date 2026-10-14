@@ -8,6 +8,7 @@ from .backends.base import ToolReceipt
 from .browser_backend import BrowserBackendError
 from .resource_lease import ResourceLeaseError
 from .node_executor import BROWSER_TOOLS
+from tools.browser_bridge.contract import WEB_AGENT_TOOLS, WEB_AGENT_DEFINITIONS
 
 
 class ToolBroker:
@@ -23,7 +24,7 @@ class ToolBroker:
         "workspace.artifact", "fleet.list_services", "service.get_health",
         "service.read_logs", "incident.get_evidence", "service.request_action",
         "platform.get_defaults", "platform.update_defaults",
-    }) | BROWSER_TOOLS
+    }) | BROWSER_TOOLS | WEB_AGENT_TOOLS
     TOOLS = TOOLS | CONVERSATION_TOOLS
     _BASE_TOOL_DEFINITIONS = ({'name': 'workspace.list',
       'risk': 'read_only',
@@ -225,8 +226,10 @@ class ToolBroker:
     @classmethod
     def tool_definitions(cls, allowed_tools=None, *, browser_enabled: bool = False,
                          browser_submit_enabled: bool = False,
-                         service_actions_enabled: bool = False):
+                         service_actions_enabled: bool = False, web_agent_enabled: bool = False):
         definitions = [dict(item) for item in cls._BASE_TOOL_DEFINITIONS]
+        if web_agent_enabled:
+            definitions.extend(dict(item) for item in WEB_AGENT_DEFINITIONS)
         if browser_enabled:
             definitions.extend(dict(item) for item in cls._BROWSER_TOOL_DEFINITIONS)
             if browser_submit_enabled:
@@ -246,6 +249,8 @@ class ToolBroker:
             return ToolReceipt(command_id, "failed", {}, "lease_mismatch")
         if not isinstance(arguments, dict):
             return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
+        if tool in WEB_AGENT_TOOLS:
+            return ToolReceipt(command_id, "failed", {}, "capability_unavailable")
         if tool in BROWSER_TOOLS:
             if not self.browser_enabled or self.browser_backend is None:
                 return ToolReceipt(command_id, "failed", {}, "browser_disabled")

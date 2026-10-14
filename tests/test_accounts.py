@@ -1,4 +1,6 @@
 import pytest
+import threading
+import time
 from hub.accounts.store import AccountStore
 from hub.http.errors import ApplicationError
 
@@ -127,6 +129,55 @@ def test_admin_disable_and_last_admin(accounts):
     assert not repo.identity(token) and repo.identity(admin_token)
     with pytest.raises(ApplicationError):
         repo.login('alice@example.test', PASSWORD)
+
+
+def test_account_deactivation_waits_for_background_operation_and_fences_new_work(accounts):
+    repo, _ = accounts
+    repo.bootstrap_admin('admin@example.test', PASSWORD)
+    _, admin = repo.login('admin@example.test', PASSWORD)
+    register(repo)
+    _, user = repo.login('alice@example.test', PASSWORD)
+    entered, release = threading.Event(), threading.Event()
+    operation_store = AccountStore(repo.path)
+    deactivation_store = AccountStore(repo.path)
+
+    def operation():
+        with operation_store.background_operation(user['id']) as allowed:
+            assert allowed
+            entered.set()
+            assert release.wait(5)
+
+    worker = threading.Thread(target=operation)
+    worker.start()
+    assert entered.wait(5)
+    result = []
+
+    def deactivate():
+        result.append(deactivation_store.manage(
+            admin['id'], user['id'], changes={'active': False}, expected_revision=user['revision']))
+
+    manager = threading.Thread(target=deactivate)
+    manager.start()
+    deadline = time.monotonic() + 5
+    fenced = False
+    while time.monotonic() < deadline:
+        with operation_store.connect() as db:
+            barrier = db.execute('SELECT 1 FROM background_operation_barriers WHERE user_id=?',
+                                  (user['id'],)).fetchone()
+        if barrier:
+            with operation_store.background_operation(user['id']) as allowed:
+                fenced = not allowed
+            break
+        time.sleep(0.01)
+    assert fenced
+    assert manager.is_alive()
+    assert operation_store.is_active(user['id'])
+    release.set()
+    worker.join(5)
+    manager.join(5)
+    assert not worker.is_alive() and not manager.is_alive()
+    assert result and not result[0]['active']
+    assert not operation_store.is_active(user['id'])
 
 
 def test_throttling_and_failed_delivery(accounts):

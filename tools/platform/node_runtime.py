@@ -12,6 +12,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .backends.sandbox import SandboxBackend
+from tools.browser_bridge.contract import WEB_AGENT_TOOLS, WebAgentExecutor
+from tools.browser_bridge.muse import MuseBridge
 from .journal import NodeJournal
 from .node_client import NodeClient
 from .node_executor import (
@@ -51,6 +53,9 @@ class NodeRuntimeConfig:
     log_path_prefix: tuple[Path, ...] = ()
     service_path_prefix: tuple[Path, ...] = ()
     sandbox_launcher: tuple[str, ...] = ()
+    muse_bridge_enabled: bool = False
+    muse_workspace_ids: tuple[str, ...] = ()
+    muse_bridge_state_path: Path | None = None
     browser_enabled: bool = False
     browser_network_enabled: bool = False
     browser_submit_enabled: bool = False
@@ -88,6 +93,11 @@ class NodeRuntimeConfig:
             raise ValueError("browser network requires browser capability")
         if self.browser_submit_enabled and not (self.browser_enabled and self.browser_network_enabled):
             raise ValueError("browser submit requires browser capability and network gate")
+        if self.muse_bridge_enabled:
+            if not self.muse_workspace_ids or self.muse_bridge_state_path is None:
+                raise ValueError("Muse state path and workspace allowlist required")
+            if not self.public_key or not (capabilities & WEB_AGENT_TOOLS):
+                raise ValueError("Muse signed capabilities required")
         origins = tuple(self.browser_allowed_origins or ())
         if any(not isinstance(origin, str) or len(origin) > 512 for origin in origins):
             raise ValueError("invalid browser origins")
@@ -173,6 +183,13 @@ class NodeRuntime:
             capability for capability in POSTCHECK_ACTIONS
             if capability in config.capabilities
         )
+        web_agent_executor = None
+        if config.muse_bridge_enabled:
+            web_agent_executor = WebAgentExecutor(
+                MuseBridge(config.muse_bridge_state_path), workspace_ids=config.muse_workspace_ids)
+        if web_agent_executor is None:
+            allowed_tools = allowed_tools - WEB_AGENT_TOOLS
+        self.web_agent_executor = web_agent_executor
         self.browser_backend = browser_backend
         self.executor = NodeToolExecutor(
             self.backend,
@@ -182,6 +199,7 @@ class NodeRuntime:
             log_reader=self.log_reader if SERVICE_LOGS_POSTCHECK_ACTION in config.capabilities else None,
             browser_backend=browser_backend,
             browser_enabled=config.browser_enabled,
+            web_agent_executor=web_agent_executor,
         )
         kwargs = {
             "executor": self.executor,
@@ -203,8 +221,9 @@ class NodeRuntime:
             "worker_id": self.config.worker_id,
             "capabilities": {
                 **{name: True for name in sorted(self.config.capabilities)
-                   if name != BROWSER_SESSION_CAPABILITY
-                   or (self.browser_backend is not None and self.browser_backend.available)},
+                   if (name != BROWSER_SESSION_CAPABILITY
+                       or (self.browser_backend is not None and self.browser_backend.available))
+                   and (name not in WEB_AGENT_TOOLS or self.web_agent_executor is not None)},
                 **({"browser.submit": True} if "browser.submit" in self.executor.allowed_tools else {}),
             },
             **({"browser": {

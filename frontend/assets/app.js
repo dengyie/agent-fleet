@@ -13,6 +13,7 @@ import { mountSession } from './views/session.js';
 import { mountSessionSearch } from './views/session-search.js';
 import { mountUsage } from './views/usage.js';
 import { mountAssistant } from './views/assistant.js';
+import { mountMuse } from './views/muse.js';
 import { mountMonitoring } from './views/monitoring.js';
 import { mountLogin, redirectToLogin } from './shell/operator.js';
 import './ui/ChatPromptInput.js';
@@ -84,6 +85,7 @@ function protectConsole() {
     if (route.page === 'account') view.teardown = mountAccount(target);
     else if (route.page === 'fleet') view.teardown = mountFleet(target, store, client);
     else if (route.page === 'assistant') view.teardown = mountAssistant(target, {conversationId: route.id, account});
+    else if (route.page === 'muse') view.teardown = mountMuse(target);
     else if (route.page === 'monitoring') view.teardown = mountMonitoring(target, client);
     else if (route.page === 'session-search') view.teardown = mountSessionSearch(target, client);
     else if (route.page === 'usage') view.teardown = mountUsage(target, client);
@@ -138,7 +140,7 @@ function protectConsole() {
     if (target.origin !== window.location.origin) return false;
     let nextRoute = resolveRoute(target);
     if (nextRoute.page === 'invalid') return false;
-    const forbiddenForAccount = account && account.role !== 'admin' && !['assistant', 'account'].includes(nextRoute.page);
+    const forbiddenForAccount = account && account.role !== 'admin' && !['assistant', 'account', 'muse'].includes(nextRoute.page);
     if (forbiddenForAccount) {
       target = new URL('/assistant', window.location.origin);
       nextRoute = resolveRoute(target);
@@ -208,7 +210,7 @@ function protectConsole() {
         document.querySelector('[data-nav="fleet"]').hidden = true;
         document.querySelector('[data-nav="monitoring"]').hidden = true;
         document.getElementById("sidebar-nodes").textContent = "节点由管理员分配";
-        if (!["assistant", "account", "usage"].includes(route.page)) {
+        if (!["assistant", "account", "usage", "muse"].includes(route.page)) {
           window.history.replaceState(null, '', '/assistant');
           route = resolveRoute();
         }

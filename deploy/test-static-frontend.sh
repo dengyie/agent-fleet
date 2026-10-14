@@ -39,6 +39,10 @@ REQUIRED_PATHS=(
   assets/views/monitoring.js
   assets/views/assistant.js
   assets/views/assistant/panels.js
+  assets/views/muse.js
+  assets/views/muse/cards.js
+  assets/api/muse.js
+  assets/styles/muse.css
   assets/styles/app.css
   assets/shell/navigation.js
   assets/shell/theme.js

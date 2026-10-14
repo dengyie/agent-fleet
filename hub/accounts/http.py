@@ -17,7 +17,7 @@ PUBLIC = {'accounts.options', 'accounts.code', 'accounts.register', 'accounts.lo
 # These handlers already enforce their own distinct machine credential domain.
 MACHINE_BLUEPRINTS = {'commands', 'platform_nodes'}
 # Only audited owner-scoped surfaces are available to ordinary accounts.
-USER_BLUEPRINTS = {'accounts', 'operator', 'platform_conversations', 'platform_artifacts'}
+USER_BLUEPRINTS = {'accounts', 'operator', 'platform_conversations', 'platform_artifacts', 'platform_muse'}
 
 
 def store():

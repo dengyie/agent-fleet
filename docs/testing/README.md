@@ -88,6 +88,8 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/test_full_flow_browser.py -q
 | RELEASE-01 | 发布探活与验收CLI | integration |
 | BROWSER-01 | 浏览器离线网络边界 | contract |
 | BROWSER-02 | 单次表单提交审批 | integration |
+| WEB-AGENT-01 | Muse 本地桥接、签名命令及重复派发保护 | integration |
+| MUSE-WORKSPACE | 独立登录态、原生多会话、卡片与审批 | integration |
 | GATE-01 | 全流程门禁自身 | contract |
 
 ## 新增贯穿测试如何工作

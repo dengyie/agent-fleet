@@ -790,6 +790,42 @@
         "tests/test_platform_usage_summary.py::test_summary_migration_failure_does_not_disable_existing_ledger",
         "tests/test_platform_usage_summary.py::test_usage_summary_in_real_browser"
       ]
+    },
+    {
+      "id": "WEB-AGENT-01",
+      "title": "Muse 本地浏览器桥接与签名派发",
+      "layer": "integration",
+      "acceptance": "持久化幂等派发、草稿保护、消息关联和未知结果不重发；节点必须显式启用且有签名与工作区权限",
+      "boundary": "Disposable Hub and real Chromium DOM fixture; real Muse account not contacted",
+      "tests": [
+        "tests/test_muse_browser_bridge.py::test_real_chromium_fixed_helper",
+        "tests/test_muse_browser_bridge.py::test_unknown_send_is_not_replayed_and_can_reconcile",
+        "tests/test_muse_browser_bridge.py::test_concurrent_submission_has_single_writer",
+        "tests/test_muse_fleet_integration.py::test_signed_hub_node_submit_read_and_duplicate_command",
+        "tests/test_muse_fleet_integration.py::test_capabilities_are_opt_in_and_workspace_bound",
+        "tests/test_muse_fleet_integration.py::test_legacy_unsigned_node_client_cannot_execute_web_agent"
+      ]
+    },
+    {
+      "id": "MUSE-WORKSPACE",
+      "title": "Muse 独立登录态与原生多会话工作区",
+      "layer": "integration",
+      "acceptance": "导入登录态后无浏览器连接；owner 隔离、子会话、多窗口草稿、卡片、审批范围与撤销、文件限制、未知结果不重放",
+      "boundary": "Independent Noise responder, temporary encrypted SQLite and real Chromium with fixture Muse; no live account contacted",
+      "tests": [
+        "tests/test_muse_native.py::test_noise_handshake_interoperates_and_confidential_challenge_rejected",
+        "tests/test_muse_native.py::test_full_native_request_without_browser_handles_chunked_json_and_ack",
+        "tests/test_muse_native.py::test_auth_redirects_are_blocked_and_fetch_metadata_is_sent",
+        "tests/test_muse_workspace.py::test_concurrent_first_use_never_observes_partial_key",
+        "tests/test_muse_workspace.py::test_account_users_have_separate_muse_logins_and_revocation",
+        "tests/test_muse_workspace.py::test_duplicate_unknown_send_is_never_replayed_after_restart",
+        "tests/test_muse_workspace.py::test_auto_approval_is_scoped_durable_and_audited",
+        "tests/test_muse_workspace.py::test_auto_approval_rechecks_login_and_settings_after_read",
+        "tests/test_muse_workspace.py::test_workspace_resources_are_bounded_and_paths_cannot_escape",
+        "tests/test_muse_workspace.py::test_malformed_resource_reads_fail_without_returning_partial_content",
+        "tests/test_muse_workspace.py::test_resource_total_limit_stops_upstream_reads",
+        "tests/test_muse_workspace.py::test_muse_workspace_in_browser"
+      ]
     }
   ],
   "external_checks": [
@@ -812,6 +848,11 @@
       "id": "DEPLOY-LIVE",
       "acceptance": "Release hashes, account guards, one guardian/worker, TLS/static resources and browser recovery match the deployed artifact; rollback tested in an isolated environment.",
       "procedure": "release-acceptance.md#deploy-live"
+    },
+    {
+      "id": "MUSE-LIVE",
+      "acceptance": "Explicitly authorized harmless prompt reaches a dedicated native Muse side chat exactly once using imported login state without a browser; a fresh client process reads the matching response.",
+      "procedure": "../platform/muse-workspace.md#验证"
     }
   ]
 }

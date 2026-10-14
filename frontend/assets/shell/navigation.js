@@ -7,6 +7,7 @@ const labels = {
   account: ['账号设置', '账号设置', '管理个人资料、密码与登录会话。', 'ACCOUNT'],
   fleet: ['总览', '集群总览', '节点、任务与服务状态，一处掌握。', 'WORKSPACE OVERVIEW'],
   assistant: ['主助手', '主助手', '从一个想法开始，让助手把工作推进到完成。', 'ASSISTANT'],
+  muse: ['Muse', 'Muse', '连接 Muse，管理你的对话和任务。', 'MUSE'],
   monitoring: ['服务监控', '服务监控', '查看服务健康与待处理事件，按授权执行操作。', 'SERVICE HEALTH'],
   machine: ['计算节点', '节点详情', '资源状态、运行中的任务与纳管会话。', 'COMPUTE NODE'],
   task: ['任务', '任务详情', '跟踪执行过程，查看结果与交付文件。', 'TASK DETAIL'],

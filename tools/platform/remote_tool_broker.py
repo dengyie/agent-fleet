@@ -11,6 +11,8 @@ from .backends.base import ToolReceipt
 from .browser_policy import BrowserPolicyError, validate_action
 from .node_executor import BROWSER_TOOLS
 from .tool_broker import ToolBroker
+from tools.browser_bridge.contract import WEB_AGENT_TOOLS, validate_arguments
+from tools.browser_bridge.muse import MuseBridgeError
 
 
 class RemoteToolBroker:
@@ -21,7 +23,9 @@ class RemoteToolBroker:
                  allowed_tools=None,
                  browser_enabled: bool = False, browser_network_enabled: bool = False,
                  browser_allowed_origins=(), browser_resolver=None,
-                 browser_submit_enabled: bool = False, submit_approvals=None):
+                 browser_submit_enabled: bool = False, submit_approvals=None,
+                 web_agent_enabled: bool = False):
+        self.web_agent_enabled = bool(web_agent_enabled)
         self.delivery = delivery
         self.node_id = node_id
         self.resource_id = resource_id
@@ -47,6 +51,8 @@ class RemoteToolBroker:
             return ToolReceipt(command_id, "failed", {}, "unknown_tool")
         if tool not in self.allowed_tools:
             return ToolReceipt(command_id, "failed", {}, "tool_not_allowed")
+        if tool in WEB_AGENT_TOOLS and not self.web_agent_enabled:
+            return ToolReceipt(command_id, "failed", {}, "capability_unavailable")
         if tool in BROWSER_TOOLS and not self.browser_enabled:
             return ToolReceipt(command_id, "failed", {}, "browser_disabled")
         if tool == "browser.submit" and (not self.browser_submit_enabled or self.submit_approvals is None):
@@ -58,6 +64,8 @@ class RemoteToolBroker:
         attribution = {}
         try:
             bounded = dict(arguments)
+            if tool in WEB_AGENT_TOOLS:
+                bounded = validate_arguments(tool, bounded)
             if tool in BROWSER_TOOLS:
                 bounded = validate_action(
                     tool, bounded,
@@ -68,7 +76,7 @@ class RemoteToolBroker:
             if len(json.dumps(bounded, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 64 * 1024:
                 return ToolReceipt(command_id, "failed", {}, "arguments_too_large")
             retry_class = "read_only" if tool in {"workspace.list", "workspace.read", "fleet.list_services", "service.get_health", "service.read_logs", "incident.get_evidence"} else "reconcile_before_retry"
-            if tool in BROWSER_TOOLS:
+            if tool in BROWSER_TOOLS or tool in WEB_AGENT_TOOLS:
                 retry_class = "manual_only"
             command = PlatformCommand.create(
                 command_id=command_id, target_node=self.node_id, owner_id=owner_id,
@@ -118,7 +126,7 @@ class RemoteToolBroker:
             if status in {"failed", "expired"}:
                 return ToolReceipt(command_id, "failed", result, inner_error or "remote_failed")
             return ToolReceipt(command_id, "unknown", attribution, "receipt_unknown")
-        except BrowserPolicyError as exc:
+        except (BrowserPolicyError, MuseBridgeError) as exc:
             return ToolReceipt(command_id, "failed", {}, exc.code)
         except Exception:
             self._event("node_receipt", command_id, tool, status="unknown", **attribution)

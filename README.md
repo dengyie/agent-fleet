@@ -135,6 +135,12 @@ python3 tools/agent-self-report.py \
 
 main 在测试、前后端打包通过后进入[自动部署](deploy/auto-deploy.md)，使用 production 环境的受限 SSH 入口，保留运行数据与配置，探活失败时回滚代码和前端。PR 不部署，也不读取部署凭据。
 
+## Muse 工作区
+
+侧栏 **Muse**（`/muse`）可导入 Muse 登录态，直接查看和使用原生会话，不需要运行浏览器或 9222。支持最多 6 个对话窗口、原生子会话、引用回复、停止生成、按会话开启自动审批，以及浏览器任务、截图、文件和工具卡片。登录态按 Fleet 用户加密保存。使用步骤、限制与实测记录见 [Muse 工作区](docs/platform/muse-workspace.md)。
+
+此前的 [本地浏览器桥接](docs/platform/muse-browser-bridge.md) 作为可选的 Assistant 执行节点保留；使用 Muse 栏目不需要配置该桥接。
+
 ## 📖 进阶文档
 
 - [系统架构详解 (Architecture v3)](docs/architecture-v3.md)

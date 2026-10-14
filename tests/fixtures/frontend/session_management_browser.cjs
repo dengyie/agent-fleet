@@ -42,6 +42,7 @@ const origin = process.argv[2];
       await page.screenshot({path:`/tmp/agent-fleet-management-evidence/questions-${width}.png`, fullPage:true});
       await page.goto(origin + '/session/questions-' + width + '?sequence=5', {waitUntil: 'domcontentloaded'});
       await page.locator('#session-event-5.session-event-match').waitFor();
+      await page.waitForTimeout(100);
       assert.equal(await page.locator('#session-event-5').evaluate(node => document.activeElement === node), true);
     }
     assert.deepEqual(errors, []);

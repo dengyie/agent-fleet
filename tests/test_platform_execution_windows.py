@@ -467,6 +467,32 @@ def test_browser_frame_event_is_ticket_bound_idempotent_and_owner_scoped(tmp_pat
         "owner-b@example.test", window_id, "artifact-a",
     ) is None
 
+    issued_next = browser.issue_artifact_ticket(
+        "owner-a@example.test", workspace_id="workspace-a", run_id=run_id,
+        node_id="node-a", command_id="screenshot-command-2", expires_at=1200,
+        idempotency_key="screenshot-idem-2", session_id="session-a" * 3,
+    )
+    browser.begin_artifact_upload(
+        issued_next["ticket_id"], issued_next["upload_token"], node_id="node-a",
+        command_id="screenshot-command-2", idempotency_key="screenshot-idem-2",
+    )
+
+    def publish_next_frame(connection, ticket, dimensions):
+        return windows.append_browser_frame_event(
+            connection, owner_id="owner-a@example.test", ticket_id=ticket["ticket_id"],
+            artifact_id="artifact-b", sha256="b" * 64,
+            width=dimensions[0], height=dimensions[1], now=clock(),
+        )
+
+    browser.complete_artifact_upload(
+        issued_next["ticket_id"], sha256="b" * 64, size=128,
+        artifact_id="artifact-b", frame_publisher=publish_next_frame,
+        frame_dimensions=(320, 180),
+    )
+    current = windows.list_events("owner-a@example.test", window_id)["events"]
+    assert len(current) == 1
+    assert current[0]["sequence"] == current[0]["payload"]["frame_seq"] == 2
+
 
 def test_browser_artifact_ticket_upgrade_adds_optional_frame_scope(tmp_path):
     _, windows, _, _ = _repositories(tmp_path)
@@ -564,6 +590,56 @@ def test_writer_lease_is_exclusive_across_windows_for_the_same_run(tmp_path):
     with pytest.raises(ExecutionWindowRepositoryError) as active:
         windows.acquire_writer("owner-a@example.test", second["window"]["window_id"], "another-operator")
     assert active.value.code == "lease_conflict"
+
+
+def test_expired_writer_on_another_window_is_fenced_before_takeover(tmp_path):
+    _, windows, clock, run_id = _repositories(tmp_path)
+    first = windows.create_window("owner-a@example.test", run_id)
+    second = windows.create_window("owner-a@example.test", run_id)
+    first_id = first["window"]["window_id"]
+    second_id = second["window"]["window_id"]
+    windows.redeem_ticket("owner-a@example.test", first_id, first["attach_ticket"])
+    windows.redeem_ticket("owner-a@example.test", second_id, second["attach_ticket"])
+    old = windows.acquire_writer("owner-a@example.test", first_id, "old-writer", ttl_s=5)
+    clock.value = old["lease"]["expires_at"] + 1
+
+    current = windows.acquire_writer("owner-a@example.test", second_id, "new-writer")
+    assert current["lease"]["writer_epoch"] > old["lease"]["writer_epoch"]
+    with pytest.raises(ExecutionWindowRepositoryError) as stale:
+        windows.append_event("owner-a@example.test", first_id, "old-writer", old["lease_token"],
+                             "stale-event", "text", {"text": "must not be accepted"})
+    assert stale.value.code == "lease_expired"
+
+
+def test_execution_window_migration_preserves_event_cursor_after_pruning(tmp_path):
+    _, windows, _, run_id = _repositories(tmp_path)
+    created = windows.create_window("owner-a@example.test", run_id)
+    window_id = created["window"]["window_id"]
+    windows.redeem_ticket("owner-a@example.test", window_id, created["attach_ticket"])
+    lease = windows.acquire_writer("owner-a@example.test", window_id, "assistant")
+    event = windows.append_event("owner-a@example.test", window_id, "assistant", lease["lease_token"],
+                                 "evt-before-upgrade", "text", {"text": "kept cursor"})
+    assert event["sequence"] == 1
+
+    with sqlite3.connect(str(windows.db_path)) as conn:
+        conn.execute("DROP INDEX IF EXISTS idx_execution_window_leases_live")
+        conn.execute("ALTER TABLE execution_windows DROP COLUMN next_event_sequence")
+        conn.execute("ALTER TABLE execution_windows DROP COLUMN writer_epoch")
+        conn.execute("ALTER TABLE execution_window_leases DROP COLUMN expired_at")
+        conn.execute("ALTER TABLE execution_window_leases DROP COLUMN writer_epoch")
+
+    upgraded = ExecutionWindowRepository(windows.db_path, clock=windows.clock)
+    upgraded.init()
+    with sqlite3.connect(str(windows.db_path)) as conn:
+        conn.execute("DELETE FROM execution_window_events WHERE window_id=?", (window_id,))
+    with pytest.raises(ExecutionWindowRepositoryError) as fenced:
+        upgraded.append_event("owner-a@example.test", window_id, "assistant", lease["lease_token"],
+                              "evt-fenced", "text", {"text": "legacy writer is fenced"})
+    assert fenced.value.code == "lease_not_found"
+    replacement = upgraded.acquire_writer("owner-a@example.test", window_id, "assistant")
+    next_event = upgraded.append_event("owner-a@example.test", window_id, "assistant", replacement["lease_token"],
+                                       "evt-after-upgrade", "text", {"text": "cursor remains monotonic"})
+    assert next_event["sequence"] == 2
 
 
 def test_active_writer_rejects_browser_mutation_inside_command_admission(tmp_path):

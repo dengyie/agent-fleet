@@ -5,6 +5,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from .backends.base import ToolReceipt
+from tools.browser_bridge.contract import WEB_AGENT_TOOLS
+from tools.browser_bridge.muse import MuseBridgeError
 from .browser_backend import BrowserBackendError, BrowserExecutionError
 
 
@@ -17,7 +19,7 @@ BROWSER_SESSION_CAPABILITY = "browser.session"
 NODE_TOOLS = frozenset({
     "workspace.list", "workspace.read", "workspace.write",
     "workspace.exec",
-}) | BROWSER_TOOLS
+}) | BROWSER_TOOLS | WEB_AGENT_TOOLS
 POSTCHECK_ACTION = "reconcile.workspace.digest"
 SERVICE_POSTCHECK_ACTION = "reconcile.service.inspect"
 SERVICE_LOGS_POSTCHECK_ACTION = "reconcile.service.logs"
@@ -38,9 +40,10 @@ class NodeToolExecutor:
 
     def __init__(self, backend, *, allowed_tools: frozenset[str] | set[str] | None = None,
                  service_executor=None, log_reader=None, browser_backend=None,
-                 browser_enabled: bool = False,
+                 browser_enabled: bool = False, web_agent_executor=None,
                  allowed_postcheck_actions: frozenset[str] | set[str] | None = None):
         self.backend = backend
+        self.web_agent_executor = web_agent_executor
         self.browser_backend = browser_backend
         self.browser_enabled = bool(browser_enabled)
         self.allowed_tools = frozenset(NODE_TOOLS if allowed_tools is None else allowed_tools)
@@ -160,6 +163,14 @@ class NodeToolExecutor:
         if not action.startswith("tool."):
             return {"state": "failed", "result": {}, "error_code": "unknown_tool", "command_id": command_id}
         tool = action[5:]
+        if tool in WEB_AGENT_TOOLS:
+            if tool not in self.allowed_tools or self.web_agent_executor is None:
+                return {"state": "failed", "result": {}, "error_code": "capability_unavailable", "command_id": command_id}
+            try:
+                result = self.web_agent_executor.execute(tool, command.get("arguments"), resource_id=command.get("resource_id"))
+                return {"state": "succeeded", "result": result, "command_id": command_id}
+            except MuseBridgeError as exc:
+                return {"state": "failed", "result": {}, "error_code": exc.code, "command_id": command_id}
         if tool in BROWSER_TOOLS:
             if not self.browser_enabled:
                 return {"state": "failed", "result": {}, "error_code": "browser_disabled", "command_id": command_id}

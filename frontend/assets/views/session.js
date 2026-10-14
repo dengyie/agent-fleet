@@ -928,6 +928,9 @@ export function mountSession(root, sessionId, store, client, routeSequence) {
     if (disposed) {
       return;
     }
+    var targetId = targetSequence ? 'session-event-' + targetSequence : '';
+    var focusedTarget = targetId && document.activeElement &&
+      document.activeElement.id === targetId;
     removeAllChildren(root);
     if (viewState.error) {
       root.appendChild(sessionHeading(sessionId));
@@ -1038,12 +1041,12 @@ export function mountSession(root, sessionId, store, client, routeSequence) {
     renderSignalPanel(signalsPanel, viewState.signals);
     root.appendChild(signalsPanel);
     if (targetSequence) {
-      var target = document.getElementById('session-event-' + targetSequence);
+      var target = document.getElementById(targetId);
       if (target) {
         target.classList.add('session-event-match');
-        if (jumpPending) {
+        if (jumpPending || focusedTarget) {
           target.focus();
-          target.scrollIntoView({block: 'center'});
+          if (jumpPending) target.scrollIntoView({block: 'center'});
           jumpPending = false;
         }
       }
