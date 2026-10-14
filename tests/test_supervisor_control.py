@@ -481,8 +481,7 @@ class SupervisorServiceTests(unittest.TestCase):
         cmd = sv.enqueue("mac-a", "s1", None, "pause_session", "x")
         cid = cmd["command_id"]
         clock.advance(120)
-        sv.poll("mac-a")  # runs _expire_stale
-        self.assertEqual(sv.command_status(cid), "expired")
+        self.assertEqual(sv.command_status(cid), "queued")
         stale = sv.receipt(cid, "succeeded", "late")
         self.assertEqual(stale["status"], "expired")
         self.assertEqual(stale["reason"], "expired")
@@ -569,6 +568,158 @@ class SupervisorServiceTests(unittest.TestCase):
     def test_public_key_width(self):
         sv = self._svc(signing=self.priv)
         self.assertEqual(len(sv.public_key()), 32)
+
+
+def test_durable_audit_records_command_lifecycle_and_survives_restart(tmp_path):
+    from hub.infrastructure.supervisor_command_repository import (
+        SupervisorCommandRepository,
+    )
+
+    private_key, _ = _keypair()
+    clock = _Clock(1_800_000_000)
+    repository = SupervisorCommandRepository(tmp_path / "commands.db")
+    service = SupervisorService(
+        signing_key=private_key, now_fn=clock, command_repository=repository)
+
+    command = service.enqueue("machine-a", "session-a", "attempt-a",
+                              "pause_session", "operator_requested")
+    service.poll("machine-a")
+    for status in ("accepted", "executing", "succeeded"):
+        service.receipt(command["command_id"], status)
+    rejected = service.enqueue("machine-a", "session-b", None,
+                               "pause_session", "operator_requested")
+    service.receipt(rejected["command_id"], "rejected", "unsupported_target")
+
+    restarted = SupervisorService(
+        signing_key=private_key, now_fn=clock,
+        command_repository=SupervisorCommandRepository(tmp_path / "commands.db"))
+    rows = restarted.audit_recent(50)
+    events_seen = [row["event"] for row in rows]
+    assert events_seen == [
+        "enqueue", "deliver", "receipt:accepted", "receipt:executing",
+        "receipt:succeeded", "enqueue", "receipt:rejected",
+    ]
+    assert all(row["command_id"] == command["command_id"] for row in rows[:5])
+    assert all(row["command_id"] == rejected["command_id"] for row in rows[5:])
+    serialized = json.dumps(rows)
+    assert "signature" not in serialized
+    assert "payload" not in serialized
+
+
+def test_durable_audit_records_expiry_and_supersede_transitions(tmp_path):
+    from hub.infrastructure.supervisor_command_repository import (
+        SupervisorCommandRepository,
+    )
+
+    private_key, _ = _keypair()
+    clock = _Clock(1_800_000_000)
+    db_path = tmp_path / "commands.db"
+    service = SupervisorService(
+        signing_key=private_key, now_fn=clock, ttl_s=10,
+        command_repository=SupervisorCommandRepository(db_path))
+
+    expiring = service.enqueue("machine-a", "session-expire", None,
+                               "pause_session", "operator_requested")
+    clock.advance(11)
+    assert service.poll("machine-a") == []
+    assert service.command_status(expiring["command_id"]) == "expired"
+
+    clock.advance(1)
+    queued = service.enqueue("machine-a", "session-supersede", None,
+                             "resume_session", "operator_requested")
+    terminate = service.enqueue("machine-a", "session-supersede", None,
+                                "terminate_session", "operator_requested")
+
+    restarted = SupervisorService(
+        signing_key=private_key, now_fn=clock,
+        command_repository=SupervisorCommandRepository(db_path))
+    rows = restarted.audit_recent(50)
+    by_event = {}
+    for row in rows:
+        by_event.setdefault(row["event"], []).append(row)
+
+    assert any(row["command_id"] == expiring["command_id"]
+               for row in by_event["expire"])
+    assert any(row["command_id"] == queued["command_id"]
+               for row in by_event["supersede"])
+    assert any(row["command_id"] == terminate["command_id"]
+               for row in by_event["enqueue"])
+
+
+def test_expired_durable_command_rejects_late_receipt_without_poll(tmp_path):
+    from hub.infrastructure.supervisor_command_repository import (
+        SupervisorCommandRepository,
+    )
+
+    private_key, _ = _keypair()
+    clock = _Clock(1_800_000_000)
+    repository = SupervisorCommandRepository(tmp_path / "commands.db")
+    service = SupervisorService(
+        signing_key=private_key, now_fn=clock, ttl_s=10,
+        command_repository=repository)
+    command = service.enqueue("machine-a", "session-a", None,
+                              "pause_session", "operator_requested")
+
+    clock.advance(11)
+    receipt = service.receipt(command["command_id"], "succeeded", "late")
+
+    assert receipt == {
+        "command_id": command["command_id"], "status": "expired",
+        "reason": "expired", "first": False,
+    }
+    rows = service.audit_recent()
+    assert [row["event"] for row in rows] == ["enqueue", "expire"]
+
+
+def test_durable_audit_failure_rolls_back_receipt_state(tmp_path):
+    import sqlite3
+
+    from hub.infrastructure.supervisor_command_repository import (
+        SupervisorCommandRepository,
+    )
+
+    private_key, _ = _keypair()
+    db_path = tmp_path / "commands.db"
+    repository = SupervisorCommandRepository(db_path)
+    service = SupervisorService(signing_key=private_key, command_repository=repository)
+    command = service.enqueue("machine-a", "session-a", None,
+                              "pause_session", "operator_requested")
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "CREATE TRIGGER reject_receipt_audit BEFORE INSERT ON supervisor_audit_events "
+            "WHEN NEW.event_json LIKE '%receipt:succeeded%' "
+            "BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END")
+        conn.commit()
+    finally:
+        conn.close()
+
+    with unittest.TestCase().assertRaises(SupervisorServiceError) as error:
+        service.receipt(command["command_id"], "succeeded", "paused")
+    assert error.exception.status == 503
+    assert service.command_status(command["command_id"]) == "queued"
+    assert [row["event"] for row in service.audit_recent()] == ["enqueue"]
+
+
+def test_durable_idempotent_enqueue_does_not_duplicate_audit_event(tmp_path):
+    from hub.infrastructure.supervisor_command_repository import (
+        SupervisorCommandRepository,
+    )
+
+    private_key, _ = _keypair()
+    service = SupervisorService(
+        signing_key=private_key,
+        command_repository=SupervisorCommandRepository(tmp_path / "commands.db"))
+    first = service.enqueue("machine-a", "session-a", None, "pause_session", "x",
+                            idempotency_key="request-1")
+    replay = service.enqueue("machine-a", "session-a", None, "pause_session", "x",
+                             idempotency_key="request-1")
+
+    assert replay == first
+    rows = service.audit_recent()
+    assert [row["event"] for row in rows] == ["enqueue"]
+    assert rows[0]["command_id"] == first["command_id"]
 
 
 # --------------------------------------------------------------------------- #
