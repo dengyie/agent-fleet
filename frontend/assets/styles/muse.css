@@ -31,6 +31,17 @@ body[data-page="muse"] .page-heading { display: none; }
 .muse-pane-header { display: flex; gap: 10px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border-subtle); }
 .muse-pane-header h2 { flex: 1; min-width: 0; font-size: 14px; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
 .muse-pane-header button { padding: 4px 7px; min-height: 28px; font-size: 11px; }
+.muse-browser-activity { margin: 10px 14px 0; border: 1px solid var(--border-subtle); border-radius: 9px; background: var(--bg); }
+.muse-browser-activity > summary { min-height: 38px; display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; list-style: none; }
+.muse-browser-activity > summary::-webkit-details-marker { display: none; }
+.muse-browser-activity > summary strong { font-size: 12px; }
+.muse-browser-activity-status { margin-left: auto; max-width: 55%; overflow: hidden; color: var(--text-2); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.muse-browser-activity-content { display: flex; align-items: center; gap: 10px 16px; flex-wrap: wrap; padding: 0 12px 10px; font-size: 12px; }
+.muse-browser-activity-content > p { margin: 0; }
+.muse-browser-activity-title { font-weight: 550; }
+.muse-browser-activity-site { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.muse-browser-activity .muse-resource { display: flex; align-items: center; gap: 10px; }
+.muse-browser-activity .muse-resource .muse-image { max-height: 260px; }
 .muse-auto-label { font-size: 11px; color: var(--text-2); white-space: nowrap; display: flex; gap: 5px; align-items: center; }
 .muse-transcript { overflow-y: auto; flex: 1; min-height: 0; padding: 20px; overscroll-behavior: contain; }
 .muse-transcript > button { display: block; margin: 0 auto 16px; }
@@ -79,4 +90,4 @@ body[data-page="muse"] .page-heading { display: none; }
 .muse-audit { margin-top: 16px; }
 .muse-audit h3 { font-size: 12px; margin-bottom: 8px; }
 @media (max-width: 1100px) { .muse-body { grid-template-columns: 170px minmax(0, 1fr); gap: 10px; } .muse-identity .meta { display: none; } }
-@media (max-width: 767px) { .muse-body { display: flex; flex-direction: column; height: auto; } .muse-sessions { max-height: 190px; } .muse-session-list { display: flex; gap: 6px; } .muse-session { min-width: 170px; max-width: 190px; } .muse-conversations { height: 70dvh; min-height: 500px; } .muse-transcript { padding: 14px; } .muse-pane-header { flex-wrap: wrap; } .muse-pane-header h2 { flex-basis: 50%; } .muse-toolbar { gap: 8px; } .muse-toolbar button { padding: 6px 9px; } }
+@media (max-width: 767px) { .muse-body { display: flex; flex-direction: column; height: auto; } .muse-sessions { max-height: 190px; } .muse-session-list { display: flex; gap: 6px; } .muse-session { min-width: 170px; max-width: 190px; } .muse-conversations { height: 70dvh; min-height: 500px; } .muse-transcript { padding: 14px; } .muse-pane-header { flex-wrap: wrap; } .muse-pane-header h2 { flex-basis: 50%; } .muse-browser-activity { margin: 8px 8px 0; } .muse-browser-activity-content { align-items: flex-start; flex-direction: column; } .muse-toolbar { gap: 8px; } .muse-toolbar button { padding: 6px 9px; } }

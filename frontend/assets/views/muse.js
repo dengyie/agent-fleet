@@ -1,5 +1,6 @@
 import * as api from '../api/muse.js';
-import {el, action, mergeEvents, visibleMessages, renderMuseMessage, renderApproval} from './muse/cards.js';
+import {el, action, mergeEvents, visibleMessages, renderMuseMessage, renderApproval,
+  createBrowserActivity, updateBrowserActivity} from './muse/cards.js';
 
 export function mountMuse(target) {
   let disposed = false, suspended = false, connected = false, busy = false, timer, epoch = 0;
@@ -184,6 +185,7 @@ export function mountMuse(target) {
       auto.checked = settings.auto_approve_sessions.includes(id); auto.disabled = draft;
       autoLabel.append(auto, document.createTextNode('自动审批'));
       header.append(heading, autoLabel, close);
+      const browserActivity = createBrowserActivity();
       const scroll = el('div', 'muse-transcript'); scroll.dataset.chatScroll = ''; scroll.tabIndex = 0; scroll.setAttribute('aria-label', '对话内容');
       const older = action('加载更早消息', 'arrow-up', () => loadHistory(pane, true)); older.hidden = true;
       const messages = el('div', 'muse-messages');
@@ -213,9 +215,9 @@ export function mountMuse(target) {
         finally { cancel.disabled = false; }
       });
       const send = el('button', 'button-primary', '发送'); send.type = 'submit'; controls.append(cancel, send);
-      form.append(reply, prompt, controls); host.append(header, scroll, state, continueInput, form);
+      form.append(reply, prompt, controls); host.append(header, browserActivity, scroll, state, continueInput, form);
       const pane = {id, host, tab, heading, scroll, messages, older, anchor, input, send, state, reply, auto,
-        continueInput, events: [], nodes: new Map(), draft, loading: false, pending: null, replyTo: null};
+        continueInput, browserActivity, events: [], nodes: new Map(), draft, loading: false, pending: null, replyTo: null};
       panes.set(id, pane); tabs.append(tab); deck.append(host);
       host.addEventListener('focusin', () => { activePane = id; for (const [key, p] of panes) p.tab.setAttribute('aria-selected', String(key === id)); });
       auto.addEventListener('change', async () => {
@@ -291,6 +293,7 @@ export function mountMuse(target) {
       const result = await api.museHistory(pane.id, accountId, connectionRevision, before, after, continuation);
       if (disposed || generation !== epoch || !panes.has(pane.id)) return;
       pane.events = mergeEvents(pane.events, result.chat_events || []);
+      updateBrowserActivity(pane.browserActivity, pane.events, {accountId, connectionRevision});
       if (older || !pane.loaded) pane.older.hidden = !result.has_more_before;
       if (!older && result.has_more_after) {
         pane.catchup = {after, before: result.continuation_before_seq}; schedule(0);

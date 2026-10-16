@@ -60,6 +60,78 @@ function resourceControl(path, title, preview = false, context = {}) {
   box.append(button, status); return box;
 }
 
+function eventCards(event) {
+  const payload = event.payload || {};
+  if (event.event_name === 'delta.presentation') return [payload];
+  return [
+    ...(Array.isArray(payload.content) ? payload.content : []),
+    ...(Array.isArray(event.resources) ? event.resources : []),
+    ...(Array.isArray(payload.tool_calls) ? payload.tool_calls : []),
+  ];
+}
+
+function browserTask(card) {
+  if (!card || typeof card !== 'object') return false;
+  const data = card.data || card;
+  return (card.kind || card.type || data.type) === 'browser_task';
+}
+
+export function latestBrowserTask(events) {
+  let latest = null;
+  for (const event of events) {
+    const payload = event.payload || {};
+    if ((event.visibility && event.visibility !== 'public') ||
+        (payload.visibility && payload.visibility !== 'public')) continue;
+    for (const card of eventCards(event)) if (browserTask(card)) latest = card;
+  }
+  return latest;
+}
+
+export function createBrowserActivity() {
+  const panel = el('details', 'muse-browser-activity');
+  panel.dataset.browserActivity = '';
+  panel.open = true;
+  const summary = el('summary');
+  summary.append(uiIcon('globe', {size: 16}), el('strong', '', 'Muse 云端浏览器'));
+  summary.append(el('span', 'muse-browser-activity-status', '等待活动'));
+  const content = el('div', 'muse-browser-activity-content');
+  panel.append(summary, content);
+  updateBrowserActivity(panel, []);
+  return panel;
+}
+
+export function updateBrowserActivity(panel, events, context = {}) {
+  const card = latestBrowserTask(events);
+  const signature = card ? JSON.stringify(card) : 'empty';
+  if (panel.dataset.signature === signature) return;
+  panel.dataset.signature = signature;
+  const status = panel.querySelector('.muse-browser-activity-status');
+  const content = panel.querySelector('.muse-browser-activity-content');
+  content.replaceChildren();
+  if (!card) {
+    status.textContent = '等待活动';
+    content.append(el('p', 'meta', 'Muse 尚未在此会话返回浏览器活动。'));
+    return;
+  }
+
+  const data = card.data || card;
+  status.textContent = data.display_status || data.display_state || data.status || '状态未知';
+  const title = data.activity_title || card.fallback_text;
+  if (title) content.append(el('p', 'muse-browser-activity-title', title));
+  const site = data.current_site || data.latest_tab;
+  if (site && typeof site === 'object') {
+    const siteLink = link(site.page_title || site.title || site.domain || '当前页面', site.url);
+    siteLink.classList.add('muse-browser-activity-site');
+    content.append(siteLink);
+  }
+  if (data.step_count != null) content.append(el('p', 'meta', `已执行 ${data.step_count} 步`));
+  const screenshot = data.latest_screenshot?.url;
+  if (typeof screenshot === 'string' && screenshot.startsWith('sandbox://workspace/')) {
+    content.append(resourceControl(screenshot, '查看最新浏览器截图', true, context));
+  }
+  if (!content.children.length) content.append(el('p', 'meta', 'Muse 尚未提供更多浏览器活动信息。'));
+}
+
 export function renderCard(card, context = {}) {
   if (!card || typeof card !== 'object') return el('p', '', String(card));
   const data = card.data || card;
