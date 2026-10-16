@@ -131,10 +131,16 @@ export function mountMuse(target) {
     accountId = accountSelect.value; clearAccountView(); showConnected(); schedule(0);
   });
 
-  function showError(error) {
+  let noticeSource = null;
+  function showError(error, source = 'general') {
     if (disposed) return;
     notice.textContent = error.detail || error.message || 'Muse 暂时不可用'; notice.hidden = false;
+    noticeSource = source;
     if (error.code === 'muse_login_expired') { badge.textContent = '登录态已过期'; loginPanel.hidden = false; }
+  }
+  function clearError(source) {
+    if (noticeSource !== source) return;
+    notice.textContent = ''; notice.hidden = true; noticeSource = null;
   }
   function showConnected() {
     badge.textContent = connected ? '已导入登录态' : '未连接'; badge.dataset.connected = String(connected);
@@ -380,7 +386,7 @@ export function mountMuse(target) {
           ({auto_approve: '自动审批', approval: '手动审批', send: '发送消息', cancel: '停止生成'}[record.action] || record.action) + ' · ' +
           ({confirmed: '已确认', rejected: '已拒绝', unknown: '结果未知'}[record.state] || record.state)));
       }
-      if (!connected) return;
+      if (!connected) { clearError('poll'); return; }
       const [sessionResult, approvalResult] = await Promise.allSettled([
         api.museSessions(accountId, connectionRevision), api.museApprovals(accountId, connectionRevision)]);
       if (disposed || generation !== epoch) return;
@@ -393,7 +399,7 @@ export function mountMuse(target) {
             pane.auto.checked = settings.auto_approve_sessions.includes(pane.id); }
         }
         if (!openedDefault && sessions.length) { openedDefault = true; openSession(sessions.find(s => s.is_primary) || sessions[0]); }
-      } else showError(sessionResult.reason);
+      } else showError(sessionResult.reason, 'poll');
       if (approvalResult.status === 'fulfilled') {
         const result = approvalResult.value, pending = result.pending_approvals || result.pending || [];
         const signature = JSON.stringify(pending);
@@ -411,9 +417,10 @@ export function mountMuse(target) {
           if (pending.length) permissions.open = true;
           else approvalsBox.append(el('p', 'meta', '没有待处理的权限请求'));
         }
-      } else showError(approvalResult.reason);
+      } else showError(approvalResult.reason, 'poll');
+      if (sessionResult.status === 'fulfilled' && approvalResult.status === 'fulfilled') clearError('poll');
       await Promise.all([...panes.values()].filter(p => !p.host.hidden).map(p => loadHistory(p)));
-    } catch (error) { showError(error); }
+    } catch (error) { showError(error, 'poll'); }
     finally { busy = false; schedule([...panes.values()].some(pane => pane.catchup) ? 0 : 4000); }
   }
   function schedule(delay) {

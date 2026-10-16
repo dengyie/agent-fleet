@@ -7,7 +7,18 @@ const origin = process.argv[2];
   const context = await browser.newContext({viewport:{width:1500,height:1000},serviceWorkers:'block'});
   const errors=[];
   try {
-    await context.route('**/*', route => route.request().url().startsWith(origin) ? route.continue() : route.abort());
+    let failNextSessionPoll = true;
+    await context.route('**/*', async route => {
+      const url = route.request().url();
+      if (!url.startsWith(origin)) { await route.abort(); return; }
+      if (failNextSessionPoll && url.includes('/api/platform/v1/muse/sessions?')) {
+        failNextSessionPoll = false;
+        await route.fulfill({status:502, contentType:'application/json',
+          body:JSON.stringify({ok:false,error:'http_error',detail:'服务返回异常，请稍后重试'})});
+        return;
+      }
+      await route.continue();
+    });
     const page=await context.newPage(); page.on('pageerror', e=>errors.push(e.message));
     page.setDefaultTimeout(7000);
     await page.goto(origin+'/muse');
@@ -16,6 +27,9 @@ const origin = process.argv[2];
     await page.getByLabel('Muse 登录态',{exact:true}).fill(JSON.stringify({cookies:[{name:'hatch_sess',value:'fixture-secret',domain:'.muse.ai'}]}));
     await page.getByRole('button',{name:'导入并连接'}).click();
     await page.locator('.muse-message').first().waitFor();
+    await page.waitForFunction(()=>document.querySelector('.muse-notice')?.hidden===false);
+    await page.waitForFunction(()=>document.querySelector('.muse-connection')?.dataset.connected==='true');
+    await page.waitForFunction(()=>document.querySelector('.muse-notice')?.hidden===true, null, {timeout:10000});
     assert.equal(await page.getByLabel('Muse 登录态',{exact:true}).inputValue(),'');
     assert.equal(await page.locator('[data-card-type="browser_task"]').count(),1);
     const mainActivity = page.locator('.muse-pane[data-session-id="main"] [data-browser-activity]');
