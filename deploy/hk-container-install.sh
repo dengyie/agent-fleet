@@ -356,7 +356,7 @@ fi
 
 q_release=$(printf '%q' "$release")
 su -s /bin/bash -c \
-    "cd $q_release && python3 -m compileall -q connectors hub tools report_schema.py && python3 -c 'import flask, yaml; from hub import web; web.make_app(require_token=True)'" \
+    "cd $q_release && python3 -m compileall -q connectors hub tools report_schema.py && python3 -c 'import cryptography, flask, websocket, yaml; from hub import web; web.make_app(require_token=True)'" \
     "$FLEET_USER"
 
 old_pid=$(live_hub_pid || true)

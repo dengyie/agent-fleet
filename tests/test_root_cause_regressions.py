@@ -1,5 +1,7 @@
 from pathlib import Path
 import hashlib
+import logging
+import os
 import pytest
 
 from hub.application.supervisor_service import SupervisorService
@@ -29,6 +31,108 @@ def test_supervisor_command_survives_restart_and_replays_idempotency(tmp_path):
     replay = second.enqueue("machine", "session", "attempt", "pause_session", "test",
                             idempotency_key="interaction:session:q:token")
     assert replay["command_id"] == command["command_id"]
+
+
+def test_supervisor_command_store_is_private_under_permissive_umask(tmp_path):
+    root = Path(tmp_path) / "supervisor"
+    previous = os.umask(0o022)
+    try:
+        SupervisorCommandRepository(root / "commands.db").init()
+    finally:
+        os.umask(previous)
+    assert root.stat().st_mode & 0o777 == 0o700
+    assert (root / "commands.db").stat().st_mode & 0o777 == 0o600
+
+
+def test_deployment_runtime_gate_rejects_missing_muse_transport(monkeypatch):
+    import builtins
+    from deploy import auto_deploy_container
+
+    original_import = builtins.__import__
+
+    def fail_websocket(name, *args, **kwargs):
+        if name == "websocket":
+            raise ImportError("websocket-client missing")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_websocket)
+    with pytest.raises(RuntimeError, match="runtime_dependency_missing"):
+        auto_deploy_container.verify_runtime_dependencies()
+
+
+def test_muse_auto_approval_repository_failure_is_observable(caplog):
+    from hub.application.muse_service import MuseService
+
+    class BrokenRepository:
+        def enabled_accounts(self):
+            raise RuntimeError("credential-bearing provider response")
+
+    service = MuseService(BrokenRepository())
+    with caplog.at_level(logging.WARNING):
+        service._auto_approve_tick()
+    assert "muse_auto_approval_repository_failed" in caplog.text
+    assert "credential-bearing provider response" not in caplog.text
+
+
+def test_muse_auto_approval_account_failure_does_not_starve_later_accounts(caplog):
+    from hub.application.muse_service import MuseService
+
+    class Repository:
+        def enabled_accounts(self):
+            return [{"owner": "first", "account_id": "a"},
+                    {"owner": "second", "account_id": "b"}]
+
+    service = MuseService(Repository())
+    completed = []
+
+    def approve(owner, account_id):
+        if owner == "first":
+            raise RuntimeError("provider response")
+        completed.append((owner, account_id))
+
+    service.auto_approve_once = approve
+    with caplog.at_level(logging.WARNING):
+        service._auto_approve_tick()
+    assert completed == [("second", "b")]
+    assert "muse_auto_approval_account_failed" in caplog.text
+    assert "provider response" not in caplog.text
+
+
+def test_muse_receipts_use_audit_index_and_bounded_tombstones(tmp_path, monkeypatch):
+    from hub.infrastructure.muse_repository import MuseRepository
+
+    monkeypatch.setattr(MuseRepository, "_RECEIPT_RETENTION_SECONDS", 0)
+    monkeypatch.setattr(MuseRepository, "_RECEIPT_MAX_ROWS", 1)
+    repo = MuseRepository(Path(tmp_path) / "muse")
+    repo.import_login("owner", [{"name": "hatch_sess", "value": "fixture"}])
+    revision = repo.account("owner", "default")["revision"]
+    for index in range(3):
+        request_id = f"request-{index}"
+        data = {"message": str(index)}
+        assert repo.claim("owner", request_id, "send", data, "default", revision) is None
+        repo.finish("owner", request_id, "confirmed", {"index": index}, "default", revision)
+
+    repo.audit("owner", "default")
+    with repo._connect() as conn:
+        receipt_count = conn.execute(
+            "SELECT count(*) FROM receipts WHERE owner=? AND account_id=?",
+            ("owner", "default"),
+        ).fetchone()[0]
+        tombstone_count = conn.execute(
+            "SELECT count(*) FROM receipt_tombstones WHERE owner=? AND account_id=?",
+            ("owner", "default"),
+        ).fetchone()[0]
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT request_id FROM receipts "
+            "WHERE owner=? AND account_id=? ORDER BY created DESC LIMIT 50",
+            ("owner", "default"),
+        ).fetchall()
+    assert receipt_count <= 1
+    assert tombstone_count >= 2
+    assert any("idx_muse_receipts_audit" in row[3] for row in plan)
+    replay = repo.claim("owner", "request-0", "send", {"message": "0"}, "default", revision)
+    assert replay["state"] == "confirmed"
+    assert replay["result"] == {"index": 0}
 
 
 def test_hook_missing_event_id_does_not_dedupe_repeated_identical_prompts(tmp_path):

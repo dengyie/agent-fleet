@@ -141,6 +141,7 @@ class DeploymentSafetyTests(unittest.TestCase):
         self.assertIn("DEPLOY_PREFLIGHT_FAILED", source)
         self.assertIn("prepare_runtime_dir", source)
         self.assertIn("install -d -o", source)
+        self.assertIn("import cryptography, flask, websocket, yaml", source)
 
     def test_container_install_preserves_runtime_credentials(self):
         source = (REPO_ROOT / "deploy" / "hk-container-install.sh").read_text()

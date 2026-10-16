@@ -15,6 +15,17 @@ import sys
 import time
 
 
+def verify_runtime_dependencies():
+    """Fail deployment before cutover when the release runtime is incomplete."""
+    try:
+        import cryptography  # noqa: F401
+        import flask  # noqa: F401
+        import websocket  # noqa: F401
+        import yaml  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError('runtime_dependency_missing') from exc
+
+
 def processes(root):
     found = []
     for path in Path('/proc').iterdir():
@@ -181,6 +192,8 @@ def main():
     data = json.load(sys.stdin)
     root = Path(data['live'])
     mode = data['mode']
+    if mode in ('preflight', 'stage', 'verify'):
+        verify_runtime_dependencies()
     if mode == 'preflight':
         assert_idle(root)
         observed = processes(root)
@@ -192,7 +205,8 @@ def main():
     elif mode == 'stop':
         stop(root)
     elif mode == 'stage':
-        subprocess.run([sys.executable, '-c', 'import flask,yaml; from hub import web; from hub.bootstrap import create_app'],
+        subprocess.run([sys.executable, '-c',
+                        'from hub import web; from hub.bootstrap import create_app'],
                        cwd=data['stage'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
     elif mode == 'verify':
         origin = dict(line.split(': ', 1) for line in (root / 'RELEASE_ORIGIN').read_text().splitlines())

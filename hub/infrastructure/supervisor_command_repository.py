@@ -8,6 +8,7 @@ receipt wins. Delivery uses a short lease so an interrupted poll can retry.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any, Mapping
@@ -27,21 +28,80 @@ class SupervisorCommandRepository:
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
 
+    @staticmethod
+    def _private_directory(path: Path) -> None:
+        try:
+            if path.is_symlink() or (path.exists() and not path.is_dir()):
+                raise SupervisorCommandRepositoryError("command_private_store")
+            path.mkdir(parents=True, exist_ok=True, mode=0o700)
+            info = path.stat()
+            if path.is_symlink() or info.st_uid != os.getuid():
+                raise SupervisorCommandRepositoryError("command_private_store")
+            os.chmod(path, 0o700)
+            if path.stat().st_mode & 0o077:
+                raise SupervisorCommandRepositoryError("command_private_store")
+        except SupervisorCommandRepositoryError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise SupervisorCommandRepositoryError("command_private_store") from exc
+
+    def _private_database(self) -> None:
+        self._private_directory(self.db_path.parent)
+        try:
+            if self.db_path.is_symlink():
+                raise SupervisorCommandRepositoryError("command_private_store")
+            if not self.db_path.exists():
+                fd = os.open(self.db_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                os.close(fd)
+            info = self.db_path.stat()
+            if not self.db_path.is_file() or info.st_uid != os.getuid():
+                raise SupervisorCommandRepositoryError("command_private_store")
+            os.chmod(self.db_path, 0o600)
+            if self.db_path.stat().st_mode & 0o077:
+                raise SupervisorCommandRepositoryError("command_private_store")
+        except SupervisorCommandRepositoryError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise SupervisorCommandRepositoryError("command_private_store") from exc
+
+    def _check_journal_permissions(self) -> None:
+        for suffix in ("-wal", "-shm"):
+            path = Path(str(self.db_path) + suffix)
+            if not path.exists():
+                continue
+            try:
+                info = path.stat()
+                if path.is_symlink() or not path.is_file() or info.st_uid != os.getuid():
+                    raise SupervisorCommandRepositoryError("command_private_store")
+                os.chmod(path, 0o600)
+                if path.stat().st_mode & 0o077:
+                    raise SupervisorCommandRepositoryError("command_private_store")
+            except SupervisorCommandRepositoryError:
+                raise
+            except (OSError, ValueError) as exc:
+                raise SupervisorCommandRepositoryError("command_private_store") from exc
+
     def _connect(self) -> sqlite3.Connection:
         conn: sqlite3.Connection | None = None
         try:
+            self._private_database()
             conn = sqlite3.connect(str(self.db_path), timeout=10, isolation_level=None)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
+            self._check_journal_permissions()
             return conn
-        except (sqlite3.Error, OSError) as exc:
+        except SupervisorCommandRepositoryError:
+            if conn is not None:
+                conn.close()
+            raise
+        except (sqlite3.Error, OSError, ValueError) as exc:
             if conn is not None:
                 conn.close()
             raise SupervisorCommandRepositoryError("command_unavailable") from exc
 
     def init(self) -> None:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._private_database()
         conn = self._connect()
         try:
             conn.executescript(

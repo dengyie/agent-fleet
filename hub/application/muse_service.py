@@ -1,5 +1,6 @@
 """Native Muse sessions and bounded, auditable permission decisions."""
 import hashlib
+import logging
 import re
 import threading
 import uuid
@@ -9,6 +10,10 @@ from contextlib import nullcontext
 from urllib.parse import unquote
 
 from hub.integrations.muse.client import MuseClient, MuseError, normalize_login
+from hub.diagnostics import log_failure
+
+
+logger = logging.getLogger(__name__)
 
 
 def identifier(value):
@@ -350,22 +355,33 @@ class MuseService:
                     if exc.code != 'muse_approval_revoked':
                         raise
 
+    @staticmethod
+    def _identity_digest(value):
+        return hashlib.sha256(str(value).encode('utf-8')).hexdigest()[:12]
+
+    def _auto_approve_tick(self):
+        try:
+            accounts = self.repository.enabled_accounts()
+        except Exception as exc:
+            log_failure(logger, 'muse_auto_approval_repository_failed', exc)
+            return
+        for entry in accounts:
+            owner = entry.get('owner') if isinstance(entry, dict) else None
+            account_id = entry.get('account_id') if isinstance(entry, dict) else None
+            try:
+                self.auto_approve_once(owner, account_id)
+            except Exception as exc:
+                log_failure(logger, 'muse_auto_approval_account_failed', exc,
+                            owner_hash=self._identity_digest(owner),
+                            account_hash=self._identity_digest(account_id))
+
     def start(self):
         with self.worker_lock:
             if self.worker is not None:
                 return
             def run():
                 while not self.stop_event.wait(5):
-                    try:
-                        accounts = self.repository.enabled_accounts()
-                    except Exception:
-                        continue
-                    for entry in accounts:
-                        try:
-                            self.auto_approve_once(entry['owner'], entry['account_id'])
-                        except Exception:
-                            # No raw upstream exceptions/credentials in logs.
-                            continue
+                    self._auto_approve_tick()
             self.worker = threading.Thread(target=run, name='muse-approvals', daemon=True)
             self.worker.start()
 

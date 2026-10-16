@@ -24,6 +24,10 @@ class MuseRepository:
     _ACCOUNT_CHANGE_WAIT_SECONDS = 300
     _LOCK_POLL_SECONDS = 0.05
     _DISPATCH_POLL_SECONDS = 0.05
+    _RECEIPT_RETENTION_SECONDS = 30 * 24 * 60 * 60
+    _RECEIPT_MAX_ROWS = 5000
+    _RECEIPT_TOMBSTONE_MAX_ROWS = 10000
+    _RECEIPT_TERMINAL_STATES = ('confirmed', 'rejected', 'unknown')
     def __init__(self, directory):
         self.directory = Path(directory)
         self.path = self.directory / 'muse.db'
@@ -121,6 +125,15 @@ class MuseRepository:
             # subsequently imported logins. Mark them stale so they cannot
             # suppress or impersonate operations for the current login.
             conn.execute('ALTER TABLE receipts ADD COLUMN connection_revision INTEGER NOT NULL DEFAULT 0')
+        conn.execute('''CREATE TABLE IF NOT EXISTS receipt_tombstones (
+            owner TEXT NOT NULL, account_id TEXT NOT NULL, request_id TEXT NOT NULL,
+            fingerprint TEXT NOT NULL, action TEXT NOT NULL, state TEXT NOT NULL,
+            result TEXT NOT NULL, created REAL NOT NULL, connection_revision INTEGER NOT NULL,
+            PRIMARY KEY(owner, account_id, request_id))''')
+        conn.execute('''CREATE INDEX IF NOT EXISTS idx_muse_receipts_audit
+            ON receipts(owner, account_id, created DESC)''')
+        conn.execute('''CREATE INDEX IF NOT EXISTS idx_muse_tombstones_created
+            ON receipt_tombstones(owner, account_id, created DESC)''')
         conn.execute('''CREATE TABLE IF NOT EXISTS account_leases (
             owner TEXT NOT NULL, account_id TEXT NOT NULL, token TEXT NOT NULL,
             revision INTEGER NOT NULL, expires REAL NOT NULL, PRIMARY KEY(owner,account_id,token))''')
@@ -130,6 +143,61 @@ class MuseRepository:
         conn.execute('''CREATE TABLE IF NOT EXISTS account_generations (
             owner TEXT NOT NULL, account_id TEXT NOT NULL, revision INTEGER NOT NULL,
             PRIMARY KEY(owner, account_id))''')
+
+    @classmethod
+    def _prune_receipts(cls, conn, owner, account_id):
+        """Move old terminal receipts to bounded idempotency tombstones."""
+        now = time.time()
+        terminal = cls._RECEIPT_TERMINAL_STATES
+        candidates = conn.execute(
+            "SELECT owner,account_id,request_id,fingerprint,action,state,result,created,connection_revision "
+            "FROM receipts WHERE owner=? AND account_id=? AND state IN (?,?,?) AND created<? "
+            "ORDER BY created ASC",
+            (owner, account_id, *terminal, now - cls._RECEIPT_RETENTION_SECONDS),
+        ).fetchall()
+        count = conn.execute(
+            "SELECT count(*) FROM receipts WHERE owner=? AND account_id=? AND state IN (?,?,?)",
+            (owner, account_id, *terminal),
+        ).fetchone()[0]
+        excess = max(0, count - cls._RECEIPT_MAX_ROWS)
+        if excess:
+            candidates.extend(conn.execute(
+                "SELECT owner,account_id,request_id,fingerprint,action,state,result,created,connection_revision "
+                "FROM receipts WHERE owner=? AND account_id=? AND state IN (?,?,?) "
+                "ORDER BY created ASC LIMIT ?",
+                (owner, account_id, *terminal, excess),
+            ).fetchall())
+        seen = set()
+        for row in candidates:
+            key = (row['owner'], row['account_id'], row['request_id'])
+            if key in seen:
+                continue
+            seen.add(key)
+            conn.execute(
+                "INSERT OR REPLACE INTO receipt_tombstones "
+                "(owner,account_id,request_id,fingerprint,action,state,result,created,connection_revision) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                tuple(row),
+            )
+            conn.execute(
+                "DELETE FROM receipts WHERE owner=? AND account_id=? AND request_id=?",
+                key,
+            )
+        tombstone_count = conn.execute(
+            "SELECT count(*) FROM receipt_tombstones WHERE owner=? AND account_id=?",
+            (owner, account_id),
+        ).fetchone()[0]
+        excess = max(0, tombstone_count - cls._RECEIPT_TOMBSTONE_MAX_ROWS)
+        if excess:
+            old = conn.execute(
+                "SELECT request_id FROM receipt_tombstones WHERE owner=? AND account_id=? "
+                "ORDER BY created ASC LIMIT ?",
+                (owner, account_id, excess),
+            ).fetchall()
+            conn.executemany(
+                "DELETE FROM receipt_tombstones WHERE owner=? AND account_id=? AND request_id=?",
+                [(owner, account_id, row['request_id']) for row in old],
+            )
 
     @contextmanager
     def account_lease(self, owner, account_id=None, expected_revision=None):
@@ -350,7 +418,11 @@ class MuseRepository:
                 if row['settings_revision'] != expected_settings_revision or not allowed:
                     raise MuseError('muse_approval_revoked', '自动审批设置已更改，请重新加载权限请求。', 409)
             connection_revision = row['revision']
+            self._prune_receipts(conn, owner, account_id)
             row = conn.execute('SELECT * FROM receipts WHERE owner=? AND account_id=? AND request_id=?', (owner, account_id, request_id)).fetchone()
+            if row is None:
+                row = conn.execute('SELECT * FROM receipt_tombstones WHERE owner=? AND account_id=? AND request_id=?',
+                                   (owner, account_id, request_id)).fetchone()
             if row:
                 if row['connection_revision'] != connection_revision:
                     raise MuseError('muse_request_conflict', '此请求标识属于另一份 Muse 登录态。', 409)
@@ -407,6 +479,7 @@ class MuseRepository:
             conn.execute("UPDATE receipts SET state='unknown',result=? WHERE owner=? AND account_id=? AND state='dispatching' AND created<?",
                          (json.dumps({'error': 'muse_dispatch_unknown'}), owner, account['account_id'],
                           time.time() - self._DISPATCH_STALE_SECONDS))
+            self._prune_receipts(conn, owner, account['account_id'])
             rows = conn.execute('SELECT request_id,action,state,result,created FROM receipts WHERE owner=? AND account_id=? ORDER BY created DESC LIMIT 50',
                                 (owner, account['account_id'])).fetchall()
         return [{**dict(r), 'result': json.loads(r['result'])} for r in rows]

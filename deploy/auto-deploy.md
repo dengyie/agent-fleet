@@ -44,7 +44,7 @@ restrict,command="sudo -n /usr/local/sbin/agent-fleet-deploy \"$SSH_ORIGINAL_COM
 
 1. Receiver 校验命令、完整 SHA、run ID、压缩包大小（最多 128 MiB）和 SHA-256；传输限时 120 秒。tar 拒绝路径穿越、软/硬链接、设备、重复项、非法顶层文件、超过 30000 项或展开超过 512 MiB。剩余磁盘不足 1 GiB 时拒绝新上传。
 2. 使用 systemd 启动独立事务；SSH 断开不杀部署。事务保存 `pending.json`，防止进程异常中断后下一次发布覆盖现场。systemd 运行上限 600 秒，TERM 留 120 秒完成回滚。
-3. 检查原实例的唯一 Hub/guardian、活动 Run/任务、账号会话、readiness；在容器临时目录导入候选代码。版本必须与后台 RELEASE_ORIGIN、前端 manifest 和同一个 run 完全一致。
+3. 检查原实例的唯一 Hub/guardian、活动 Run/任务、账号会话、readiness；在容器临时目录导入候选代码，并在候选运行时显式导入 Flask、PyYAML、cryptography 和 websocket-client。缺少生产依赖时在切换前失败。版本必须与后台 RELEASE_ORIGIN、前端 manifest 和同一个 run 完全一致。
 4. 保存旧代码和 Nginx，建立现有 launcher 的维护屏障；Nginx 临时返回 503，阻止公网新请求。再查活动任务；如果已有新任务，恢复访问并退出，不停止任务。
 5. 只停止 UID、cwd、脚本和进程启动时间均匹配的 guardian/Hub；停写后对配置中的每个 SQLite 数据库使用 backup API，并检查 integrity/FK。
 6. 在原 LIVE 目录内更新有限的发布管理路径。**不覆盖** `fleet-gates.conf`、`hosts.yaml`、`.env`、`credentials/`、`state/`、`var/`，不改变 LIVE inode。前端部署到不可变的完整 SHA 目录。

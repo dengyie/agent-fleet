@@ -6,7 +6,7 @@
 
 ## 使用
 
-1. 更新包含本功能的前后端版本，并安装 `requirements.txt`（新增 `websocket-client>=1.8,<2`）。沿用 Fleet 的平台开关 `platform_enabled`；普通 Fleet 用户也能访问自己的 Muse 工作区。
+1. 更新包含本功能的前后端版本，并安装 `requirements.txt`（新增 `websocket-client>=1.8,<2`）。发布候选导入、切换前验证和容器安装器都会显式检查 `cryptography`、`flask`、`websocket-client` 与 `pyyaml`；缺少任一依赖时发布会失败并保持旧版本运行。沿用 Fleet 的平台开关 `platform_enabled`；普通 Fleet 用户也能访问自己的 Muse 工作区。
 2. 从任意已登录 Muse 的浏览器导出 Cookie JSON，或使用已有的 Playwright storage state 文件。点击 **管理登录态**，选择 JSON 文件或粘贴内容，再点击 **导入并连接**。首次导入建立默认账号；点击 **添加账号** 可保存另一份登录态，并可填写账号名称。也支持原始 Cookie 字符串。导入只采纳 `muse.ai` 域 Cookie，必须含未过期的 `hatch_sess`；无需安装 Playwright 来使用导出的文件。
 3. 点击已有会话打开窗口；**新建子会话**在第一次发送时创建独立的 Muse 原生 side chat。单窗口与并排窗口可切换，最多打开 6 个窗口，每个窗口有独立草稿和引用对象。窗口布局和草稿仅保留在当前页面内存，切换 Fleet 栏目可保留，刷新页面后不保留。
 4. 在消息下点击 **引用回复**，或点击 **停止**请求 Muse 停止当前会话。历史支持加载更早消息；可见窗口约每 4 秒在上一轮请求结束后刷新，并非逐 Token 推送。
@@ -36,7 +36,7 @@ Cookie 是登录凭据，不要发到聊天、提交到仓库或附在截图中�
 
 - `hub/integrations/muse/`：固定 HTTPS 鉴权、Noise XX（X25519/AESGCM/SHA256）加密 WebSocket、受限 protobuf 分片与服务请求。只使用自有实现和 `cryptography`、`websocket-client`，不加载或执行 Muse 前端代码。
 - `hub/application/muse_service.py`：会话、历史、发送/停止、文件读取、审批与后台检查；`hub/http/muse_routes.py`：经 Fleet 身份验证和同源写入保护的 `/api/platform/v1/muse/*`。
-- `hub/infrastructure/muse_repository.py`：`state_dir/muse/` 目录权限 0700，`muse.db` 与 `credentials.key` 权限 0600。Cookie 用 Fernet 加密，密钥原子发布；登录、设置与回执按 Fleet 用户和 Muse 账号双重隔离。SQLite 事务保护多 Hub worker 之间的账号租约、连接替换和回执领取。旧单账号表迁移为 `default` 账号。备份恢复需要同时保留数据库与密钥，磁盘加密不代替服务器账户隔离。
+- `hub/infrastructure/muse_repository.py`：`state_dir/muse/` 目录权限 0700，`muse.db` 与 `credentials.key` 权限 0600。Cookie 用 Fernet 加密，密钥原子发布；登录、设置与回执按 Fleet 用户和 Muse 账号双重隔离。SQLite 事务保护多 Hub worker 之间的账号租约、连接替换和回执领取。终态回执保留 30 天且每账号最多 5000 条，超出部分转为最多 10000 条幂等墓碑；`dispatching` 与 `retryable` 保留在详细回执中，`unknown` 转为墓碑后仍保留原幂等结果，避免不确定投递被重放。旧单账号表迁移为 `default` 账号。备份恢复需要同时保留数据库与密钥，磁盘加密不代替服务器账户隔离。
 - `frontend/assets/views/muse*`：复用现有 StreamMarkdown、ChatPromptInput、AutoScrollAnchor 和 ToolCallBadge。消息及资源来自 Muse，不复制保存为 Fleet Assistant 会话；回执包含操作结果与时间，操作内容以哈希参与幂等校验。
 
 这一接入依据 2026-10-14 实际使用的 Muse Web 协议，不是官方稳定 API。Muse 改动协议、登录验证或会话结构时可能需要适配。当前验证的是普通 `hatch_vm`；需要恢复密钥或机密计算认证的环境会明确拒绝。暂不支持附件上传、任意嵌套子会话、远端会话删除，以及执行 Muse 专有交互 widget；未知卡片显示数据，HTML 不执行。原有 CDP 桥接可选保留，独立于此栏目。
