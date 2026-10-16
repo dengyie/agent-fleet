@@ -72,6 +72,7 @@ export function mountMuse(target) {
       importTargetId = null; epoch++; connected = true; accountId = result.account_id; accountLabel = result.label || '';
       settings = result.settings; settingsRevision = result.settings_revision; sessions = result.sessions || [];
       connectionRevision = result.connection_revision; accounts = result.accounts || accounts; openedDefault = false;
+      autoAll.checked = settings.auto_approve_all === true;
       // A re-import may select another Muse account. Do not retain its previous
       // transcript, pane drafts or approval state.
       panes.clear(); activePane = null; deck.replaceChildren(empty); tabs.replaceChildren(); approvalSignature = auditSignature = '';
