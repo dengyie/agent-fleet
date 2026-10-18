@@ -36,6 +36,52 @@ function markdown(text) {
   const node = el('stream-markdown'); node.setAttribute('content', String(text || '')); return node;
 }
 
+const DELIVERY_LABELS = {
+  sending: '正在发送…',
+  thinking: 'Muse 正在思考…',
+  streaming: 'Muse 正在输出…',
+  executing: 'Muse 正在执行任务…',
+  retryable: '发送失败，可重试',
+  unknown: '投递结果待核对',
+};
+const STREAMING_PHASES = new Set(['thinking', 'streaming', 'running', 'in_progress', 'generating']);
+
+function deliveryIcon(phase) {
+  const active = ['sending', 'thinking', 'streaming', 'executing'].includes(phase);
+  return uiIcon(active ? 'loader' : phase === 'retryable' || phase === 'unknown' ? 'circle-x' : 'check-circle', {
+    size: 15,
+    className: active ? 'muse-delivery-spinner' : '',
+  });
+}
+
+function deliveryLabel(phase, label) {
+  return label || DELIVERY_LABELS[phase] || '状态更新';
+}
+
+export function renderMusePendingMessage(state = {}) {
+  const phase = state.phase || 'sending';
+  const article = el('article', 'muse-message muse-message-user muse-transient-message');
+  article.dataset.transientMessage = 'user';
+  article.dataset.deliveryPhase = phase;
+  article.setAttribute('aria-live', 'polite');
+  const meta = el('div', 'muse-message-meta muse-delivery-meta');
+  meta.append(deliveryIcon(phase), el('strong', '', '你'), el('span', 'muse-delivery-label', deliveryLabel(phase, state.label)));
+  article.append(meta, markdown(state.text));
+  return article;
+}
+
+export function renderMuseThinkingMessage(state = {}) {
+  const phase = state.phase || 'thinking';
+  const article = el('article', 'muse-message muse-message-assistant muse-transient-message muse-thinking-message');
+  article.dataset.transientMessage = 'assistant';
+  article.dataset.deliveryPhase = phase;
+  article.setAttribute('aria-live', 'polite');
+  const meta = el('div', 'muse-message-meta muse-delivery-meta');
+  meta.append(deliveryIcon(phase), el('strong', '', 'Muse'), el('span', 'muse-delivery-label', deliveryLabel(phase, state.label)));
+  article.append(meta, el('p', 'muse-thinking-copy', state.copy || '请稍候，Muse 正在处理这条消息。'));
+  return article;
+}
+
 function resourceControl(path, title, preview = false, context = {}) {
   const box = el('div', 'muse-resource');
   const status = el('p', 'meta'); status.setAttribute('role', 'status');
@@ -220,13 +266,25 @@ export function renderMuseMessage(event, onReply, context = {}) {
   article.dataset.messageId = event.message_id || '';
   const head = el('div', 'muse-message-meta');
   head.append(el('strong', '', role === 'user' ? '你' : 'Muse'));
-  if (event.occurred_at_ms) head.append(el('time', '', new Date(event.occurred_at_ms).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})));
+  if (event.occurred_at_ms) {
+    const occurredAt = new Date(event.occurred_at_ms);
+    if (Number.isFinite(occurredAt.getTime())) {
+      const time = el('time', '', occurredAt.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}));
+      time.dateTime = occurredAt.toISOString();
+      head.append(time);
+    }
+  }
   article.append(head);
+  let copyText = '';
   if (event.event_name === 'delta.presentation') article.append(renderCard(payload, context));
   else {
     const content = event.display_text || payload.display_text || payload.content || '';
     if (typeof content === 'string' && content) {
+      copyText = content;
       article.append(markdown(content));
+      if (role === 'assistant' && isStreamingEvent(event, payload)) {
+        article.querySelector('stream-markdown').setAttribute('is-streaming', '');
+      }
       // Muse uses sandbox links in Markdown for generated files; the shared
       // Markdown component deliberately permits only HTTP links.
       const paths = new Set();
@@ -235,14 +293,45 @@ export function renderMuseMessage(event, onReply, context = {}) {
         article.append(resourceControl(match[2], match[1] || '查看文件', match[0].startsWith('!'), context));
       }
     }
-    else if (Array.isArray(content)) content.forEach(item => article.append(item.type === 'text' ? markdown(item.text) : renderCard(item, context)));
+    else if (Array.isArray(content)) {
+      copyText = content.filter(item => item && item.type === 'text' && typeof item.text === 'string')
+        .map(item => item.text).join('\n\n');
+      content.forEach(item => article.append(item.type === 'text' ? markdown(item.text) : renderCard(item, context)));
+    }
     for (const item of [...(event.resources || []), ...(payload.tool_calls || [])]) article.append(renderCard(item, context));
     if (!content && !(event.resources || []).length) article.append(details(payload, '查看消息详情'));
   }
-  if (onReply && event.message_id) {
-    const button = action('引用回复', 'arrow-left', () => onReply(event)); button.className = 'muse-reply-button'; article.append(button);
+  const actionBar = el('div', 'muse-message-actions');
+  if (copyText) {
+    const copy = el('button', 'muse-message-action'); copy.type = 'button';
+    copy.title = '复制消息'; copy.setAttribute('aria-label', '复制消息');
+    copy.append(uiIcon('copy', {size: 14}));
+    const copyStatus = el('span', 'muse-copy-status'); copyStatus.hidden = true; copyStatus.setAttribute('role', 'status');
+    copy.addEventListener('click', async () => {
+      try {
+        if (!navigator.clipboard?.writeText) throw new Error('clipboard_unavailable');
+        await navigator.clipboard.writeText(copyText);
+        copyStatus.textContent = '已复制'; copyStatus.hidden = false;
+      } catch {
+        copyStatus.textContent = '复制失败'; copyStatus.hidden = false;
+      }
+    });
+    actionBar.append(copy, copyStatus);
   }
+  if (onReply && event.message_id) {
+    const reply = el('button', 'muse-message-action'); reply.type = 'button';
+    reply.title = '引用回复'; reply.setAttribute('aria-label', '引用回复');
+    reply.append(uiIcon('arrow-left', {size: 14})); reply.addEventListener('click', () => onReply(event));
+    actionBar.append(reply);
+  }
+  if (actionBar.childElementCount) article.append(actionBar);
   return article;
+}
+
+function isStreamingEvent(event, payload) {
+  return [event.status, event.state, event.phase, payload.status, payload.state, payload.phase, payload.stream_state]
+    .some(value => STREAMING_PHASES.has(String(value || '').toLowerCase())) ||
+    (typeof event.event_name === 'string' && /(^|[.:])stream/.test(event.event_name));
 }
 
 export function renderApproval(item, onDecision) {

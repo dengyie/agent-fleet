@@ -5,6 +5,7 @@ const origin = process.argv[2];
 (async () => {
   const browser = await chromium.launch({channel: process.env.FLEET_BROWSER_CHANNEL || 'chrome', headless:true});
   const context = await browser.newContext({viewport:{width:1500,height:1000},serviceWorkers:'block'});
+  await context.grantPermissions(['clipboard-read','clipboard-write'],{origin});
   const errors=[];
   try {
     let failNextSessionPoll = true;
@@ -31,6 +32,20 @@ const origin = process.argv[2];
     await page.waitForFunction(()=>document.querySelector('.muse-connection')?.dataset.connected==='true');
     await page.waitForFunction(()=>document.querySelector('.muse-notice')?.hidden===true, null, {timeout:10000});
     assert.equal(await page.getByLabel('Muse 登录态',{exact:true}).inputValue(),'');
+    const firstMessage=page.locator('.muse-message-assistant').first();
+    assert.equal(await firstMessage.evaluate(node=>getComputedStyle(node.parentElement).display),'flex');
+    await firstMessage.getByRole('button',{name:'复制消息'}).click();
+    assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),'已完成资料整理。\n\n**下一步**：实现接入。');
+    const mainPane=page.locator('.muse-pane[data-session-id="main"]');
+    const mainLayout=await mainPane.evaluate(node=>{
+      const activity=node.querySelector('[data-browser-activity]').getBoundingClientRect();
+      const transcript=node.querySelector('.muse-transcript').getBoundingClientRect();
+      const composer=node.querySelector('.muse-composer').getBoundingClientRect();
+      return {activityBottom:activity.bottom,transcriptTop:transcript.top,transcriptBottom:transcript.bottom,composerTop:composer.top,composerBottom:composer.bottom,paneBottom:node.getBoundingClientRect().bottom};
+    });
+    assert(mainLayout.transcriptTop>=mainLayout.activityBottom-1);
+    assert(mainLayout.composerTop>=mainLayout.transcriptTop);
+    assert(mainLayout.composerBottom<=mainLayout.paneBottom+1);
     assert.equal(await page.locator('[data-card-type="browser_task"]').count(),1);
     const mainActivity = page.locator('.muse-pane[data-session-id="main"] [data-browser-activity]');
     await mainActivity.waitFor();
@@ -100,13 +115,79 @@ const origin = process.argv[2];
     await page.screenshot({path:'/tmp/fleet-muse-workspace-split.png',fullPage:true});
     await page.getByRole('button',{name:'新建子会话'}).click();
     const fresh=page.locator('.muse-pane').last();
+    const freshSessionId=await fresh.getAttribute('data-session-id');
+    let releaseSend, sendArrived, holdSend=true;
+    const sendGate=new Promise(resolve=>{releaseSend=resolve;});
+    const sendStarted=new Promise(resolve=>{sendArrived=resolve;});
+    let releaseHistory, historyArrived, holdHistory=true, historyCount=0;
+    const historyGate=new Promise(resolve=>{releaseHistory=resolve;});
+    const historyStarted=new Promise(resolve=>{historyArrived=resolve;});
+    await page.route(`**/api/platform/v1/muse/sessions/${freshSessionId}/messages`,async route=>{
+      if(holdSend){holdSend=false;sendArrived();await sendGate;}
+      await route.continue();
+    });
+    await page.route(`**/api/platform/v1/muse/sessions/${freshSessionId}/history*`,async route=>{
+      historyCount++;
+      if(holdHistory){holdHistory=false;historyArrived();await historyGate;}
+      if(historyCount<=2){
+        const response=await route.fetch();
+        const body=await response.json();
+        if(historyCount===1) body.chat_events=body.chat_events.filter(event=>(event.role||event.payload?.role)!=='assistant');
+        if(historyCount===2){
+          const assistant=body.chat_events.find(event=>(event.role||event.payload?.role)==='assistant');
+          if(assistant) assistant.status='streaming';
+        }
+        await route.fulfill({response,body:JSON.stringify(body)});
+        return;
+      }
+      if(historyCount===3){
+        const response=await route.fetch();
+        const body=await response.json();
+        body.chat_events.push({seq:104,message_id:'final-answer',role:'assistant',event_name:'message.assistant',display_text:'FLEET_FINAL'});
+        await route.fulfill({response,body:JSON.stringify(body)});
+        return;
+      }
+      await route.continue();
+    });
     await fresh.getByLabel('发送给 Muse').fill('这是夹具测试');
-    await fresh.getByRole('button',{name:'发送',exact:true}).click();
+    const submit=fresh.getByRole('button',{name:'发送',exact:true}).click();
+    await sendStarted;
+    const sendingBubble=fresh.locator('.muse-transient-message[data-transient-message="user"]');
+    await sendingBubble.waitFor();
+    assert.match(await sendingBubble.innerText(),/这是夹具测试/);
+    assert.equal(await sendingBubble.evaluate(node=>getComputedStyle(node).alignSelf),'flex-end');
+    assert.equal(await sendingBubble.getAttribute('data-delivery-phase'),'sending');
+    assert.equal(await sendingBubble.locator('.muse-delivery-spinner').evaluate(node=>getComputedStyle(node).animationName),'muse-spin');
+    releaseSend();
+    await historyStarted;
+    assert.equal(await fresh.locator('.muse-thinking-message .muse-delivery-label').innerText(),'Muse 正在思考…');
+    assert.equal(await fresh.locator('.muse-thinking-message').getAttribute('aria-live'),'polite');
+    releaseHistory();
+    await submit;
+    await fresh.locator('.muse-thinking-message .muse-delivery-label').filter({hasText:'Muse 正在输出…'}).waitFor();
+    const streamed= fresh.locator('.muse-message-assistant stream-markdown[is-streaming]');
+    await streamed.waitFor();
+    assert.equal(await streamed.evaluate(node=>getComputedStyle(node,'::after').animationName),'muse-caret-blink');
+    const completedPolls=historyCount;
+    await page.getByRole('button',{name:'单窗口'}).click();
+    await page.locator('#muse-tab-main').click();
+    await page.waitForTimeout(1100);
+    assert.equal(historyCount,completedPolls,'hidden Muse panes must not keep the fast reply poll running');
+    await page.locator(`#muse-tab-${freshSessionId}`).click();
+    await page.getByRole('button',{name:'并排窗口'}).click();
     await fresh.getByText('FLEET_OK',{exact:true}).waitFor();
+    await fresh.getByText('FLEET_FINAL',{exact:true}).waitFor();
+    await fresh.locator('.muse-transient-message').waitFor({state:'detached'});
+    assert.equal(await fresh.locator('.muse-transient-message').count(),0);
+    assert.equal(await fresh.getByLabel('发送给 Muse').getAttribute('readonly'),null);
     assert.equal(await main.getByLabel('发送给 Muse').inputValue(),'保留主会话草稿');
     await fresh.getByLabel('发送给 Muse').fill('uncertain');
     await fresh.getByRole('button',{name:'发送',exact:true}).click();
     await fresh.getByRole('button',{name:'核对投递结果'}).waitFor();
+    const unknownBubble=fresh.locator('.muse-transient-message[data-transient-message="user"]');
+    await unknownBubble.waitFor();
+    assert.equal(await unknownBubble.getAttribute('data-delivery-phase'),'unknown');
+    assert.match(await unknownBubble.innerText(),/结果待核对/);
     await fresh.getByRole('button',{name:'核对投递结果'}).click();
     await page.waitForFunction(()=>!Array.from(document.querySelectorAll('.muse-composer button')).find(b=>b.textContent==='核对投递结果')?.disabled);
     assert.equal(await fresh.getByLabel('发送给 Muse').getAttribute('readonly'),'');
@@ -121,6 +202,7 @@ const origin = process.argv[2];
     await page.waitForFunction(()=>document.querySelector('.console-sidebar').getBoundingClientRect().right<=1);
     await page.screenshot({path:'/tmp/fleet-muse-workspace-mobile.png',fullPage:true});
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1));
+    assert.equal(await page.locator('.muse-message-actions').first().evaluate(node=>getComputedStyle(node).opacity),'1');
     await page.setViewportSize({width:1500,height:1000});
     await page.waitForFunction(()=>document.querySelector('.console-sidebar').getBoundingClientRect().right>1);
     let releaseImport;
