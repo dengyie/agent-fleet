@@ -1,5 +1,6 @@
 import * as api from '../api/muse.js';
 import {el, action, mergeEvents, visibleMessages, renderMuseMessage, renderApproval,
+  renderMusePendingMessage, renderMuseThinkingMessage, latestBrowserTask,
   createBrowserActivity, updateBrowserActivity} from './muse/cards.js';
 
 export function mountMuse(target) {
@@ -112,6 +113,7 @@ export function mountMuse(target) {
 
   function clearAccountView() {
     epoch++; connected = false; sessions = []; settings = {auto_approve_sessions: [], auto_approve_all: false}; connectionRevision = null; settingsRevision = null;
+    for (const pane of panes.values()) { clearTimeout(pane.replyTimer); pane.replyTimer = null; }
     autoAll.checked = false; autoAll.disabled = true;
     delete autoAll.dataset.saving;
     openedDefault = false; panes.clear(); activePane = null; deck.replaceChildren(empty); tabs.replaceChildren();
@@ -165,13 +167,18 @@ export function mountMuse(target) {
   function showPanes() {
     deck.dataset.layout = layout;
     for (const [id, pane] of panes) {
+      const wasHidden = pane.host.hidden;
       pane.host.hidden = layout === 'single' && id !== activePane;
       pane.tab.setAttribute('aria-selected', String(id === activePane));
       pane.host.dataset.active = String(id === activePane);
+      if (pane.host.hidden) {
+        clearTimeout(pane.replyTimer); pane.replyTimer = null;
+      } else if (wasHidden && pane.awaitingReply && !pane.loading && !suspended) loadHistory(pane);
     }
     empty.hidden = panes.size > 0; renderSessions();
   }
   function closePane(pane) {
+    clearTimeout(pane.replyTimer);
     panes.delete(pane.id); pane.host.remove(); pane.tab.remove();
     if (activePane === pane.id) activePane = panes.keys().next().value || null;
     if (!panes.size) deck.append(empty);
@@ -200,9 +207,12 @@ export function mountMuse(target) {
       const anchor = el('auto-scroll-anchor'); scroll.append(older, messages, anchor);
       const state = el('p', 'muse-pane-state'); state.setAttribute('role', 'status');
       const continueInput = action('已核对，继续输入', 'arrow-right', () => {
+        clearTimeout(pane.replyTimer); pane.replyTimer = null;
         pane.pending = null; pane.input.value = ''; pane.input.readOnly = false;
         pane.replyTo = null; pane.reply.hidden = true; pane.send.textContent = '发送';
+        pane.delivery = {phase: 'idle'}; pane.awaitingReply = false;
         continueInput.hidden = true; pane.state.textContent = '原操作保留为结果未知。可以输入下一条消息。';
+        renderDelivery(pane);
         pane.input.focus();
       });
       continueInput.hidden = true; continueInput.className = 'muse-delivery-recovery';
@@ -217,16 +227,24 @@ export function mountMuse(target) {
         const selectedAccount = accountId, selectedConnection = connectionRevision, generation = epoch;
         cancel.disabled = true;
         try { const result = await api.museCancel(id, selectedAccount, selectedConnection);
-          if (!disposed && generation === epoch && accountId === selectedAccount) state.textContent = receiptText(result); }
+          if (!disposed && generation === epoch && accountId === selectedAccount) {
+            clearTimeout(pane.replyTimer); pane.replyTimer = null;
+            pane.awaitingReply = false; pane.delivery = {phase: 'idle'}; pane.input.readOnly = false; pane.send.disabled = false;
+            state.textContent = result.cancelled ? '已请求 Muse 停止' : receiptText(result); renderDelivery(pane);
+          } }
         catch (error) { if (!disposed && generation === epoch && accountId === selectedAccount) showError(error); }
         finally { cancel.disabled = false; }
       });
       const send = el('button', 'button-primary', '发送'); send.type = 'submit'; controls.append(cancel, send);
       form.append(reply, prompt, controls); host.append(header, browserActivity, scroll, state, continueInput, form);
       const pane = {id, host, tab, heading, scroll, messages, older, anchor, input, send, state, reply, auto,
-        continueInput, browserActivity, events: [], nodes: new Map(), draft, loading: false, pending: null, replyTo: null};
+        continueInput, browserActivity, events: [], nodes: new Map(), draft, loading: false, pending: null,
+        delivery: {phase: 'idle'}, awaitingReply: false, replyTo: null};
       panes.set(id, pane); tabs.append(tab); deck.append(host);
-      host.addEventListener('focusin', () => { activePane = id; for (const [key, p] of panes) p.tab.setAttribute('aria-selected', String(key === id)); });
+      host.addEventListener('focusin', () => {
+        activePane = id;
+        for (const [key, p] of panes) p.tab.setAttribute('aria-selected', String(key === id));
+      });
       auto.addEventListener('change', async () => {
         const selectedAccount = accountId, selectedConnection = connectionRevision;
         const selectedSettings = settingsRevision, generation = epoch, enabled = auto.checked;
@@ -256,36 +274,184 @@ export function mountMuse(target) {
     if (result.state === 'dispatching') return '同一请求仍在派发中，请稍后核对；不会重复发送。';
     return '投递结果尚未确认。请检查历史消息；此请求不会被自动重复发送。';
   }
+
+  function eventSequence(event) {
+    const value = Number(event && event.seq);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function latestSequence(events) {
+    return (events || []).reduce((latest, event) => Math.max(latest, eventSequence(event) || 0), 0);
+  }
+
+  function eventRole(event) {
+    const payload = event && event.payload || {};
+    return event && (event.role || payload.role) || '';
+  }
+
+  function eventText(event) {
+    const payload = event && event.payload || {};
+    const content = event && (event.display_text || payload.display_text || payload.content);
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) return content.filter(item => item && item.type === 'text')
+      .reduce((text, item) => text + (item.text || ''), '');
+    return '';
+  }
+
+  function eventIsStreaming(event) {
+    const payload = event && event.payload || {};
+    const markers = [event && event.status, event && event.state, event && event.phase,
+      payload.status, payload.state, payload.phase, payload.stream_state];
+    return markers.some(value => ['thinking', 'streaming', 'running', 'in_progress', 'generating'].includes(String(value || '').toLowerCase())) ||
+      (typeof (event && event.event_name) === 'string' && /(^|[.:])stream/.test(event.event_name));
+  }
+
+  function browserTaskIsActive(events) {
+    const card = latestBrowserTask(events || []);
+    const data = card && (card.data || card);
+    const status = String(data && (data.display_status || data.display_state || data.status) || '').toLowerCase();
+    return !!status && !/(completed|complete|success|succeeded|stopped|failed|cancelled|canceled|done|已完成|成功|停止|失败|取消)/i.test(status);
+  }
+
+  function renderDelivery(pane) {
+    pane.messages.querySelectorAll('[data-transient-message]').forEach(node => node.remove());
+    const delivery = pane.delivery;
+    if (delivery && delivery.phase !== 'idle' || pane.awaitingReply) {
+      pane.messages.querySelectorAll('.muse-empty').forEach(node => node.remove());
+    }
+    if (delivery && delivery.phase !== 'idle' && !delivery.userConfirmed) {
+      pane.messages.append(renderMusePendingMessage({
+        phase: delivery.userPhase || delivery.phase,
+        requestId: delivery.requestId,
+        text: delivery.text,
+        label: delivery.userLabel,
+      }));
+    }
+    if (pane.awaitingReply) {
+      pane.messages.append(renderMuseThinkingMessage({
+        phase: delivery.phase === 'executing' ? 'executing' : delivery.phase === 'streaming' ? 'streaming' : 'thinking',
+        label: delivery.assistantLabel,
+      }));
+      pane.anchor.setAttribute('is-streaming', '');
+      pane.anchor.scrollToBottom();
+    } else if (!delivery || delivery.phase === 'idle') {
+      pane.anchor.removeAttribute('is-streaming');
+    }
+  }
+
+  function finishDelivery(pane) {
+    clearTimeout(pane.replyTimer);
+    pane.replyTimer = null;
+    pane.awaitingReply = false;
+    pane.delivery = {phase: 'idle'};
+    pane.input.readOnly = false;
+    pane.send.disabled = false;
+    pane.send.textContent = '发送';
+    pane.state.textContent = 'Muse 已回复';
+    pane.continueInput.hidden = true;
+    pane.sentUnknown = false;
+    renderDelivery(pane);
+  }
+
+  function reconcileDelivery(pane, events, messages) {
+    const delivery = pane.delivery;
+    if (!delivery || delivery.phase === 'idle') return;
+    const baseline = Number.isFinite(delivery.baselineSeq) ? delivery.baselineSeq : 0;
+    const recent = (events || []).filter(event => {
+      const sequence = eventSequence(event);
+      return sequence === null || sequence > baseline;
+    });
+    const matchingUser = (messages || []).filter(event => eventRole(event) === 'user' &&
+      (eventSequence(event) === null || eventSequence(event) > baseline) &&
+      eventText(event).trim() === String(delivery.text || '').trim())
+      .sort((a, b) => (eventSequence(a) || 0) - (eventSequence(b) || 0)).pop();
+    if (matchingUser) delivery.userConfirmed = true;
+    if (!pane.awaitingReply) { renderDelivery(pane); return; }
+    const userSequence = matchingUser && eventSequence(matchingUser);
+    const responseEvents = recent.filter(event => userSequence === null || eventSequence(event) === null || eventSequence(event) > userSequence);
+    const assistant = responseEvents.reduce((latest, event) => {
+      if (eventRole(event) !== 'assistant' || event.event_name === 'delta.presentation') return latest;
+      if (!latest) return event;
+      const sequence = eventSequence(event), latestSeq = eventSequence(latest);
+      return sequence !== null && (latestSeq === null || sequence > latestSeq) ? event : latest;
+    }, null);
+    const streaming = responseEvents.some(eventIsStreaming);
+    const executing = browserTaskIsActive(responseEvents);
+    if (assistant && !eventIsStreaming(assistant)) {
+      finishDelivery(pane);
+      return;
+    }
+    delivery.phase = executing ? 'executing' : streaming || assistant ? 'streaming' : 'thinking';
+    delivery.assistantLabel = executing ? 'Muse 正在执行任务…' : streaming || assistant ? 'Muse 正在输出…' : 'Muse 正在思考…';
+    pane.state.textContent = delivery.assistantLabel;
+    renderDelivery(pane);
+  }
+
+  function scheduleReplyPoll(pane) {
+    clearTimeout(pane.replyTimer);
+    pane.replyTimer = null;
+    if (!pane.awaitingReply || disposed || suspended || !panes.has(pane.id) || pane.host.hidden) return;
+    pane.replyTimer = setTimeout(() => {
+      pane.replyTimer = null;
+      loadHistory(pane);
+    }, 900);
+  }
+
   async function sendMessage(pane) {
     if (pane.send.disabled || !pane.input.value.trim()) return;
     const generation = epoch;
     if (!pane.pending) pane.pending = {text: pane.input.value, id: crypto.randomUUID(), replyTo: pane.replyTo};
+    const baselineSeq = pane.delivery && pane.delivery.requestId === pane.pending.id && Number.isFinite(pane.delivery.baselineSeq)
+      ? pane.delivery.baselineSeq : latestSequence(pane.events);
+    const previousDelivery = pane.delivery;
+    pane.delivery = {
+      phase: 'sending', userPhase: 'sending', requestId: pane.pending.id, text: pane.pending.text,
+      baselineSeq, userConfirmed: false,
+      userLabel: '正在发送…', assistantLabel: '',
+    };
+    // A retry reuses the same idempotency key. Keep a previously confirmed
+    // history match while the transport receipt is being refreshed so the UI
+    // does not briefly regress from a real user message to a pending copy.
+    if (previousDelivery?.requestId === pane.pending.id && previousDelivery.userConfirmed) {
+      pane.delivery.userConfirmed = true;
+    }
+    pane.awaitingReply = false;
     pane.send.disabled = true; pane.continueInput.hidden = true; pane.input.readOnly = true; pane.state.textContent = '正在发送…';
+    renderDelivery(pane);
     try {
       const result = await api.museSend(pane.id, pane.pending.text, pane.pending.id, pane.pending.replyTo, accountId, connectionRevision);
       if (disposed || epoch !== generation) return;
       pane.state.textContent = receiptText(result);
       if (result.state === 'confirmed') {
-        pane.pending = null; pane.input.value = ''; pane.input.readOnly = false; pane.draft = false; pane.auto.disabled = false;
-        pane.replyTo = null; pane.reply.hidden = true; pane.send.textContent = '发送';
+        pane.pending = null; pane.input.value = ''; pane.input.readOnly = true; pane.draft = false; pane.auto.disabled = false;
+        pane.replyTo = null; pane.reply.hidden = true; pane.awaitingReply = true;
+        pane.delivery.phase = 'thinking'; pane.delivery.userPhase = 'sent';
+        pane.delivery.userLabel = '已发送，等待 Muse 回复…'; pane.delivery.assistantLabel = 'Muse 正在思考…';
+        pane.send.textContent = '等待回复…'; renderDelivery(pane);
         await loadHistory(pane); schedule(0);
       } else if (result.state === 'rejected') {
         pane.pending = null; pane.input.readOnly = false; pane.send.textContent = '发送';
+        pane.delivery = {phase: 'idle'}; renderDelivery(pane);
       } else if (result.state === 'retryable') {
         pane.input.readOnly = false; pane.send.textContent = '重试发送'; pane.continueInput.hidden = true;
+        pane.delivery.phase = pane.delivery.userPhase = 'retryable'; pane.delivery.userLabel = '发送失败，可重试'; renderDelivery(pane);
       } else if (result.state === 'dispatching') {
         pane.send.textContent = '核对投递结果'; pane.continueInput.hidden = true;
-        pane.sentUnknown = true; schedule(1000); await loadHistory(pane);
+        pane.sentUnknown = true; pane.delivery.phase = pane.delivery.userPhase = 'unknown';
+        pane.delivery.userLabel = '正在核对投递结果…'; renderDelivery(pane); schedule(1000); await loadHistory(pane);
       } else {
         pane.send.textContent = '核对投递结果'; pane.continueInput.hidden = false;
-        pane.sentUnknown = true; await loadHistory(pane);
+        pane.sentUnknown = true; pane.delivery.phase = pane.delivery.userPhase = 'unknown';
+        pane.delivery.userLabel = '投递结果待核对'; renderDelivery(pane); await loadHistory(pane);
       }
     } catch (error) {
       if (!disposed && epoch === generation) {
         pane.state.textContent = '连接中断。可用同一个请求标识核对投递结果。'; pane.send.textContent = '核对投递结果';
-        pane.continueInput.hidden = false; pane.sentUnknown = true; showError(error); await loadHistory(pane);
+        pane.continueInput.hidden = false; pane.sentUnknown = true;
+        pane.delivery.phase = pane.delivery.userPhase = 'unknown'; pane.delivery.userLabel = '连接中断，投递结果待核对';
+        renderDelivery(pane); showError(error); await loadHistory(pane);
       }
-    } finally { pane.send.disabled = false; }
+    } finally { pane.send.disabled = pane.awaitingReply; }
   }
   async function loadHistory(pane, older = false) {
     if (pane.loading || (pane.draft && !pane.sentUnknown) || disposed || suspended) return;
@@ -334,9 +500,17 @@ export function mountMuse(target) {
       }
       if (older) pane.scroll.scrollTop += pane.scroll.scrollHeight - height;
       else if (atBottom) { pane.anchor.setAttribute('is-streaming', ''); pane.anchor.scrollToBottom(); }
+      reconcileDelivery(pane, pane.events, messages);
+      renderDelivery(pane);
     } catch (error) {
-      if (!disposed && generation === epoch) pane.state.textContent = error.detail || error.message;
-    } finally { pane.loading = false; pane.older.disabled = false; }
+      if (!disposed && generation === epoch) {
+        pane.state.textContent = pane.awaitingReply ? '等待 Muse 回复时，状态刷新失败…' : (error.detail || error.message);
+        renderDelivery(pane);
+      }
+    } finally {
+      pane.loading = false; pane.older.disabled = false;
+      scheduleReplyPoll(pane);
+    }
   }
   let approvalSignature = '', auditSignature = '';
   autoAll.addEventListener('change', async () => {
@@ -421,14 +595,18 @@ export function mountMuse(target) {
       if (sessionResult.status === 'fulfilled' && approvalResult.status === 'fulfilled') clearError('poll');
       await Promise.all([...panes.values()].filter(p => !p.host.hidden).map(p => loadHistory(p)));
     } catch (error) { showError(error, 'poll'); }
-    finally { busy = false; schedule([...panes.values()].some(pane => pane.catchup) ? 0 : 4000); }
+    finally {
+      busy = false;
+      const needsReplyPolling = [...panes.values()].some(pane => pane.awaitingReply);
+      schedule(needsReplyPolling ? 4000 : [...panes.values()].some(pane => pane.catchup) ? 0 : 4000);
+    }
   }
   function schedule(delay) {
     clearTimeout(timer); if (!disposed && !suspended) timer = setTimeout(refresh, delay);
   }
   refresh();
-  const dispose = () => { disposed = true; epoch++; clearTimeout(timer); credential.value = ''; panes.clear(); target.replaceChildren(); };
-  dispose.suspend = () => { suspended = true; clearTimeout(timer); };
+  const dispose = () => { disposed = true; epoch++; clearTimeout(timer); for (const pane of panes.values()) clearTimeout(pane.replyTimer); credential.value = ''; panes.clear(); target.replaceChildren(); };
+  dispose.suspend = () => { suspended = true; clearTimeout(timer); for (const pane of panes.values()) { clearTimeout(pane.replyTimer); pane.replyTimer = null; } };
   dispose.resume = () => { suspended = false; schedule(0); };
   return dispose;
 }
