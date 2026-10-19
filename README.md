@@ -135,6 +135,15 @@ python3 tools/agent-self-report.py \
 
 main 在测试、前后端打包通过后进入[自动部署](deploy/auto-deploy.md)，使用 production 环境的受限 SSH 入口，保留运行数据与配置，探活失败时回滚代码和前端。PR 不部署，也不读取部署凭据。
 
+## 最新更新
+
+### 2026-10-19
+
+- Windows 台式机上的 Agent CLI 任务支持可靠的进程树发现、绑定和终止控制；只有确认进程树退出后，任务会话才会结束。
+- 无法确认退出或权限不足时，控制台保留真实运行状态，避免误报成功。
+
+完整历史见[发布说明](docs/releases/release-notes.md)。
+
 ## Muse 工作区
 
 侧栏 **Muse**（`/muse`）可导入 Muse 登录态，直接查看和使用原生会话，不需要运行浏览器或 9222。支持最多 6 个对话窗口、原生子会话、引用回复、停止生成、按会话开启自动审批，以及浏览器任务、截图、文件和工具卡片。登录态按 Fleet 用户加密保存。使用步骤、限制与实测记录见 [Muse 工作区](docs/platform/muse-workspace.md)。

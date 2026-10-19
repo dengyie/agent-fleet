@@ -141,6 +141,48 @@ def test_pi_basename_never_matches_as_substring():
     assert discovery.classify_family("/usr/bin/pil", "pil") is None
 
 
+def test_windows_process_rows_parse_agent_processes_after_narrow_owner_filter(monkeypatch):
+    captured = {}
+    payload = [
+        {
+            "User": "mango", "ProcessId": 42, "ParentProcessId": 1,
+            "ExecutablePath": r"C:\Users\mango\AppData\Local\OpenAI\Codex\codex.exe",
+            "CommandLine": r"C:\Users\mango\AppData\Local\OpenAI\Codex\codex.exe app-server",
+            "Name": "codex.exe", "CreationUtc": "2026-10-19T01:02:03Z",
+        },
+        {
+            "User": "mango", "ProcessId": 43, "ParentProcessId": 2,
+            "ExecutablePath": r"F:\programe\ZCode\ZCode.exe",
+            "CommandLine": r"F:\programe\ZCode\ZCode.exe F:\programe\ZCode\resources\glm\zcode.cjs app-server --stdio",
+            "Name": "ZCode.exe", "CreationUtc": "2026-10-19T01:02:04Z",
+        },
+    ]
+
+    def run_script(script):
+        captured["script"] = script
+        return payload
+
+    monkeypatch.setattr(discovery.os, "name", "nt")
+    monkeypatch.setattr(discovery, "_run_powershell_json", run_script)
+    rows = discovery.enumerate_process_rows()
+
+    assert [(row.pid, row.user, row.comm) for row in rows] == [
+        (42, "mango", "codex.exe"), (43, "mango", "ZCode.exe")]
+    script = captured["script"]
+    assert script.index("Where-Object") < script.index("Invoke-CimMethod")
+    assert "GetOwner" in script
+    assert "AGENT_FLEET_LOCAL_USER" not in script
+    assert "zcode\\.cjs" in script
+    assert "($interpreter -and $script_cli)" in script
+
+
+def test_windows_process_query_timeout_is_reported_as_discovery_error(monkeypatch):
+    monkeypatch.setattr(discovery.os, "name", "nt")
+    monkeypatch.setattr(discovery, "_run_powershell_json", lambda script: None)
+    assert discovery.discover_instances() == []
+    assert discovery.last_discovery_error == discovery.DISCOVERY_ERROR_CODE
+
+
 def test_can_attach_requires_same_user_and_readable_native(monkeypatch):
     from tools.probe import discovery as d
     monkeypatch.setattr(d, "current_user", lambda: "mango")

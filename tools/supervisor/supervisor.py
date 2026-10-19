@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import platform as _platform_mod
+import queue
 import select
 import signal
 import subprocess
@@ -83,6 +84,11 @@ _ABUF_MAX = 1 << 20
 # Post-exit tail-flush bounds: per-pump step and the whole-flush wall budget.
 _FLUSH_STEP = 0.2
 _FLUSH_BUDGET = 2.0
+
+_SIGTERM = getattr(signal, "SIGTERM", 15)
+_SIGKILL = getattr(signal, "SIGKILL", 9)
+_SIGSTOP = getattr(signal, "SIGSTOP", 19)
+_SIGCONT = getattr(signal, "SIGCONT", 18)
 
 
 class GroupError(RuntimeError):
@@ -399,6 +405,379 @@ class MacGroupOps(POSIXGroupOps):
         return (GROUP_CAPABILITY_PGROUP, "1")
 
 
+class WindowsGroupOps(GroupOps):
+    """Windows process-tree backend for runner and adopted CLI sessions.
+
+    Windows has no POSIX process groups.  A supervised root is therefore
+    treated as the root of a Win32 parent/child tree.  ``taskkill /T`` handles
+    termination and the native ``NtSuspendProcess``/``NtResumeProcess`` APIs
+    provide the pause/resume controls needed by the supervisor.  Output is
+    consumed by a daemon reader thread because ``select()`` cannot wait on a
+    Windows anonymous pipe.
+    """
+
+    _READ_CHUNK = 65536
+
+    def __init__(self):
+        super().__init__(platform="windows")
+
+    def capability(self):
+        return (GROUP_CAPABILITY_PGROUP, "1")
+
+    @staticmethod
+    def _attached(handle) -> bool:
+        return isinstance(handle, _AttachedHandle)
+
+    def create(self, argv, cwd, env):
+        flags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
+        try:
+            proc = subprocess.Popen(
+                list(argv),
+                cwd=cwd or os.getcwd(),
+                env=_bounded_spawn_env(env),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                creationflags=flags,
+                close_fds=True,
+                bufsize=0,
+            )
+        except (OSError, ValueError):
+            raise GroupError("spawn_failed")
+        return _Bound(proc=proc)
+
+    def attach(self, pid: int, started_at: str, exe_path: str):
+        pid_i = int(pid)
+        if pid_i <= 0:
+            raise GroupError("pid_reused")
+        pids = self._tree_pids(pid_i)
+        if pids is None:
+            raise GroupError("no_permission")
+        if not pids:
+            raise GroupError("pid_reused")
+        root_alive = self._pid_alive(pid_i)
+        if root_alive is None:
+            raise GroupError("no_permission")
+        if not root_alive:
+            raise GroupError("pid_reused")
+        return _AttachedHandle(pid=pid_i, pgid=pid_i,
+                               started_at=started_at, exe_path=exe_path)
+
+    def proc_poll(self, handle):
+        if self._attached(handle):
+            return None if self.group_alive(handle) else 0
+        return handle.proc.poll()
+
+    def proc_wait(self, handle, timeout=None):
+        if self._attached(handle):
+            return None
+        try:
+            return handle.proc.wait(timeout=timeout)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            return None
+
+    def group_id(self, handle):
+        return f"grp_{_handle_pid(handle) or 0}"
+
+    def group_alive(self, handle):
+        if self._attached(handle):
+            pids = self._tree_pids(handle.pid)
+            if pids is None:
+                return True  # enumeration failure is not exit evidence
+            return any(self._pid_alive(pid) is not False
+                       for pid in pids)
+        if handle.proc.poll() is None:
+            return True
+        pids = self._tree_pids(getattr(handle.proc, "pid", 0))
+        if pids is None:
+            return True
+        return any(self._pid_alive(pid) is not False
+                   for pid in pids)
+
+    def group_terminate(self, handle, sig):
+        if sig == _SIGSTOP:
+            return self._suspend_tree(_handle_pid(handle))
+        if sig == _SIGCONT:
+            return self._resume_tree(_handle_pid(handle))
+        return self._taskkill(_handle_pid(handle), force=False)
+
+    def group_kill(self, handle, sig):
+        if sig in (_SIGSTOP, _SIGCONT):
+            return self.group_terminate(handle, sig)
+        return self._taskkill(_handle_pid(handle), force=True)
+
+    def group_reap(self, handle, timeout=None):
+        if self._attached(handle):
+            deadline = time.monotonic() + max(0.0, float(timeout or 0))
+            while self.group_alive(handle) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            return not self.group_alive(handle)
+        try:
+            handle.proc.wait(timeout=max(0.0, float(timeout or 0)))
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            return False
+        deadline = time.monotonic() + max(0.0, float(timeout or 0))
+        while self.group_alive(handle) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return not self.group_alive(handle)
+
+    def close(self, handle):
+        if self._attached(handle):
+            return
+        try:
+            if handle.proc.stdout is not None:
+                handle.proc.stdout.close()
+        except Exception:
+            pass
+
+    # ---- Windows process tree ---------------------------------------------
+
+    @staticmethod
+    def _tree_pids(root_pid: int | None) -> list[int] | None:
+        try:
+            root = int(root_pid or 0)
+        except (TypeError, ValueError):
+            return []
+        if root <= 0:
+            return []
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class PROCESSENTRY32W(ctypes.Structure):
+                _fields_ = [
+                    ("dwSize", wintypes.DWORD),
+                    ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", wintypes.LONG),
+                    ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", wintypes.WCHAR * 260),
+                ]
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CreateToolhelp32Snapshot.argtypes = [
+                wintypes.DWORD,
+                wintypes.DWORD,
+            ]
+            kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+            kernel32.Process32FirstW.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(PROCESSENTRY32W),
+            ]
+            kernel32.Process32FirstW.restype = wintypes.BOOL
+            kernel32.Process32NextW.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(PROCESSENTRY32W),
+            ]
+            kernel32.Process32NextW.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            ctypes.set_last_error(0)
+            snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+            if snapshot == wintypes.HANDLE(-1).value:
+                return None
+            rows = []
+            try:
+                item = PROCESSENTRY32W()
+                item.dwSize = ctypes.sizeof(item)
+                ctypes.set_last_error(0)
+                ok = kernel32.Process32FirstW(snapshot, ctypes.byref(item))
+                if not ok and ctypes.get_last_error() != 18:  # ERROR_NO_MORE_FILES
+                    return None
+                while ok:
+                    rows.append((int(item.th32ProcessID), int(item.th32ParentProcessID)))
+                    ctypes.set_last_error(0)
+                    ok = kernel32.Process32NextW(snapshot, ctypes.byref(item))
+                    if not ok and ctypes.get_last_error() != 18:
+                        return None
+            finally:
+                kernel32.CloseHandle(snapshot)
+        except (AttributeError, OSError, TypeError, ValueError):
+            return None
+        children: dict[int, list[int]] = {}
+        for pid, parent in rows:
+            children.setdefault(parent, []).append(pid)
+        found: list[int] = []
+        pending = [root]
+        seen: set[int] = set()
+        while pending:
+            pid = pending.pop(0)
+            if pid in seen:
+                continue
+            seen.add(pid)
+            found.append(pid)
+            pending.extend(children.get(pid, ()))
+        return found
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool | None:
+        if os.name != "nt":
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [
+                wintypes.DWORD,
+                wintypes.BOOL,
+                wintypes.DWORD,
+            ]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.WaitForSingleObject.argtypes = [
+                wintypes.HANDLE,
+                wintypes.DWORD,
+            ]
+            kernel32.WaitForSingleObject.restype = wintypes.DWORD
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            handle = kernel32.OpenProcess(0x00100000, False, int(pid))  # SYNCHRONIZE
+            if not handle:
+                error = ctypes.get_last_error()
+                if error == 87:  # ERROR_INVALID_PARAMETER: PID no longer exists
+                    return False
+                return None
+            try:
+                result = kernel32.WaitForSingleObject(handle, 0)
+                if int(result) == 0x00000102:  # WAIT_TIMEOUT
+                    return True
+                if int(result) == 0x00000000:  # WAIT_OBJECT_0
+                    return False
+                return None
+            finally:
+                kernel32.CloseHandle(handle)
+        except (AttributeError, OSError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _taskkill(root_pid: int | None, *, force: bool) -> bool:
+        try:
+            root = int(root_pid or 0)
+        except (TypeError, ValueError):
+            return False
+        if root <= 0:
+            return False
+        argv = ["taskkill.exe", "/PID", str(root), "/T"]
+        if force:
+            argv.append("/F")
+        try:
+            result = subprocess.run(argv, capture_output=True,
+                                    stdin=subprocess.DEVNULL, timeout=8,
+                                    check=False)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return False
+        return result.returncode == 0
+
+    @staticmethod
+    def _suspend_process(pid: int, resume: bool) -> bool:
+        if os.name != "nt":
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            ntdll = ctypes.WinDLL("ntdll")
+            access = 0x0800 | 0x0400 | 0x1000  # suspend/query/synchronize
+            kernel32.OpenProcess.argtypes = [
+                wintypes.DWORD,
+                wintypes.BOOL,
+                wintypes.DWORD,
+            ]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            handle = kernel32.OpenProcess(access, False, int(pid))
+            if not handle:
+                return False
+            try:
+                fn = ntdll.NtResumeProcess if resume else ntdll.NtSuspendProcess
+                fn.argtypes = [wintypes.HANDLE]
+                fn.restype = ctypes.c_long
+                return int(fn(handle)) == 0
+            finally:
+                kernel32.CloseHandle(handle)
+        except (AttributeError, OSError, TypeError, ValueError):
+            return False
+
+    @classmethod
+    def _suspend_tree(cls, root_pid: int | None) -> bool:
+        pids = cls._tree_pids(root_pid)
+        if not pids:
+            return False
+        suspended = []
+        for pid in reversed(pids):
+            if not cls._suspend_process(pid, False):
+                for prior in suspended:
+                    cls._suspend_process(prior, True)
+                return False
+            suspended.append(pid)
+        return True
+
+    @classmethod
+    def _resume_tree(cls, root_pid: int | None) -> bool:
+        pids = cls._tree_pids(root_pid)
+        return bool(pids) and all(cls._suspend_process(pid, True) for pid in pids)
+
+    # ---- deadline-safe output reading -------------------------------------
+
+    def _ensure_reader(self, handle):
+        if getattr(handle, "_reader_started", False):
+            return
+        handle._reader_started = True
+        handle._queue = queue.Queue(maxsize=256)
+
+        def reader():
+            try:
+                stream = handle.proc.stdout
+                while stream is not None:
+                    raw = stream.read(self._READ_CHUNK)
+                    if not raw:
+                        break
+                    try:
+                        handle._queue.put(raw, timeout=0.1)
+                    except queue.Full:
+                        pass
+            except Exception:
+                pass
+            finally:
+                handle._reader_eof = True
+
+        handle._reader_thread = threading.Thread(
+            target=reader, name="agent-fleet-windows-reader", daemon=True)
+        handle._reader_thread.start()
+
+    def pump(self, handle, timeout, on_line=None, should_abort=None):
+        if handle is None or getattr(handle, "proc", None) is None:
+            return "eof"
+        self._ensure_reader(handle)
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            if should_abort is not None and should_abort():
+                return "abort"
+            if POSIXGroupOps._drain_lines(self, handle, on_line):
+                return "line"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "timeout"
+            try:
+                raw = handle._queue.get(timeout=min(remaining, 0.2))
+            except queue.Empty:
+                if handle._reader_eof and handle._queue.empty():
+                    POSIXGroupOps._drain_lines(self, handle, on_line, flush=True)
+                    handle._abuf = b""
+                    return "eof"
+                continue
+            if not isinstance(raw, bytes):
+                raw = str(raw).encode("utf-8", "replace")
+            if len(handle._abuf) + len(raw) > _ABUF_MAX:
+                keep = handle._abuf[-(_ABUF_MAX - len(raw)):] if len(raw) < _ABUF_MAX else b""
+                handle._abuf = keep + raw
+            else:
+                handle._abuf += raw
+
+
 @dataclass
 class _Bound:
     """Mutable handle bundle for an owned process group.
@@ -417,6 +796,10 @@ class _Bound:
     resume_token: str | None = None
     exe_path: str | None = None
     _abuf: bytes = b""
+    _queue: Any = None
+    _reader_thread: Any = None
+    _reader_started: bool = False
+    _reader_eof: bool = False
 
 
 @dataclass
@@ -494,8 +877,11 @@ class Supervisor:
         self._manifest_dir = Path(manifest_dir)
         self._manifest_dir.mkdir(parents=True, exist_ok=True)
         if ops is None:
-            if _platform_mod.system().lower() == "linux":
+            system = _platform_mod.system().lower()
+            if system == "linux":
                 ops = LinuxGroupOps()
+            elif system == "windows":
+                ops = WindowsGroupOps()
             else:
                 ops = MacGroupOps()
         self._ops = ops
@@ -643,6 +1029,10 @@ class Supervisor:
             "session_id")
         try:
             handle = self._ops.attach(pid_int, started_at, exe_path)
+        except GroupError as exc:
+            # Preserve the backend's bounded distinction between a vanished
+            # PID and process metadata that could not be read.
+            return exc.code if exc.code in ("pid_reused", "no_permission") else "pid_reused"
         except Exception:
             # process died (or the read of pgid failed) between the identity
             # re-read and the bind — autocount that as a reused/gone pid.
@@ -853,6 +1243,14 @@ class Supervisor:
         except Exception:
             return False
 
+    @staticmethod
+    def _kill_ok(handle, ops, sig) -> bool:
+        """Return True iff the forced group-kill operation was accepted."""
+        try:
+            return bool(ops.group_kill(handle, sig))
+        except Exception:
+            return False
+
     def pause_session(self, session_id: str) -> str:
         entry = self._entries.get(session_id)
         if entry is None:
@@ -875,7 +1273,7 @@ class Supervisor:
         gate = self._guard_adopted(session_id)
         if gate:
             return gate
-        if not self._signal_ok(handle, self._ops, signal.SIGSTOP):
+        if not self._signal_ok(handle, self._ops, _SIGSTOP):
             return self._fail_operation(m, "pause_failed")
         m.state = PAUSED
         self._set_reason(m, "pause")
@@ -903,7 +1301,7 @@ class Supervisor:
         gate = self._guard_adopted(session_id)
         if gate:
             return gate
-        if not self._signal_ok(handle, self._ops, signal.SIGCONT):
+        if not self._signal_ok(handle, self._ops, _SIGCONT):
             return self._fail_operation(m, "resume_failed")
         m.state = RUNNING
         self._set_reason(m, "resumed")
@@ -935,7 +1333,7 @@ class Supervisor:
         gate = self._guard_adopted(session_id)
         if gate:
             return gate
-        if not self._signal_ok(handle, self._ops, signal.SIGSTOP):
+        if not self._signal_ok(handle, self._ops, _SIGSTOP):
             return self._fail_operation(m, "quarantine_failed")
         m.state = QUARANTINED
         self._set_reason(m, "quarantine")
@@ -1050,7 +1448,7 @@ class Supervisor:
                         and m.reason != "completed")
                     or m.state == QUARANTINED):
                 try:
-                    self._ops.group_kill(handle, signal.SIGKILL)
+                    self._ops.group_kill(handle, _SIGKILL)
                 except Exception:
                     pass
                 try:
@@ -1198,15 +1596,20 @@ class Supervisor:
         if escaped:
             # a child slipped out of the group namespace: group-wide kill cannot
             # be guaranteed, so report the degraded outcome honestly.
-            self._signal_ok(handle, self._ops, signal.SIGTERM)
-            self._signal_ok(handle, self._ops, signal.SIGKILL)
-            self._mark_terminated(m, "escape_unverified")
-            self._ops.close(handle)
-            self._release_handle(session_id)
+            self._signal_ok(handle, self._ops, _SIGTERM)
+            self._kill_ok(handle, self._ops, _SIGKILL)
+            if self._wait_gone(handle, 2.0):
+                self._mark_terminated(m, "escape_unverified")
+                self._ops.close(handle)
+                self._release_handle(session_id)
+            else:
+                # Retain the private handle while the tree remains observable;
+                # cleanup is not complete until liveness is verified.
+                self._set_reason(m, "escape_unverified")
             return "escape_unverified"
 
         # graceful
-        self._signal_ok(handle, self._ops, signal.SIGTERM)
+        self._signal_ok(handle, self._ops, _SIGTERM)
         if self._wait_gone(handle, max(0.0, float(grace_s))):
             self._mark_terminated(m, "terminated")
             self._ops.close(handle)
@@ -1214,15 +1617,15 @@ class Supervisor:
             return "terminated"
 
         # forced
-        self._signal_ok(handle, self._ops, signal.SIGKILL)
+        self._kill_ok(handle, self._ops, _SIGKILL)
         if self._wait_gone(handle, 2.0):
             self._mark_terminated(m, "terminated_forced")
             self._ops.close(handle)
             self._release_handle(session_id)
             return "terminated_forced"
-        self._mark_terminated(m, "escape_unverified")
-        self._ops.close(handle)
-        self._release_handle(session_id)
+        # A successful taskkill invocation is only a delivery acknowledgement;
+        # retain the handle until the process tree is proven gone.
+        self._set_reason(m, "escape_unverified")
         return "escape_unverified"
 
     def pump_output(self, session_id: str) -> None:
@@ -1382,7 +1785,7 @@ class Supervisor:
         # reap with a bounded settle.  Report ``group_remaining`` (bounded,
         # degraded) instead of plain success.
         try:
-            self._ops.group_kill(handle, signal.SIGKILL)
+            self._ops.group_kill(handle, _SIGKILL)
         except Exception:
             pass
         try:
@@ -1520,6 +1923,8 @@ def _flags_for(cap: str) -> list[str]:
 _SAFE_ENV_KEYS = (
     "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL",
     "PATH", "TMPDIR", "TERM", "COLORTERM", "CI", "GITHUB_ACTIONS",
+    "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "SYSTEMROOT",
+    "WINDIR", "ComSpec", "PATHEXT",
 )
 
 
@@ -1573,7 +1978,13 @@ def _bounded_spawn_env(env):
             base[key] = val
     base.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
     base.setdefault("LANG", "C.UTF-8")
-    base.setdefault("HOME", os.environ.get("HOME") or os.path.expanduser("~"))
+    if os.name == "nt":
+        base.setdefault("HOME", os.environ.get("USERPROFILE") or os.path.expanduser("~"))
+        base.setdefault("USERPROFILE", os.path.expanduser("~"))
+        base.setdefault("SYSTEMROOT", os.environ.get("SystemRoot", r"C:\Windows"))
+        base.setdefault("ComSpec", os.environ.get("ComSpec", r"C:\Windows\System32\cmd.exe"))
+    else:
+        base.setdefault("HOME", os.environ.get("HOME") or os.path.expanduser("~"))
     return base
 
 
