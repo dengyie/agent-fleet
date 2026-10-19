@@ -3,6 +3,7 @@ import json
 import base64
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import threading
 import time
@@ -20,6 +21,16 @@ LOGIN = {'cookies': [{'name': 'hatch_sess', 'value': 'fixture-secret', 'domain':
 LOGIN_A = {'cookies': [{'name': 'hatch_sess', 'value': 'account-A', 'domain': '.muse.ai'}]}
 LOGIN_B = {'cookies': [{'name': 'hatch_sess', 'value': 'account-B', 'domain': '.muse.ai'}]}
 PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jv1sAAAAASUVORK5CYII=')
+
+
+def test_muse_event_projection_model():
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node.js is required for Muse event projection tests')
+    result = subprocess.run([node, str(ROOT / 'tests/fixtures/muse_model.mjs'),
+                             str(ROOT / 'frontend/assets/views/muse/model.js')],
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 class FakeMuse:

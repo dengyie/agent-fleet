@@ -55,16 +55,23 @@ const origin = process.argv[2];
     assert.match(await mainActivity.innerText(), /已执行 6 步/);
     assert.equal(await mainActivity.getByRole('button',{name:'查看最新浏览器截图'}).count(),1);
     const activityBoundary = await page.evaluate(async()=>{
-      const {createBrowserActivity,latestBrowserTask,updateBrowserActivity}=await import('/assets/views/muse/cards.js');
+      const {createBrowserActivity,updateBrowserActivity}=await import('/assets/views/muse/cards.js');
+      const {latestBrowserTask,reduceBrowserActivity}=await import('/assets/views/muse/model.js');
       const privateTask=latestBrowserTask([{visibility:'private',event_name:'delta.presentation',
         payload:{kind:'browser_task',data:{activity_title:'private activity'}}}]);
       const panel=createBrowserActivity();
-      updateBrowserActivity(panel,[{event_name:'delta.presentation',payload:{kind:'browser_task',data:{
+      const newer=reduceBrowserActivity(null,[{seq:10,event_name:'delta.presentation',payload:{kind:'browser_task',data:{activity_title:'newer'}}}]);
+      const older=reduceBrowserActivity(newer,[{seq:9,event_name:'delta.presentation',payload:{kind:'browser_task',data:{activity_title:'older'}}}]);
+      const sameSequence=reduceBrowserActivity(newer,[{seq:10,event_name:'delta.presentation',payload:{kind:'browser_task',data:{
         current_site:{page_title:'Unsafe URL',url:'javascript:alert(1)'}}}}]);
+      updateBrowserActivity(panel,sameSequence);
       const site=panel.querySelector('.muse-browser-activity-site');
-      return {privateTask,siteTag:site?.tagName,siteHref:site?.getAttribute('href')};
+      return {privateTask,olderTitle:older.data.activity_title,sameSequenceTitle:sameSequence.data.current_site.page_title,
+        siteTag:site?.tagName,siteHref:site?.getAttribute('href')};
     });
     assert.equal(activityBoundary.privateTask,null);
+    assert.equal(activityBoundary.olderTitle,'newer');
+    assert.equal(activityBoundary.sameSequenceTitle,'Unsafe URL');
     assert.equal(activityBoundary.siteTag,'SPAN');
     assert.equal(activityBoundary.siteHref,null);
     await page.locator('.muse-permissions').evaluate(node=>{node.open=true;});
@@ -120,6 +127,7 @@ const origin = process.argv[2];
     const sendGate=new Promise(resolve=>{releaseSend=resolve;});
     const sendStarted=new Promise(resolve=>{sendArrived=resolve;});
     let releaseHistory, historyArrived, holdHistory=true, historyCount=0;
+    const historyTimes=[];
     const historyGate=new Promise(resolve=>{releaseHistory=resolve;});
     const historyStarted=new Promise(resolve=>{historyArrived=resolve;});
     await page.route(`**/api/platform/v1/muse/sessions/${freshSessionId}/messages`,async route=>{
@@ -128,6 +136,7 @@ const origin = process.argv[2];
     });
     await page.route(`**/api/platform/v1/muse/sessions/${freshSessionId}/history*`,async route=>{
       historyCount++;
+      historyTimes.push(Date.now());
       if(holdHistory){holdHistory=false;historyArrived();await historyGate;}
       if(historyCount<=2){
         const response=await route.fetch();
@@ -140,7 +149,15 @@ const origin = process.argv[2];
         await route.fulfill({response,body:JSON.stringify(body)});
         return;
       }
-      if(historyCount===3){
+      if(historyCount>=3 && historyCount<=6){
+        const response=await route.fetch();
+        const body=await response.json();
+        const assistant=body.chat_events.find(event=>(event.role||event.payload?.role)==='assistant');
+        if(assistant) assistant.status='streaming';
+        await route.fulfill({response,body:JSON.stringify(body)});
+        return;
+      }
+      if(historyCount===7){
         const response=await route.fetch();
         const body=await response.json();
         body.chat_events.push({seq:104,message_id:'final-answer',role:'assistant',event_name:'message.assistant',display_text:'FLEET_FINAL'});
@@ -177,6 +194,9 @@ const origin = process.argv[2];
     await page.getByRole('button',{name:'并排窗口'}).click();
     await fresh.getByText('FLEET_OK',{exact:true}).waitFor();
     await fresh.getByText('FLEET_FINAL',{exact:true}).waitFor();
+    assert(historyTimes.length>=7);
+    assert(historyTimes.slice(1,7).every((time,index)=>time-historyTimes[index]<1800),
+      `reply polling should stay pane-local; timestamps=${historyTimes.join(',')}`);
     await fresh.locator('.muse-transient-message').waitFor({state:'detached'});
     assert.equal(await fresh.locator('.muse-transient-message').count(),0);
     assert.equal(await fresh.getByLabel('发送给 Muse').getAttribute('readonly'),null);
