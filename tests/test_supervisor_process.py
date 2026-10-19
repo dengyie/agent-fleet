@@ -227,6 +227,41 @@ class FakeOps(sup_mod.GroupOps):
         return "timeout"
 
 
+class WindowsTaskkillOps(FakeOps):
+    """Windows taskkill model with independently observable tree liveness."""
+
+    def __init__(self, *, force_removes_tree):
+        super().__init__(platform="windows")
+        self.force_removes_tree = force_removes_tree
+        self.taskkill_calls = []
+        self.close_calls = 0
+        self.events = []
+
+    def group_alive(self, proc):
+        self.events.append("liveness")
+        return super().group_alive(proc)
+
+    def group_terminate(self, proc, sig):
+        if sig != signal.SIGTERM:
+            return False
+        self.events.append("graceful")
+        self.taskkill_calls.append((proc.pid, False))
+        return False  # taskkill /T returned nonzero during graceful stop
+
+    def group_kill(self, proc, sig):
+        if sig != signal.SIGKILL:
+            return False
+        self.events.append("forced")
+        self.taskkill_calls.append((proc.pid, True))
+        if self.force_removes_tree:
+            proc.alive = False
+            proc.exit_code = -sig
+        return True  # taskkill /T /F returned zero
+
+    def close(self, proc):
+        self.close_calls += 1
+
+
 # --------------------------------------------------------------------------- #
 # Tests
 # --------------------------------------------------------------------------- #
@@ -962,6 +997,118 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(outcome, "terminated_forced")
         handle = sv._ops.children[0]
         self.assertIn(signal.SIGKILL, handle.signals)
+
+    def test_windows_force_command_success_is_not_tree_exit_evidence(self):
+        ops = WindowsTaskkillOps(force_removes_tree=False)
+        sv = self._sv(ops=ops)
+        m = self._launch(sv)
+        handle = sv._handle_of(m.session_id)
+
+        outcome = sv.terminate_session(m.session_id, grace_s=0.0)
+
+        self.assertEqual(outcome, "escape_unverified")
+        self.assertEqual(ops.taskkill_calls, [(handle.pid, False), (handle.pid, True)])
+        self.assertIs(sv._handle_of(m.session_id), handle)
+        self.assertEqual(sv.get(m.session_id).state, "running")
+        self.assertEqual(ops.close_calls, 0)
+        forced_at = ops.events.index("forced")
+        self.assertIn("liveness", ops.events[forced_at + 1:])
+
+    def test_windows_forced_success_waits_for_tree_liveness(self):
+        ops = WindowsTaskkillOps(force_removes_tree=True)
+        sv = self._sv(ops=ops)
+        m = self._launch(sv)
+
+        outcome = sv.terminate_session(m.session_id, grace_s=0.0)
+
+        self.assertEqual(outcome, "terminated_forced")
+        self.assertEqual(ops.taskkill_calls[0][1], False)
+        self.assertEqual(ops.taskkill_calls[1][1], True)
+        forced_at = ops.events.index("forced")
+        self.assertIn("liveness", ops.events[forced_at + 1:])
+        self.assertIsNone(sv._handle_of(m.session_id))
+        self.assertEqual(ops.close_calls, 1)
+
+    def test_windows_unknown_pid_liveness_is_conservatively_alive(self):
+        ops = sup_mod.WindowsGroupOps()
+        handle = sup_mod._AttachedHandle(
+            pid=1234, pgid=1234, started_at="", exe_path="")
+
+        with mock.patch.object(sup_mod.WindowsGroupOps, "_tree_pids",
+                               return_value=[1234]), \
+                mock.patch.object(sup_mod.WindowsGroupOps, "_pid_alive",
+                                  return_value=None):
+            self.assertTrue(ops.group_alive(handle))
+
+        with mock.patch.object(sup_mod.WindowsGroupOps, "_tree_pids",
+                               return_value=None):
+            self.assertTrue(ops.group_alive(handle))
+
+    def test_windows_pid_access_denial_is_unknown_not_exit(self):
+        import ctypes
+
+        kernel32 = mock.Mock()
+        kernel32.OpenProcess.return_value = None
+        with mock.patch.object(sup_mod.os, "name", "nt"), \
+                mock.patch.object(ctypes, "WinDLL", return_value=kernel32,
+                                  create=True), \
+                mock.patch.object(ctypes, "get_last_error", return_value=5,
+                                  create=True):
+            self.assertIsNone(sup_mod.WindowsGroupOps._pid_alive(1234))
+
+        with mock.patch.object(sup_mod.os, "name", "nt"), \
+                mock.patch.object(ctypes, "WinDLL", return_value=kernel32,
+                                  create=True), \
+                mock.patch.object(ctypes, "get_last_error", return_value=87,
+                                  create=True):
+            self.assertFalse(sup_mod.WindowsGroupOps._pid_alive(1234))
+
+    def test_windows_tree_enumeration_failure_is_unknown(self):
+        import ctypes
+
+        with mock.patch.object(ctypes, "WinDLL", side_effect=OSError,
+                               create=True):
+            self.assertIsNone(sup_mod.WindowsGroupOps._tree_pids(1234))
+
+        with mock.patch.object(sup_mod.WindowsGroupOps, "_tree_pids",
+                               return_value=None):
+            self.assertFalse(sup_mod.WindowsGroupOps._suspend_tree(1234))
+            self.assertFalse(sup_mod.WindowsGroupOps._resume_tree(1234))
+
+        ops = sup_mod.WindowsGroupOps()
+        with mock.patch.object(sup_mod.WindowsGroupOps, "_tree_pids",
+                               return_value=None):
+            with self.assertRaises(sup_mod.GroupError) as error:
+                ops.attach(1234, "", "")
+        self.assertEqual(error.exception.code, "no_permission")
+
+        with mock.patch.object(sup_mod.WindowsGroupOps, "_tree_pids",
+                               return_value=[]):
+            with self.assertRaises(sup_mod.GroupError) as error:
+                ops.attach(1234, "", "")
+        self.assertEqual(error.exception.code, "pid_reused")
+
+        with mock.patch.object(sup_mod.WindowsGroupOps, "_tree_pids",
+                               return_value=[1234]), \
+                mock.patch.object(sup_mod.WindowsGroupOps, "_pid_alive",
+                                  return_value=False):
+            with self.assertRaises(sup_mod.GroupError) as error:
+                ops.attach(1234, "", "")
+        self.assertEqual(error.exception.code, "pid_reused")
+
+        with mock.patch.object(sup_mod.WindowsGroupOps, "_tree_pids",
+                               return_value=[1234]), \
+                mock.patch.object(sup_mod.WindowsGroupOps, "_pid_alive",
+                                  return_value=None):
+            with self.assertRaises(sup_mod.GroupError) as error:
+                ops.attach(1234, "", "")
+        self.assertEqual(error.exception.code, "no_permission")
+
+        with mock.patch.object(sup_mod.WindowsGroupOps, "_tree_pids",
+                               return_value=[1234]), \
+                mock.patch.object(sup_mod.WindowsGroupOps, "_pid_alive",
+                                  return_value=True):
+            self.assertEqual(ops.attach(1234, "", "").pid, 1234)
 
     def test_terminate_escape_degrades(self):
         ops = FakeOps()

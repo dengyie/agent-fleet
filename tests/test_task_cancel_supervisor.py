@@ -18,6 +18,7 @@ Signing keys are test-only placeholders; their VALUES never appear in output.
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -265,6 +266,72 @@ class ManagedCancelTests(unittest.TestCase):
             replay = self.router.on_supervisor_receipt(cmd_id, status="failed")
             self.assertEqual(replay, {"command_id": cmd_id,
                                       "outcome": expected, "first": False})
+
+    def test_successful_receipt_closes_managed_session_summary(self):
+        task, lease, cmd_id = self._lease_command()
+        session_id = self.router.tracked(cmd_id)["session_id"]
+
+        self.assertEqual(self.session_repo.get_session(session_id)["status"], "running")
+        result = self.router.on_supervisor_receipt(cmd_id, status="succeeded")
+
+        self.assertEqual(result["outcome"], "terminated")
+        closed = self.session_repo.get_session(session_id)
+        self.assertEqual(closed["status"], "closed")
+        self.assertTrue(closed["finished_at"])
+        self.assertEqual(closed["current_state"], "stopped")
+
+    def test_failed_receipt_keeps_managed_session_active(self):
+        _task, _lease, cmd_id = self._lease_command()
+        session_id = self.router.tracked(cmd_id)["session_id"]
+
+        self.router.on_supervisor_receipt(cmd_id, status="failed")
+
+        active = self.session_repo.get_session(session_id)
+        self.assertEqual(active["status"], "running")
+        self.assertIsNone(active["finished_at"])
+
+    def test_unverified_termination_success_receipt_does_not_close_session(self):
+        _task, _lease, cmd_id = self._lease_command()
+        session_id = self.router.tracked(cmd_id)["session_id"]
+
+        result = self.router.on_supervisor_receipt(
+            cmd_id, status="succeeded", reason="escape_unverified")
+
+        self.assertEqual(result["outcome"], "failed")
+        active = self.session_repo.get_session(session_id)
+        self.assertEqual(active["status"], "running")
+        self.assertIsNone(active["finished_at"])
+
+    def test_projection_failure_keeps_receipt_retryable_without_partial_close(self):
+        _task, _lease, cmd_id = self._lease_command()
+        session_id = self.router.tracked(cmd_id)["session_id"]
+        conn = sqlite3.connect(str(self.session_repo.db_path))
+        conn.execute(
+            "CREATE TRIGGER fail_stopped_projection "
+            "BEFORE UPDATE OF current_state ON sessions "
+            "BEGIN SELECT RAISE(ABORT, 'state projection failed'); END",
+        )
+        conn.commit()
+        conn.close()
+
+        first = self.router.on_supervisor_receipt(cmd_id, status="succeeded")
+
+        self.assertIsNone(first)
+        active = self.session_repo.get_session(session_id)
+        self.assertEqual(active["status"], "running")
+        self.assertIsNone(active["finished_at"])
+        self.assertIsNone(self.router.outcome_of(cmd_id))
+
+        conn = sqlite3.connect(str(self.session_repo.db_path))
+        conn.execute("DROP TRIGGER fail_stopped_projection")
+        conn.commit()
+        conn.close()
+
+        retry = self.router.on_supervisor_receipt(cmd_id, status="succeeded")
+        self.assertEqual(retry["outcome"], "terminated")
+        closed = self.session_repo.get_session(session_id)
+        self.assertEqual(closed["status"], "closed")
+        self.assertEqual(closed["current_state"], "stopped")
 
     def test_non_terminal_status_does_not_finalize(self):
         task, lease, cmd_id = self._manual_command()

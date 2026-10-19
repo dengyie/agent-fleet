@@ -226,6 +226,15 @@ class AttachTests(unittest.TestCase):
         self.assertEqual(result, "pid_reused")
         self.assertEqual(self.sup.all_status(), {})
 
+    def test_attach_backend_permission_error_is_reported_as_no_permission(self):
+        self.ops.attach = lambda *_args: (_ for _ in ()).throw(
+            sup_mod.GroupError("no_permission"))
+
+        result = self._attach()
+
+        self.assertEqual(result, "no_permission")
+        self.assertEqual(self.sup.all_status(), {})
+
     def test_reader_exception_fails_closed_no_permission(self):
         def probe(pid):
             raise OSError("identity unreadable")

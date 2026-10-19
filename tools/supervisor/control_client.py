@@ -102,7 +102,7 @@ _register_handlers()
 _EXECUTION_OK = frozenset({
     "pause", "paused", "resume", "resumed", "running",
     "quarantined", "quarantine",
-    "terminated", "terminated_forced", "escape_unverified",
+    "terminated", "terminated_forced",
     "appended", "applied",
 })
 #: Guard refusals for an adopted session: bounded codes that MUST never reach

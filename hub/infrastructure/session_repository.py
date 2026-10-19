@@ -499,6 +499,57 @@ class SessionRepository:
             conn.close()
         return self._clean_row(row) if row is not None else None
 
+    def finish_managed_session(self, session_id: str,
+                                finished_at: str) -> dict[str, Any] | None:
+        """Atomically close a managed session and project its stopped state."""
+        self._validate_session_id(session_id)
+        if not isinstance(finished_at, str) or not finished_at:
+            raise SessionError("invalid_finished_at")
+        if not self.management_available:
+            raise SessionError("feature_unavailable")
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+            if row is None or not normalize_managed(row["managed"]):
+                conn.commit()
+                return None
+
+            now = _now_iso()
+            update_state = (
+                row["status"] not in ("closed", "failed")
+                and row["current_state"] not in (
+                    "completed", "failed", "stopped")
+            )
+            state_sequence = max(1, int(row["state_sequence"] or 0) + 1)
+            if (update_state and accepts_agent_state(
+                    row, "stopped", "supervisor", "high", state_sequence)):
+                conn.execute(
+                    "UPDATE sessions SET current_state='stopped',"
+                    " state_source='supervisor',state_confidence='high',"
+                    " state_sequence=?,updated_at=? WHERE session_id=?",
+                    (state_sequence, now, session_id),
+                )
+            conn.execute(
+                "UPDATE sessions SET status=CASE"
+                " WHEN status='failed' THEN 'failed' ELSE 'closed' END,"
+                " finished_at=CASE WHEN status IN ('closed','failed')"
+                " THEN finished_at ELSE ? END,updated_at=? WHERE session_id=?",
+                (finished_at, now, session_id),
+            )
+            result = conn.execute(
+                "SELECT * FROM sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return self._clean_row(result) if result is not None else None
+
     def upsert(self, spec: Mapping[str, Any]) -> dict[str, Any]:
         """Alias for :meth:`upsert_session`."""
         return self.upsert_session(spec)

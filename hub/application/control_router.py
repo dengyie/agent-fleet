@@ -29,6 +29,7 @@ printed or stored here; only bounded identifiers and stable codes.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import Any
 
 from hub.application.supervisor_service import (
@@ -96,7 +97,8 @@ class ControlRouter:
     """Cancel -> cancel_attempt bridge + receipt finalization (Task 10)."""
 
     def __init__(self, *, supervisor: SupervisorService, task_repository: Any,
-                 session_repo: Any, audit_store: Any | None = None) -> None:
+                 session_repo: Any | None = None,
+                 audit_store: Any | None = None) -> None:
         self._supervisor = supervisor
         self._task_repo = task_repository
         self._session_repo = session_repo
@@ -162,6 +164,7 @@ class ControlRouter:
                        machine=machine, code="malformed_command")
             return None
         self._tracked[command_id] = {
+            "command_id": command_id,
             "task_id": task_id,
             "attempt_id": attempt,
             "machine": machine,
@@ -193,7 +196,13 @@ class ControlRouter:
             return None
         status = _bound(status if status is not None
                         else self._safe_status(command_id), 32)
+        receipt_reason = _bound(reason, 120)
         outcome = _RECEIPT_OUTCOMES.get(status)
+        # Older or incompatible clients could mark an unverified kill as
+        # succeeded. Treat that bounded reason as a failed control outcome so
+        # the session summary remains active until exit is actually observed.
+        if status == "succeeded" and receipt_reason == "escape_unverified":
+            outcome = "failed"
         if outcome is None:
             # queued / delivered / accepted / executing are progress only.
             return None
@@ -202,13 +211,48 @@ class ControlRouter:
             # Deterministic replay: return the FIRST recorded outcome.
             return {"command_id": command_id, "outcome": finalized,
                     "first": False}
-        self._finalized[command_id] = outcome
         tracked = self._tracked[command_id]
+        if outcome in ("terminated", "already_finished"):
+            if not self._project_terminated_session(tracked):
+                return None
+        self._finalized[command_id] = outcome
         self._note("control_final", command_id=command_id,
                    task_id=tracked["task_id"], attempt_id=tracked["attempt_id"],
                    machine=tracked.get("machine"), outcome=outcome,
-                   reason=_bound(reason, 120))
+                   reason=receipt_reason)
         return {"command_id": command_id, "outcome": outcome, "first": True}
+
+    def _project_terminated_session(self, tracked: Mapping[str, str]) -> bool:
+        """Close the managed-session summary after a terminal receipt."""
+        session_id = tracked.get("session_id")
+        close_session = getattr(self._session_repo, "close_session", None)
+        if not session_id or not callable(close_session):
+            return True
+        finished_at = datetime.now(timezone.utc).isoformat().replace(
+            "+00:00", "Z")
+        try:
+            finish_managed = getattr(
+                self._session_repo, "finish_managed_session", None)
+            if callable(finish_managed):
+                return finish_managed(session_id, finished_at) is not False
+            session = self._session_repo.get_session(session_id)
+            closed = close_session(session_id, "closed", finished_at)
+            if session is None or closed is None:
+                return True
+            if (session.get("status") not in ("closed", "failed")
+                    and session.get("current_state") not in (
+                        "completed", "failed", "stopped")):
+                sequence = max(1, int(session.get("state_sequence") or 0) + 1)
+                self._session_repo.update_agent_state(
+                    session_id, "stopped", "supervisor", "high", sequence)
+            return True
+        except Exception:
+            self._note("control_projection_failed",
+                       command_id=_bound(tracked.get("command_id")),
+                       task_id=_bound(tracked.get("task_id")),
+                       attempt_id=_bound(tracked.get("attempt_id")),
+                       code="session_unavailable")
+            return False
 
     def outcome_of(self, command_id: str) -> str | None:
         """Bounded finalized outcome for ``command_id`` or ``None``."""
@@ -248,6 +292,8 @@ class ControlRouter:
         requires ``managed`` (an unmanaged session never gets control) and an
         exact opaque attempt match.
         """
+        if self._session_repo is None:
+            return None
         try:
             rows = self._session_repo.list_sessions(machine_id=machine,
                                                     limit=_SESSION_SCAN)

@@ -967,6 +967,7 @@ class _FakeOps:
         return True
 
     def group_kill(self, handle, sig):
+        self.alive = False
         return True
 
     def group_reap(self, handle, timeout=None):
@@ -1046,6 +1047,16 @@ class AgentControlClientTestsTests(unittest.TestCase):
         self._client(pipe).poll_once()
         self.assertEqual(pipe.uploads[0]["status"], "succeeded")
         self.assertEqual(self.sup.get(self.session_id).state, "terminated")
+
+    def test_unverified_termination_receipts_as_failed(self):
+        self.sup.terminate_session = lambda *_args, **_kwargs: "escape_unverified"
+        cmd = self._cmd(action="terminate_session", nonce="u3-unverified")
+        pipe = _Pipe([cmd])
+
+        self._client(pipe).poll_once()
+
+        self.assertEqual(pipe.uploads[0]["status"], "failed")
+        self.assertEqual(pipe.uploads[0]["reason"], "escape_unverified")
 
     def test_unsupported_action_rejects_bounded(self):
         cmd = self._cmd(action="exec_shell", nonce="u4")
