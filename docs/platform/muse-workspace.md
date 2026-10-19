@@ -40,6 +40,8 @@ Cookie 是登录凭据，不要发到聊天、提交到仓库或附在截图中�
 - `hub/infrastructure/muse_repository.py`：`state_dir/muse/` 目录权限 0700，`muse.db` 与 `credentials.key` 权限 0600。Cookie 用 Fernet 加密，密钥原子发布；登录、设置与回执按 Fleet 用户和 Muse 账号双重隔离。SQLite 事务保护多 Hub worker 之间的账号租约、连接替换和回执领取。终态回执保留 30 天且每账号最多 5000 条，超出部分转为最多 10000 条幂等墓碑；`dispatching` 与 `retryable` 保留在详细回执中，`unknown` 转为墓碑后仍保留原幂等结果，避免不确定投递被重放。旧单账号表迁移为 `default` 账号。备份恢复需要同时保留数据库与密钥，磁盘加密不代替服务器账户隔离。
 - `frontend/assets/views/muse*`：复用现有 StreamMarkdown、ChatPromptInput、AutoScrollAnchor 和 ToolCallBadge。消息及资源来自 Muse，不复制保存为 Fleet Assistant 会话；回执包含操作结果与时间，操作内容以哈希参与幂等校验。
 
+前端的 Muse 历史事件先经过 `frontend/assets/views/muse/model.js` 的纯函数投影，再分别交给聊天消息和浏览器活动呈现层。事件序列、角色、文本、流式标记、公开可见性和 `browser_task` 识别只有一个实现；浏览器活动 reducer 只消费每次历史响应中的新增事件，旧分页不会覆盖较新的任务快照。全局工作区刷新负责空闲窗口，等待 Muse 回复的窗口由自己的短轮询刷新，避免同一会话被两个调度器重复读取历史。该分层只改变 Fleet 内部数据流，不改变 Muse 协议和只读浏览器边界。
+
 这一接入依据 2026-10-14 实际使用的 Muse Web 协议，不是官方稳定 API。Muse 改动协议、登录验证或会话结构时可能需要适配。当前验证的是普通 `hatch_vm`；需要恢复密钥或机密计算认证的环境会明确拒绝。活动区是 Muse 云端浏览器的只读快照，不提供 CDP、iframe、实时视频流、鼠标键盘接管或页面提交；Fleet 的 **停止**只请求 Muse 停止当前会话。暂不支持附件上传、任意嵌套子会话、远端会话删除，以及执行 Muse 专有交互 widget；未知卡片显示数据，HTML 不执行。原有 CDP 桥接可选保留，独立于此栏目。
 
 ## 验证

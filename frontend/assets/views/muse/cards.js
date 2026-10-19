@@ -1,5 +1,6 @@
 import {uiIcon} from '../../routes.js';
 import {museResource} from '../../api/muse.js';
+import {eventContent, eventIsStreaming, eventRole, isBrowserTaskCard} from './model.js';
 
 export function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -44,8 +45,6 @@ const DELIVERY_LABELS = {
   retryable: '发送失败，可重试',
   unknown: '投递结果待核对',
 };
-const STREAMING_PHASES = new Set(['thinking', 'streaming', 'running', 'in_progress', 'generating']);
-
 function deliveryIcon(phase) {
   const active = ['sending', 'thinking', 'streaming', 'executing'].includes(phase);
   return uiIcon(active ? 'loader' : phase === 'retryable' || phase === 'unknown' ? 'circle-x' : 'check-circle', {
@@ -106,33 +105,6 @@ function resourceControl(path, title, preview = false, context = {}) {
   box.append(button, status); return box;
 }
 
-function eventCards(event) {
-  const payload = event.payload || {};
-  if (event.event_name === 'delta.presentation') return [payload];
-  return [
-    ...(Array.isArray(payload.content) ? payload.content : []),
-    ...(Array.isArray(event.resources) ? event.resources : []),
-    ...(Array.isArray(payload.tool_calls) ? payload.tool_calls : []),
-  ];
-}
-
-function browserTask(card) {
-  if (!card || typeof card !== 'object') return false;
-  const data = card.data || card;
-  return (card.kind || card.type || data.type) === 'browser_task';
-}
-
-export function latestBrowserTask(events) {
-  let latest = null;
-  for (const event of events) {
-    const payload = event.payload || {};
-    if ((event.visibility && event.visibility !== 'public') ||
-        (payload.visibility && payload.visibility !== 'public')) continue;
-    for (const card of eventCards(event)) if (browserTask(card)) latest = card;
-  }
-  return latest;
-}
-
 export function createBrowserActivity() {
   const panel = el('details', 'muse-browser-activity');
   panel.dataset.browserActivity = '';
@@ -142,13 +114,13 @@ export function createBrowserActivity() {
   summary.append(el('span', 'muse-browser-activity-status', '等待活动'));
   const content = el('div', 'muse-browser-activity-content');
   panel.append(summary, content);
-  updateBrowserActivity(panel, []);
+  updateBrowserActivity(panel, null);
   return panel;
 }
 
-export function updateBrowserActivity(panel, events, context = {}) {
-  const card = latestBrowserTask(events);
-  const signature = card ? JSON.stringify(card) : 'empty';
+export function updateBrowserActivity(panel, activity, context = {}) {
+  const card = activity?.card || null;
+  const signature = activity?.signature || 'empty';
   if (panel.dataset.signature === signature) return;
   panel.dataset.signature = signature;
   const status = panel.querySelector('.muse-browser-activity-status');
@@ -160,7 +132,7 @@ export function updateBrowserActivity(panel, events, context = {}) {
     return;
   }
 
-  const data = card.data || card;
+  const data = activity.data;
   status.textContent = data.display_status || data.display_state || data.status || '状态未知';
   const title = data.activity_title || card.fallback_text;
   if (title) content.append(el('p', 'muse-browser-activity-title', title));
@@ -198,7 +170,7 @@ export function renderCard(card, context = {}) {
   const heading = el('div', 'muse-card-heading');
   heading.append(uiIcon(kind === 'browser_task' ? 'globe' : 'layers', {size: 16}), el('strong', '', title || names[kind] || kind));
   box.append(heading);
-  if (kind === 'browser_task') {
+  if (isBrowserTaskCard(card)) {
     box.append(el('p', 'muse-card-status', data.display_status || data.display_state || data.status || ''),
       el('p', '', data.activity_title || card.fallback_text || ''));
     if (data.current_site || data.latest_tab) {
@@ -242,26 +214,8 @@ export function renderCard(card, context = {}) {
   return box;
 }
 
-export function mergeEvents(existing, events) {
-  const result = new Map(existing.map(e => [String(e.seq ?? e.message_id), e]));
-  for (const event of events) result.set(String(event.seq ?? event.message_id), event);
-  return [...result.values()].sort((a, b) => (a.seq || 0) - (b.seq || 0));
-}
-
-export function visibleMessages(events) {
-  const result = new Map();
-  for (const event of events) {
-    if (event.visibility && event.visibility !== 'public') continue;
-    const payload = event.payload || {};
-    if (payload.visibility && payload.visibility !== 'public') continue;
-    const key = event.event_name === 'delta.presentation' ? 'card:' + (payload.id || event.message_id) : 'message:' + (event.message_id || event.seq);
-    result.set(key, {key, ...event});
-  }
-  return [...result.values()];
-}
-
 export function renderMuseMessage(event, onReply, context = {}) {
-  const payload = event.payload || {}, role = event.role || payload.role || 'assistant';
+  const payload = event.payload || {}, role = eventRole(event) || 'assistant';
   const article = el('article', 'muse-message muse-message-' + (role === 'user' ? 'user' : 'assistant'));
   article.dataset.messageId = event.message_id || '';
   const head = el('div', 'muse-message-meta');
@@ -278,11 +232,11 @@ export function renderMuseMessage(event, onReply, context = {}) {
   let copyText = '';
   if (event.event_name === 'delta.presentation') article.append(renderCard(payload, context));
   else {
-    const content = event.display_text || payload.display_text || payload.content || '';
+    const content = eventContent(event);
     if (typeof content === 'string' && content) {
       copyText = content;
       article.append(markdown(content));
-      if (role === 'assistant' && isStreamingEvent(event, payload)) {
+      if (role === 'assistant' && eventIsStreaming(event)) {
         article.querySelector('stream-markdown').setAttribute('is-streaming', '');
       }
       // Muse uses sandbox links in Markdown for generated files; the shared
@@ -326,12 +280,6 @@ export function renderMuseMessage(event, onReply, context = {}) {
   }
   if (actionBar.childElementCount) article.append(actionBar);
   return article;
-}
-
-function isStreamingEvent(event, payload) {
-  return [event.status, event.state, event.phase, payload.status, payload.state, payload.phase, payload.stream_state]
-    .some(value => STREAMING_PHASES.has(String(value || '').toLowerCase())) ||
-    (typeof event.event_name === 'string' && /(^|[.:])stream/.test(event.event_name));
 }
 
 export function renderApproval(item, onDecision) {

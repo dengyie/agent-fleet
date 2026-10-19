@@ -54,7 +54,7 @@ class ReleaseLayoutTests(unittest.TestCase):
                     'assets/realtime/sse.js', 'assets/state/store.js', 'assets/views/fleet.js',
                     'assets/views/machine.js', 'assets/views/task.js', 'assets/views/session.js',
                     'assets/views/assistant.js', 'assets/views/monitoring.js', 'assets/views/account.js',
-                    'assets/views/muse.js', 'assets/views/muse/cards.js', 'assets/api/muse.js', 'assets/styles/muse.css')
+                    'assets/views/muse.js', 'assets/views/muse/cards.js', 'assets/views/muse/model.js', 'assets/api/muse.js', 'assets/styles/muse.css')
         for relative in required:
             self.assertTrue((FRONTEND_DIR / relative).is_file(), relative)
 
@@ -85,7 +85,7 @@ class ReleaseLayoutTests(unittest.TestCase):
         allowed.update({'assets/app.js', 'THIRD_PARTY.md'})
         allowed.update({'assets/views/session-handoff.js', 'assets/views/session-questions.js',
                         'assets/views/session-search.js', 'assets/views/usage.js'})
-        allowed.update({'assets/views/muse.js', 'assets/views/muse/cards.js', 'assets/api/muse.js'})
+        allowed.update({'assets/views/muse.js', 'assets/views/muse/cards.js', 'assets/views/muse/model.js', 'assets/api/muse.js'})
         for folder in ('assets/ui', 'assets/vendor', 'assets/shell', 'assets/styles', 'assets/views/assistant'):
             allowed.update(p.relative_to(FRONTEND_DIR).as_posix() for p in (FRONTEND_DIR / folder).rglob('*') if p.is_file())
         unexpected = present - allowed
@@ -103,7 +103,7 @@ class ReleaseLayoutTests(unittest.TestCase):
                          'assets/views/fleet.js', 'assets/views/machine.js',
                          'assets/views/task.js', 'assets/views/session.js',
                          'assets/views/assistant.js', 'assets/views/monitoring.js', 'assets/views/account.js',
-                         'assets/views/muse.js', 'assets/views/muse/cards.js',
+                         'assets/views/muse.js', 'assets/views/muse/cards.js', 'assets/views/muse/model.js',
                          'assets/api/muse.js',
                          'assets/styles/muse.css'):
             source = (FRONTEND_DIR / relative).read_text()

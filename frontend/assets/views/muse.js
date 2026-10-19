@@ -1,7 +1,8 @@
 import * as api from '../api/muse.js';
-import {el, action, mergeEvents, visibleMessages, renderMuseMessage, renderApproval,
-  renderMusePendingMessage, renderMuseThinkingMessage, latestBrowserTask,
-  createBrowserActivity, updateBrowserActivity} from './muse/cards.js';
+import {el, action, renderMuseMessage, renderApproval, renderMusePendingMessage,
+  renderMuseThinkingMessage, createBrowserActivity, updateBrowserActivity} from './muse/cards.js';
+import {eventSequence, eventRole, eventText, eventIsStreaming, latestSequence,
+  mergeEvents, visibleMessages, browserTaskIsActive, reduceBrowserActivity} from './muse/model.js';
 
 export function mountMuse(target) {
   let disposed = false, suspended = false, connected = false, busy = false, timer, epoch = 0;
@@ -53,7 +54,6 @@ export function mountMuse(target) {
       const result = await api.museDisconnect(selectedAccount, selectedConnection); accounts = result.accounts || accounts;
       if (disposed || generation !== epoch || accountId !== selectedAccount) { renderAccounts(); return; }
       accountId = accounts[0]?.account_id || null; clearAccountView(); renderAccounts();
-      panes.clear(); activePane = null; deck.replaceChildren(empty); tabs.replaceChildren(); approvalSignature = auditSignature = '';
       credential.value = ''; file.value = ''; showConnected(); renderSessions(); approvalsBox.replaceChildren(); audit.replaceChildren();
     } catch (error) { showError(error); }
     finally { disconnect.disabled = false; }
@@ -76,7 +76,7 @@ export function mountMuse(target) {
       autoAll.checked = settings.auto_approve_all === true;
       // A re-import may select another Muse account. Do not retain its previous
       // transcript, pane drafts or approval state.
-      panes.clear(); activePane = null; deck.replaceChildren(empty); tabs.replaceChildren(); approvalSignature = auditSignature = '';
+      clearPanes(); approvalSignature = auditSignature = '';
       loginPanel.hidden = true;
       credential.value = ''; file.value = ''; accountLabelInput.value = ''; showConnected(); renderAccounts(); renderSessions();
       if (sessions.length) { openedDefault = true; openSession(sessions.find(s => s.is_primary) || sessions[0]); }
@@ -111,12 +111,18 @@ export function mountMuse(target) {
   permissions.append(permissionHeading, permissionHelp, fullAccess, approvalsBox, audit);
   root.append(toolbar, notice, loginPanel, body, permissions); target.replaceChildren(root);
 
+  function clearPanes() {
+    for (const pane of panes.values()) {
+      clearTimeout(pane.replyTimer); pane.replyTimer = null; pane.browserActivityModel = null;
+    }
+    panes.clear(); activePane = null; empty.hidden = false; deck.replaceChildren(empty); tabs.replaceChildren();
+  }
   function clearAccountView() {
     epoch++; connected = false; sessions = []; settings = {auto_approve_sessions: [], auto_approve_all: false}; connectionRevision = null; settingsRevision = null;
-    for (const pane of panes.values()) { clearTimeout(pane.replyTimer); pane.replyTimer = null; }
+    clearPanes();
     autoAll.checked = false; autoAll.disabled = true;
     delete autoAll.dataset.saving;
-    openedDefault = false; panes.clear(); activePane = null; deck.replaceChildren(empty); tabs.replaceChildren();
+    openedDefault = false;
     approvalSignature = auditSignature = ''; approvalsBox.replaceChildren(); audit.replaceChildren();
   }
   function renderAccounts() {
@@ -180,6 +186,7 @@ export function mountMuse(target) {
   function closePane(pane) {
     clearTimeout(pane.replyTimer);
     panes.delete(pane.id); pane.host.remove(); pane.tab.remove();
+    pane.browserActivityModel = null;
     if (activePane === pane.id) activePane = panes.keys().next().value || null;
     if (!panes.size) deck.append(empty);
     showPanes();
@@ -238,7 +245,7 @@ export function mountMuse(target) {
       const send = el('button', 'button-primary', '发送'); send.type = 'submit'; controls.append(cancel, send);
       form.append(reply, prompt, controls); host.append(header, browserActivity, scroll, state, continueInput, form);
       const pane = {id, host, tab, heading, scroll, messages, older, anchor, input, send, state, reply, auto,
-        continueInput, browserActivity, events: [], nodes: new Map(), draft, loading: false, pending: null,
+        continueInput, browserActivity, browserActivityModel: null, events: [], nodes: new Map(), draft, loading: false, pending: null,
         delivery: {phase: 'idle'}, awaitingReply: false, replyTo: null};
       panes.set(id, pane); tabs.append(tab); deck.append(host);
       host.addEventListener('focusin', () => {
@@ -273,44 +280,6 @@ export function mountMuse(target) {
     if (result.state === 'retryable') return 'Muse 环境尚未就绪，可以用同一个请求标识重试。';
     if (result.state === 'dispatching') return '同一请求仍在派发中，请稍后核对；不会重复发送。';
     return '投递结果尚未确认。请检查历史消息；此请求不会被自动重复发送。';
-  }
-
-  function eventSequence(event) {
-    const value = Number(event && event.seq);
-    return Number.isFinite(value) ? value : null;
-  }
-
-  function latestSequence(events) {
-    return (events || []).reduce((latest, event) => Math.max(latest, eventSequence(event) || 0), 0);
-  }
-
-  function eventRole(event) {
-    const payload = event && event.payload || {};
-    return event && (event.role || payload.role) || '';
-  }
-
-  function eventText(event) {
-    const payload = event && event.payload || {};
-    const content = event && (event.display_text || payload.display_text || payload.content);
-    if (typeof content === 'string') return content;
-    if (Array.isArray(content)) return content.filter(item => item && item.type === 'text')
-      .reduce((text, item) => text + (item.text || ''), '');
-    return '';
-  }
-
-  function eventIsStreaming(event) {
-    const payload = event && event.payload || {};
-    const markers = [event && event.status, event && event.state, event && event.phase,
-      payload.status, payload.state, payload.phase, payload.stream_state];
-    return markers.some(value => ['thinking', 'streaming', 'running', 'in_progress', 'generating'].includes(String(value || '').toLowerCase())) ||
-      (typeof (event && event.event_name) === 'string' && /(^|[.:])stream/.test(event.event_name));
-  }
-
-  function browserTaskIsActive(events) {
-    const card = latestBrowserTask(events || []);
-    const data = card && (card.data || card);
-    const status = String(data && (data.display_status || data.display_state || data.status) || '').toLowerCase();
-    return !!status && !/(completed|complete|success|succeeded|stopped|failed|cancelled|canceled|done|已完成|成功|停止|失败|取消)/i.test(status);
   }
 
   function renderDelivery(pane) {
@@ -465,8 +434,11 @@ export function mountMuse(target) {
       const continuation = !older ? pane.catchup?.before : undefined;
       const result = await api.museHistory(pane.id, accountId, connectionRevision, before, after, continuation);
       if (disposed || generation !== epoch || !panes.has(pane.id)) return;
-      pane.events = mergeEvents(pane.events, result.chat_events || []);
-      updateBrowserActivity(pane.browserActivity, pane.events, {accountId, connectionRevision});
+      const incomingEvents = result.chat_events || [];
+      pane.events = mergeEvents(pane.events, incomingEvents);
+      pane.browserActivityModel = reduceBrowserActivity(pane.browserActivityModel, incomingEvents,
+        {allowUnordered: !older, allowEqual: !older});
+      updateBrowserActivity(pane.browserActivity, pane.browserActivityModel, {accountId, connectionRevision});
       if (older || !pane.loaded) pane.older.hidden = !result.has_more_before;
       if (!older && result.has_more_after) {
         pane.catchup = {after, before: result.continuation_before_seq}; schedule(0);
@@ -593,7 +565,7 @@ export function mountMuse(target) {
         }
       } else showError(approvalResult.reason, 'poll');
       if (sessionResult.status === 'fulfilled' && approvalResult.status === 'fulfilled') clearError('poll');
-      await Promise.all([...panes.values()].filter(p => !p.host.hidden).map(p => loadHistory(p)));
+      await Promise.all([...panes.values()].filter(p => !p.host.hidden && !p.awaitingReply).map(p => loadHistory(p)));
     } catch (error) { showError(error, 'poll'); }
     finally {
       busy = false;
@@ -605,7 +577,7 @@ export function mountMuse(target) {
     clearTimeout(timer); if (!disposed && !suspended) timer = setTimeout(refresh, delay);
   }
   refresh();
-  const dispose = () => { disposed = true; epoch++; clearTimeout(timer); for (const pane of panes.values()) clearTimeout(pane.replyTimer); credential.value = ''; panes.clear(); target.replaceChildren(); };
+  const dispose = () => { disposed = true; epoch++; clearTimeout(timer); clearPanes(); credential.value = ''; target.replaceChildren(); };
   dispose.suspend = () => { suspended = true; clearTimeout(timer); for (const pane of panes.values()) { clearTimeout(pane.replyTimer); pane.replyTimer = null; } };
   dispose.resume = () => { suspended = false; schedule(0); };
   return dispose;
