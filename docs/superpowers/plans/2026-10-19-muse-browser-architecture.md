@@ -88,4 +88,3 @@ reduceBrowserActivity 返回 {card, data, order, signature} 或 null；只接受
 - [x] Step 3: Muse 原生和工作区测试通过：60 passed。
 - [x] Step 4: 发布布局测试通过：37 passed、2 subtests passed；静态资源、Python 编译和 diff 检查通过。
 - [x] Step 5: 完成最终 diff 与引用检查；代码保留在隔离功能 worktree 中供集成。
-
