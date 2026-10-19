@@ -12,6 +12,7 @@ from connectors.probe import ProbeContext
 from report_schema import sanitize_agent_state, sanitize_instances, sanitize_local_profiles
 from agent_profiles import OBSERVABLE_AGENT_TYPES
 from tools.probe.discovery import discover_instances
+from tools.local_process import run as run_local
 
 DEFAULT_AGENT_TYPES = OBSERVABLE_AGENT_TYPES
 
@@ -26,11 +27,11 @@ def collect_system():
     total_bytes = used_bytes = 0
     try:
         if platform.system() == "Darwin":
-            total_bytes = int(subprocess.run(
+            total_bytes = int(run_local(
                 ["sysctl", "-n", "hw.memsize"],
                 capture_output=True, text=True, check=True,
             ).stdout.strip())
-            vm = subprocess.run(
+            vm = run_local(
                 ["vm_stat"], capture_output=True, text=True, check=True,
             ).stdout
             page_size = 4096

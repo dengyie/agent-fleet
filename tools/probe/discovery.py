@@ -37,6 +37,7 @@ from datetime import datetime
 from typing import Any, Iterator
 
 from agent_profiles import OBSERVABLE_AGENT_TYPES, PROFILES
+from tools import local_process
 
 # ---------------------------------------------------------------------------
 # fixed boundaries (schema boundary for Task 1)
@@ -134,15 +135,11 @@ _last_enumerate_failed: bool = False
 # bounded local subprocess helpers
 # ---------------------------------------------------------------------------
 
-# Windows: pythonw（无控制台）spawn ``ps`` 会新建可见 conhost 闪窗；隐藏之。
-# POSIX 无此语义，置 0。
-_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-
 
 def _run_ps(argv: list[str], timeout: float = PS_TIMEOUT_S) -> str:
     """Run one bounded local ``ps``; returns stdout, or ``""`` on any failure."""
     try:
-        result = subprocess.run(
+        result = local_process.run(
             ["ps", *argv],
             capture_output=True,
             stdin=subprocess.DEVNULL,
@@ -150,7 +147,6 @@ def _run_ps(argv: list[str], timeout: float = PS_TIMEOUT_S) -> str:
             timeout=timeout,
             cwd=tempfile.gettempdir(),
             env=_PS_ENV,
-            creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError, ValueError, UnicodeDecodeError):
         return ""
@@ -167,7 +163,7 @@ def _run_powershell_json(script: str, timeout: float = POWERSHELL_TIMEOUT_S):
                   or shutil.which("powershell") or "powershell.exe")
     encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
     try:
-        result = subprocess.run(
+        result = local_process.run(
             [executable, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
             capture_output=True,
             stdin=subprocess.DEVNULL,

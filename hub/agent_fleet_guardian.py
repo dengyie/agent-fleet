@@ -25,6 +25,8 @@ import sys
 import time
 from pathlib import Path
 
+from tools.local_process import NO_WINDOW
+
 # Use gateway.run logger for visibility in gateway logs
 logger = logging.getLogger("gateway.run")
 _RELEASE_ROOT = Path(__file__).resolve().parents[1]
@@ -268,6 +270,7 @@ class AgentFleetGuardian:
                     stderr=log_err,
                     stdin=subprocess.DEVNULL,
                     start_new_session=True,
+                    creationflags=NO_WINDOW,
                 )
                 new_pid = proc.pid
 

@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Pattern, Sequence
 
 from tools.session.probes import claude, codex, hermes, pi
+from tools.local_process import run as run_local
 
 DEFAULT_TIMEOUT_S = 8.0
 MIN_TIMEOUT_S = 0.1
@@ -291,7 +292,7 @@ def _run_binary(
     timeout_s = _sanitize_timeout(timeout_s)
     env = _env_for(argv[0], path_adds)
     try:
-        result = subprocess.run(
+        result = run_local(
             argv,
             capture_output=True,
             stdin=subprocess.DEVNULL,

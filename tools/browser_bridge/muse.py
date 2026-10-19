@@ -12,6 +12,8 @@ import sqlite3
 import subprocess
 from typing import Any, Mapping, Protocol
 
+from tools.local_process import run as run_local
+
 MAX_PROMPT = 8192
 MAX_MESSAGES = 100
 MAX_MESSAGE_TEXT = 12288
@@ -36,7 +38,7 @@ class SubprocessMuseTransport:
 
     def request(self, operation: str, **kwargs) -> Mapping[str, Any]:
         try:
-            process = subprocess.run(
+            process = run_local(
                 ['node', str(Path(__file__).with_name('cdp_muse.cjs'))],
                 input=json.dumps({'op': operation, **kwargs}, ensure_ascii=False), encoding='utf-8',
                 capture_output=True, timeout=20, check=False,

@@ -33,6 +33,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from report_schema import INSTANCE_FAMILIES
+from tools.local_process import popen as popen_local
+from tools.local_process import run as run_local
 
 from tools.supervisor.model import (
     GROUP_CAPABILITY_CGROUP,
@@ -205,7 +207,7 @@ class POSIXGroupOps(GroupOps):
 
     def create(self, argv, cwd, env):
         try:
-            proc = subprocess.Popen(
+            proc = popen_local(
                 list(argv),
                 cwd=cwd or "/tmp",
                 env=_bounded_spawn_env(env),
@@ -431,7 +433,7 @@ class WindowsGroupOps(GroupOps):
     def create(self, argv, cwd, env):
         flags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
         try:
-            proc = subprocess.Popen(
+            proc = popen_local(
                 list(argv),
                 cwd=cwd or os.getcwd(),
                 env=_bounded_spawn_env(env),
@@ -663,9 +665,9 @@ class WindowsGroupOps(GroupOps):
         if force:
             argv.append("/F")
         try:
-            result = subprocess.run(argv, capture_output=True,
-                                    stdin=subprocess.DEVNULL, timeout=8,
-                                    check=False)
+            result = run_local(argv, capture_output=True,
+                               stdin=subprocess.DEVNULL, timeout=8,
+                               check=False)
         except (OSError, subprocess.SubprocessError, ValueError):
             return False
         return result.returncode == 0
@@ -1951,7 +1953,7 @@ def _live_process_cwd(pid: int) -> str | None:
     if lsof is None:
         return None
     try:
-        completed = subprocess.run(
+        completed = run_local(
             [lsof, "-a", "-p", str(pid_i), "-d", "cwd", "-Fn"],
             capture_output=True, text=True, timeout=2,
             stdin=subprocess.DEVNULL, check=False,

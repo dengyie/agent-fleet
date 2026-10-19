@@ -4,16 +4,14 @@ The hub never executes commands on another machine. Every probe runs on the
 machine where this context is created and only returns bounded stdout.
 """
 
-import os
 import subprocess
+import sys
 from pathlib import Path
 
-FLEET_HOME = Path(__file__).resolve().parent.parent
+from tools.local_process import resolve_bash
+from tools.local_process import run as run_local
 
-# pythonw（无控制台）spawn 控制台子进程（bash/python3/ps）时会新建一个
-# 可见 conhost 窗口——每轮 self-report 闪窗的根因。CREATE_NO_WINDOW 让
-# 子进程仍有 console 可继承但窗口不显示；POSIX 下为 0（无此语义）。
-_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+FLEET_HOME = Path(__file__).resolve().parent.parent
 
 
 class ProbeContext:
@@ -26,32 +24,38 @@ class ProbeContext:
         self.inner_reachable = True
 
     def run(self, cmd):
+        shell = resolve_bash()
+        if shell is None:
+            # No *real* POSIX shell on this host (e.g. Windows without Git
+            # Bash): return empty output rather than spawn the WSL shim and
+            # lose the whole cycle to its failure notice.
+            return ""
         try:
-            result = subprocess.run(
-                ["bash", "-c", cmd],
+            result = run_local(
+                [shell, "-c", cmd],
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
                 cwd=str(FLEET_HOME),
-                creationflags=_NO_WINDOW,
             )
-            return result.stdout.strip()
-        except (subprocess.TimeoutExpired, OSError):
+            return (result.stdout or "").strip()
+        except (subprocess.TimeoutExpired, OSError,
+                subprocess.SubprocessError, ValueError):
             return ""
 
     def run_python(self, script):
         try:
-            result = subprocess.run(
-                ["python3", "-"],
+            result = run_local(
+                [sys.executable, "-"],
                 input=script,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout + 5,
                 cwd=str(FLEET_HOME),
-                creationflags=_NO_WINDOW,
             )
-            return result.stdout
-        except (subprocess.TimeoutExpired, OSError):
+            return result.stdout or "{}"
+        except (subprocess.TimeoutExpired, OSError,
+                subprocess.SubprocessError, ValueError):
             return "{}"
 
     def run_batch(self, cmds):
