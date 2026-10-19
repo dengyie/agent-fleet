@@ -14,8 +14,6 @@ import os
 from pathlib import Path
 from unittest import mock
 
-import pytest
-
 from tools import local_process
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -103,7 +101,7 @@ def test_binary_mode_never_forces_a_text_decoder():
 
 def test_resolve_bash_never_returns_the_wsl_launcher():
     if os.name != "nt":
-        pytest.skip("Windows-only shim guard")
+        return  # POSIX has no WSL/Store shim to avoid
     shell = local_process.resolve_bash()
     if shell is not None:
         normalized = shell.replace("/", "\\").lower()
