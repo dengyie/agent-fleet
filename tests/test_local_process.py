@@ -112,6 +112,11 @@ def test_resolve_bash_never_returns_the_wsl_launcher():
 
 
 def test_resolve_bash_honours_override(tmp_path):
+    if os.name != "nt":
+        # POSIX resolves ``bash`` through the OS at spawn time; the override
+        # only chooses among Windows shells.
+        assert local_process.resolve_bash() == "bash"
+        return
     real = tmp_path / "mybash.exe"
     real.write_text("")
     local_process.resolve_bash.cache_clear()
