@@ -424,7 +424,7 @@ def test_public_probe_has_one_deadline_and_rejects_late_success(tmp_path, monkey
 def test_ci_deploy_is_main_only_after_tests_and_same_run_packaging():
     workflow = yaml.safe_load((Path(__file__).resolve().parents[1] / '.github/workflows/ci.yml').read_text())
     job = workflow['jobs']['deploy']
-    assert set(job['needs']) == {'test', 'package'}
+    assert set(job['needs']) == {'test', 'package', 'launch-policy-windows'}
     assert "github.ref == 'refs/heads/main'" in job['if']
     assert "github.event_name == 'push'" in job['if']
     assert job['environment'] == 'production'
@@ -436,5 +436,5 @@ def test_ci_deploy_is_main_only_after_tests_and_same_run_packaging():
     assert 'StrictHostKeyChecking=yes' in steps
     assert 'git/ref/heads/main' in steps
     assert 'systemctl' not in steps and 'docker ' not in steps  # Receiver owns privileged operations.
-    for name in ('test', 'package'):
+    for name in ('test', 'package', 'launch-policy-windows'):
         assert 'secrets.' not in json.dumps(workflow['jobs'][name])
