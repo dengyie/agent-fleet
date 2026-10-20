@@ -90,3 +90,52 @@ def test_invalid_utf8_diff_is_bounded_valid_text(tmp_path: Path, monkeypatch: py
     patch = worktree.diff_patch(tmp_path, max_bytes=120)
     assert len(patch.encode("utf-8")) <= 120
     assert patch.endswith("\n…[truncated]")
+
+
+def test_threaded_drain_keeps_a_bounded_prefix_and_real_exit() -> None:
+    """The Windows drain branch must bound output without losing the exit code."""
+    from tools import bounded_process, local_process
+
+    proc = local_process.popen(
+        [sys.executable, "-c",
+         "import sys; sys.stdout.buffer.write(b'x' * 200000); sys.stdout.buffer.flush()"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+    )
+    try:
+        output, error = bounded_process._drain_threaded(
+            proc, time.monotonic() + 30, 100, 10, 30.0)
+        assert proc.returncode == 0
+    finally:
+        bounded_process._reap_group(proc)
+    assert output == b"x" * 100
+    assert error == b""
+
+
+def test_threaded_drain_times_out_when_a_writer_holds_the_pipe() -> None:
+    from tools import bounded_process, local_process
+
+    proc = local_process.popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            bounded_process._drain_threaded(proc, time.monotonic() + 0.5, 100, 10, 0.5)
+    finally:
+        bounded_process._reap_group(proc)
+    assert time.monotonic() - started < 5
+    assert proc.poll() is not None
+
+
+def test_reap_never_masks_the_original_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tools import bounded_process
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(bounded_process, "_drain", boom)
+    with pytest.raises(RuntimeError, match="boom"):
+        bounded_process.run_bounded(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            cwd=Path.cwd(), timeout_s=5, stdout_limit=100)

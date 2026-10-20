@@ -8,6 +8,8 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from tools.local_process import run as run_local
+
 
 class ServiceLogReaderError(RuntimeError):
     def __init__(self, code: str):
@@ -81,7 +83,7 @@ class FixedServiceLogReader:
             raise ServiceLogReaderError("invalid_timeout") from None
         if not math.isfinite(timeout) or timeout <= 0 or timeout > 300:
             raise ServiceLogReaderError("invalid_timeout")
-        self.runner = runner or subprocess.run
+        self.runner = runner or run_local
         self.timeout_s = timeout
         self.clock = clock
         normalized_prefix: list[str] = []

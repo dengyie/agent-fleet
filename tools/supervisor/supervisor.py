@@ -297,7 +297,6 @@ class POSIXGroupOps(GroupOps):
         Returns True if at least one line was delivered.
         """
         buf = handle._abuf
-        handled_only_dirty = False
         delivered = False
         while True:
             idx = buf.find(b"\n")
@@ -1679,7 +1678,6 @@ class Supervisor:
         should_abort = should_abort or (lambda: False)
         deadline = time.monotonic() + max(0.0, float(timeout_s))
         aborted = False
-        timed_out = False
 
         while True:
             entry = self._entries.get(session_id)
@@ -1705,7 +1703,6 @@ class Supervisor:
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                timed_out = True
                 break
             try:
                 pr = self._ops.pump(handle, min(remaining, 0.2),

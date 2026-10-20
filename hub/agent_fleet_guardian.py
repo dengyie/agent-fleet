@@ -22,10 +22,9 @@ import logging
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
-from tools.local_process import NO_WINDOW
+from tools.local_process import popen as popen_local
 
 # Use gateway.run logger for visibility in gateway logs
 logger = logging.getLogger("gateway.run")
@@ -255,7 +254,7 @@ class AgentFleetGuardian:
             python_cmd = str(venv_python) if venv_python.exists() else "python3"
 
             with open(self.web_log, "a") as log_out, open(self.web_error_log, "a") as log_err:
-                proc = subprocess.Popen(
+                proc = popen_local(
                     [
                         python_cmd,
                         "hub/web.py",
@@ -270,7 +269,6 @@ class AgentFleetGuardian:
                     stderr=log_err,
                     stdin=subprocess.DEVNULL,
                     start_new_session=True,
-                    creationflags=NO_WINDOW,
                 )
                 new_pid = proc.pid
 

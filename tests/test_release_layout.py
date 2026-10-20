@@ -551,6 +551,7 @@ class RuntimeStoreHygieneTests(unittest.TestCase):
             "hub/web.py",
             "deploy/hk-web-process-control.py",
             "tools/__init__.py",
+            "tools/local_process.py",
             "tools/result_files.py",
             "tools/session/__init__.py",
             "tools/supervisor/supervisor.py",

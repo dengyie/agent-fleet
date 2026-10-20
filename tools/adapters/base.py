@@ -3,13 +3,15 @@
 子进程执行 agent CLI；instruction 只作为单 argv 元素传递（不经 shell）。
 输出行流式回调 on_line；should_abort 轮询用于 lease 失效后主动终止。
 """
+import os
+import signal
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 from tools.local_process import popen as popen_local
+from tools.local_process import run as run_local
 
 MAX_LOG_TAIL = 10240
 MAX_LINE = 500
@@ -117,16 +119,36 @@ class BaseAdapter:
 
 
 def _kill(proc):
-    import os
-    import signal
+    """Terminate the agent and everything it spawned, on either platform.
+
+    ``start_new_session`` gives the child its own group on POSIX, so ``killpg``
+    reaches its whole tree. Windows has neither ``killpg`` nor a session here,
+    and ``Popen.kill`` would orphan the agent's own grandchildren, so the tree
+    is taken down with ``taskkill /T``.
+    """
+    if os.name == "nt":
+        try:
+            run_local(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                      capture_output=True, stdin=subprocess.DEVNULL,
+                      check=False, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        return
     try:
         os.killpg(proc.pid, signal.SIGTERM)
-    except Exception:
+    except OSError:
         pass
     try:
         proc.wait(timeout=5)
-    except Exception:
+    except subprocess.TimeoutExpired:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
-        except Exception:
+        except OSError:
             pass

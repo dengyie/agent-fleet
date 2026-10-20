@@ -8,6 +8,8 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Sequence
 
+from tools.local_process import run as run_local
+
 
 class CollectorError(RuntimeError):
     def __init__(self, code: str):
@@ -65,7 +67,7 @@ def run_fixed_command(
     ):
         raise CollectorError("invalid_command")
     started = float(now())
-    execute = runner or subprocess.run
+    execute = runner or run_local
     normalized_prefix: list[str] = []
     for item in path_prefix or ():
         if isinstance(item, os.PathLike):

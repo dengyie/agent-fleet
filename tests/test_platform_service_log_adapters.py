@@ -62,3 +62,30 @@ def test_reader_rejects_forged_arguments_and_failures():
     with pytest.raises(ServiceLogReaderError) as private:
         fixed_log_argv("systemd", "bad\nunit", 60)
     assert private.value.code == "invalid_target_alias"
+
+
+def test_default_reader_runner_is_the_launch_policy(monkeypatch):
+    """A reader built without an injected runner must still use the policy.
+
+    The default used to be a bare ``subprocess.run``: on Windows that flashes a
+    console window, and ``text=True`` without ``errors="replace"`` silently
+    returns an empty result whenever the child emits a non-UTF-8 byte.
+    """
+    from tools.platform.services import logs
+
+    seen = []
+
+    class Result:
+        stdout = "行"
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        seen.append((argv, kwargs))
+        return Result()
+
+    monkeypatch.setattr(logs, "run_local", fake_run)
+    reader = logs.FixedServiceLogReader(clock=lambda: 10.0)
+    result = reader(_command())
+    assert result["text"] == "行"
+    assert seen and seen[0][0] == list(fixed_log_argv("systemd", "api.service", 60))
+    assert seen[0][1]["text"] is True

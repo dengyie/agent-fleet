@@ -1,4 +1,11 @@
-"""Bounded POSIX child output with deadline and process-group ownership."""
+"""Bounded child output with deadline and process-group ownership.
+
+POSIX drains both pipes through one selector under a single deadline. Windows
+has no ``select`` on pipes and no ``os.killpg``, so it drains with reader
+threads and reaps the tree with ``taskkill``; both paths keep the same
+contract: at most ``limit`` bytes per stream, one deadline, and the whole
+group gone when the call returns.
+"""
 from __future__ import annotations
 
 import math
@@ -6,11 +13,13 @@ import os
 import selectors
 import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from tools.local_process import popen as popen_local
+from tools.local_process import run as run_local
 
 
 def decode_prefix(raw: bytes, limit: int) -> tuple[str, bool]:
@@ -31,8 +40,67 @@ def _read_ready(selector: selectors.BaseSelector, timeout: float) -> None:
         target.extend(chunk[:max(0, limit - len(target))])
 
 
+def _pump(stream, target: bytearray, limit: int) -> None:
+    """Drain one pipe, keeping a bounded prefix and never blocking the child."""
+    try:
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                break
+            room = limit - len(target)
+            if room > 0:
+                target.extend(chunk[:room])
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _drain_threaded(proc: subprocess.Popen[bytes], deadline: float,
+                    stdout_limit: int, stderr_limit: int | None,
+                    timeout_s: float) -> tuple[bytes, bytes]:
+    """Windows drain: reader threads plus deadline-bounded joins.
+
+    Each thread ends on EOF, so waiting for the threads keeps the POSIX
+    contract: a descendant that still holds the pipe open past the deadline is
+    a timeout, not a success.
+    """
+    output, error = bytearray(), bytearray()
+    streams = [(proc.stdout, output, stdout_limit)]
+    if stderr_limit is not None:
+        streams.append((proc.stderr, error, stderr_limit))
+    threads = [
+        threading.Thread(target=_pump, args=(stream, target, limit), daemon=True)
+        for stream, target, limit in streams
+        if stream is not None
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(proc.args, timeout_s)
+        thread.join(timeout=remaining)
+        if thread.is_alive():
+            raise subprocess.TimeoutExpired(proc.args, timeout_s)
+    proc.wait(timeout=max(0.001, deadline - time.monotonic()))
+    return bytes(output), bytes(error)
+
+
 def _drain(proc: subprocess.Popen[bytes], deadline: float, stdout_limit: int,
            stderr_limit: int | None, timeout_s: float) -> tuple[bytes, bytes]:
+    if os.name == "nt":
+        return _drain_threaded(proc, deadline, stdout_limit, stderr_limit,
+                               timeout_s)
+    return _drain_posix(proc, deadline, stdout_limit, stderr_limit, timeout_s)
+
+
+def _drain_posix(proc: subprocess.Popen[bytes], deadline: float,
+                 stdout_limit: int, stderr_limit: int | None,
+                 timeout_s: float) -> tuple[bytes, bytes]:
     output, error = bytearray(), bytearray()
     with selectors.DefaultSelector() as selector:
         assert proc.stdout is not None
@@ -53,11 +121,38 @@ def _drain(proc: subprocess.Popen[bytes], deadline: float, stdout_limit: int,
 
 
 def _reap_group(proc: subprocess.Popen[bytes]) -> None:
+    """Kill the owned group without ever masking the caller's exception."""
+    if os.name == "nt":
+        # ``/T`` is the only way to reach descendants: a leader that exited
+        # while a grandchild still holds the pipe must still be reaped.
+        try:
+            run_local(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                      capture_output=True, stdin=subprocess.DEVNULL,
+                      check=False, timeout=2)
+        except (OSError, subprocess.SubprocessError):
+            if proc.poll() is None:
+                proc.kill()
+        _wait_quietly(proc)
+        return
     try:
         os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        proc.poll()
-    proc.wait(timeout=2)
+    except OSError:
+        pass
+    _wait_quietly(proc)
+
+
+def _wait_quietly(proc: subprocess.Popen[bytes]) -> None:
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def run_bounded(argv: Sequence[str], *, cwd: Path, timeout_s: float,

@@ -76,11 +76,14 @@ def _non_stub_path() -> str:
 
 
 @lru_cache(maxsize=8)
-def _resolve_bash_cached(override: str) -> str | None:
+def _resolve_bash_cached(override: str | None) -> str | None:
     """Locate a *real* POSIX shell on Windows, skipping the WSL/Store shims."""
     if os.name != "nt":
         return "bash"
-    if override and os.path.isfile(override):
+    # An override is still validated: pointing it at the WSL launcher would
+    # reproduce the exact silent-empty-output failure this module exists to
+    # prevent, so a stub path is ignored in favour of normal discovery.
+    if override and os.path.isfile(override) and not _is_stub_dir(override):
         return override
     candidates = [shutil.which("bash", path=_non_stub_path())]
     git = shutil.which("git", path=_non_stub_path())
@@ -107,9 +110,9 @@ def resolve_bash() -> str | None:
 
     On POSIX this is ``"bash"`` (resolved by the OS at spawn time). On Windows
     the ``System32``/``WindowsApps`` shims are rejected because they are not
-    real shells. Results are memoised on the ``AGENT_FLEET_BASH`` override, so
-    changing that variable invalidates the cache naturally and repeated calls
-    never re-scan ``PATH`` or the filesystem.
+    real shells — including when named by ``AGENT_FLEET_BASH``. Results are
+    memoised on that override, so changing the variable invalidates the cache
+    naturally and repeated calls never re-scan ``PATH`` or the filesystem.
     """
     return _resolve_bash_cached(os.environ.get("AGENT_FLEET_BASH"))
 
