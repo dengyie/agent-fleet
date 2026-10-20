@@ -13,6 +13,9 @@ These tests pin the Task 1 contract from the agent-discovery-adoption plan:
 
 from __future__ import annotations
 
+import base64
+import json
+
 from tools.probe import discovery
 
 
@@ -64,6 +67,30 @@ def test_ps_command_failure_returns_empty_list(monkeypatch):
     monkeypatch.setattr(discovery, "enumerate_process_rows", _boom)
     assert discovery.discover_instances() == []
     assert discovery.last_discovery_error == discovery.DISCOVERY_ERROR_CODE
+
+
+def test_powershell_json_preserves_unicode_command_and_output(monkeypatch):
+    payload = [{"Name": "codex.exe", "CommandLine": "codex --resume 測試"}]
+    captured = {}
+
+    class Result:
+        returncode = 0
+        stdout = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    monkeypatch.setattr(discovery.os, "name", "nt")
+    monkeypatch.setattr(discovery.shutil, "which", lambda _: "powershell.exe")
+
+    def run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return Result()
+
+    monkeypatch.setattr(discovery.local_process, "run", run)
+    assert discovery._run_powershell_json("Write-Output '測試'") == payload
+    assert captured["argv"][-2] == "-EncodedCommand"
+    assert base64.b64decode(captured["argv"][-1]).decode("utf-16le") == "Write-Output '測試'"
+    assert captured["kwargs"]["stdin"] is discovery.subprocess.DEVNULL
+    assert captured["kwargs"]["timeout"] == discovery.POWERSHELL_TIMEOUT_S
 
 
 def test_non_agent_rows_are_filtered_out(monkeypatch):
