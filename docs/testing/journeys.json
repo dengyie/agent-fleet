@@ -344,7 +344,10 @@
         "tests/test_instance_ingest.py::test_replayed_report_id_does_not_append_history_or_publish_duplicate",
         "tests/test_instance_ingest.py::test_missing_report_id_keeps_legacy_ingest_behavior",
         "tests/test_instance_ingest.py::test_invalid_report_id_is_rejected_without_writing_history",
-        "tests/test_repositories.py::ObservationRepositoryRegressionTests::test_independent_processes_accept_one_copy_of_a_report"
+        "tests/test_repositories.py::ObservationRepositoryRegressionTests::test_independent_processes_accept_one_copy_of_a_report",
+        "tests/test_cli_stdlib_imports.py::test_probe_direct_script_collects_from_unrelated_cwd",
+        "tests/test_cli_stdlib_imports.py::test_probe_bootstraps_before_importing_uuid",
+        "tests/test_direct_run.py::DirectRunSmokeTests::test_agent_self_report_direct_run_reaches_argparse"
       ]
     },
     {

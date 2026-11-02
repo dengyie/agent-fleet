@@ -15,7 +15,6 @@ import sys
 import time
 import urllib.error
 import urllib.request
-import uuid
 from pathlib import Path
 
 
@@ -39,6 +38,7 @@ def _bootstrap_direct_imports():
 _bootstrap_direct_imports()
 
 import platform
+import uuid
 
 from tools.probe_collectors import (
     DEFAULT_AGENT_TYPES,
