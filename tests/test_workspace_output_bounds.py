@@ -36,7 +36,7 @@ def test_workspace_large_read_has_bounded_memory(tmp_path: Path) -> None:
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
-    assert receipt.state == "succeeded"
+    assert receipt.state == "succeeded", receipt
     assert receipt.truncated
     assert receipt.result["content"] == "x" * MAX_READ_BYTES
     assert peak < 1024 * 1024
@@ -53,7 +53,7 @@ def test_workspace_command_output_has_bounded_memory(tmp_path: Path, backend_typ
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
-    assert receipt.state == "succeeded"
+    assert receipt.state == "succeeded", receipt
     assert receipt.truncated
     assert receipt.result["output"] == "x" * MAX_OUTPUT_BYTES
     assert peak < 2 * 1024 * 1024
@@ -75,7 +75,7 @@ def test_failed_command_preserves_exit_and_bounded_stderr(tmp_path: Path, backen
     receipt = backend.execute("failure-test", argv)
     assert receipt.state == "failed"
     assert receipt.error_code == "process_failed"
-    assert receipt.result["returncode"] == 7
+    assert receipt.result["returncode"] == 7, receipt
     assert receipt.result["output"].startswith("failure")
     assert len(receipt.result["output"].encode("utf-8")) <= MAX_OUTPUT_BYTES
     assert receipt.truncated
@@ -91,7 +91,7 @@ def test_workspace_timeout_reaps_process(tmp_path: Path, backend_type: type[Dire
     backend, argv = execution(tmp_path, backend_type, source + "time.sleep(30)\n", monkeypatch)
     started = time.monotonic()
     receipt = backend.execute("timeout-test", argv, timeout_s=0.5)
-    assert receipt.error_code == "timeout"
+    assert receipt.error_code == "timeout", receipt
     assert time.monotonic() - started < 3
     pid = int((tmp_path / "child.pid").read_text())
     assert_process_exited(pid)
@@ -109,6 +109,6 @@ def test_invalid_utf8_replacements_remain_within_byte_limit(tmp_path: Path, kind
         backend, argv = execution(tmp_path, backend_type, f"import os\nos.write(1,b'\\xff'*{MAX_OUTPUT_BYTES})\n", monkeypatch)
         receipt = backend.execute("utf8-test", argv)
         text = receipt.result["output"]
-    assert receipt.state == "succeeded"
+    assert receipt.state == "succeeded", receipt
     assert receipt.truncated
     assert len(text.encode("utf-8")) <= MAX_OUTPUT_BYTES

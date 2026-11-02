@@ -35,7 +35,7 @@ def test_large_git_patch_has_bounded_parent_memory(repository: Path) -> None:
 @pytest.mark.parametrize("kind", ["patch", "stat"])
 def test_git_diff_marker_is_inside_utf8_budget(repository: Path, kind: str) -> None:
     for index in range(12):
-        (repository / f"result-{index}.txt").write_text("🌲" * 100 + "\n")
+        (repository / f"result-{index}.txt").write_text("🌲" * 100 + "\n", encoding="utf-8")
     collector = worktree.diff_patch if kind == "patch" else worktree.diff_stat
     result = collector(repository, max_bytes=120)
     assert len(result.encode("utf-8")) <= 120
