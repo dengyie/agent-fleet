@@ -19,7 +19,7 @@ agent machine
 - `tools/agent-self-report.py`：定时执行采集、dry-run、HTTPS 上报。
 - `hub/web.py`：认证 ingest、状态 API、面板、reconciliation API。
 - `hub/scan.py`：只做 stale reconciliation；没有远程执行能力。
-- `hub/state.py`：JSONL 历史和原子 current 快照。
+- `hub/state.py`：JSONL 历史、原子 current 快照和 ingest 回执索引。
 - `connectors/`：被本地 probe 复用的 agent 适配器。
 
 ## Transport
@@ -38,7 +38,7 @@ hub token 来源：
 
 ## Stale 处理
 
-每次 ingest 写入 `_ts`。reconciliation 只读取 `state/*.json`，超过默认 300 秒没有新报告就生成 offline 状态；不会触发任何机器命令。
+每次 ingest 写入 `_ts`。带 `report_id` 的请求在 `state/observation-reports.sqlite3` 保存至少 24 小时回执，同一 ID 的重试刷新保留时间，后续写入清理过期回执；响应丢失后的重试不会重复追加历史或重复发布变更事件，JSONL 历史轮转不影响回执去重。客户端在单次上报重试链中固定 ID，新一轮采集生成新 ID；不带 ID 的旧客户端仍逐次写入。挂起回执在同机器下一次写入前恢复，修复部分 UTF-8 尾记录、缺少换行及 current 镜像写入中断。reconciliation 只读取 `state/*.json`，超过默认 300 秒没有新报告就生成 offline 状态；不会触发任何机器命令。
 
 ## 控制方向
 

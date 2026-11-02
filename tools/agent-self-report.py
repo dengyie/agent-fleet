@@ -6,10 +6,16 @@ metadata to the HK hub; no reverse connection or central machine access is used.
 """
 
 import argparse
+import http.client
 import json
 import os
+import socket
+import ssl
 import sys
+import time
+import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 
@@ -68,6 +74,51 @@ def send_payload(endpoint, token, payload):
         return response.status, response.read().decode()
 
 
+def _is_retryable_report_error(exc):
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in (408, 429) or 500 <= exc.code <= 599
+    if isinstance(exc, ssl.SSLError):
+        return False
+    network_errors = (
+        TimeoutError,
+        ConnectionError,
+        socket.gaierror,
+        http.client.BadStatusLine,
+        http.client.IncompleteRead,
+        http.client.LineTooLong,
+        http.client.RemoteDisconnected,
+    )
+    if isinstance(exc, urllib.error.URLError):
+        return isinstance(exc.reason, network_errors)
+    return isinstance(exc, network_errors)
+
+
+def send_payload_with_retry(endpoint, token, payload, attempts=3, backoff=5):
+    # Use one id for every attempt so Hub can safely discard an ambiguous replay.
+    payload = dict(payload)
+    payload.setdefault("report_id", uuid.uuid4().hex)
+    last_exc = None
+    attempts = max(1, int(attempts))
+    for attempt in range(1, attempts + 1):
+        try:
+            return send_payload(endpoint, token, payload)
+        except Exception as exc:
+            retryable = _is_retryable_report_error(exc)
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
+            if not retryable:
+                raise
+            last_exc = exc
+            if attempt < attempts:
+                print(
+                    f"[self-report] attempt {attempt}/{attempts} failed: {exc}, "
+                    f"retrying in {backoff}s",
+                    file=sys.stderr,
+                )
+                time.sleep(backoff)
+    raise last_exc
+
+
 def resolve_token(cli_token, token_file):
     if cli_token:
         return cli_token
@@ -118,7 +169,7 @@ def main(argv=None):
         print("[self-report] --token is required", file=sys.stderr)
         return 2
     try:
-        status, body = send_payload(args.endpoint, token, payload)
+        status, body = send_payload_with_retry(args.endpoint, token, payload)
         print(f"[self-report] {machine} -> {status} {body}")
         return 0
     except Exception as exc:

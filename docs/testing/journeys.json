@@ -309,7 +309,7 @@
       "id": "MONITOR-01",
       "title": "监控、健康证据及事件",
       "layer": "integration",
-      "acceptance": "过期/异常优先级准确；重复故障去重；连续健康证据才关闭事件；请求探针防SSRF",
+      "acceptance": "过期/异常优先级准确；重复故障去重；连续健康证据才关闭事件；请求探针防SSRF；同一 report_id 重试不重复历史/事件；回执跨进程与重启持久，轮转和写入中断可恢复，重试续期且过期可重新接受",
       "boundary": "disposable Hub; external services simulated",
       "tests": [
         "tests/test_platform_service_health.py::test_health_aggregation_has_stale_and_unhealthy_precedence",
@@ -323,7 +323,28 @@
         "tests/test_platform_monitoring.py::test_scheduler_rejects_non_finite_result_without_finishing_lease",
         "tests/test_platform_incidents.py::test_repeated_fingerprint_is_one_open_incident_and_owner_scoped",
         "tests/test_platform_incidents.py::test_two_consecutive_healthy_samples_close_and_failure_resets_streak",
-        "tests/test_platform_http_probe_scheduling.py::test_policy_rejects_private_dns_and_allows_loopback_only_with_explicit_override"
+        "tests/test_platform_http_probe_scheduling.py::test_policy_rejects_private_dns_and_allows_loopback_only_with_explicit_override",
+        "tests/test_push_only.py::SelfReportContractTests::test_retry_reuses_report_id_for_transient_failure",
+        "tests/test_push_only.py::SelfReportContractTests::test_retry_does_not_repeat_permanent_http_error",
+        "tests/test_push_only.py::SelfReportContractTests::test_retry_repeats_transient_http_error",
+        "tests/test_push_only.py::SelfReportContractTests::test_retry_closes_transient_http_error_responses",
+        "tests/test_push_only.py::SelfReportContractTests::test_retry_does_not_repeat_tls_certificate_failure",
+        "tests/test_push_only.py::SelfReportContractTests::test_retry_does_not_repeat_invalid_url_error",
+        "tests/test_repositories.py::ObservationRepositoryRegressionTests::test_invalid_utf8_tail_does_not_break_history_read",
+        "tests/test_repositories.py::ObservationRepositoryRegressionTests::test_report_snapshot_deduplicates_after_repository_restart",
+        "tests/test_repositories.py::ObservationRepositoryRegressionTests::test_concurrent_report_replays_append_only_once",
+        "tests/test_repositories.py::ObservationRepositoryRegressionTests::test_report_deduplication_survives_history_rotation",
+        "tests/test_repositories.py::ObservationRepositoryRegressionTests::test_report_retry_extends_retention_and_expired_receipts_are_pruned",
+        "tests/test_repositories.py::ObservationRepositoryRegressionTests::test_expired_id_is_a_new_report_even_when_it_is_last_in_history",
+        "tests/test_repositories.py::ObservationRepositoryRegressionTests::test_pending_report_recovers_before_reading_incomplete_utf8_tail",
+        "tests/test_repositories.py::ObservationRepositoryRegressionTests::test_pending_report_recovers_a_complete_row_missing_its_newline",
+        "tests/test_repositories.py::ObservationRepositoryRegressionTests::test_pending_report_is_recovered_without_duplicate_history",
+        "tests/test_repositories.py::ObservationRepositoryRegressionTests::test_pending_report_repairs_torn_jsonl_tail_before_recovery",
+        "tests/test_repositories.py::ObservationRepositoryRegressionTests::test_pending_report_repairs_current_mirror_without_reappend",
+        "tests/test_instance_ingest.py::test_replayed_report_id_does_not_append_history_or_publish_duplicate",
+        "tests/test_instance_ingest.py::test_missing_report_id_keeps_legacy_ingest_behavior",
+        "tests/test_instance_ingest.py::test_invalid_report_id_is_rejected_without_writing_history",
+        "tests/test_repositories.py::ObservationRepositoryRegressionTests::test_independent_processes_accept_one_copy_of_a_report"
       ]
     },
     {

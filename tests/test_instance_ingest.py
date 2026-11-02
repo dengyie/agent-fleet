@@ -115,6 +115,43 @@ def test_ingest_defaults_missing_instances_to_empty_list(client):
     assert read_current("m1")["instances"] == []
 
 
+def test_replayed_report_id_does_not_append_history_or_publish_duplicate(client):
+    payload = valid_payload(report_id="replayed-report-1", agent={"codex": {"installed": False}})
+    publisher = client.application.extensions["fleet"]["publisher"]
+
+    first = client.post("/api/ingest", json=payload, headers=ingest_header())
+    after_first = store.read_history("m1", 20)
+    events_after_first = publisher.read_recent(20)
+    second = client.post("/api/ingest", json=payload, headers=ingest_header())
+    after_second = store.read_history("m1", 20)
+
+    assert first.status_code == second.status_code == 200
+    assert len(after_second) == len(after_first)
+    assert second.get_json()["duplicate"] is True
+    assert "report_id" not in read_current("m1")
+    assert "_ingest_report_id" not in read_current("m1")
+    assert first.get_json()["changes"] == ["agents"]
+    assert len(events_after_first) == 1
+    assert publisher.read_recent(20) == events_after_first
+
+
+def test_missing_report_id_keeps_legacy_ingest_behavior(client):
+    response = client.post("/api/ingest", json=valid_payload(), headers=ingest_header())
+
+    assert response.status_code == 200
+    assert "duplicate" not in response.get_json()
+
+
+def test_invalid_report_id_is_rejected_without_writing_history(client):
+    before = len(store.read_history("m1", 20))
+    response = client.post(
+        "/api/ingest", json=valid_payload(report_id=None), headers=ingest_header())
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "invalid_report_id"
+    assert len(store.read_history("m1", 20)) == before
+
+
 def test_ingest_drops_malformed_instance_rows_individually(client):
     response = client.post("/api/ingest", json=valid_payload(instances=[
         {

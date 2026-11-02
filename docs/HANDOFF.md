@@ -17,7 +17,7 @@ AI agent 舰队观测系统：每台机器运行本地 probe，向 hub `/api/ing
 | hub/events.py | hub 进程 | 事件总线 + SSE 队列桥 |
 | agent-self-report.py | 每台 agent 机器 | 本地采集并主动 POST |
 | probe_collectors.py | 每台 agent 机器 | Hermes/Claude/Codex/generic 本地采集 |
-| state/ | hub 数据目录 | JSONL 历史 + 原子 current 快照 + events.jsonl |
+| state/ | hub 数据目录 | JSONL 历史 + 原子 current 快照 + ingest 回执索引 + events.jsonl |
 | hosts.yaml | hub 配置 | 展示描述和 stale TTL，不是机器注册门槛 |
 
 ## 三、上报数据

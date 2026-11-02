@@ -1,13 +1,16 @@
 import importlib.util
+import http.client
 import inspect
 import json
 import os
+import ssl
 import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 from contextlib import redirect_stdout
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from unittest import mock
 
@@ -60,6 +63,87 @@ class SelfReportContractTests(unittest.TestCase):
 
         self.assertEqual(captured["request"].headers["User-agent"], "agent-fleet-probe/1.0")
         self.assertEqual(captured["timeout"], 15)
+
+    def test_retry_reuses_report_id_for_transient_failure(self):
+        module = load_self_report_module()
+        sent_payloads = []
+
+        def fake_send(_endpoint, _token, payload):
+            sent_payloads.append(dict(payload))
+            if len(sent_payloads) == 1:
+                raise ConnectionResetError("connection reset")
+            return 200, "{}"
+
+        with mock.patch.object(module, "send_payload", side_effect=fake_send), \
+                mock.patch.object(module.time, "sleep"):
+            status, _ = module.send_payload_with_retry(
+                "https://hub.example.test", "secret", {"machine": "node-a"})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(sent_payloads), 2)
+        self.assertEqual(sent_payloads[0]["report_id"], sent_payloads[1]["report_id"])
+        self.assertRegex(sent_payloads[0]["report_id"], r"^[0-9a-f]{32}$")
+
+    def test_retry_does_not_repeat_permanent_http_error(self):
+        module = load_self_report_module()
+        body = BytesIO(b"unauthorized")
+        error = urllib.error.HTTPError(
+            "https://hub.example.test/api/ingest", 401, "unauthorized", {}, body)
+        with mock.patch.object(module, "send_payload", side_effect=error) as send, \
+                mock.patch.object(module.time, "sleep") as sleep:
+            with self.assertRaises(urllib.error.HTTPError):
+                module.send_payload_with_retry(
+                    "https://hub.example.test", "secret", {"machine": "node-a"})
+
+        send.assert_called_once()
+        sleep.assert_not_called()
+        self.assertTrue(body.closed)
+
+    def test_retry_repeats_transient_http_error(self):
+        module = load_self_report_module()
+        unavailable = urllib.error.HTTPError(
+            "https://hub.example.test/api/ingest", 503, "unavailable", {}, None)
+        with mock.patch.object(module, "send_payload", side_effect=[unavailable, (200, "{}")]) as send, \
+                mock.patch.object(module.time, "sleep"):
+            status, _ = module.send_payload_with_retry(
+                "https://hub.example.test", "secret", {"machine": "node-a"})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(send.call_count, 2)
+
+    def test_retry_closes_transient_http_error_responses(self):
+        module = load_self_report_module()
+        body = BytesIO(b"unavailable")
+        error = urllib.error.HTTPError(
+            "https://hub.example.test/api/ingest", 503, "unavailable", {}, body)
+        with mock.patch.object(module, "send_payload", side_effect=[error, (200, "{}")]), mock.patch.object(module.time, "sleep"):
+            module.send_payload_with_retry(
+                "https://hub.example.test", "secret", {"machine": "node-a"})
+        self.assertTrue(body.closed)
+
+    def test_retry_does_not_repeat_tls_certificate_failure(self):
+        module = load_self_report_module()
+        error = ssl.SSLCertVerificationError("certificate verify failed")
+        with mock.patch.object(module, "send_payload", side_effect=error) as send, \
+                mock.patch.object(module.time, "sleep") as sleep:
+            with self.assertRaises(ssl.SSLCertVerificationError):
+                module.send_payload_with_retry(
+                    "https://hub.example.test", "secret", {"machine": "node-a"})
+
+        send.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_retry_does_not_repeat_invalid_url_error(self):
+        module = load_self_report_module()
+        error = http.client.InvalidURL("bad endpoint")
+        with mock.patch.object(module, "send_payload", side_effect=error) as send, \
+                mock.patch.object(module.time, "sleep") as sleep:
+            with self.assertRaises(http.client.InvalidURL):
+                module.send_payload_with_retry(
+                    "invalid://hub", "secret", {"machine": "node-a"})
+
+        send.assert_called_once()
+        sleep.assert_not_called()
 
     def test_dry_run_does_not_open_network(self):
         module = load_self_report_module()

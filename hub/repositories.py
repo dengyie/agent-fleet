@@ -51,10 +51,15 @@ class TaskRepository(Protocol):
 class ObservationRepository(Protocol):
     """Persistent observation store for per-machine push snapshots.
 
-    Wire payloads are preserved verbatim (plus the legacy ``_ts`` stamp).
+    History rows retain the sanitized observation plus internal timestamps and
+    an ingest receipt marker; public read models remove those internal fields.
     """
 
     def save_snapshot(self, machine: str, snapshot: dict) -> None: ...
+
+    def save_snapshot_once(
+        self, machine: str, snapshot: dict, report_id: str
+    ) -> bool: ...
 
     def read_current(self, machine: str) -> dict | None: ...
 

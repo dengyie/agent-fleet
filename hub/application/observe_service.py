@@ -14,6 +14,7 @@ this module free of Flask, request state, module-level path lookups, and any
 network/subprocess behavior.  The hub only processes pushed observations.
 """
 
+import re
 import time
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from report_schema import sanitize_agents, sanitize_instances, sanitize_system, 
 
 DEFAULT_STALE_AFTER_S = 300
 _HISTORY_LIMIT = 720
+_REPORT_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 _DIFF_AGENT_FIELDS = (
     "installed", "gateway_state", "deployed", "error",
@@ -158,6 +160,10 @@ class ObserveService:
             raise ObserveError("invalid_machine", "machine 字段缺失")
         if not isinstance(machine, str) or not MACHINE_NAME_RE.fullmatch(machine):
             raise ObserveError("invalid_machine", "machine 名不合法")
+        report_id = payload.get("report_id")
+        if "report_id" in payload and (
+                not isinstance(report_id, str) or not _REPORT_ID_RE.fullmatch(report_id)):
+            raise ObserveError("invalid_report_id", "report_id 不合法")
 
         remote_error = payload.get("error")
         if isinstance(remote_error, str):
@@ -177,6 +183,12 @@ class ObserveService:
         }
         old = self.repo.read_current(machine)
         changes = diff_snapshots(old, snapshot)
+        if report_id is None:
+            self.repo.save_snapshot(machine, snapshot)
+        else:
+            saved = self.repo.save_snapshot_once(machine, snapshot, report_id)
+            if not saved:
+                return {"ok": True, "changes": [], "duplicate": True}
         if changes:
             try:
                 self.publisher.emit(
@@ -184,7 +196,6 @@ class ObserveService:
                 )
             except Exception:
                 pass
-        self.repo.save_snapshot(machine, snapshot)
         return {"ok": True, "changes": changes}
 
     # -- read use cases ----------------------------------------------------
