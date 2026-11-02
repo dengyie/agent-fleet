@@ -480,6 +480,6 @@ class MuseRepository:
                          (json.dumps({'error': 'muse_dispatch_unknown'}), owner, account['account_id'],
                           time.time() - self._DISPATCH_STALE_SECONDS))
             self._prune_receipts(conn, owner, account['account_id'])
-            rows = conn.execute('SELECT request_id,action,state,result,created FROM receipts WHERE owner=? AND account_id=? ORDER BY created DESC LIMIT 50',
+            rows = conn.execute('SELECT request_id,action,state,created FROM receipts WHERE owner=? AND account_id=? ORDER BY created DESC LIMIT 50',
                                 (owner, account['account_id'])).fetchall()
-        return [{**dict(r), 'result': json.loads(r['result'])} for r in rows]
+        return [dict(row) for row in rows]

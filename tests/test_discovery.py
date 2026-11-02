@@ -290,3 +290,60 @@ def test_codex_native_path_finds_nested_rollout(tmp_path, monkeypatch):
                         else p)
     got = d._codex_native_path("codex app-server")
     assert got == str(new)
+
+
+@pytest.mark.parametrize('option', ['--session-id {id}', '--session-id={id}', '--resume {id}', '-r {id}', '--resume "{id}"'])
+def test_claude_native_path_matches_explicit_identity(tmp_path, monkeypatch, option):
+    import os
+    session_id = '11113dbd-8191-443c-89af-59dcfe2a0ea0'
+    project = tmp_path / 'project'; project.mkdir()
+    expected = project / (session_id + '.jsonl'); expected.write_text('{}\n', encoding='utf-8')
+    unrelated = project / 'another-session.jsonl'; unrelated.write_text('{}\n', encoding='utf-8')
+    os.utime(expected, (1000, 1000)); os.utime(unrelated, (2000, 2000))
+    monkeypatch.setattr(discovery.os.path, 'expanduser', lambda _: str(tmp_path))
+    # The identity is beyond the public 200-character cmdline bound.
+    cmdline = '"C:\\Program Files\\Claude\\claude.exe" --settings "' + 'x' * 220 + '" ' + option.format(id=session_id)
+    row = discovery.ProcRow('mango', 5, 5, 'claude.exe', cmdline, '2026-11-03T00:00:00Z')
+    assert discovery.native_path_for(row) == str(expected)
+
+
+@pytest.mark.parametrize('command', ['claude', 'claude --session-id missing', 'claude --resume missing'])
+def test_claude_never_binds_unrelated_recent_transcript(tmp_path, monkeypatch, command):
+    project = tmp_path / 'project'; project.mkdir()
+    (project / 'unrelated-missing-suffix.jsonl').write_text('{}\n', encoding='utf-8')
+    monkeypatch.setattr(discovery.os.path, 'expanduser', lambda _: str(tmp_path))
+    assert discovery._claude_native_path(command) is None
+
+
+def test_claude_duplicate_identity_is_unconfirmed(tmp_path, monkeypatch):
+    for name in ('a', 'b'):
+        project = tmp_path / name; project.mkdir()
+        (project / 'same.jsonl').write_text('{}\n', encoding='utf-8')
+    monkeypatch.setattr(discovery.os.path, 'expanduser', lambda _: str(tmp_path))
+    assert discovery._claude_native_path('claude --session-id same') is None
+
+
+def test_claude_identity_scan_exhaustion_does_not_guess(tmp_path, monkeypatch):
+    project = tmp_path / 'project'; project.mkdir()
+    (project / 'same.jsonl').write_text('{}\n', encoding='utf-8')
+    for index in range(513):
+        (tmp_path / f'other-{index}').mkdir()
+    monkeypatch.setattr(discovery.os.path, 'expanduser', lambda _: str(tmp_path))
+    assert discovery._claude_native_path('claude --resume same') is None
+
+
+@pytest.mark.parametrize('option', ['--fork-session', '--no-session-persistence'])
+def test_claude_new_identity_options_never_capture_old_session(tmp_path, monkeypatch, option):
+    project = tmp_path / 'project'; project.mkdir()
+    (project / 'same.jsonl').write_text('{}\n', encoding='utf-8')
+    monkeypatch.setattr(discovery.os.path, 'expanduser', lambda _: str(tmp_path))
+    assert discovery._claude_native_path('claude --resume same ' + option) is None
+
+
+def test_claude_exact_lookup_does_not_enumerate_historical_transcripts(tmp_path, monkeypatch):
+    project = tmp_path / 'project'; project.mkdir()
+    target = project / 'same.jsonl'; target.write_text('{}\n', encoding='utf-8')
+    for index in range(513):
+        (project / f'other-{index}.jsonl').write_text('{}\n', encoding='utf-8')
+    monkeypatch.setattr(discovery.os.path, 'expanduser', lambda _: str(tmp_path))
+    assert discovery._claude_native_path('claude --resume same') == str(target)

@@ -524,6 +524,33 @@ def app_with_remote(tmp_path):
     return app, service, remote
 
 
+def test_status_audit_is_bounded_summary_and_preserves_receipt_replay(tmp_path):
+    app, service, remote = app_with_remote(tmp_path)
+    repo = service.repository
+    try:
+        service.import_login('owner', LOGIN)
+        service.import_login('other-owner', LOGIN_B)
+        revision = repo.account('owner')['revision']
+        result = {'approval': {'status': 'approved'}, 'snapshot': {'text': '私密内容' * 12000}}
+        for index in range(50):
+            request_id = f'approval-{index}'
+            assert repo.claim('owner', request_id, 'auto_approve', {'index': index}, 'default', revision) is None
+            repo.finish('owner', request_id, 'confirmed', result, 'default', revision)
+        response = app.test_client().get('/api/platform/v1/muse/status')
+        assert response.status_code == 200
+        assert len(response.data) < 20 * 1024
+        assert b'snapshot' not in response.data and '私密内容'.encode() not in response.data
+        rows = response.json['audit']
+        assert len(rows) == 50
+        assert all(set(row) == {'request_id', 'action', 'state', 'created'} for row in rows)
+        assert repo.audit('other-owner') == []
+        # The summary projection must not truncate or alter the durable result.
+        replay = repo.claim('owner', 'approval-0', 'auto_approve', {'index': 0}, 'default', revision)
+        assert replay['state'] == 'confirmed' and replay['result'] == result
+    finally:
+        service.close()
+
+
 def test_routes_require_identity_origin_and_hide_credentials(tmp_path):
     app, service, remote = app_with_remote(tmp_path)
     client = app.test_client(); prefix = '/api/platform/v1/muse'
