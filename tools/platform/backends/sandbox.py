@@ -81,7 +81,8 @@ class SandboxBackend(DirectoryBackend):
         try:
             proc = run_bounded(command, cwd=self.root, env=env,
                                timeout_s=max(0.1, min(timeout_s, self.policy.timeout_seconds)),
-                               stdout_limit=MAX_OUTPUT_BYTES + 1, preexec_fn=self._preexec)
+                               stdout_limit=MAX_OUTPUT_BYTES + 1,
+                               preexec_fn=self._preexec if os.name == "posix" else None)
             output, truncated = decode_prefix(proc.stdout, MAX_OUTPUT_BYTES)
             return self._receipt(command_id, "succeeded" if proc.returncode == 0 else "failed",
                                  {"returncode": proc.returncode, "output": output},

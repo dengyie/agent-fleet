@@ -15,10 +15,14 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+
+import pytest
 
 from tools.probe import discovery
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ps timezone boundary")
 def test_process_start_time_is_utc_under_non_utc_parent_timezone():
     import datetime
     import os

@@ -1,6 +1,6 @@
 """Launch policy for every console child process the fleet spawns.
 
-Two Windows-only failure modes are decided here, once, instead of at each
+Windows-only failure modes are decided here, once, instead of at each
 call site:
 
 * **Visible flash windows.** A GUI-subsystem parent (``pythonw.exe``, a
@@ -15,6 +15,9 @@ call site:
   loses the whole output. Text-mode spawns therefore default to
   ``errors="replace"``. ``errors`` is only valid in text mode, so binary
   spawns are left untouched.
+* **Minimal environments.** Windows runtime initialization requires
+  ``SystemRoot`` even when the caller supplies a restricted environment.
+  Preserve this OS value without inheriting application credentials.
 
 Import :func:`run` / :func:`popen` in preference to ``subprocess.run`` /
 ``subprocess.Popen`` for anything that may execute on Windows;
@@ -41,6 +44,11 @@ def _launch_policy(kwargs):
     """Return ``kwargs`` with the hidden-window flag and lenient decode applied."""
     options = dict(kwargs)
     options["creationflags"] = int(options.get("creationflags", 0)) | NO_WINDOW
+    env = options.get("env")
+    if os.name == "nt" and env is not None and not any(key.upper() == "SYSTEMROOT" for key in env):
+        system_root = os.environ.get("SYSTEMROOT")
+        if system_root:
+            options["env"] = {**env, "SYSTEMROOT": system_root}
     text_mode = bool(
         options.get("text")
         or options.get("encoding")
