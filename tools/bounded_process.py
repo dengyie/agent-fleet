@@ -193,10 +193,13 @@ def _run_owned(argv: Sequence[str], cwd: Path, env: Mapping[str, str] | None,
             return subprocess.CompletedProcess(proc.args, proc.returncode, output, error)
         finally:
             if job is not None:
-                job.close()
-                # Assignment failure leaves an unstarted child outside the job.
-                if proc.poll() is None:
-                    proc.kill()
-                _wait_quietly(proc)
+                try:
+                    job.close()
+                finally:
+                    # Reap even if Job cleanup fails; an assignment failure
+                    # also leaves an unstarted child outside the Job.
+                    if proc.poll() is None:
+                        proc.kill()
+                    _wait_quietly(proc)
             else:
                 _reap_group(proc)

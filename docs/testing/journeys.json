@@ -460,6 +460,7 @@
         "tests/test_bounded_process.py::test_timeout_reaps_descendant_after_leader_exits",
         "tests/test_bounded_process.py::test_output_exit_and_owned_handle_cleanup",
         "tests/test_bounded_process.py::test_ownership_failure_never_runs_the_command",
+        "tests/test_bounded_process.py::test_job_cleanup_failure_still_reaps_child_and_retains_timeout",
         "tests/test_supervisor_control.py::AgentControlClientTestsTests::test_operator_terminate_has_bounded_grace_by_default",
         "tests/test_supervisor_process.py::RealProcessGroupTests::test_control_client_default_grace_allows_real_cleanup",
         "tests/test_discovery.py::test_process_start_time_is_utc_under_non_utc_parent_timezone",

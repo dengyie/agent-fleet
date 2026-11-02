@@ -88,3 +88,35 @@ def test_ownership_failure_never_runs_the_command(tmp_path: Path, monkeypatch) -
                      f"import pathlib;pathlib.Path({str(marker)!r}).write_text('ran')"],
                     cwd=tmp_path, timeout_s=5, stdout_limit=100)
     assert not marker.exists()
+
+
+def test_job_cleanup_failure_still_reaps_child_and_retains_timeout(tmp_path: Path, monkeypatch) -> None:
+    from tools import bounded_process
+
+    launch = bounded_process.popen_local
+    children = []
+
+    def spawn(*args, **kwargs):
+        proc = launch(*args, **kwargs)
+        if os.name != "nt":
+            proc._handle = 0
+        children.append(proc)
+        return proc
+
+    class FailedJob:
+        def start(self, process_handle: int) -> None:
+            return None
+
+        def close(self) -> None:
+            raise OSError("injected_job_cleanup_failure")
+
+    monkeypatch.setattr(bounded_process, "popen_local", spawn)
+    started = time.monotonic()
+    with pytest.raises(OSError, match="injected_job_cleanup_failure") as error:
+        bounded_process._run_owned(
+            [sys.executable, "-c", "import time;time.sleep(2)"], tmp_path, None,
+            started + 0.1, 0.1, 100, 100, {}, FailedJob(),
+        )
+    assert time.monotonic() - started < 1.5
+    assert isinstance(error.value.__context__, subprocess.TimeoutExpired)
+    assert children[0].poll() is not None
