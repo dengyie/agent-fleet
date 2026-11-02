@@ -164,6 +164,30 @@ def test_popen_binary_mode_never_forces_a_text_decoder():
     assert "errors" not in fake.call_args.kwargs
 
 
+def test_windows_minimal_environment_keeps_system_root_without_inheriting_secrets():
+    supplied = {"PATH": "fixed-path"}
+    with mock.patch.object(local_process.os, "name", "nt"), mock.patch.dict(
+            os.environ, {"SYSTEMROOT": r"C:\Windows", "FLEET_SECRET": "private"}, clear=True):
+        for wrapper, method in ((local_process.run, "run"), (local_process.popen, "Popen")):
+            with mock.patch.object(local_process.subprocess, method) as child:
+                wrapper(["fixed-command"], env=supplied)
+                assert child.call_args.kwargs["env"] == {"PATH": "fixed-path", "SYSTEMROOT": r"C:\Windows"}
+                assert supplied == {"PATH": "fixed-path"}
+
+
+def test_windows_explicit_system_root_is_case_insensitive():
+    with mock.patch.object(local_process.os, "name", "nt"), mock.patch.dict(
+            os.environ, {"SYSTEMROOT": r"C:\Windows"}, clear=True):
+        supplied = {"SystemRoot": r"D:\Windows"}
+        assert local_process._launch_policy({"env": supplied})["env"] == supplied
+
+
+def test_posix_minimal_environment_is_not_expanded():
+    with mock.patch.object(local_process.os, "name", "posix"), mock.patch.dict(
+            os.environ, {"SYSTEMROOT": r"C:\Windows"}, clear=True):
+        assert local_process._launch_policy({"env": {}})["env"] == {}
+
+
 def test_resolve_bash_never_returns_the_wsl_launcher():
     if os.name != "nt":
         return  # POSIX has no WSL/Store shim to avoid

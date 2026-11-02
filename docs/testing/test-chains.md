@@ -8,6 +8,10 @@ POSIX 传入资源限制 `preexec_fn`；Windows 继续要求显式 launcher 承�
 中的其他 Python 版本污染 stderr。POSIX `ps` 时区测试只在 POSIX 执行；Windows
 验证 CIM 发现，不把该平台 skip 用于放宽 Linux 完整门禁。
 
+所有 Windows 子进程的显式最小环境保留 OS 的 `SystemRoot`，避免 Python 3.10
+随机数初始化失败；不继承其他宿主环境变量，调用方的大小写变体与原始映射保持不变。
+UTF-8 文件夹具显式指定编码，Windows 非 UTF-8 locale 同样验证多字节截断。
+
 Windows 有界执行以 suspended 状态创建子进程，加入带
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Job Object 后才恢复执行；所有退出路径
 关闭 Job，从而在 leader 已退出时仍清理持有管道的后代。加入 Job 失败不会执行命令。
