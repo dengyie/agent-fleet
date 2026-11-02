@@ -116,6 +116,7 @@ class AdoptionService:
 
 ### 3.4 关键边界纪律
 
+- Claude 原生 transcript 仅按进程完整命令行中的 `--session-id` / `--resume` / `-r` 明确 ID 匹配各 project 直属的完整文件名；最多检查 512 个 project 条目，不遍历历史文件或 subagent。无 ID、缺失、重复、fork/不持久化或预算耗尽均返回无路径，不能用最近修改时间关联另一个会话。进程控制身份检查不变。
 - `AdoptionRepository` 独立 DB,与 session/transcript/observation/task 分库,任一失效不影响其余。
 - `report_schema.validate_instances` 用与 `validate_event` 同款的字段白名单 + 家族枚举,cmdline 走截断 + 脱敏再入库与展示。
 - 新动作码 `adopt`/`detach` 加入现有 bounded 错误码固定集,前端只比对这些码。

@@ -552,16 +552,45 @@ def _codex_native_path(cmdline: str) -> str | None:
 
 
 def _claude_native_path(cmdline: str) -> str | None:
-    resume = _resume_token(cmdline)
+    # A recent file belongs to whichever process wrote it, not necessarily
+    # this process. Only an explicit, exact identity can bind a transcript.
+    tokens = _argv_tokens(cmdline or "")
+    session_id = None
+    for index, token in enumerate(tokens):
+        if token == "--":
+            break
+        if token in ("--fork-session", "--no-session-persistence"):
+            return None
+        option, separator, value = token.partition("=")
+        if option not in ("--session-id", "--resume", "-r"):
+            continue
+        value = value.strip('\"\'') if separator else (tokens[index + 1] if index + 1 < len(tokens) else "")
+        if session_id is not None or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
+            return None
+        session_id = value
+    if session_id is None:
+        return None
     base = os.path.expanduser("~/.claude/projects")
-    if resume:
-        # Claude uses a project-encoded path; best-effort: match the newest
-        # file whose stem contains the resume token within a bounded scan.
-        found = _most_recent_native(base, ".jsonl", depth=2,
-                                    name_contains=resume.lower())
-        if found:
-            return found
-    return _most_recent_native(base, ".jsonl", depth=2)
+    found = None
+    try:
+        # Primary sessions live directly in each project directory. Probe the
+        # exact filename without enumerating every historical transcript or
+        # descending into subagent sessions. Reject ambiguity across projects.
+        with os.scandir(base) as projects:
+            for scanned, project in enumerate(projects, 1):
+                if scanned > 512:
+                    return None
+                if not project.is_dir(follow_symlinks=False):
+                    continue
+                candidate = os.path.join(project.path, session_id + ".jsonl")
+                if os.path.islink(candidate) or not os.path.isfile(candidate):
+                    continue
+                if found is not None:
+                    return None
+                found = candidate
+    except OSError:
+        return None
+    return found
 
 
 # Family-specific native path resolvers above; families WITHOUT dedicated
