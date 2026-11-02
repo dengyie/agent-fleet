@@ -186,3 +186,18 @@ macOS 上依赖 `/proc` 和真实 stop/resume 的测试可能跳过；保留具�
 `MUSE-WORKSPACE` 将独立 Noise 协议对端、私有加密 SQLite、真实账号 HTTP 边界和 Chromium 页面连起来：登录导入、owner 隔离、原生 side chat、独立草稿、截图/文件卡片、单次审批、撤销及未知投递不重放。协议测试不依赖 Muse 服务，UI fixture 替换远端响应，不证明上游兼容性。
 
 `MUSE-LIVE` 对应新的无浏览器客户端：2026-10-14 用户授权的一次专用子会话发送，经过新进程读取确认 `FLEET_OK`，详见 [Muse 工作区验收](../platform/muse-workspace.md#验证)。真实自动审批未执行，仍以隔离夹具证明其范围与去重；本地门禁不得自动把外部检查标记成发布验收通过。
+
+
+2026-11-03 control regressions: ADOPT-01 exercises the real operator control and
+supervisor receipt HTTP routes with SQLite. Confirmed terminate receipts close
+managed session status/state/finished_at together. Projection failure returns 503,
+retains a durable pending flag in the command transaction, and is reconciled in
+bounded batches of 100 by the existing authenticated machine poll after restart;
+no command is redelivered. Replay uses the first stored reason; detach, pause,
+failed and escape_unverified outcomes keep live sessions open. SESSION-01 verifies
+a real TERM handler finishes cleanup within ControlClient's default 5-second
+grace and validates UTC process creation under a non-UTC parent timezone. Old
+adoption identities recorded with incorrect local-time Z suffixes are not
+rewritten: identity guards fail closed and an operator must detach/re-adopt.
+
+确认退出回执早于 session_start 时保留投影待办；缺失会话退避 30 秒再尝试，索引按机器和到期时间选择，每次至多 100 条，避免长期缺失的前一批阻塞后续会话。回归覆盖 101 条确认退出、前 100 条会话缺失，以及迟到会话在退避到期后关闭；终态命令始终不再下发。

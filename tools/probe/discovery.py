@@ -54,11 +54,12 @@ POWERSHELL_TIMEOUT_S = 15.0
 # Fixed bounded code for whole-discovery failure; callers branch on it.
 DISCOVERY_ERROR_CODE = "discovery_error"
 
-# Minimal neutral environment so ``ps -o lstart`` output is locale-independent
+# Minimal neutral environment so ``ps -o lstart`` output is UTC and locale-independent
 # (C / POSIX weekday-month names) and no caller secrets reach the child.
 _PS_ENV = {
     "LANG": "C",
     "LC_ALL": "C",
+    "TZ": "UTC",
     "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
 }
 
@@ -266,7 +267,7 @@ def _iter_lines(text: str) -> Iterator[str]:
 
 
 def _lstart_to_iso(tokens: list[str]) -> str:
-    """Convert C-locale ``lstart`` tokens to ``YYYY-MM-DDTHH:MM:SSZ``."""
+    """Format UTC C-locale tokens collected with ``_PS_ENV``."""
     text = " ".join(tokens)
     for fmt in ("%a %b %d %H:%M:%S %Y", "%b %d %H:%M:%S %Y"):
         try:

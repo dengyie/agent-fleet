@@ -1510,6 +1510,41 @@ class RealProcessGroupTests(unittest.TestCase):
         outcome = sv.terminate_session(m.session_id, grace_s=1.0)
         self.assertIn(outcome, ("terminated", "terminated_forced"))
 
+    def test_control_client_default_grace_allows_real_cleanup(self):
+        from hub.domain.control import generate_ed25519_keypair
+        from tools.supervisor.control_client import ControlClient
+
+        ready = self.dir / "grace-ready"
+        cleaned = self.dir / "grace-cleaned"
+        script = (
+            "import pathlib,signal,time,sys\n"
+            "def shutdown(*args):\n"
+            "    time.sleep(0.2)\n"
+            f"    pathlib.Path({str(cleaned)!r}).write_text('cleaned')\n"
+            "    sys.exit(0)\n"
+            "signal.signal(signal.SIGTERM,shutdown)\n"
+            f"pathlib.Path({str(ready)!r}).write_text('ready')\n"
+            "time.sleep(30)\n"
+        )
+        sv = self._real_sv("client-grace")
+        m = sv.launch(agent="codex", command=_py(script), cwd=str(self.dir),
+                      env_allowlist={}, session_id=_sid(), attempt_id=None)
+        _, public = generate_ed25519_keypair()
+        client = ControlClient(hub_url="https://unused.invalid", machine_id="host",
+                               credential="test-only", hub_public_key=public,
+                               public_supervisor=sv)
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists())
+            status, reason = client._execute("terminate_session", "test-grace", m.session_id)
+            self.assertEqual((status, reason), ("succeeded", "terminated"))
+            self.assertEqual(cleaned.read_text(), "cleaned")
+        finally:
+            if sv._handle_of(m.session_id) is not None:
+                sv.terminate_session(m.session_id, grace_s=0)
+
     def test_real_forced_terminate_after_grace(self):
         sv = self._real_sv("real")
         ready = self.dir / "ready"

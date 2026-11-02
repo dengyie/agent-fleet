@@ -44,6 +44,75 @@ def test_supervisor_command_store_is_private_under_permissive_umask(tmp_path):
     assert (root / "commands.db").stat().st_mode & 0o777 == 0o600
 
 
+def test_terminal_session_projection_is_transactional_and_machine_scoped(tmp_path):
+    repo = SupervisorCommandRepository(tmp_path / 'commands.db')
+    service = SupervisorService(signing_key=b'k' * 32, command_repository=repo)
+    cid = service.enqueue('machine', 'session', None, 'terminate_session', 'test')['command_id']
+    with sqlite3.connect(repo.db_path) as conn:
+        conn.execute("CREATE TRIGGER fail_receipt_audit BEFORE INSERT ON supervisor_audit_events "
+                     "BEGIN SELECT RAISE(ABORT,'audit unavailable'); END")
+    from hub.application.supervisor_service import SupervisorServiceError
+    with pytest.raises(SupervisorServiceError):
+        service.receipt(cid, 'succeeded', 'terminated', machine='machine')
+    assert service.pending_session_projections('machine') == []
+    assert service.command_status(cid) == 'queued'
+    with sqlite3.connect(repo.db_path) as conn:
+        conn.execute('DROP TRIGGER fail_receipt_audit')
+    service.receipt(cid, 'succeeded', 'terminated', machine='machine')
+    assert service.pending_session_projections('other-machine') == []
+    assert [row['command_id'] for row in service.pending_session_projections('machine')] == [cid]
+    service.receipt(cid, 'failed', 'escape_unverified', machine='machine')
+    assert service.pending_session_projections('machine')[0]['reason'] == 'terminated'
+    assert service.poll('machine') == []
+    repo.complete_session_projection(cid)
+    assert service.pending_session_projections('machine') == []
+
+
+def test_legacy_terminal_receipts_are_backfilled_once_for_session_projection(tmp_path):
+    repo = SupervisorCommandRepository(tmp_path / 'commands.db')
+    service = SupervisorService(signing_key=b'k' * 32, command_repository=repo)
+    success = service.enqueue('machine', 'session', None, 'terminate_session', 'test')['command_id']
+    failed = service.enqueue('machine', 'other-session', None, 'terminate_session', 'test')['command_id']
+    service.receipt(success, 'succeeded', 'terminated_forced', machine='machine')
+    service.receipt(failed, 'succeeded', 'escape_unverified', machine='machine')
+    # Reconstruct the exact pre-migration table shape while retaining real rows.
+    with sqlite3.connect(repo.db_path) as conn:
+        conn.execute('DROP INDEX idx_supervisor_session_projection')
+        conn.execute('ALTER TABLE supervisor_commands DROP COLUMN session_projection_retry_s')
+        conn.execute('ALTER TABLE supervisor_commands DROP COLUMN session_projection_pending')
+    repo.init()
+    pending = service.pending_session_projections('machine')
+    assert [row['command_id'] for row in pending] == [success]
+    repo.complete_session_projection(success)
+    repo.init()
+    assert service.pending_session_projections('machine') == []
+    assert service.poll('machine') == []
+
+
+def test_missing_sessions_cannot_starve_later_projection_batches(tmp_path):
+    from hub.application.control_router import SupervisorReceiptHook
+    from hub.infrastructure.session_repository import SessionRepository
+
+    now = [1000.0]
+    commands = SupervisorCommandRepository(tmp_path / 'commands.db')
+    service = SupervisorService(signing_key=b'k' * 32, command_repository=commands,
+                                now_fn=lambda: now[0])
+    sessions = SessionRepository(tmp_path / 'sessions.db')
+    sessions.init()
+    for i in range(101):
+        cid = service.enqueue('machine', f'session_{i}', None,
+                              'terminate_session', 'test')['command_id']
+        service.receipt(cid, 'succeeded', 'terminated', machine='machine')
+        now[0] += 1
+    sessions.upsert_session({'session_id': 'session_100', 'machine_id': 'machine',
+                             'managed': True, 'process_group_id': 'group'})
+    hook = SupervisorReceiptHook(service, None, session_repo=sessions)
+    assert hook.poll('machine') == []
+    assert sessions.get_session('session_100')['status'] == 'running'
+    assert hook.poll('machine') == []
+    assert sessions.get_session('session_100')['status'] == 'closed'
+
+
 def test_deployment_runtime_gate_rejects_missing_muse_transport(monkeypatch):
     import builtins
     from deploy import auto_deploy_container

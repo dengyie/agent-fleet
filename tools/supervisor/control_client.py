@@ -276,7 +276,7 @@ class ControlClient:
         transport: Callable[[str, Any, Mapping[str, str]], tuple[int, Any]] | None = None,
         nonce_store: NonceStore | None = None,
         max_clock_skew_s: float = 300.0,
-        terminate_grace_s: float = 0.0,
+        terminate_grace_s: float = 5.0,
         bridge_factory: Callable[[dict], Any] | None = None,
         spool: Any | None = None,
         spool_root: str | os.PathLike | None = None,
