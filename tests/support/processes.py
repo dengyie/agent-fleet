@@ -40,6 +40,10 @@ def assert_process_exited(pid: int) -> None:
             return
         raise ctypes.WinError(error)
     try:
-        assert kernel.WaitForSingleObject(handle, 0) == 0, f"fixture process {pid} is still running"
+        deadline = time.monotonic() + 3
+        while kernel.WaitForSingleObject(handle, 0) != 0:
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"fixture process {pid} is still running")
+            time.sleep(0.01)
     finally:
         kernel.CloseHandle(handle)

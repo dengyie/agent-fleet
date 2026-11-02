@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import time
 from ctypes import wintypes
 
 
@@ -30,6 +31,15 @@ class _ExtendedLimits(ctypes.Structure):
     ]
 
 
+class _Accounting(ctypes.Structure):
+    _fields_ = [
+        ("user_time", ctypes.c_int64), ("kernel_time", ctypes.c_int64),
+        ("period_user_time", ctypes.c_int64), ("period_kernel_time", ctypes.c_int64),
+        ("page_faults", wintypes.DWORD), ("total", wintypes.DWORD),
+        ("active", wintypes.DWORD), ("terminated", wintypes.DWORD),
+    ]
+
+
 class WindowsJob:
     """KILL_ON_JOB_CLOSE ownership; assignment must precede child execution."""
 
@@ -43,6 +53,13 @@ class WindowsJob:
         self._kernel.SetInformationJobObject.restype = wintypes.BOOL
         self._kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
         self._kernel.AssignProcessToJobObject.restype = wintypes.BOOL
+        self._kernel.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        self._kernel.TerminateJobObject.restype = wintypes.BOOL
+        self._kernel.QueryInformationJobObject.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        self._kernel.QueryInformationJobObject.restype = wintypes.BOOL
         self._kernel.CloseHandle.argtypes = [wintypes.HANDLE]
         self._kernel.CloseHandle.restype = wintypes.BOOL
         self._handle = self._kernel.CreateJobObjectW(None, None)
@@ -67,6 +84,22 @@ class WindowsJob:
             raise OSError("windows_child_resume_failed")
 
     def close(self) -> None:
-        if self._handle is not None:
-            self._kernel.CloseHandle(self._handle)
-            self._handle = None
+        if self._handle is None:
+            return
+        handle, self._handle = self._handle, None
+        try:
+            if not self._kernel.TerminateJobObject(handle, 1):
+                raise ctypes.WinError(ctypes.get_last_error())
+            accounting = _Accounting()
+            deadline = time.monotonic() + 2
+            while True:
+                if not self._kernel.QueryInformationJobObject(
+                        handle, 1, ctypes.byref(accounting), ctypes.sizeof(accounting), None):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if accounting.active == 0:
+                    return
+                if time.monotonic() >= deadline:
+                    raise OSError("windows_job_exit_unconfirmed")
+                time.sleep(0.01)
+        finally:
+            self._kernel.CloseHandle(handle)
