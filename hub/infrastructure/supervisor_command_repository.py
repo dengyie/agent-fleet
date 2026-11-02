@@ -135,6 +135,28 @@ class SupervisorCommandRepository:
                 );
                 """
             )
+            conn.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in conn.execute(
+                "PRAGMA table_info(supervisor_commands)")}
+            if "session_projection_pending" not in columns:
+                conn.execute("ALTER TABLE supervisor_commands ADD COLUMN"
+                             " session_projection_pending INTEGER NOT NULL DEFAULT 0")
+                # Backfill confirmed exits once, including sessions left active
+                # by older releases. No command is delivered or executed again.
+                conn.execute("UPDATE supervisor_commands SET session_projection_pending=1"
+                             " WHERE action IN ('terminate_session','cancel_attempt') AND ("
+                             " (receipt_status='succeeded' AND receipt_reason IN"
+                             " ('terminated','terminated_forced')) OR"
+                             " (receipt_status='already_finished' AND receipt_reason IN"
+                             " ('already_finished','no_live_process')))")
+            if "session_projection_retry_s" not in columns:
+                conn.execute("ALTER TABLE supervisor_commands ADD COLUMN"
+                             " session_projection_retry_s REAL NOT NULL DEFAULT 0")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_supervisor_session_projection"
+                         " ON supervisor_commands(machine_id,session_projection_retry_s,"
+                         "issued_s,command_id)"
+                         " WHERE session_projection_pending=1")
+            conn.commit()
         except (sqlite3.Error, OSError) as exc:
             raise SupervisorCommandRepositoryError("command_unavailable") from exc
         finally:
@@ -407,8 +429,16 @@ class SupervisorCommandRepository:
             first = not bool(row["receipt_status"]) and advances
             if advances:
                 conn.execute("UPDATE supervisor_commands SET status=?, receipt_status=?, "
-                             "receipt_reason=?, lease_until_s=0 WHERE command_id=?",
-                             (status, receipt_status, receipt_reason[:120], command_id))
+                             "receipt_reason=?, lease_until_s=0,"
+                             "session_projection_pending=CASE WHEN"
+                             " action IN ('terminate_session','cancel_attempt') AND ("
+                             " (?='succeeded' AND ? IN ('terminated','terminated_forced')) OR"
+                             " (?='already_finished' AND ? IN ('already_finished','no_live_process')))"
+                             " THEN 1 ELSE 0 END,session_projection_retry_s=0"
+                             " WHERE command_id=?",
+                             (status, receipt_status, receipt_reason[:120],
+                              receipt_status, receipt_reason, receipt_status, receipt_reason,
+                              command_id))
                 row = conn.execute("SELECT * FROM supervisor_commands WHERE command_id=?",
                                    (command_id,)).fetchone()
                 if audit_row is not None:
@@ -417,6 +447,48 @@ class SupervisorCommandRepository:
             return self._decode(row), first  # type: ignore[return-value]
         except (sqlite3.Error, OSError) as exc:
             conn.rollback()
+            raise SupervisorCommandRepositoryError("command_unavailable") from exc
+        finally:
+            conn.close()
+
+    def pending_session_projections(self, machine: str,
+                                    now_s: float) -> list[dict[str, Any]]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT command_id,session_id,machine_id,action,receipt_status,receipt_reason"
+                " FROM supervisor_commands WHERE machine_id=? AND session_projection_pending=1"
+                " AND session_projection_retry_s<=?"
+                " ORDER BY session_projection_retry_s,issued_s,command_id LIMIT 100",
+                (machine, now_s)).fetchall()
+            return [{"command_id": row["command_id"], "session_id": row["session_id"],
+                     "machine_id": row["machine_id"], "action": row["action"],
+                     "status": row["receipt_status"], "reason": row["receipt_reason"]}
+                    for row in rows]
+        except (sqlite3.Error, OSError) as exc:
+            raise SupervisorCommandRepositoryError("command_unavailable") from exc
+        finally:
+            conn.close()
+
+    def defer_session_projection(self, command_id: str,
+                                 retry_at_s: float) -> None:
+        conn = self._connect()
+        try:
+            conn.execute("UPDATE supervisor_commands SET session_projection_retry_s=?"
+                         " WHERE command_id=? AND session_projection_pending=1",
+                         (retry_at_s, command_id))
+        except (sqlite3.Error, OSError) as exc:
+            raise SupervisorCommandRepositoryError("command_unavailable") from exc
+        finally:
+            conn.close()
+
+    def complete_session_projection(self, command_id: str) -> None:
+        conn = self._connect()
+        try:
+            conn.execute("UPDATE supervisor_commands SET session_projection_pending=0,"
+                         "session_projection_retry_s=0"
+                         " WHERE command_id=?", (command_id,))
+        except (sqlite3.Error, OSError) as exc:
             raise SupervisorCommandRepositoryError("command_unavailable") from exc
         finally:
             conn.close()

@@ -386,6 +386,140 @@ class _E2E:
         return self.adoptions.transcripts.read_audit()
 
 
+def test_operator_terminate_receipt_closes_session_summary(e2e):
+    row = e2e.adopted_session()
+    e2e.ingest_native_line("running", session_id=row.session_id)
+    repo = e2e.sessions.session_repo
+    assert repo.get_session(row.session_id)["status"] == "running"
+    response = e2e.app.post(
+        f"/api/adoption/{row.session_id}/source/control",
+        json={"action": "terminate_session", "reason_code": "test"},
+        headers=operator_headers())
+    assert response.status_code == 202
+    cid = response.get_json()["command_id"]
+    response = e2e.app.post('/api/supervisor/receipts', json={
+        'command_id': cid, 'status': 'succeeded', 'reason': 'terminated_forced'},
+        headers={'X-Supervisor-Credential': f'{MACHINE}:{SUP_SECRET}'})
+    assert response.status_code == 200, response.get_json()
+    closed = repo.get_session(row.session_id)
+    assert closed['status'] == 'closed'
+    assert closed['current_state'] == 'stopped'
+    assert closed['finished_at']
+    first_finished_at = closed['finished_at']
+    repo.update_agent_state(row.session_id, 'running', 'native_transcript', 'medium', 999)
+    assert repo.get_session(row.session_id)['current_state'] == 'stopped'
+    replay = e2e.app.post('/api/supervisor/receipts', json={
+        'command_id': cid, 'status': 'failed', 'reason': 'escape_unverified'},
+        headers={'X-Supervisor-Credential': f'{MACHINE}:{SUP_SECRET}'})
+    assert replay.status_code == 200
+    assert replay.get_json()['receipt']['reason'] == 'terminated_forced'
+    assert repo.get_session(row.session_id)['finished_at'] == first_finished_at
+
+
+def test_failed_session_projection_recovers_on_poll_after_hub_restart(e2e, monkeypatch):
+    import sqlite3
+    from hub.application.control_router import SupervisorReceiptHook
+    from hub.application.supervisor_service import SupervisorService
+    from hub.infrastructure.supervisor_command_repository import SupervisorCommandRepository
+
+    row = e2e.adopted_session()
+    e2e.ingest_native_line("running", session_id=row.session_id)
+    repo = e2e.sessions.session_repo
+    response = e2e.app.post(
+        f"/api/adoption/{row.session_id}/source/control",
+        json={"action": "terminate_session", "reason_code": "test"},
+        headers=operator_headers())
+    cid = response.get_json()["command_id"]
+    original = repo.finish_managed_session
+
+    def fail(*args):
+        raise sqlite3.OperationalError("projection store unavailable")
+
+    monkeypatch.setattr(repo, "finish_managed_session", fail)
+    response = e2e.app.post('/api/supervisor/receipts', json={
+        'command_id': cid, 'status': 'succeeded', 'reason': 'terminated'},
+        headers={'X-Supervisor-Credential': f'{MACHINE}:{SUP_SECRET}'})
+    assert response.status_code == 503
+    assert repo.get_session(row.session_id)['status'] == 'running'
+    monkeypatch.setattr(repo, "finish_managed_session", original)
+    current = e2e.app.extensions['fleet']['services']['supervisor']
+    recovered = SupervisorReceiptHook(
+        SupervisorService(signing_key=current._inner._signing_key,
+                          command_repository=SupervisorCommandRepository(
+                              current._inner._command_repository.db_path)),
+        None, session_repo=repo)
+    assert recovered.poll(MACHINE) == []
+    closed = repo.get_session(row.session_id)
+    assert closed['status'] == 'closed'
+    assert closed['current_state'] == 'stopped'
+    assert recovered._inner.pending_session_projections(MACHINE) == []
+
+
+def test_termination_before_session_start_recovers_without_command_replay(e2e, monkeypatch):
+    row = e2e.adopted_session()
+    repo = e2e.sessions.session_repo
+    assert repo.get_session(row.session_id) is None
+    response = e2e.app.post(
+        f"/api/adoption/{row.session_id}/source/control",
+        json={"action": "terminate_session", "reason_code": "test"},
+        headers=operator_headers())
+    assert response.status_code == 202
+    cid = response.get_json()["command_id"]
+    supervisor = e2e.app.extensions['fleet']['services']['supervisor']
+    now = [1000.0]
+    monkeypatch.setattr(supervisor._inner, '_now_fn', lambda: now[0])
+    response = e2e.app.post('/api/supervisor/receipts', json={
+        'command_id': cid, 'status': 'succeeded', 'reason': 'terminated'},
+        headers={'X-Supervisor-Credential': f'{MACHINE}:{SUP_SECRET}'})
+    assert response.status_code == 200, response.get_json()
+    assert supervisor.poll(MACHINE) == []
+    assert supervisor._inner.pending_session_projections(MACHINE) == []
+    now[0] += 30
+    assert [command['command_id'] for command in
+            supervisor._inner.pending_session_projections(MACHINE)] == [cid]
+    e2e.ingest_native_line('late transcript', session_id=row.session_id)
+    assert supervisor.poll(MACHINE) == []
+    closed = repo.get_session(row.session_id)
+    assert closed['status'] == 'closed'
+    assert closed['current_state'] == 'stopped'
+    assert supervisor._inner.pending_session_projections(MACHINE) == []
+
+
+def test_detach_receipt_keeps_live_session_open(e2e):
+    row = e2e.adopted_session()
+    e2e.ingest_native_line("running", session_id=row.session_id)
+    e2e.operator_delete(row.session_id)
+    e2e.probe_poll_and_receipt()
+    active = e2e.sessions.session_repo.get_session(row.session_id)
+    assert active['status'] == 'running'
+    assert active['finished_at'] is None
+    assert e2e.process.signals == []
+
+
+@pytest.mark.parametrize('action,status,reason', [
+    ('pause_session', 'succeeded', 'paused'),
+    ('resume_session', 'succeeded', 'running'),
+    ('terminate_session', 'failed', 'escape_unverified'),
+    ('terminate_session', 'succeeded', 'escape_unverified'),
+    ('terminate_session', 'rejected', 'pid_reused'),
+])
+def test_non_termination_receipts_never_close_session(e2e, action, status, reason):
+    row = e2e.adopted_session()
+    e2e.ingest_native_line("running", session_id=row.session_id)
+    response = e2e.app.post(
+        f"/api/adoption/{row.session_id}/source/control",
+        json={"action": action, "reason_code": "test"}, headers=operator_headers())
+    cid = response.get_json()['command_id']
+    for incoming_reason in (reason, 'terminated'):
+        response = e2e.app.post('/api/supervisor/receipts', json={
+            'command_id': cid, 'status': status, 'reason': incoming_reason},
+            headers={'X-Supervisor-Credential': f'{MACHINE}:{SUP_SECRET}'})
+        assert response.status_code == 200, response.get_json()
+    active = e2e.sessions.session_repo.get_session(row.session_id)
+    assert active['status'] == 'running'
+    assert active['finished_at'] is None
+
+
 @pytest.fixture
 def e2e(tmp_path):
     _root = tmp_path

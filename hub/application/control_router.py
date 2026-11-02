@@ -324,37 +324,74 @@ class ControlRouter:
 
 
 class SupervisorReceiptHook:
-    """Thin additive wrapper notifying the router AND adoption service.
+    """Fan canonical receipts out and recover durable session projections.
 
-    Only ``receipt`` is special-cased; every other attribute is forwarded to
-    the inner ``SupervisorService``, so the Task 9 supervisor surface and its
-    poll/enqueue/audit contracts stay fully intact for the rest of the system.
-    Task 12 fans EVERY recorded receipt to the adoption service too (its
-    ``on_supervisor_receipt`` closure stays inert for commands it never
-    issued).  The adoption consumer is optional: when absent the receipt flow
-    is byte-identical to Task 10.
+    Confirmed termination closes the managed summary before consumers settle.
+    The existing machine poll retries pending projections after a store failure
+    or Hub restart, without returning those terminal commands to the client.
     """
 
     def __init__(self, inner: SupervisorService,
                  router: ControlRouter | None,
-                 adoption=None) -> None:
+                 adoption=None, *, session_repo=None) -> None:
         self._inner = inner
         self._router = router
         self._adoptions = adoption
+        self._session_repo = session_repo
 
     def set_adoption(self, adoption) -> None:
         """Attach the (optional) adoption-service receipt consumer."""
         self._adoptions = adoption
 
+    def poll(self, machine: str, *, max_commands: int = 20) -> list[dict]:
+        if self._session_repo is not None:
+            for command in self._inner.pending_session_projections(machine):
+                self._project_session(command)
+        return self._inner.poll(machine, max_commands=max_commands)
+
+    def _project_session(self, command: Mapping[str, Any]) -> None:
+        confirmed = (
+            command["status"] == "succeeded"
+            and command["reason"] in ("terminated", "terminated_forced")
+        ) or (
+            command["status"] == "already_finished"
+            and command["reason"] in ("already_finished", "no_live_process")
+        )
+        if (command["action"] not in ("terminate_session", "cancel_attempt")
+                or not confirmed):
+            return
+        finished_at = datetime.now(timezone.utc).isoformat().replace(
+            "+00:00", "Z")
+        try:
+            session = self._session_repo.finish_managed_session(
+                command["session_id"], finished_at)
+        except Exception as exc:
+            raise SupervisorServiceError(
+                "session_projection_unavailable", "", 503) from exc
+        if session is None:
+            # The bridge may upload its session_start after the receipt. Keep
+            # the pending marker and let later batches progress in the meantime.
+            self._inner.defer_session_projection(command["command_id"])
+            return
+        self._inner.complete_session_projection(command["command_id"])
+
     def receipt(self, command_id: str, status: str, reason: str = "",
                 *, machine: str | None = None) -> dict:
         result = self._inner.receipt(command_id, status, reason, machine=machine)
+        # Read identity and outcome from the durable command, never the
+        # incoming replay or the adoption service's volatile tracking map.
+        # A committed receipt may be replayed after a projection failure or
+        # Hub restart; the atomic session finalizer is safe to repeat.
+        if self._session_repo is not None:
+            command = self._inner.receipt_status(command_id)
+            self._project_session(command)
+        canonical_status = str(result.get("status") or "")
+        canonical_reason = str(result.get("reason") or "")
         if self._router is not None:
             try:
                 self._router.on_supervisor_receipt(
                     command_id,
-                    status=str(result.get("status") or status),
-                    reason=reason or str(result.get("reason") or ""))
+                    status=canonical_status, reason=canonical_reason)
             except Exception:
                 pass
         if self._adoptions is not None:
@@ -363,8 +400,7 @@ class SupervisorReceiptHook:
                 # receipt replays the original (idempotency is replayed here).
                 self._adoptions.on_supervisor_receipt(
                     command_id,
-                    status=str(result.get("status") or status),
-                    reason=reason or str(result.get("reason") or ""))
+                    status=canonical_status, reason=canonical_reason)
             except AdoptionRepositoryError:
                 # A genuine store failure is NOT a stray receipt: it must
                 # reach the hub's 500-protect handler (bounded) instead of

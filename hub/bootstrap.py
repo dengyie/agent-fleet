@@ -541,7 +541,7 @@ def create_app(
             session_repo=session_repo,
         )
         supervisor_service = SupervisorReceiptHook(
-            supervisor_service, control_router)
+            supervisor_service, control_router, session_repo=session_repo)
         task_service.cancel_router = control_router
 
     # Task 6: operator adoption (纳管) wiring.  Additive and gated by
@@ -588,7 +588,7 @@ def create_app(
 
         if not isinstance(supervisor_service, SupervisorReceiptHook):
             supervisor_service = SupervisorReceiptHook(
-                supervisor_service, None)
+                supervisor_service, None, session_repo=session_repo)
         adoption_service = AdoptionService(
             observation_repository, adoption_repo, supervisor_service,
             transcript_repo)

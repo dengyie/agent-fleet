@@ -456,7 +456,12 @@
         "tests/test_workspace_output_bounds.py::test_read_exact_limit_distinguishes_truncation",
         "tests/test_workspace_output_bounds.py::test_failed_command_preserves_exit_and_bounded_stderr",
         "tests/test_workspace_output_bounds.py::test_workspace_timeout_reaps_process",
-        "tests/test_workspace_output_bounds.py::test_invalid_utf8_replacements_remain_within_byte_limit"
+        "tests/test_workspace_output_bounds.py::test_invalid_utf8_replacements_remain_within_byte_limit",
+        "tests/test_supervisor_control.py::AgentControlClientTestsTests::test_operator_terminate_has_bounded_grace_by_default",
+        "tests/test_supervisor_process.py::RealProcessGroupTests::test_control_client_default_grace_allows_real_cleanup",
+        "tests/test_discovery.py::test_process_start_time_is_utc_under_non_utc_parent_timezone",
+        "tests/test_discovery.py::test_ps_uses_utc_at_collection_boundary",
+        "tests/test_root_cause_regressions.py::test_missing_sessions_cannot_starve_later_projection_batches"
       ]
     },
     {
@@ -475,7 +480,7 @@
       "id": "ADOPT-01",
       "title": "会话接管与撤销",
       "layer": "integration",
-      "acceptance": "接管回执升级状态；撤销或目录漂移只能脱离，不能杀死外部会话",
+      "acceptance": "接管回执升级状态；撤销或目录漂移只能脱离，不能杀死外部会话；确认终止回执必须关闭 managed session；投影失败留持久 pending 并在重启后的 poll 恢复，不能重放终止；原终态 reason 不受重放改变；脱管与未验证退出不得关闭会话",
       "boundary": "disposable Hub; external services simulated",
       "tests": [
         "tests/test_adoption_e2e.py::test_adopted_receipt_promotes_and_observes",
@@ -491,7 +496,14 @@
         "tests/test_exact_capture_upgrade.py::test_malformed_session_is_404_bounded",
         "tests/test_exact_capture_upgrade.py::test_upgrade_idempotent_single_audit",
         "tests/test_exact_capture_upgrade.py::test_exact_upgrade_response_never_leaks",
-        "tests/test_exact_capture_upgrade.py::test_exact_event_uses_redacted_and_encrypted_raw"
+        "tests/test_exact_capture_upgrade.py::test_exact_event_uses_redacted_and_encrypted_raw",
+        "tests/test_adoption_e2e.py::test_operator_terminate_receipt_closes_session_summary",
+        "tests/test_adoption_e2e.py::test_failed_session_projection_recovers_on_poll_after_hub_restart",
+        "tests/test_adoption_e2e.py::test_non_termination_receipts_never_close_session",
+        "tests/test_adoption_e2e.py::test_detach_receipt_keeps_live_session_open",
+        "tests/test_root_cause_regressions.py::test_terminal_session_projection_is_transactional_and_machine_scoped",
+        "tests/test_root_cause_regressions.py::test_legacy_terminal_receipts_are_backfilled_once_for_session_projection",
+        "tests/test_adoption_e2e.py::test_termination_before_session_start_recovers_without_command_replay"
       ]
     },
     {

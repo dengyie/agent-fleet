@@ -534,6 +534,32 @@ class SupervisorService:
             "first": bool(first),
         }
 
+    def pending_session_projections(self, machine: str) -> list[dict]:
+        if self._command_repository is None:
+            return []
+        try:
+            return self._command_repository.pending_session_projections(
+                machine, self._now_fn())
+        except SupervisorCommandRepositoryError as exc:
+            raise SupervisorServiceError(exc.code, "", 503) from exc
+
+    def defer_session_projection(self, command_id: str, delay_s: float = 30.0) -> None:
+        if self._command_repository is None:
+            return
+        try:
+            self._command_repository.defer_session_projection(
+                command_id, self._now_fn() + delay_s)
+        except SupervisorCommandRepositoryError as exc:
+            raise SupervisorServiceError(exc.code, "", 503) from exc
+
+    def complete_session_projection(self, command_id: str) -> None:
+        if self._command_repository is None:
+            return
+        try:
+            self._command_repository.complete_session_projection(command_id)
+        except SupervisorCommandRepositoryError as exc:
+            raise SupervisorServiceError(exc.code, "", 503) from exc
+
     def command_status(self, command_id: str) -> str | None:
         if self._command_repository is not None:
             try:

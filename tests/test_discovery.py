@@ -19,6 +19,39 @@ import json
 from tools.probe import discovery
 
 
+def test_process_start_time_is_utc_under_non_utc_parent_timezone():
+    import datetime
+    import os
+    import subprocess
+    import sys
+
+    code = """import datetime,json,os
+from tools.probe import discovery
+observed=discovery._start_map(discovery._run_ps(['-p',str(os.getpid()),'-o','pid=,lstart=']))[os.getpid()]
+print(json.dumps({'observed':observed,'now':datetime.datetime.now(datetime.timezone.utc).isoformat()}))
+"""
+    env = dict(os.environ, TZ='Asia/Singapore')
+    result = subprocess.run([sys.executable, '-c', code], env=env,
+                            capture_output=True, text=True, check=True, timeout=15)
+    data = json.loads(result.stdout)
+    observed = datetime.datetime.fromisoformat(data['observed'].replace('Z', '+00:00'))
+    now = datetime.datetime.fromisoformat(data['now'])
+    assert 0 <= (now - observed).total_seconds() < 15
+
+
+def test_ps_uses_utc_at_collection_boundary(monkeypatch):
+    captured = {}
+
+    def run(argv, **kwargs):
+        captured.update(kwargs)
+        return type('Result', (), {'returncode': 0, 'stdout': ''})()
+
+    monkeypatch.setattr(discovery.local_process, 'run', run)
+    discovery._run_ps(['-eo', 'pid=,lstart='])
+    assert captured['env']['TZ'] == 'UTC'
+    assert captured['env']['LC_ALL'] == 'C'
+
+
 def test_discover_instances_returns_identity(monkeypatch):
     monkeypatch.setattr(discovery, "enumerate_process_rows", lambda: [
         discovery.ProcRow(

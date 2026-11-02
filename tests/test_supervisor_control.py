@@ -1041,6 +1041,16 @@ class AgentControlClientTestsTests(unittest.TestCase):
         self.assertEqual(pipe.uploads[0]["status"], "succeeded")
         self.assertEqual(self.sup.get(self.session_id).state, "terminated")
 
+    def test_operator_terminate_has_bounded_grace_by_default(self):
+        from unittest import mock
+
+        cmd = self._cmd(action="terminate_session", nonce="grace-default")
+        pipe = _Pipe([cmd])
+        with mock.patch.object(self.sup, "terminate_session", return_value="terminated") as terminate:
+            self._client(pipe).poll_once()
+        self.assertEqual(terminate.call_args.kwargs["grace_s"], 5.0)
+        self.assertEqual(pipe.uploads[0]["reason"], "terminated")
+
     def test_cancel_attempt_executes_through_supervisor(self):
         cmd = self._cmd(action="cancel_attempt", nonce="u3")
         pipe = _Pipe([cmd])
