@@ -1,5 +1,19 @@
 # 测试链路、回归与证据核验
 
+Windows CI 的 `launch-policy-windows` 覆盖真实 workspace/sandbox 子进程、Git
+有界输出、失败退出码、超时回收及传输/发现契约，并单独保存 JUnit。沙箱执行只在
+POSIX 传入资源限制 `preexec_fn`；Windows 继续要求显式 launcher 承担隔离，不能
+退化为无 launcher 的宿主执行。Git 对端夹具由当前 Python 显式启动，避免 Windows
+无法执行 shebang 而误调用宿主 Git；workspace 夹具同样使用当前解释器，避免 PATH
+中的其他 Python 版本污染 stderr。POSIX `ps` 时区测试只在 POSIX 执行；Windows
+验证 CIM 发现，不把该平台 skip 用于放宽 Linux 完整门禁。
+
+Windows 有界执行以 suspended 状态创建子进程，加入带
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Job Object 后才恢复执行；所有退出路径
+关闭 Job，从而在 leader 已退出时仍清理持有管道的后代。加入 Job 失败不会执行命令。
+`test_bounded_process.py` 用真实父/子进程验证父进程提前退出后 1.5 秒超时仍有界返回，
+后代已退出；POSIX 的同一用例验证原有进程组清理。该夹具不证明生产 sandbox 隔离。
+
 请求级模型、五项 Token、耗时、费用来源、重试与交互验收详见[请求元数据测试矩阵](request-metadata.md)。
 
 本页说明测试如何串联，以及怎样核验“通过”的含义。[测试入口](README.md)提供环境安装和完整命令；[journeys.json](journeys.json)是必需 selector 的唯一清单；[外部验收](release-acceptance.md)定义真实服务的交付证据。

@@ -2,7 +2,7 @@
 
 POSIX drains both pipes through one selector under a single deadline. Windows
 has no ``select`` on pipes and no ``os.killpg``, so it drains with reader
-threads and reaps the tree with ``taskkill``; both paths keep the same
+threads and owns descendants through a Windows Job Object; both paths keep the same
 contract: at most ``limit`` bytes per stream, one deadline, and the whole
 group gone when the call returns.
 """
@@ -16,10 +16,12 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 from tools.local_process import popen as popen_local
-from tools.local_process import run as run_local
+
+if TYPE_CHECKING:
+    from tools.windows_job import WindowsJob
 
 
 def decode_prefix(raw: bytes, limit: int) -> tuple[str, bool]:
@@ -122,18 +124,6 @@ def _drain_posix(proc: subprocess.Popen[bytes], deadline: float,
 
 def _reap_group(proc: subprocess.Popen[bytes]) -> None:
     """Kill the owned group without ever masking the caller's exception."""
-    if os.name == "nt":
-        # ``/T`` is the only way to reach descendants: a leader that exited
-        # while a grandchild still holds the pipe must still be reaped.
-        try:
-            run_local(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                      capture_output=True, stdin=subprocess.DEVNULL,
-                      check=False, timeout=2)
-        except (OSError, subprocess.SubprocessError):
-            if proc.poll() is None:
-                proc.kill()
-        _wait_quietly(proc)
-        return
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except OSError:
@@ -172,12 +162,41 @@ def run_bounded(argv: Sequence[str], *, cwd: Path, timeout_s: float,
     if not math.isfinite(timeout_s) or timeout_s <= 0:
         raise ValueError("invalid_process_timeout")
     deadline = time.monotonic() + timeout_s
+    job = None
+    options = {"start_new_session": True, "preexec_fn": preexec_fn}
+    if os.name == "nt":
+        from tools.windows_job import WindowsJob
+        job = WindowsJob()
+        # The child cannot spawn descendants before it belongs to our job.
+        options = {"creationflags": 0x00000004 | 0x00000200,
+                   "preexec_fn": preexec_fn}  # SUSPENDED | NEW_PROCESS_GROUP
+    try:
+        return _run_owned(argv, cwd, env, deadline, timeout_s, stdout_limit,
+                          stderr_limit, options, job)
+    finally:
+        if job is not None:
+            job.close()
+
+
+def _run_owned(argv: Sequence[str], cwd: Path, env: Mapping[str, str] | None,
+               deadline: float, timeout_s: float, stdout_limit: int,
+               stderr_limit: int | None, options: dict[str, Any],
+               job: WindowsJob | None) -> subprocess.CompletedProcess[bytes]:
     with popen_local(list(argv), cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                      stdout=subprocess.PIPE,
                      stderr=subprocess.STDOUT if stderr_limit is None else subprocess.PIPE,
-                     start_new_session=True, preexec_fn=preexec_fn) as proc:
+                     **options) as proc:
         try:
+            if job is not None:
+                job.start(int(proc._handle))
             output, error = _drain(proc, deadline, stdout_limit, stderr_limit, timeout_s)
             return subprocess.CompletedProcess(proc.args, proc.returncode, output, error)
         finally:
-            _reap_group(proc)
+            if job is not None:
+                job.close()
+                # Assignment failure leaves an unstarted child outside the job.
+                if proc.poll() is None:
+                    proc.kill()
+                _wait_quietly(proc)
+            else:
+                _reap_group(proc)

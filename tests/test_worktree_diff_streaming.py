@@ -1,6 +1,5 @@
 """Git result collection keeps memory bounded by the published byte budget."""
 from pathlib import Path
-import os
 import subprocess
 import sys
 import time
@@ -9,6 +8,7 @@ import tracemalloc
 import pytest
 
 from tools import worktree
+from tests.support.processes import assert_process_exited
 
 
 @pytest.fixture
@@ -43,11 +43,15 @@ def test_git_diff_marker_is_inside_utf8_budget(repository: Path, kind: str) -> N
 
 
 def fake_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: str) -> None:
-    binary = tmp_path / "git"
-    binary.write_text(f"#!{sys.executable}\nimport os, sys, time\n"
-                      "if sys.argv[1] == 'add':\n    sys.exit(0)\n" + script)
-    binary.chmod(0o700)
-    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ.get("PATH", ""))
+    binary = tmp_path / "git-fixture.py"
+    binary.write_text("import os, sys, time\n"
+                      "if sys.argv[1] == 'add':\n    sys.exit(0)\n" + script,
+                      encoding="utf-8")
+    run, bounded = worktree.run_local, worktree.run_bounded
+    monkeypatch.setattr(worktree, "run_local",
+                        lambda argv, **kw: run([sys.executable, str(binary), *argv[1:]], **kw))
+    monkeypatch.setattr(worktree, "run_bounded",
+                        lambda argv, **kw: bounded([sys.executable, str(binary), *argv[1:]], **kw))
 
 
 def test_large_stderr_is_drained_and_failure_is_not_hidden(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -81,8 +85,7 @@ def test_diff_deadline_reaps_child_and_retains_cause(tmp_path: Path, monkeypatch
     assert time.monotonic() - started < 3
     assert isinstance(error.value.__cause__, subprocess.TimeoutExpired)
     pid = int((tmp_path / "child.pid").read_text())
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    assert_process_exited(pid)
 
 
 def test_invalid_utf8_diff_is_bounded_valid_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -92,40 +95,32 @@ def test_invalid_utf8_diff_is_bounded_valid_text(tmp_path: Path, monkeypatch: py
     assert patch.endswith("\n…[truncated]")
 
 
-def test_threaded_drain_keeps_a_bounded_prefix_and_real_exit() -> None:
+def test_threaded_drain_keeps_a_bounded_prefix_and_real_exit(tmp_path, monkeypatch) -> None:
     """The Windows drain branch must bound output without losing the exit code."""
-    from tools import bounded_process, local_process
+    from tools import bounded_process
 
-    proc = local_process.popen(
+    monkeypatch.setattr(bounded_process, "_drain", bounded_process._drain_threaded)
+    proc = bounded_process.run_bounded(
         [sys.executable, "-c",
          "import sys; sys.stdout.buffer.write(b'x' * 200000); sys.stdout.buffer.flush()"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+        cwd=tmp_path, timeout_s=30, stdout_limit=100, stderr_limit=10,
     )
-    try:
-        output, error = bounded_process._drain_threaded(
-            proc, time.monotonic() + 30, 100, 10, 30.0)
-        assert proc.returncode == 0
-    finally:
-        bounded_process._reap_group(proc)
-    assert output == b"x" * 100
-    assert error == b""
+    assert proc.returncode == 0
+    assert proc.stdout == b"x" * 100
+    assert proc.stderr == b""
 
 
-def test_threaded_drain_times_out_when_a_writer_holds_the_pipe() -> None:
-    from tools import bounded_process, local_process
+def test_threaded_drain_times_out_when_a_writer_holds_the_pipe(tmp_path, monkeypatch) -> None:
+    from tools import bounded_process
 
-    proc = local_process.popen(
-        [sys.executable, "-c", "import time; time.sleep(30)"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
-    )
+    monkeypatch.setattr(bounded_process, "_drain", bounded_process._drain_threaded)
+    script = "import os,pathlib,time;pathlib.Path('child.pid').write_text(str(os.getpid()));time.sleep(30)"
     started = time.monotonic()
-    try:
-        with pytest.raises(subprocess.TimeoutExpired):
-            bounded_process._drain_threaded(proc, time.monotonic() + 0.5, 100, 10, 0.5)
-    finally:
-        bounded_process._reap_group(proc)
+    with pytest.raises(subprocess.TimeoutExpired):
+        bounded_process.run_bounded([sys.executable, "-c", script], cwd=tmp_path,
+                                    timeout_s=0.5, stdout_limit=100, stderr_limit=10)
     assert time.monotonic() - started < 5
-    assert proc.poll() is not None
+    assert_process_exited(int((tmp_path / 'child.pid').read_text()))
 
 
 def test_reap_never_masks_the_original_error(monkeypatch: pytest.MonkeyPatch) -> None:
