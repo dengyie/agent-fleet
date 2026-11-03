@@ -496,9 +496,32 @@ def current_user() -> str:
 # native transcript path helpers (best-effort, read-only, bounded)
 # ---------------------------------------------------------------------------
 
+_NATIVE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+
+def _option_token(cmdline: str, flags: tuple[str, ...]) -> str | None:
+    tokens = _argv_tokens(cmdline or "")
+    found = None
+    for index, token in enumerate(tokens):
+        for flag in flags:
+            if token == flag:
+                if index + 1 >= len(tokens):
+                    return None
+                value = tokens[index + 1]
+            elif token.startswith(flag + "="):
+                value = token[len(flag) + 1:]
+            else:
+                continue
+            if not _NATIVE_ID_RE.fullmatch(value):
+                return None
+            if found is not None and value != found:
+                return None
+            found = value
+    return found
+
+
 def _resume_token(cmdline: str) -> str | None:
-    m = re.search(r"(?:--resume|-r)\s+([A-Za-z0-9][A-Za-z0-9._-]*)", cmdline or "")
-    return m.group(1) if m else None
+    return _option_token(cmdline, ("--resume", "-r"))
 
 
 def _most_recent_native(base_dir: str, suffix: str = ".jsonl", depth: int = 2,
@@ -539,6 +562,43 @@ def _topmost(candidates: list[tuple[float, str]]) -> str | None:
     return max(candidates, key=lambda pair: pair[0])[1]
 
 
+def _unique_native_named(base_dir: str, filename: str, *, depth: int) -> str | None:
+    """Return one exact transcript path, failing closed on ambiguity or scan cap."""
+    if not base_dir or not os.path.isdir(base_dir):
+        return None
+    target = os.path.normcase(filename)
+    found = None
+    scanned_files = 0
+    scanned_dirs = 0
+    pending = [(base_dir, 0)]
+    while pending:
+        dirpath, level = pending.pop()
+        try:
+            entries = os.scandir(dirpath)
+            with entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        scanned_dirs += 1
+                        if scanned_dirs > 512:
+                            return None
+                        if level < depth:
+                            pending.append((entry.path, level + 1))
+                        continue
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    scanned_files += 1
+                    if scanned_files > 512:
+                        return None
+                    if os.path.normcase(entry.name) != target:
+                        continue
+                    if found is not None:
+                        return None
+                    found = entry.path
+        except OSError:
+            return None
+    return found
+
+
 def _codex_native_path(cmdline: str) -> str | None:
     resume = _resume_token(cmdline)
     base = os.path.expanduser("~/.codex/sessions")
@@ -552,16 +612,11 @@ def _codex_native_path(cmdline: str) -> str | None:
 
 
 def _claude_native_path(cmdline: str) -> str | None:
-    resume = _resume_token(cmdline)
+    session_id = _option_token(cmdline, ("--session-id", "--resume", "-r"))
+    if not session_id:
+        return None
     base = os.path.expanduser("~/.claude/projects")
-    if resume:
-        # Claude uses a project-encoded path; best-effort: match the newest
-        # file whose stem contains the resume token within a bounded scan.
-        found = _most_recent_native(base, ".jsonl", depth=2,
-                                    name_contains=resume.lower())
-        if found:
-            return found
-    return _most_recent_native(base, ".jsonl", depth=2)
+    return _unique_native_named(base, f"{session_id}.jsonl", depth=2)
 
 
 # Family-specific native path resolvers above; families WITHOUT dedicated

@@ -31,7 +31,11 @@ const origin = process.argv[2];
       assert.equal(await page.evaluate(() => window.injected), undefined);
       assert.equal((await page.locator('.session-search-results').textContent()).includes('browsersecretvalue'), false);
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-      await page.screenshot({path: path.join(output, `search-${width}.png`), fullPage: true});
+      await page.screenshot({
+        path: path.join(output, `search-${width}.png`),
+        fullPage: true,
+        timeout: 15000,
+      });
       await link.click();
       await page.locator('#session-event-143').waitFor();
       assert.equal(await page.locator('#session-event-143').isVisible(), true);

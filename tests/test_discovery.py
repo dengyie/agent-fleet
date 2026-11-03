@@ -290,3 +290,179 @@ def test_codex_native_path_finds_nested_rollout(tmp_path, monkeypatch):
                         else p)
     got = d._codex_native_path("codex app-server")
     assert got == str(new)
+
+
+def test_claude_native_path_uses_explicit_session_id(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    old_session = "7e40a001-b4bf-4f31-b94d-451b24b1eef3"
+    current_session = "e4d96615-0dc1-44ea-8c6d-ea7b5a952a5b"
+    old_project = tmp_path / "C--old-workspace"
+    current_project = tmp_path / "C--current-workspace"
+    old_project.mkdir()
+    current_project.mkdir()
+    old = old_project / f"{old_session}.jsonl"
+    current = current_project / f"{current_session}.jsonl"
+    old.write_text("{}\n", encoding="utf-8")
+    current.write_text("{}\n", encoding="utf-8")
+    os.utime(old, (2000, 2000))
+    os.utime(current, (1000, 1000))
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    cmdline = (
+        r'C:\claude.exe --bare --setting-sources "" '
+        f"--session-id {current_session}"
+    )
+    assert d._claude_native_path(cmdline) == str(current)
+
+
+def test_claude_native_path_without_explicit_identity_fails_closed(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    project = tmp_path / "C--workspace"
+    project.mkdir()
+    newest = project / "7e40a001-b4bf-4f31-b94d-451b24b1eef3.jsonl"
+    newest.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    assert d._claude_native_path(r"C:\claude.exe --bare") is None
+
+
+def test_claude_missing_explicit_session_never_falls_back(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    project = tmp_path / "C--workspace"
+    project.mkdir()
+    unrelated = project / "7e40a001-b4bf-4f31-b94d-451b24b1eef3.jsonl"
+    unrelated.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    missing = "e4d96615-0dc1-44ea-8c6d-ea7b5a952a5b"
+    assert d._claude_native_path(f"claude --session-id {missing}") is None
+
+
+@pytest.mark.parametrize("identity_arg", [
+    "--resume session-current",
+    "--resume=session-current",
+    "-r session-current",
+])
+def test_claude_resume_uses_exact_session(tmp_path, monkeypatch, identity_arg):
+    from tools.probe import discovery as d
+
+    project = tmp_path / "C--workspace"
+    project.mkdir()
+    current = project / "session-current.jsonl"
+    current.write_text("{}\n", encoding="utf-8")
+    (project / "session-old.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    assert d._claude_native_path(f"claude {identity_arg}") == str(current)
+
+
+def test_claude_conflicting_session_flags_fail_closed(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    project = tmp_path / "C--workspace"
+    project.mkdir()
+    (project / "session-new.jsonl").write_text("{}\n", encoding="utf-8")
+    (project / "session-old.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    cmdline = "claude --session-id session-new --resume session-old"
+    assert d._claude_native_path(cmdline) is None
+
+    missing_value = "claude --resume session-old --session-id"
+    assert d._claude_native_path(missing_value) is None
+
+
+def test_claude_duplicate_session_id_fails_closed(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    session_id = "e4d96615-0dc1-44ea-8c6d-ea7b5a952a5b"
+    for name in ("C--workspace-a", "C--workspace-b"):
+        project = tmp_path / name
+        project.mkdir()
+        (project / f"{session_id}.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    assert d._claude_native_path(f"claude --session-id={session_id}") is None
+
+
+def test_claude_native_scan_cap_fails_closed(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    project = tmp_path / "C--workspace"
+    project.mkdir()
+    for index in range(513):
+        (project / f"session-{index:03d}.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    assert d._claude_native_path("claude --session-id session-000") is None
+
+
+def test_claude_native_scan_accepts_exact_cap(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    project = tmp_path / "C--workspace"
+    project.mkdir()
+    for index in range(512):
+        (project / f"session-{index:03d}.jsonl").write_text("{}\n", encoding="utf-8")
+    expected = project / "session-511.jsonl"
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    assert d._claude_native_path("claude --session-id session-511") == str(expected)
+
+
+def test_claude_native_scan_cap_counts_non_transcript_files(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    project = tmp_path / "C--workspace"
+    project.mkdir()
+    (project / "session-current.jsonl").write_text("{}\n", encoding="utf-8")
+    for index in range(513):
+        (project / f"unrelated-{index:03d}.txt").write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    assert d._claude_native_path("claude --session-id session-current") is None
+
+
+def test_claude_native_scan_cap_counts_directories(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    for index in range(513):
+        (tmp_path / f"C--workspace-{index:03d}").mkdir()
+    target = tmp_path / "C--workspace-000" / "session-current.jsonl"
+    target.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    assert d._claude_native_path("claude --session-id session-current") is None
