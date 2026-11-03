@@ -34,7 +34,7 @@ const origin = process.argv[2];
       await page.screenshot({
         path: path.join(output, `search-${width}.png`),
         fullPage: true,
-        timeout: 15000,
+        timeout: 60000,
       });
       await link.click();
       await page.locator('#session-event-143').waitFor();

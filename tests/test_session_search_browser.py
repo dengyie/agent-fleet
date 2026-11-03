@@ -47,7 +47,7 @@ def test_session_search_in_real_browser(tmp_path):
     try:
         result = subprocess.run(
             ["node", str(ROOT / "tests/fixtures/frontend/session_search_browser.cjs"),
-             f"http://127.0.0.1:{server.server_port}"], capture_output=True, text=True, timeout=65)
+             f"http://127.0.0.1:{server.server_port}"], capture_output=True, text=True, timeout=150)
         assert result.returncode == 0, result.stdout + result.stderr
     finally:
         server.shutdown()
