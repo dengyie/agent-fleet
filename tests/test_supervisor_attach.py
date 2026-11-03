@@ -253,16 +253,14 @@ class AttachTests(unittest.TestCase):
                          "native_file_unreadable")
         self.assertEqual(self.sup.all_status(), {})
 
-        # a real file with no read permission (same user, chmod 000)
+        # Simulate an existing path that the running service cannot read.
+        # chmod(000) is still readable when the test runner is root.
         blocked = self.dir / "blocked.jsonl"
         blocked.write_text("x")
-        os.chmod(blocked, 0)
-        try:
+        with mock.patch.object(sup_mod, "_native_readable", return_value=False):
             self.assertEqual(
                 self._attach(native_file_path=str(blocked)),
                 "native_file_unreadable")
-        finally:
-            os.chmod(blocked, 0o600)
         self.assertEqual(self.sup.all_status(), {})
 
     # ---- gate 3 ordering: unsupported family never touches the probe ------- #
