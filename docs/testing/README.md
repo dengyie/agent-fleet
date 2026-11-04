@@ -130,10 +130,9 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/test_full_flow_browser.py -q
 CI 在打包前运行门禁，测试失败或不完整时 `package` 不执行。CI 保留 JUnit、流程报告和浏览器截图 7 天。截图只拍临时 fixture 数据；默认不上传网络 trace、登录请求体或邮箱内容。
 
 已发布版本的截图名称、视口、覆盖面及证据边界记录在
-[UI 视觉证据](visual-evidence.md)；该页保留耐久 contact sheet，全分辨率原图仍以
-对应 CI artifact 为准。
+[UI 视觉证据](visual-evidence.md)；该页保留耐久 contact sheet 及逐字节核验的全分辨率原图，并标明来源 CI 与版本。
 
-main 的 `deploy` 依赖 `test` 与 `package`，通过受限入口部署同一次 CI 的前后端产物；PR 无部署权限。`tests/test_auto_deploy.py` 验证文件/数据库保留、部分失败回滚、任务竞态、归档与 SSH 协议、Nginx 恢复和 workflow 边界，属于 RELEASE-01 必需集合。部署步骤和真实检查边界见[自动部署手册](../../deploy/auto-deploy.md)。
+main 的 `deploy` 依赖 `test`、`launch-policy-windows` 与 `package`，通过受限入口部署同一次 CI 的前后端产物；PR 无部署权限。`tests/test_auto_deploy.py` 验证文件/数据库保留、部分失败回滚、任务竞态、归档与 SSH 协议、Nginx 恢复和 workflow 边界，属于 RELEASE-01 必需集合。部署步骤和真实检查边界见[自动部署手册](../../deploy/auto-deploy.md)。
 
 交付时按[证据核验步骤](test-chains.md#核验-ci-证据)对照最新提交、CI checkout revision、矩阵摘要和 JUnit；Linux CI 要求零跳过。macOS 的 `/proc`/stop-resume 平台跳过须记录原因，由 Linux CI 补齐，不能据此放宽其他用例。
 

@@ -125,6 +125,25 @@ const [origin] = process.argv.slice(2);
     assert.equal(await workspace.inputValue(), 'default');
     assert.equal(await send.isDisabled(), false);
     await page.locator('#sidebar-conversations a').filter({hasText: '登录恢复验收'}).waitFor();
+    await page.setViewportSize({width: 1280, height: 720});
+    const compactSidebar = await page.evaluate(() => {
+      const bounds = selector => {
+        const {top, bottom} = document.querySelector(selector).getBoundingClientRect();
+        return {top, bottom};
+      };
+      const lists = document.querySelector('#sidebar-adjustable-lists');
+      return {lists: bounds('#sidebar-adjustable-lists'), footer: bounds('.sidebar-footer'),
+        sidebar: bounds('.console-sidebar'), listOverflow: lists.scrollHeight > lists.clientHeight,
+        listScrollMode: getComputedStyle(lists).overflowY};
+    });
+    assert.ok(compactSidebar.lists.bottom <= compactSidebar.footer.top &&
+      compactSidebar.footer.bottom <= compactSidebar.sidebar.bottom &&
+      compactSidebar.listOverflow && compactSidebar.listScrollMode === 'auto',
+    'compact desktop sidebar contains the adjustable lists above the footer: ' + JSON.stringify(compactSidebar));
+    if (process.env.FLEET_SCREENSHOTS) {
+      fs.mkdirSync(process.env.FLEET_SCREENSHOTS, {recursive: true});
+      await page.screenshot({path: path.join(process.env.FLEET_SCREENSHOTS, 'sidebar-compact-desktop.png')});
+    }
     await page.setViewportSize({width: 1280, height: 900});
     const divider = page.locator('#sidebar-nodes-resize');
     const initialNodeHeight = Number(await divider.getAttribute('aria-valuenow'));
