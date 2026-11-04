@@ -677,9 +677,11 @@ def create_app(
                 task_init()
             else:
                 task_store.init_db()
-        except Exception:
+        except Exception as exc:
             # Task storage is optional; observation routes remain available.
             app.config["TASKS_ENABLED"] = False
+            from hub.diagnostics import log_failure
+            log_failure(app.logger, "task_store_init_failed", exc)
 
     app.extensions["fleet"] = {
         "config": config,
@@ -923,8 +925,9 @@ def start_background_jobs(
 
     try:
         service.reconcile_observation()
-    except Exception:
-        pass
+    except Exception as exc:
+        from hub.diagnostics import log_failure
+        log_failure(app.logger, "initial_observation_reconciliation_failed", exc)
 
     stops = {
         "reconciliation": start_reconciliation(

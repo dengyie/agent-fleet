@@ -273,8 +273,7 @@ def test_cmdline_truncated_only_at_schema_boundary(monkeypatch):
     assert len(got[0].cmdline) <= discovery.MAX_CMDLINE_CHARS
 
 def test_codex_native_path_finds_nested_rollout(tmp_path, monkeypatch):
-    """Modern codex rollouts live at YYYY/MM/DD/rollout-*.jsonl (3 levels);
-    the scan depth must cover them or native_file_path is always None."""
+    """An unqualified Codex process cannot be assigned a rollout by mtime."""
     import os
     from tools.probe import discovery as d
     day = tmp_path / "2026" / "09" / "03"
@@ -289,7 +288,103 @@ def test_codex_native_path_finds_nested_rollout(tmp_path, monkeypatch):
                         lambda p: str(tmp_path) if p == "~/.codex/sessions"
                         else p)
     got = d._codex_native_path("codex app-server")
-    assert got == str(new)
+    assert got is None
+
+
+def test_codex_native_path_uses_explicit_resume_id_in_nested_layout(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    day = tmp_path / "2026" / "09" / "03"
+    day.mkdir(parents=True)
+    expected = day / "session-current.jsonl"
+    expected.write_text("{}\n", encoding="utf-8")
+    (day / "session-old.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda path: str(tmp_path) if path == "~/.codex/sessions" else path,
+    )
+
+    assert d._codex_native_path(
+        "codex exec resume --json session-current prompt"
+    ) == str(expected)
+
+
+def test_codex_native_path_rejects_conflicting_resume_flags(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    root = tmp_path / "codex"
+    root.mkdir()
+    (root / "session-a.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda path: str(root) if path == "~/.codex/sessions" else path,
+    )
+
+    assert d._codex_native_path(
+        "codex exec resume --resume session-a --resume session-b prompt"
+    ) is None
+
+
+def test_codex_native_path_rejects_conflicting_resume_forms(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    root = tmp_path / "codex"
+    root.mkdir()
+    (root / "session-a.jsonl").write_text("{}\n", encoding="utf-8")
+    (root / "session-b.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda path: str(root) if path == "~/.codex/sessions" else path,
+    )
+
+    assert d._codex_native_path(
+        "codex exec resume session-a --resume session-b prompt"
+    ) is None
+
+
+def test_pi_native_path_uses_explicit_session_path_only(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    root = tmp_path / "pi"
+    root.mkdir()
+    current = root / "current.jsonl"
+    current.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda path: str(root) if path == "~/.pi/agent/sessions" else path,
+    )
+
+    assert d._pi_native_path(f"pi --session {current} prompt") == str(current)
+    assert d._pi_native_path("pi --session-id current prompt") == str(current)
+    assert d._pi_native_path(
+        f"pi --session {current} --session-id other prompt"
+    ) is None
+
+
+@pytest.mark.parametrize(("family", "exe", "root_name"), [
+    ("codex", "/opt/codex", "~/.codex/sessions"),
+    ("pi", "/opt/pi", "~/.pi/agent/sessions"),
+    ("zcode", "/opt/zcode", "~/.zcode/cli/rollout"),
+])
+def test_native_path_without_process_identity_fails_closed(
+        tmp_path, monkeypatch, family, exe, root_name):
+    """A directory's newest file is not proof of this process's session."""
+    root = tmp_path / family
+    root.mkdir()
+    (root / "older.jsonl").write_text("{}\n", encoding="utf-8")
+    newest = root / "newest.jsonl"
+    newest.write_text("{}\n", encoding="utf-8")
+    os.utime(newest, (2000, 2000))
+    monkeypatch.setattr(
+        discovery.os.path, "expanduser",
+        lambda path: str(root) if path == root_name else path,
+    )
+
+    row = discovery.ProcRow(
+        user="mango", pid=1, pgid=1, exe_path=exe,
+        cmdline=exe, started_at="2026-11-04T00:00:00Z",
+    )
+    assert discovery.native_path_for(row) is None
 
 
 def test_claude_native_path_uses_explicit_session_id(tmp_path, monkeypatch):

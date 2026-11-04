@@ -726,8 +726,44 @@ class ReconciliationServiceTests(unittest.TestCase):
         self.assertEqual(service.reconcile_leases(), ["t-1"])
         self.assertEqual(calls, [7.0, 7.0])
 
+    def test_expire_task_leases_publisher_failure_is_logged(self):
+        from hub.application.reconciliation_service import ReconciliationService
+
+        class BrokenPublisher(FakePublisher):
+            def emit(self, *args, **kwargs):
+                raise RuntimeError("secret publisher detail")
+
+        repo = FakeTaskRepository()
+        repo.expire_leases = lambda now=None: ["t-1"]
+        with self.assertLogs("hub.application.reconciliation_service", level="WARNING") as logs:
+            self._service(repo=repo, publisher=BrokenPublisher()).expire_task_leases()
+        joined = " ".join(logs.output)
+        self.assertIn("reconciliation_event_publish_failed", joined)
+        self.assertIn("RuntimeError", joined)
+        self.assertNotIn("secret publisher detail", joined)
+
 
 class ReconciliationDaemonTests(unittest.TestCase):
+    def test_reconciliation_callback_failure_is_logged_with_bounded_context(self):
+        from hub.application.reconciliation_service import start_reconciliation
+
+        stop = threading.Event()
+
+        def cb():
+            stop.set()
+            raise RuntimeError("secret callback detail")
+
+        with self.assertLogs("hub.application.reconciliation_service", level="WARNING") as logs:
+            start_reconciliation(cb, stop_event=stop, interval_s=1)
+            deadline = time.monotonic() + 3.0
+            while not logs.output and time.monotonic() < deadline:
+                time.sleep(0.02)
+
+        joined = " ".join(logs.output)
+        self.assertIn("reconciliation_callback_failed", joined)
+        self.assertIn("RuntimeError", joined)
+        self.assertNotIn("secret callback detail", joined)
+
     def test_start_reconciliation_invokes_callback_until_stopped(self):
         from hub.application.reconciliation_service import start_reconciliation
         calls = []

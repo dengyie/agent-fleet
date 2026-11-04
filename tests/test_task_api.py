@@ -802,6 +802,14 @@ class FailureIsolationTests(unittest.TestCase):
         self.assertEqual(client.post("/api/tasks", json={}).status_code, 503)
         self.assertEqual(app.config["TASKS_ENABLED"], False)
 
+    def test_task_repository_init_failure_is_logged_without_raw_error(self):
+        with self.assertLogs("hub.bootstrap", level="WARNING") as logs:
+            self.make_task_repo_app("init")
+        joined = " ".join(logs.output)
+        self.assertIn("task_store_init_failed", joined)
+        self.assertIn("OSError", joined)
+        self.assertNotIn("cannot open task database directory", joined)
+
     def test_broken_task_repository_degrades_ops_to_503(self):
         client, app = self.make_task_repo_app("ops")
         self.assertEqual(app.config["TASKS_ENABLED"], True)

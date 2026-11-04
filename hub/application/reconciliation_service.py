@@ -95,8 +95,10 @@ class ReconciliationService:
     def _announce_requeued(self, task_id: str) -> None:
         try:
             self.publisher.emit("task_update", task_id=task_id, state="queued")
-        except Exception:
-            pass
+        except Exception as exc:
+            from hub.diagnostics import log_failure
+            log_failure(logger, "reconciliation_event_publish_failed", exc,
+                        task_id=task_id)
 
 
 def _start_daemon(thread_name, callback, stop_event, interval_s):
@@ -105,11 +107,14 @@ def _start_daemon(thread_name, callback, stop_event, interval_s):
     stop = stop_event if stop_event is not None else threading.Event()
 
     def loop():
+        from hub.diagnostics import log_failure
+
         while not stop.wait(interval_s):
             try:
                 callback()
-            except Exception:
-                pass
+            except Exception as exc:
+                log_failure(logger, "reconciliation_callback_failed", exc,
+                            worker=thread_name)
 
     thread = threading.Thread(target=loop, name=thread_name, daemon=True)
     thread.start()

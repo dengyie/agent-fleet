@@ -90,8 +90,15 @@ class RunSchedulerService:
         finally:
             heartbeat_stop.set()
             heartbeat_thread.join(timeout=2.0)
-            self.repository.release_worker_slot(
-                slot["lease_id"], worker_id=self.scheduler_id)
+            try:
+                self.repository.release_worker_slot(
+                    slot["lease_id"], worker_id=self.scheduler_id)
+            except Exception as exc:
+                # Slot cleanup is durable housekeeping.  It must not rewrite
+                # the worker result (or mask a worker exception); the expired
+                # lease remains reclaimable by the repository's next sweep.
+                log_failure(logger, 'platform_slot_release_failed', exc,
+                            run_id=run_id, worker_id=self.scheduler_id)
 
     def _prepare_claim(self) -> tuple[dict, dict, dict] | dict | None:
         owner_lease = self.repository.claim_worker_owner(

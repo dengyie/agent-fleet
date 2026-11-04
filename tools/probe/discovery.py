@@ -9,8 +9,8 @@ or unclassified families.
 Guarantees used by the rest of the probe/hub pipeline:
 
 - family names come only from :data:`agent_profiles.OBSERVABLE_AGENT_TYPES`
-  (``codex`` | ``claude_code`` | ``hermes`` | ``generic``) — there is no
-  free-form family string;
+  (``codex`` | ``claude_code`` | ``hermes`` | ``pi`` | ``zcode`` |
+  ``generic``) — there is no free-form family string;
 - ``discover_instances()`` returns rows stably sorted by ``(pid, started_at)``;
 - ``ps`` is invoked as ``ps -eo user=,pid=,ppid=,pgid=,comm=,args=`` (the same
   column set the generic connector historically used, plus ``pgid``); a
@@ -520,46 +520,34 @@ def _option_token(cmdline: str, flags: tuple[str, ...]) -> str | None:
     return found
 
 
+def _option_present(cmdline: str, flags: tuple[str, ...]) -> bool:
+    tokens = _argv_tokens(cmdline or "")
+    return any(token == flag or token.startswith(flag + "=")
+               for token in tokens for flag in flags)
+
+
 def _resume_token(cmdline: str) -> str | None:
     return _option_token(cmdline, ("--resume", "-r"))
 
 
-def _most_recent_native(base_dir: str, suffix: str = ".jsonl", depth: int = 2,
-                       name_contains: str | None = None) -> str | None:
-    """Newest matching native transcript under ``base_dir`` (bounded, best-effort).
-
-    The walk is limited to ``depth`` subdirectories level and stops after 512
-    candidate files, so it can never become a full-tree scan.
-    """
-    if not base_dir or not os.path.isdir(base_dir):
+def _codex_resume_token(cmdline: str) -> str | None:
+    """Extract an explicit Codex native id from either resume spelling."""
+    has_flag = _option_present(cmdline, ("--resume", "-r"))
+    flagged = _resume_token(cmdline) if has_flag else None
+    if has_flag and flagged is None:
         return None
-    candidates: list[tuple[float, str]] = []
-    root_len = len(base_dir.rstrip(os.sep)) + 1
-    scanned = 0
-    for dirpath, _dirnames, filenames in os.walk(base_dir):
-        if dirpath[root_len:].count(os.sep) >= depth:
-            continue
-        for name in filenames:
-            if not name.endswith(suffix):
-                continue
-            if name_contains and name_contains not in name.lower():
-                continue
-            scanned += 1
-            if scanned > 512:
-                return _topmost(candidates)  # bounded scan
-            path = os.path.join(dirpath, name)
-            try:
-                mtime = os.path.getmtime(path)
-            except OSError:
-                continue
-            candidates.append((mtime, path))
-    return _topmost(candidates)
-
-
-def _topmost(candidates: list[tuple[float, str]]) -> str | None:
-    if not candidates:
+    tokens = _argv_tokens(cmdline or "")
+    positional_token = None
+    if "resume" in tokens:
+        resume_at = tokens.index("resume")
+        positional = [token for token in tokens[resume_at + 1:]
+                      if not token.startswith("-")]
+        if len(positional) < 2 or not _NATIVE_ID_RE.fullmatch(positional[0]):
+            return None
+        positional_token = positional[0]
+    if flagged and positional_token and flagged != positional_token:
         return None
-    return max(candidates, key=lambda pair: pair[0])[1]
+    return flagged or positional_token
 
 
 def _unique_native_named(base_dir: str, filename: str, *, depth: int) -> str | None:
@@ -600,15 +588,11 @@ def _unique_native_named(base_dir: str, filename: str, *, depth: int) -> str | N
 
 
 def _codex_native_path(cmdline: str) -> str | None:
-    resume = _resume_token(cmdline)
+    resume = _codex_resume_token(cmdline)
     base = os.path.expanduser("~/.codex/sessions")
-    if resume:
-        p = os.path.join(base, f"{resume}.jsonl")
-        if os.path.isfile(p):
-            return p
-    # Modern codex rollouts live at YYYY/MM/DD/rollout-*.jsonl — three
-    # directory levels; depth must cover them or every lookup returns None.
-    return _most_recent_native(base, ".jsonl", depth=3)
+    if not resume:
+        return None
+    return _unique_native_named(base, f"{resume}.jsonl", depth=3)
 
 
 def _claude_native_path(cmdline: str) -> str | None:
@@ -619,30 +603,84 @@ def _claude_native_path(cmdline: str) -> str | None:
     return _unique_native_named(base, f"{session_id}.jsonl", depth=2)
 
 
-# Family-specific native path resolvers above; families WITHOUT dedicated
-# logic (pi and future Profile-driven additions) fall back to the registry's
-# ``native_session_root``/``native_session_depth`` fields.
+def _option_value(cmdline: str, flags: tuple[str, ...]) -> str | None:
+    """Read one unvalidated option value, failing closed on ambiguity."""
+    tokens = _argv_tokens(cmdline or "")
+    found = None
+    for index, token in enumerate(tokens):
+        value = None
+        for flag in flags:
+            if token == flag:
+                if index + 1 >= len(tokens):
+                    return None
+                value = tokens[index + 1]
+            elif token.startswith(flag + "="):
+                value = token[len(flag) + 1:]
+            if value is not None:
+                break
+        if value is None:
+            continue
+        if not value or (found is not None and value != found):
+            return None
+        found = value
+    return found
+
+
+def _native_path_under(base_dir: str, value: str) -> str | None:
+    """Accept an explicit transcript path only inside its configured root."""
+    if not value:
+        return None
+    try:
+        base = os.path.realpath(os.path.abspath(base_dir))
+        candidate = os.path.realpath(os.path.abspath(os.path.expanduser(value)))
+        if os.path.commonpath((base, candidate)) != base:
+            return None
+        if not os.path.isfile(candidate) or not candidate.lower().endswith(".jsonl"):
+            return None
+        return candidate
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _pi_native_path(cmdline: str) -> str | None:
+    """Resolve Pi's explicitly selected session, never the newest file."""
+    base = os.path.expanduser("~/.pi/agent/sessions")
+    has_path = _option_present(cmdline, ("--session",))
+    has_id = _option_present(cmdline, ("--session-id",))
+    if has_path and has_id:
+        return None
+    path_value = _option_value(cmdline, ("--session",)) if has_path else None
+    if has_path:
+        if not path_value:
+            return None
+        exact = _native_path_under(base, path_value)
+        if exact:
+            return exact
+        if _NATIVE_ID_RE.fullmatch(path_value):
+            return _unique_native_named(base, f"{path_value}.jsonl", depth=2)
+        return None
+    session_id = _option_token(cmdline, ("--session-id",))
+    if not session_id:
+        return None
+    return _unique_native_named(base, f"{session_id}.jsonl", depth=2)
+
+
+# Family-specific native path resolvers above.  A profile-declared storage
+# root is not an identity proof: families without an explicit resolver remain
+# unassociated until their process exposes a stable session selector.
 _PROFILE_NATIVE_RESOLVERS = {
     "codex": _codex_native_path,
     "claude_code": _claude_native_path,
+    "pi": _pi_native_path,
 }
-
-
-def _profile_native_path(family: str, cmdline: str) -> str | None:
-    """Profile-driven native transcript lookup (bounded, best-effort)."""
-    profile = PROFILES.get(family)
-    if not profile or not profile.native_session_root:
-        return None
-    base = os.path.expanduser(profile.native_session_root)
-    return _most_recent_native(base, ".jsonl", depth=profile.native_session_depth)
 
 
 def native_path_for(row: ProcRow) -> str | None:
     """Best-effort native transcript path for a known agent family.
 
     Read-only and bounded; returns ``None`` when it cannot be determined.
-    Dedicated resolvers keep codex/claude semantics; the registry fallback
-    covers profile-declared families without dedicated logic.
+    Dedicated resolvers keep each family-specific identity contract; families
+    without one remain unassociated rather than selecting by file recency.
     """
     try:
         family = classify_family(str(row.exe_path or ""), str(row.cmdline or ""))
@@ -654,10 +692,7 @@ def native_path_for(row: ProcRow) -> str | None:
             return resolver(row.cmdline or "")
         except Exception:
             return None
-    try:
-        return _profile_native_path(family, row.cmdline or "")
-    except Exception:
-        return None
+    return None
 
 
 def can_attach(row: ProcRow, native: str | None) -> bool:

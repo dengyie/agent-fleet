@@ -147,3 +147,39 @@ def test_scheduler_parallel_slots_count_across_process_instances(tmp_path):
     assert not thread.is_alive()
     assert results_a[0]["state"] == "succeeded"
     assert repo_b.get_run(OWNER_B, "run-b")["attempt"] == 0
+
+
+def test_scheduler_preserves_worker_result_when_slot_release_fails(caplog):
+    """A cleanup failure must not rewrite a completed worker outcome."""
+    from types import SimpleNamespace
+
+    class Repository:
+        def renew_worker_slot(self, *args, **kwargs):
+            return True
+
+        def renew_run_lease(self, *args, **kwargs):
+            return True
+
+        def release_worker_slot(self, *args, **kwargs):
+            raise OSError("slot store unavailable")
+
+    scheduler = RunSchedulerService(
+        Repository(),
+        SimpleNamespace(
+            lease_s=60,
+            worker_id="worker-a",
+            execute_claim=lambda claim: {
+                "run_id": claim["run_id"], "state": "succeeded"
+            },
+        ),
+        scheduler_id="scheduler-a",
+    )
+
+    result = scheduler._execute(
+        {"owner_id": OWNER_A, "run_id": "run-a", "lease_id": "run-lease", "attempt": 1},
+        {},
+        {"lease_id": "slot-lease"},
+    )
+
+    assert result == {"run_id": "run-a", "state": "succeeded"}
+    assert "platform_slot_release_failed" in caplog.text
