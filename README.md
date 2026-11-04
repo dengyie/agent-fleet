@@ -34,6 +34,10 @@
 └─────────────────────────────────────────────┘
 ```
 
+完整的可视化架构、状态机、身份绑定、调度生命周期和发布验收图见
+[可视化架构](docs/visual-architecture.md)。最新浏览器截图覆盖见
+[UI 视觉证据](docs/testing/visual-evidence.md)。
+
 ---
 
 ## 🌟 核心优势
@@ -140,6 +144,7 @@ main 在测试、前后端打包通过后进入[自动部署](deploy/auto-deploy
 ### 2026-11-04
 
 - Claude Code 新会话会按自身的明确会话标识关联原生记录，不会再误绑定其他工作区的历史会话；身份缺失、冲突或重复时保持未关联状态。
+- 新增系统拓扑、数据/控制平面、任务状态机、身份解析、调度生命周期和发布验收六组可视化图，并固化 19 张桌面/移动端 UI 证据图的覆盖索引与 contact sheet。
 
 完整历史见[发布说明](docs/releases/release-notes.md)。
 
@@ -153,6 +158,8 @@ main 在测试、前后端打包通过后进入[自动部署](deploy/auto-deploy
 
 - [系统架构详解 (Architecture v3)](docs/architecture-v3.md)
 - [受控开发链路设计 (Control Plane v4)](docs/architecture-v4-control-plane.md)
+- [可视化架构与状态机 (Visual Architecture)](docs/visual-architecture.md)
+- [UI 视觉证据 (Visual Evidence)](docs/testing/visual-evidence.md)
 - [前后端分离与发布规范 (Frontend Release Layout)](deploy/frontend-release-layout.md)
 - [交接与运维手册 (Handoff Guide)](docs/HANDOFF.md)
 

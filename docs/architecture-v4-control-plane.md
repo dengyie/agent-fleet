@@ -1,5 +1,8 @@
 # agent-fleet 架构 v4：观测链路 + 受控开发链路
 
+> 系统拓扑、三个数据/控制平面、任务状态机、transcript 身份解析、
+> scheduler 生命周期和发布链路见 [可视化架构](visual-architecture.md)。
+
 本文是 v3 push-only 观测架构的扩展设计。它解决两个产品问题：
 
 1. 页面可以查看某次开发任务的 agent 输出、变更和结果。
