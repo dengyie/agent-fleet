@@ -15,6 +15,7 @@ from werkzeug.serving import make_server
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
 from tools.adapters.base import BaseAdapter
+from tools.bounded_process import run_streamed
 from tools.probe import discovery
 from tests.support.processes import assert_process_exited
 
@@ -51,6 +52,25 @@ def test_adapter_timeout_cannot_be_overridden_by_graceful_exit(tmp_path):
     assert result.timed_out
     assert result.exit_code == 124
     assert 'ready' in result.log_tail
+
+
+def test_adapter_checks_cancellation_after_output_eof(tmp_path):
+    started = time.monotonic()
+    result = BaseAdapter([sys.executable, '-c',
+        'import os,time; os.close(1); os.close(2); time.sleep(2)'], timeout_s=5).run(
+        '', tmp_path, should_abort=lambda: time.monotonic() - started > .3)
+    assert result.aborted
+    assert result.exit_code == 130
+    assert time.monotonic() - started < 1.5
+
+
+def test_stream_reader_failure_cannot_report_success(tmp_path):
+    def reject(_line):
+        raise ValueError('fixture_callback_failed')
+
+    with pytest.raises(ValueError, match='fixture_callback_failed'):
+        run_streamed([sys.executable, '-c', 'print("output", flush=True)'],
+                     cwd=tmp_path, timeout_s=5, on_line=reject)
 
 
 def test_runner_machine_binding_includes_idempotent_result(tmp_path):
@@ -133,6 +153,15 @@ def test_codex_rollout_binding_rejects_mismatched_or_ambiguous_files(tmp_path, m
     second = day / f'rollout-2026-11-05T13-00-00-{SID}.jsonl'
     second.write_text(first.read_text(encoding='utf-8'), encoding='utf-8')
     assert discovery._codex_native_path(command) is None
+
+
+def test_codex_rejects_ambiguity_between_legacy_and_rollout(tmp_path, monkeypatch):
+    payload = json.dumps({'type': 'session_meta', 'payload': {'id': SID}}) + '\n'
+    (tmp_path / f'{SID}.jsonl').write_text(payload, encoding='utf-8')
+    (tmp_path / f'rollout-2026-11-05T12-00-00-{SID}.jsonl').write_text(payload, encoding='utf-8')
+    monkeypatch.setattr(discovery.os.path, 'expanduser',
+        lambda path: str(tmp_path) if path == '~/.codex/sessions' else path)
+    assert discovery._codex_native_path(f'codex resume {SID}') is None
 
 
 def test_frontend_deadline_covers_body_read():

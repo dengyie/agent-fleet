@@ -570,7 +570,7 @@ def _codex_resume_token(cmdline: str) -> str | None:
 
 def _unique_native_named(base_dir: str, filename: str, *, depth: int,
                          codex_rollout: bool = False) -> str | None:
-    """Return one exact transcript path, failing closed on ambiguity or scan cap."""
+    """Return one transcript, counting legacy and rollout matches together."""
     if not base_dir or not os.path.isdir(base_dir):
         return None
     target = os.path.normcase(filename)
@@ -597,8 +597,9 @@ def _unique_native_named(base_dir: str, filename: str, *, depth: int,
                     if scanned_files > 512:
                         return None
                     name = os.path.normcase(entry.name)
-                    matches = (name.startswith("rollout-") and name.endswith("-" + target)
-                               if codex_rollout else name == target)
+                    matches = name == target or (
+                        codex_rollout and name.startswith("rollout-")
+                        and name.endswith("-" + target))
                     if not matches:
                         continue
                     if found is not None:
@@ -614,13 +615,12 @@ def _codex_native_path(cmdline: str) -> str | None:
     base = os.path.expanduser("~/.codex/sessions")
     if not resume:
         return None
-    exact = _unique_native_named(base, f"{resume}.jsonl", depth=3)
-    if exact:
-        return exact
     rollout = _unique_native_named(base, f"{resume}.jsonl", depth=3,
                                    codex_rollout=True)
     if rollout is None:
         return None
+    if os.path.normcase(os.path.basename(rollout)) == os.path.normcase(f"{resume}.jsonl"):
+        return rollout
     try:
         with open(rollout, "r", encoding="utf-8") as stream:
             first = stream.readline(16 * 1024)

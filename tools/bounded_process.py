@@ -154,24 +154,35 @@ def _drain_lines(proc: subprocess.Popen[bytes], deadline: float, timeout_s: floa
                  should_abort: Callable[[], bool] | None) -> tuple[bytes, bytes]:
     """Stream lines while the owner watches EOF, cancellation and the deadline."""
     done = threading.Event()
+    errors: list[BaseException] = []
 
     def read_lines() -> None:
         try:
             assert proc.stdout is not None
             for raw in proc.stdout:
                 on_line(raw.rstrip(b"\r\n").decode("utf-8", errors="replace"))
+        except BaseException as exc:
+            errors.append(exc)
         finally:
             done.set()
 
     threading.Thread(target=read_lines, name="owned-process-output", daemon=True).start()
-    while not done.is_set():
+    while True:
+        if done.is_set() and errors:
+            raise errors[0]
         if should_abort is not None and should_abort():
             raise ProcessAborted()
+        if done.is_set() and proc.poll() is not None:
+            break
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise subprocess.TimeoutExpired(proc.args, timeout_s)
-        done.wait(min(0.1, remaining))
-    proc.wait(timeout=max(0.001, deadline - time.monotonic()))
+        if done.is_set():
+            # EOF does not imply process exit. Keep polling cancellation even
+            # when the child deliberately closes both output descriptors.
+            time.sleep(min(0.1, remaining))
+        else:
+            done.wait(min(0.1, remaining))
     return b"", b""
 
 

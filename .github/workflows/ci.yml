@@ -87,6 +87,7 @@ jobs:
           tests/test_discovery.py tests/test_transport.py
           tests/test_worktree_diff_streaming.py tests/test_workspace_output_bounds.py
           tests/test_platform_sandbox_artifacts.py tests/test_bounded_process.py -q
+          tests/test_main_review_regressions.py
           --junitxml=windows-results.xml
       - name: Preserve Windows test evidence
         if: always()
