@@ -3,15 +3,10 @@
 子进程执行 agent CLI；instruction 只作为单 argv 元素传递（不经 shell）。
 输出行流式回调 on_line；should_abort 轮询用于 lease 失效后主动终止。
 """
-import os
-import signal
 import subprocess
-import threading
-import time
 from dataclasses import dataclass
 
-from tools.local_process import popen as popen_local
-from tools.local_process import run as run_local
+from tools.bounded_process import ProcessAborted, run_streamed
 
 MAX_LOG_TAIL = 10240
 MAX_LINE = 500
@@ -61,94 +56,17 @@ class BaseAdapter:
                     pass
 
         try:
-            proc = popen_local(
-                argv, cwd=str(workdir),
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, errors="replace",
-                start_new_session=True,  # 独立进程组，超时/中止可整组杀
-            )
+            exit_code = run_streamed(
+                argv, cwd=workdir, timeout_s=self.timeout_s,
+                on_line=feed, should_abort=should_abort)
         except OSError as exc:
             return AdapterResult(exit_code=127,
                                  log_tail=f"启动失败: {type(exc).__name__}: {exc}"[:MAX_LINE])
-
-        timed_out = threading.Event()
-
-        def watchdog():
-            proc.wait()
-            timed_out.set()
-
-        waiter = threading.Thread(target=watchdog, daemon=True)
-        waiter.start()
-
-        def reader():
-            try:
-                for line in proc.stdout:
-                    feed(line.rstrip("\n"))
-            except Exception:
-                pass
-
-        reader_thread = threading.Thread(target=reader, daemon=True)
-        reader_thread.start()
-
-        deadline = time.monotonic() + self.timeout_s
-        aborted = False
-        while not timed_out.wait(1.0):
-            if should_abort and should_abort():
-                aborted = True
-                _kill(proc)
-                break
-            if time.monotonic() > deadline:
-                _kill(proc)
-                break
-        timed_out.wait(10)  # 等进程确认退出
-        reader_thread.join(timeout=5)
-        try:
-            proc.stdout.close()
-        except Exception:
-            pass
-
-        if aborted:
+        except ProcessAborted:
             return AdapterResult(exit_code=130, log_tail="\n".join(tail) + "\n[aborted: lease lost]",
                                  aborted=True)
-        if proc.returncode is None or (proc.returncode and proc.returncode < 0 and
-                                       time.monotonic() > deadline):
+        except subprocess.TimeoutExpired:
             return AdapterResult(exit_code=124,
                                  log_tail="\n".join(tail) + f"\n[timeout after {self.timeout_s}s]",
                                  timed_out=True)
-        return AdapterResult(exit_code=proc.returncode or 0, log_tail="\n".join(tail))
-
-
-def _kill(proc):
-    """Terminate the agent and everything it spawned, on either platform.
-
-    ``start_new_session`` gives the child its own group on POSIX, so ``killpg``
-    reaches its whole tree. Windows has neither ``killpg`` nor a session here,
-    and ``Popen.kill`` would orphan the agent's own grandchildren, so the tree
-    is taken down with ``taskkill /T``.
-    """
-    if os.name == "nt":
-        try:
-            run_local(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                      capture_output=True, stdin=subprocess.DEVNULL,
-                      check=False, timeout=5)
-        except (OSError, subprocess.SubprocessError):
-            try:
-                proc.kill()
-            except OSError:
-                pass
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
-        return
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except OSError:
-        pass
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            pass
+        return AdapterResult(exit_code=exit_code, log_tail="\n".join(tail))

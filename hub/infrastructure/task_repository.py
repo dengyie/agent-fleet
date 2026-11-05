@@ -428,7 +428,8 @@ class SqliteTaskRepository:
         finally:
             conn.close()
 
-    def heartbeat(self, *, attempt_id, nonce, extend_s=LEASE_TTL_S, now=None):
+    def heartbeat(self, *, attempt_id, nonce, machine=None,
+                  extend_s=LEASE_TTL_S, now=None):
         """续租；返回 {"task_id", "lease_expires_at"}，lease 无效/过期返回 None。
 
         仅接受「当前 attempt + 任务仍 leased/running」的续租；租约存在但 attempt 已不是任务
@@ -449,6 +450,8 @@ class SqliteTaskRepository:
                                     (lease["task_id"],)).fetchone()
                 if not task or task["attempt_id"] != attempt_id:
                     return None
+                if machine is not None and task["machine"] != machine:
+                    return None
                 if task["state"] not in ("leased", "running"):
                     return None
                 new_exp = _iso(now + extend_s)
@@ -461,7 +464,8 @@ class SqliteTaskRepository:
             conn.close()
 
     def complete_task(self, *, attempt_id, nonce, exit_code, log_summary, diff_stat, duration_s,
-                      now=None, files=None, diff_patch=None, test_summary=None):
+                      now=None, files=None, diff_patch=None, test_summary=None,
+                      machine=None):
         """回传结果；attempt_id PK 撞 即幂等。返回 {"task_id","state","stored"} 或 None。
 
         log_summary/diff_stat 服务端截断后再 INSERT（不依赖 SQLite CHECK 抛错），
@@ -492,6 +496,12 @@ class SqliteTaskRepository:
                                      (attempt_id,)).fetchone()
                 if not lease or lease["nonce"] != nonce:
                     return None
+                if machine is not None:
+                    bound = conn.execute(
+                        "SELECT machine FROM tasks WHERE task_id=?", (lease["task_id"],)
+                    ).fetchone()
+                    if not bound or bound["machine"] != machine:
+                        return None
                 # 幂等：同一 attempt 已有结果，返回已持久化的状态（不按新 exit_code 重算）
                 existing = conn.execute(
                     "SELECT task_id, exit_code FROM results WHERE attempt_id=?",

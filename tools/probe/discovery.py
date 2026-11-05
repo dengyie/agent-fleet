@@ -540,9 +540,27 @@ def _codex_resume_token(cmdline: str) -> str | None:
     positional_token = None
     if "resume" in tokens:
         resume_at = tokens.index("resume")
-        positional = [token for token in tokens[resume_at + 1:]
-                      if not token.startswith("-")]
-        if len(positional) < 2 or not _NATIVE_ID_RE.fullmatch(positional[0]):
+        value_options = {
+            "-c", "--config", "--enable", "--disable", "-i", "--image",
+            "-m", "--model", "-p", "--profile", "-s", "--sandbox",
+            "-C", "--cd", "--add-dir", "-a", "--ask-for-approval",
+            "--remote", "--remote-auth-token-env", "--local-provider",
+            "--thread-source", "--output-schema", "-o", "--output-last-message",
+            "--resume", "-r",
+        }
+        positional = []
+        skip_value = False
+        for token in tokens[resume_at + 1:]:
+            if skip_value:
+                skip_value = False
+                continue
+            if token in value_options:
+                skip_value = True
+            elif token.startswith("-") and token != "-":
+                continue
+            else:
+                positional.append(token)
+        if not positional or not _NATIVE_ID_RE.fullmatch(positional[0]):
             return None
         positional_token = positional[0]
     if flagged and positional_token and flagged != positional_token:
@@ -550,7 +568,8 @@ def _codex_resume_token(cmdline: str) -> str | None:
     return flagged or positional_token
 
 
-def _unique_native_named(base_dir: str, filename: str, *, depth: int) -> str | None:
+def _unique_native_named(base_dir: str, filename: str, *, depth: int,
+                         codex_rollout: bool = False) -> str | None:
     """Return one exact transcript path, failing closed on ambiguity or scan cap."""
     if not base_dir or not os.path.isdir(base_dir):
         return None
@@ -577,7 +596,10 @@ def _unique_native_named(base_dir: str, filename: str, *, depth: int) -> str | N
                     scanned_files += 1
                     if scanned_files > 512:
                         return None
-                    if os.path.normcase(entry.name) != target:
+                    name = os.path.normcase(entry.name)
+                    matches = (name.startswith("rollout-") and name.endswith("-" + target)
+                               if codex_rollout else name == target)
+                    if not matches:
                         continue
                     if found is not None:
                         return None
@@ -592,7 +614,22 @@ def _codex_native_path(cmdline: str) -> str | None:
     base = os.path.expanduser("~/.codex/sessions")
     if not resume:
         return None
-    return _unique_native_named(base, f"{resume}.jsonl", depth=3)
+    exact = _unique_native_named(base, f"{resume}.jsonl", depth=3)
+    if exact:
+        return exact
+    rollout = _unique_native_named(base, f"{resume}.jsonl", depth=3,
+                                   codex_rollout=True)
+    if rollout is None:
+        return None
+    try:
+        with open(rollout, "r", encoding="utf-8") as stream:
+            first = stream.readline(16 * 1024)
+        metadata = json.loads(first)
+        if metadata.get("type") == "session_meta" and metadata.get("payload", {}).get("id") == resume:
+            return rollout
+    except (OSError, UnicodeError, ValueError, AttributeError):
+        pass
+    return None
 
 
 def _claude_native_path(cmdline: str) -> str | None:

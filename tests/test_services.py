@@ -379,13 +379,13 @@ class FakeTaskRepository:
             return None
         return dict(self.lease)
 
-    def heartbeat(self, *, attempt_id, nonce, extend_s=300, now=None):
+    def heartbeat(self, *, attempt_id, nonce, machine=None, extend_s=300, now=None):
         self.heartbeat_calls = (attempt_id, nonce)
         return {"task_id": attempt_id, "lease_expires_at": "2026-08-22T00:05:00Z"}
 
     def complete_task(self, *, attempt_id, nonce, exit_code, log_summary,
                       diff_stat, duration_s, now=None, files=None,
-                      diff_patch=None, test_summary=None):
+                      diff_patch=None, test_summary=None, machine=None):
         self.completed = (attempt_id, nonce, exit_code)
         self.completed_files = files
         self.completed_patch = diff_patch

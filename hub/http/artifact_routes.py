@@ -1,7 +1,9 @@
 """Owner-scoped operator endpoints for workspace artifacts."""
 from __future__ import annotations
 
-from flask import Blueprint, current_app, g, jsonify, request
+from io import BytesIO
+
+from flask import Blueprint, current_app, g, jsonify, request, send_file
 from platform_schema import validate_id
 
 from hub.auth import require_operator
@@ -54,12 +56,10 @@ def artifact_content(artifact_id):
             raise ArtifactError("not_found")
         # Re-read through the integrity-checking API before sending bytes.
         raw = _store().read(g.operator, workspace_id, artifact_id)
-        response = current_app.response_class(raw, mimetype=manifest["content_type"])
-        filename = "".join(
-            char if ord(char) >= 0x20 and ord(char) != 0x7f and char not in {"\\", '"'} else "_"
-            for char in str(manifest["name"])
+        response = send_file(
+            BytesIO(raw), mimetype=manifest["content_type"],
+            as_attachment=True, download_name=manifest["name"],
         )
-        response.headers["Content-Disposition"] = f"attachment; filename=\"{filename}\""
         response.headers["X-Artifact-Sha256"] = manifest["sha256"]
         return response
     return _call(_read)

@@ -86,7 +86,7 @@ class RunnerService:
         """
         result = self._task_op(
             self.repo.heartbeat,
-            attempt_id=attempt_id, nonce=str(nonce or ""))
+            attempt_id=attempt_id, nonce=str(nonce or ""), machine=machine)
         if result is None:
             raise ApplicationError(
                 "lease_expired", "lease 不存在或已过期，runner 应放弃任务", 409)
@@ -126,7 +126,8 @@ class RunnerService:
             raise ApplicationError("invalid_test_summary", "测试摘要不合法", 400) from exc
         out = self._task_op(
             self.repo.complete_task,
-            attempt_id=attempt_id, nonce=str(nonce or ""), exit_code=exit_code,
+            attempt_id=attempt_id, nonce=str(nonce or ""), machine=machine,
+            exit_code=exit_code,
             log_summary=str(log_summary)[:MAX_LOG_SUMMARY],
             diff_stat=str(diff_stat)[:MAX_DIFF_STAT],
             duration_s=duration_s,
