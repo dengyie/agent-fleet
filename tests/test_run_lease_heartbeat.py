@@ -14,7 +14,7 @@ def test_heartbeat_failure_is_fenced_and_thread_joins():
             renewed.set()
         else:
             failed.set()
-            raise RuntimeError('store unavailable')
+            raise RunLeaseLost('lease_mismatch')
     heartbeat = LeaseHeartbeat(renew, interval=.01, name='failure-test')
     heartbeat.start()
     try:

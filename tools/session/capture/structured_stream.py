@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Iterator
-from typing import Any
 
 MAX_LINE_CHARS = 262144  # 256 KiB per line; larger lines rejected
 

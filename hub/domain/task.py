@@ -12,7 +12,7 @@ from typing import Any, Mapping
 
 from agent_profiles import EXECUTABLE_AGENT_TYPES
 from session_schema import is_valid_session_id
-from hub.domain.task_result import MAX_DIFF_PATCH, MAX_TEST_SUMMARY, bound_patch, normalize_test_summary
+from hub.domain.task_result import bound_patch, normalize_test_summary
 
 
 MACHINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -40,9 +40,22 @@ MAX_CLIENT_TOKEN = 128
 MAX_LOG_SUMMARY = 10240
 MAX_DIFF_STAT = 5120
 
-_TERMINAL_STATES = frozenset(("succeeded", "failed", "cancelled", "expired"))
-_CANCELLABLE_STATES = frozenset(("queued", "leased", "running", "paused"))
-_PAUSABLE_STATES = frozenset(("queued", "leased", "running"))
+# 任务状态机的唯一事实源：SQLite 仓储的状态集合（SQL IN 子句、CHECK）都由这些
+# 有序元组派生，避免仓储与领域谓词各写一份字面量后漂移。
+TASK_STATES = (
+    "queued", "leased", "running", "paused",
+    "succeeded", "failed", "cancelled", "expired",
+)
+TERMINAL_STATES = ("succeeded", "failed", "cancelled", "expired")
+CANCELLABLE_STATES = ("queued", "leased", "running", "paused")
+PAUSABLE_STATES = ("queued", "leased", "running")
+# 持有活跃 lease 的状态：心跳/完成/过期回收只作用于这些状态。
+LEASE_HOLDING_STATES = ("leased", "running")
+
+_TERMINAL_STATES = frozenset(TERMINAL_STATES)
+_CANCELLABLE_STATES = frozenset(CANCELLABLE_STATES)
+_PAUSABLE_STATES = frozenset(PAUSABLE_STATES)
+_LEASE_HOLDING_STATES = frozenset(LEASE_HOLDING_STATES)
 
 
 @dataclass(frozen=True)
@@ -188,3 +201,7 @@ def can_pause(state: str) -> bool:
 
 def can_continue(state: str) -> bool:
     return state == "paused"
+
+
+def holds_lease(state: str) -> bool:
+    return state in _LEASE_HOLDING_STATES

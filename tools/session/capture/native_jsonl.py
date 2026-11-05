@@ -64,6 +64,16 @@ class JsonlTailer:
         kept for a later append.  Never raises: read errors surface a bounded
         ``last_error`` code and stop the read.
         """
+        return [obj for obj, _end in self.read_entries()]
+
+    def read_entries(self) -> list:
+        """Like :meth:`read`, but pairs each object with its end offset.
+
+        ``end`` is the byte offset just past that object's line, so a caller
+        that hands rows downstream one at a time can checkpoint exactly the
+        rows that were durably accepted (and resume after a mid-batch
+        failure without re-sending the accepted prefix).
+        """
         try:
             size = os.path.getsize(self.path)
         except OSError:
@@ -145,7 +155,7 @@ class JsonlTailer:
                     continue
                 if not isinstance(obj, dict):
                     continue
-                out.append(obj)
+                out.append((obj, self.offset))
             return out
         finally:
             try:
@@ -159,7 +169,6 @@ class JsonlTailer:
 
     def checkpoint_to(self, path: str) -> dict:
         """Persist the checkpoint to ``path`` atomically (tmp + rename)."""
-        import tempfile
 
         tmp = f"{path}.tmp-{os.getpid()}"
         with open(tmp, "w", encoding="utf-8") as fh:

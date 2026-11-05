@@ -53,12 +53,12 @@ class SelfReportContractTests(unittest.TestCase):
             def __exit__(self, *args):
                 return False
 
-        def fake_urlopen(request, timeout):
+        def fake_open(self, opener, request, timeout):
             captured["request"] = request
             captured["timeout"] = timeout
             return Response()
 
-        with mock.patch.object(module.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with mock.patch.object(module.Transport, "_open", fake_open):
             module.send_payload("https://example.test", "secret", {"machine": "test"})
 
         self.assertEqual(captured["request"].headers["User-agent"], "agent-fleet-probe/1.0")

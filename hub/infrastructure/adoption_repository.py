@@ -13,9 +13,10 @@ Design rules enforced here:
 - upsert is idempotent on ``session_id`` (one row per adopted session) and
   validates the whole payload before any SQL is executed;
 - status transitions are atomic: a single ``UPDATE`` whose WHERE clause
-  permits only ``pending -> adopted -> revoked`` plus idempotent same-status;
+  permits only ``pending -> adopted -> revoked`` (or ``pending -> revoked``)
+  plus idempotent same-status;
   a revoked row is retained and is terminal;
-- revocation is a CAS: ``revoke_cas`` transitions ``adopted -> revoked`` in one
+- revocation is a CAS: ``revoke_cas`` transitions ``adopted|pending -> revoked`` in one
   bounded UPDATE and reports exactly which caller won the transition, so the
   service can issue the one detach for a seat exactly once under races (a
   concurrent operator ``revoke`` and a probe-guard ``drift`` auto-revoke can
@@ -41,6 +42,7 @@ from hub.domain.adoption import (
     allowed_old_statuses,
     normalize_adoption_spec,
 )
+from hub.infrastructure.sqlite import connect as sqlite_connect
 
 SCHEMA_VERSION = 1
 
@@ -105,16 +107,9 @@ class AdoptionRepository:
     # -- connection / schema ---------------------------------------------------
 
     def _connect(self):
-        conn = sqlite3.connect(str(self.db_path), timeout=10,
-                               isolation_level=None)
-        try:
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-        except BaseException:
-            conn.close()   # fail closed — never leak a half-initialized conn
-            raise
-        return conn
+        # 共享 helper：Row/WAL/foreign_keys/autocommit，timeout=10；
+        # 失败时总会关闭半初始化连接（fail closed），WAL 协商遇锁重试。
+        return sqlite_connect(self.db_path, timeout=10)
 
     def init(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -263,7 +258,7 @@ class AdoptionRepository:
                 " WHERE adoptions.status = excluded.status"
                 "    OR (adoptions.status = 'pending'"
                 "        AND excluded.status = 'adopted')"
-                "    OR (adoptions.status = 'adopted'"
+                "    OR (adoptions.status IN ('pending', 'adopted')"
                 "        AND excluded.status = 'revoked')",
                 (clean["adoption_id"], clean["machine_id"], session_id,
                  clean["pid"], clean["pgid"], clean["started_at"],
@@ -338,7 +333,8 @@ class AdoptionRepository:
     def update_status(self, session_id: str, new_status: str) -> Adoption:
         """Atomically transition a record to ``new_status``.
 
-        Only ``pending -> adopted -> revoked`` (plus idempotent same-status) is
+        Only ``pending -> adopted -> revoked`` / ``pending -> revoked`` (plus
+        idempotent same-status) is
         permitted; the transition is a single parameterized UPDATE whose WHERE
         clause carries the allowed predecessor set, so a disallowed or unknown
         transition changes nothing and raises a bounded code:
@@ -380,9 +376,10 @@ class AdoptionRepository:
         return _sql_row(row)
 
     def revoke_cas(self, session_id: str) -> tuple[Adoption, bool]:
-        """Atomically capture the ``adopted -> revoked`` transition (CAS).
+        """Atomically capture the ``adopted|pending -> revoked`` transition (CAS).
 
-        The transition is ONE bounded ``UPDATE ... WHERE status='adopted'``.
+        The transition is ONE bounded
+        ``UPDATE ... WHERE status IN ('adopted', 'pending')``.
         Returns ``(row, captured)`` where ``captured`` is True ONLY for the
         caller whose UPDATE actually performed the transition; a concurrent
         or later caller sees the already-revoked row with ``captured is
@@ -392,8 +389,8 @@ class AdoptionRepository:
         a detach.
 
         - missing session  -> ``invalid_adoption`` (nothing changed);
-        - still-``pending`` row -> ``invalid_status_transition`` (the domain
-          forbids ``pending -> revoked``; nothing changed);
+        - a ``pending`` row -> ``(row, True)``: an operator may cancel an
+          adoption whose receipt never arrived (or was lost by a hub restart);
         - already-``revoked`` row -> ``(row, False)`` (idempotent, no change);
         - a fresh ``adopted`` row -> ``(row, True)``.
 
@@ -406,7 +403,7 @@ class AdoptionRepository:
         try:
             cur = conn.execute(
                 "UPDATE adoptions SET status='revoked', updated_at=?"
-                " WHERE session_id=? AND status='adopted'",
+                " WHERE session_id=? AND status IN ('adopted', 'pending')",
                 (now, session_id),
             )
             if cur.rowcount == 1:
@@ -422,12 +419,39 @@ class AdoptionRepository:
             if row["status"] == "revoked":
                 # Idempotent re-confirmation: some other call won the CAS.
                 return _sql_row(row), False
-            # A still-pending row is not revocable; nothing was mutated.
             raise AdoptionRepositoryError("invalid_status_transition")
         except sqlite3.Error:
             raise AdoptionRepositoryError("adoption_store") from None
         finally:
             conn.close()
+
+    def fail_pending(self, session_id: str) -> bool:
+        """Close a still-``pending`` row as ``revoked`` (rejected adopt).
+
+        ONE bounded ``UPDATE ... WHERE status='pending'``: an ``adopted`` seat
+        (e.g. an earlier adopt already succeeded and only a retry was
+        rejected) is never touched.  Returns True only for the caller that
+        performed the transition; a missing session is ``invalid_adoption``.
+        """
+        session_id = self._validate_session_id(session_id)
+        now = _now_iso()
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                "UPDATE adoptions SET status='revoked', updated_at=?"
+                " WHERE session_id=? AND status='pending'",
+                (now, session_id),
+            )
+            if cur.rowcount == 1:
+                return True
+            row = self._fetch_row(conn, session_id)
+        except sqlite3.Error:
+            raise AdoptionRepositoryError("adoption_store") from None
+        finally:
+            conn.close()
+        if row is None:
+            raise AdoptionRepositoryError("invalid_adoption")
+        return False
 
     def delete_pending(self, session_id: str) -> bool:
         """Delete a still-``pending`` row (enqueue-failure compensation).

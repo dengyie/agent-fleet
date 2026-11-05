@@ -5,6 +5,7 @@ from flask import Blueprint, current_app, g, jsonify, request
 
 from hub.auth import require_operator
 from hub.http.errors import ApplicationError, error_response
+from hub.http._common import json_object as _body
 
 bp = Blueprint("platform_conversations", __name__, url_prefix="/api/platform/v1")
 
@@ -20,13 +21,6 @@ def _approvals():
     if service is None:
         raise ApplicationError("submit_disabled", "审批提交能力未启用", 404)
     return service
-
-
-def _body():
-    body = request.get_json(silent=True)
-    if not isinstance(body, dict):
-        raise ApplicationError("invalid_json", "请求体必须是 JSON 对象", 400)
-    return body
 
 
 def _call(fn):

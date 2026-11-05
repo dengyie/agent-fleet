@@ -6,6 +6,7 @@ from flask import Blueprint, current_app, g, jsonify, request
 from hub.application.platform_schedule_service import PlatformScheduleError
 from hub.auth import require_operator
 from hub.http.errors import ApplicationError, error_response
+from hub.http._common import json_object as _body
 
 bp = Blueprint("platform_schedules", __name__, url_prefix="/api/platform/v1/schedules")
 
@@ -17,13 +18,6 @@ def _service():
     if service is None:
         raise ApplicationError("not_found", "接口不存在", 404)
     return service
-
-
-def _body():
-    body = request.get_json(silent=True)
-    if not isinstance(body, dict):
-        raise ApplicationError("invalid_json", "请求体必须是 JSON 对象", 400)
-    return body
 
 
 def _error(exc: PlatformScheduleError) -> ApplicationError:

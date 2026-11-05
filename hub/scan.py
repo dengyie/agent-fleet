@@ -31,8 +31,8 @@ import yaml
 from hub.application.observe_service import (
     HostConfig,
     ObserveService,
-    diff_snapshots as _diff,
-    normalize_agents as _normalize_agents,
+    diff_snapshots as _diff,  # noqa: F401 — 兼容旧调用方的私有 diff helper（见模块文档）
+    normalize_agents as _normalize_agents,  # noqa: F401 — 同上
 )
 
 FLEET_HOME = Path(__file__).resolve().parent.parent

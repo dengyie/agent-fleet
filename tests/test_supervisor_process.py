@@ -167,10 +167,6 @@ class FakeOps(sup_mod.GroupOps):
         proc.alive = False
         return proc.exit_code if proc.exit_code is not None else 0
 
-    def group_id(self, proc):
-        # mirrors POSIX: internally the leader pid (never used for the manifest)
-        return f"grp_{proc.pid}"
-
     def group_alive(self, proc):
         if getattr(proc, "alive_unknown", False):
             raise RuntimeError("liveness unknown")
@@ -1232,7 +1228,9 @@ class SupervisorTests(unittest.TestCase):
         sv2 = self._sv()
         sv2.recover()
         outcome = sv2.terminate_session(m.session_id, grace_s=0.0)
-        self.assertEqual(outcome, "no_live_process")
+        # 无 owner 记录可校验：既不能发信号也不能宣称已结束。
+        self.assertEqual(outcome, "liveness_unknown")
+        self.assertNotEqual(sv2.get(m.session_id).state, "terminated")
 
     # ---- public status --------------------------------------------------------
 

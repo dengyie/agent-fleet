@@ -754,10 +754,12 @@ class ReconciliationDaemonTests(unittest.TestCase):
             raise RuntimeError("secret callback detail")
 
         with self.assertLogs("hub.application.reconciliation_service", level="WARNING") as logs:
-            start_reconciliation(cb, stop_event=stop, interval_s=1)
-            deadline = time.monotonic() + 3.0
+            # Short interval, generous bounded wait: completion is event-driven,
+            # not a race between a 1s tick and a 3s wall-clock deadline.
+            start_reconciliation(cb, stop_event=stop, interval_s=0.01)
+            deadline = time.monotonic() + 30.0
             while not logs.output and time.monotonic() < deadline:
-                time.sleep(0.02)
+                time.sleep(0.01)
 
         joined = " ".join(logs.output)
         self.assertIn("reconciliation_callback_failed", joined)
@@ -768,15 +770,19 @@ class ReconciliationDaemonTests(unittest.TestCase):
         from hub.application.reconciliation_service import start_reconciliation
         calls = []
 
+        called = threading.Event()
+
         def cb():
             calls.append(1)
+            if len(calls) >= 2:
+                called.set()
 
-        stop = start_reconciliation(cb, interval_s=1)
-        deadline = time.monotonic() + 3.0
-        while len(calls) < 1 and time.monotonic() < deadline:
-            time.sleep(0.02)
-        stop.set()
-        self.assertGreaterEqual(len(calls), 1)
+        stop = start_reconciliation(cb, interval_s=0.01)
+        try:
+            self.assertTrue(called.wait(30), "callback was not invoked repeatedly")
+        finally:
+            stop.set()
+        self.assertGreaterEqual(len(calls), 2)
 
     def test_start_reconciliation_respects_injected_stop_event(self):
         from hub.application.reconciliation_service import start_reconciliation
@@ -797,15 +803,19 @@ class ReconciliationDaemonTests(unittest.TestCase):
         from hub.application.reconciliation_service import start_lease_reconciler
         calls = []
 
+        called = threading.Event()
+
         def cb():
             calls.append("lease")
+            if len(calls) >= 2:
+                called.set()
 
-        stop = start_lease_reconciler(cb, interval_s=1)
-        deadline = time.monotonic() + 3.0
-        while len(calls) < 1 and time.monotonic() < deadline:
-            time.sleep(0.02)
-        stop.set()
-        self.assertGreaterEqual(len(calls), 1)
+        stop = start_lease_reconciler(cb, interval_s=0.01)
+        try:
+            self.assertTrue(called.wait(30), "callback was not invoked repeatedly")
+        finally:
+            stop.set()
+        self.assertGreaterEqual(len(calls), 2)
 
 
 

@@ -1,6 +1,6 @@
 # connectors/__init__.py — 连接器注册表与工厂
 
-from .base import BaseConnector
+from .base import BaseConnector  # noqa: F401 — 包级公开 API（connectors.BaseConnector）
 from .hermes import HermesConnector
 from .claude_code import ClaudeCodeConnector
 from .codex import CodexConnector

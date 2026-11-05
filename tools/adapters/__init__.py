@@ -1,5 +1,5 @@
 """tools/adapters — 任务执行器注册表（仿 connectors 工厂模式）"""
-from tools.adapters.base import AdapterResult, BaseAdapter
+from tools.adapters.base import AdapterResult, BaseAdapter  # noqa: F401 — 包级公开 API（adapters.AdapterResult 被 runner/测试使用）
 from tools.adapters.codex import CodexAdapter
 
 _REGISTRY = {}

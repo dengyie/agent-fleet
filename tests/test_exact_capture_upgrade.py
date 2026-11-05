@@ -201,7 +201,8 @@ def test_exact_event_uses_redacted_and_encrypted_raw(client):
 
     rows = tr.read_redacted(session_id)
     assert rows
-    assert rows[0]["payload"]["text"] == "password=secret"
+    # secret 形态在落库前脱敏（redacted 与 raw 一致），其余正文保留。
+    assert rows[0]["payload"]["text"] == "password=[REDACTED:password]"
 
     raw = tr.read_raw(session_id, "evt_1", actor="op")
-    assert raw["payload"]["text"] == "password=secret"
+    assert raw["payload"]["text"] == "password=[REDACTED:password]"

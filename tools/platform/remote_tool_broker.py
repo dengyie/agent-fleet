@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Mapping
-from typing import Any
 
 from hub.domain.platform_command import PlatformCommand
 from .backends.base import ToolReceipt

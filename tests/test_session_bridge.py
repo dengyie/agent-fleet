@@ -259,7 +259,7 @@ class AdoptBestEffortClampTests(BridgeBase):
 class PassthroughBeforeAppendTests(BridgeBase):
     """Live ingest keeps agent text; schema allowlist still bounds the envelope."""
 
-    def test_spool_passthrough_keeps_agent_text(self):
+    def test_spool_keeps_agent_text_but_redacts_bearer(self):
         bridge = self._bridge(self._struct_manifest())
         bridge.ingest_structured([json.dumps({
             "kind": "user_message",
@@ -267,10 +267,11 @@ class PassthroughBeforeAppendTests(BridgeBase):
         })])
         replay = self.spool.read_after(0, 100, 1 << 18)
         flat = json.dumps(replay)
-        self.assertIn("hunter2-secret-value", flat)
-        self.assertNotIn("[REDACTED", flat)
+        # Bearer token 属 secret 形态：节点侧脱敏后才进 spool。
+        self.assertNotIn("hunter2-secret-value", flat)
+        self.assertIn("Bearer [REDACTED:credential]", flat)
 
-    def test_passthrough_event_keeps_secret_shaped_text(self):
+    def test_secret_shaped_text_redacted_before_spool(self):
         bridge = self._bridge(self._struct_manifest())
         secret = "sk-ant-abcdefghijklmnopqrstuvwxyz123456"
         bridge.ingest_structured([json.dumps({
@@ -279,7 +280,9 @@ class PassthroughBeforeAppendTests(BridgeBase):
         })])
         replay = self.spool.read_after(0, 100, 1 << 18)
         self.assertTrue(replay)
-        self.assertIn(secret, json.dumps(replay))
+        flat = json.dumps(replay)
+        self.assertNotIn(secret, flat)
+        self.assertIn("my api key is sk-[REDACTED:credential]", flat)
 
 
 class SourceDisconnectTests(BridgeBase):

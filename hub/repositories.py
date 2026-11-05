@@ -7,7 +7,6 @@ remote commands.
 """
 
 import re
-from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 # Machine-name safety contract shared with the auth layer

@@ -5,16 +5,12 @@
   - 包括：agent 变下线 / 恢复上线 / Hermes 状态变化 / 高负载 / 磁盘接近满
   - 常规 scan 无变化 → 零通知
 
-发送通道（可选）：
-  - stdout（调用方——如 cron ———捕获后决定是否推送）
-  - (预留) 微信/TG 直接推送，读取 credentials/ 或 ~/.hermes 渠道
+发送通道：
+  - stdout（调用方——如 cron ——捕获后决定是否推送）
 
 设计：emit 事件时由 here 判断是否值得推送，只在值得时 output 一行。
 """
 
-import json
-import os
-import time
 from pathlib import Path
 
 FLEET_HOME = Path(__file__).resolve().parent.parent
@@ -23,7 +19,6 @@ FLEET_HOME = Path(__file__).resolve().parent.parent
 DEFAULTS = {
     "high_load": 4.0,
     "disk_high_pct": 90,
-    "agent_down_min": 10,
 }
 
 
@@ -34,10 +29,6 @@ def _thresholds():
         return cfg.get("thresholds", DEFAULTS)
     except Exception:
         return DEFAULTS
-
-
-def _time_ago(ts):
-    return int(time.time() - ts)
 
 
 def evaluate_snapshot(machine, snapshot):
@@ -104,19 +95,3 @@ def setup_alert_notify(publisher=None):
         evmod.subscribe(make_notify_cb())
     else:
         publisher.subscribe(make_notify_cb())
-
-
-# ---------- 直接推送通道（可选，预留） ----------
-def send_telegram(text):
-    """Optional Hermes telegram channel.
-
-    Deferred-with-condition (HANDOFF §六): stdout→cron already covers
-    non-noisy alerts. Do not wire send_message until a separate ops plan
-    keeps bot tokens out of fleet config/logs.
-    """
-    print(f"[TG] {text}")
-
-
-def send_weixin(text):
-    """Optional Hermes weixin channel. Same deferral as send_telegram."""
-    print(f"[WX] {text}")

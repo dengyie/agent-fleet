@@ -12,8 +12,11 @@ Guarantees used by the rest of the probe/hub pipeline:
   (``codex`` | ``claude_code`` | ``hermes`` | ``pi`` | ``zcode`` |
   ``generic``) — there is no free-form family string;
 - ``discover_instances()`` returns rows stably sorted by ``(pid, started_at)``;
-- ``ps`` is invoked as ``ps -eo user=,pid=,ppid=,pgid=,comm=,args=`` (the same
-  column set the generic connector historically used, plus ``pgid``); a
+- ``ps`` is invoked as ``ps -eo user=,pid=,ppid=,pgid=,args=``.  ``comm`` is
+  deliberately NOT a column: it may contain spaces (misaligning a whitespace
+  split) and macOS truncates it to 16 chars, so the executable path comes from
+  ``/proc/<pid>/exe`` (Linux), ``proc_pidpath`` (macOS) or the space-aware
+  argv0 resolution instead; a
   malformed or permission-failed row is dropped on its own and never
   poisons sibling rows; a whole-command failure yields ``[]`` and sets
   ``last_discovery_error`` to the bounded ``DISCOVERY_ERROR_CODE`` so the
@@ -26,11 +29,13 @@ Guarantees used by the rest of the probe/hub pipeline:
 from __future__ import annotations
 
 import base64
+import glob
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -63,7 +68,14 @@ _PS_ENV = {
     "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
 }
 
-_PS_FIELDS = "user=,pid=,ppid=,pgid=,comm=,args="
+_PS_FIELDS = "user=,pid=,ppid=,pgid=,args="
+
+# 解释器型 argv0：只有这些进程才看 argv[1]（脚本路径）做家族识别。
+_INTERPRETER_RE = re.compile(
+    r"^(?:node|nodejs|bun|deno|python(?:[0-9]+(?:\.[0-9]+)*)?)(?:\.exe)?$",
+    re.IGNORECASE)
+# 解析含空格的 macOS 可执行路径时最多尝试的空格切分点（有界 stat 次数）。
+_MAX_SPACED_ARGV0_PROBES = 16
 _LSTART_FIELDS = "pid=,lstart="
 
 # Process-name aliases per observable family — derived from each Profile's
@@ -346,6 +358,57 @@ def _token_basename(token: str) -> str:
     return token.strip('"').replace("\\", "/").rsplit("/", 1)[-1].strip()
 
 
+_libproc = None
+
+
+def _darwin_exe_path(pid: int) -> str:
+    """macOS: the kernel's full executable path for ``pid`` (``""`` if unknown).
+
+    ``ps -o comm=`` is truncated to 16 chars on Darwin and ``args`` is not
+    quoted, so ``proc_pidpath`` is the only reliable exe source there.
+    """
+    global _libproc
+    if not sys.platform.startswith("darwin"):
+        return ""
+    try:
+        import ctypes
+        if _libproc is None:
+            _libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        buf = ctypes.create_string_buffer(4096)
+        size = _libproc.proc_pidpath(int(pid), buf, ctypes.c_uint32(4096))
+        if size <= 0:
+            return ""
+        return buf.value.decode("utf-8", "replace")
+    except (OSError, AttributeError, ValueError, TypeError):
+        return ""
+
+
+def _spaced_abs_argv0(args: str) -> str:
+    """Resolve an unquoted absolute argv0 that itself contains spaces.
+
+    ``ps`` prints ``/Applications/X.app/.../X Helper (Renderer) --type=...``
+    unquoted; try the prefixes ending at the first few spaces and return the
+    first one that is an existing regular file.
+    """
+    if not args.startswith("/"):
+        return ""
+    index = -1
+    for _ in range(_MAX_SPACED_ARGV0_PROBES):
+        index = args.find(" ", index + 1)
+        if index == -1:
+            candidate = args
+        else:
+            candidate = args[:index]
+        try:
+            if os.path.isfile(candidate):
+                return os.path.realpath(candidate) or candidate
+        except (OSError, ValueError):
+            return ""
+        if index == -1:
+            break
+    return ""
+
+
 def _exe_path_for(pid: int, comm: str | None, args: str) -> str:
     argv0 = _argv0(args)
     # 1) /proc/<pid>/exe (Linux) — always canonical when available.
@@ -355,6 +418,10 @@ def _exe_path_for(pid: int, comm: str | None, args: str) -> str:
             return os.path.realpath(proc_exe) or proc_exe
         except OSError:
             pass
+    # 1b) macOS kernel path (never the truncated ``comm``).
+    darwin = _darwin_exe_path(pid)
+    if darwin:
+        return darwin
     # 2) absolute argv0 (macOS/Linux launchd-style).
     if argv0.startswith("/"):
         try:
@@ -362,6 +429,9 @@ def _exe_path_for(pid: int, comm: str | None, args: str) -> str:
                 return os.path.realpath(argv0) or argv0
         except OSError:
             pass
+        spaced = _spaced_abs_argv0(args)
+        if spaced:
+            return spaced
     else:
         found = shutil.which(argv0)
         if found:
@@ -405,24 +475,25 @@ def enumerate_process_rows() -> list[ProcRow]:
     rows: list[ProcRow] = []
     for line in _iter_lines(text):
         try:
-            parts = line.split(None, 5)
-            if len(parts) < 6:
+            parts = line.split(None, 4)
+            if len(parts) < 5:
                 continue
-            user, pid_s, ppid_s, pgid_s, comm, args = parts
+            user, pid_s, ppid_s, pgid_s, args = parts
             pid = int(pid_s)
             pgid = int(pgid_s)
             ppid = int(ppid_s)
         except (ValueError, TypeError, AttributeError):
             continue
+        exe_path = _exe_path_for(pid, None, args)
         rows.append(ProcRow(
             user=user,
             pid=pid,
             pgid=pgid,
-            exe_path=_exe_path_for(pid, comm, args),
+            exe_path=exe_path,
             cmdline=args,
             started_at=started.get(pid, ""),
             ppid=ppid,
-            comm=comm,
+            comm=_token_basename(exe_path) or None,
         ))
     return rows
 
@@ -443,6 +514,11 @@ def classify_family(exe_path: str, cmdline: str) -> str | None:
     """
     if not exe_path:
         return None
+    # Electron/Chromium 子进程（renderer/gpu/utility…）带 ``--type=``：它们是
+    # 桌面 App 的 helper，不是 agent CLI 实例。
+    if any(token.startswith("--type=")
+           for token in _argv_tokens(cmdline or "")):
+        return None
     base = _token_basename(exe_path).strip().lower()
     if base.endswith(".exe"):
         base = base[:-4]
@@ -455,7 +531,12 @@ def classify_family(exe_path: str, cmdline: str) -> str | None:
     # basename 仍可精确命中家族别名（如 npm/桌面版跑法
     # ``node .../resources/glm/zcode.cjs``）。只检查这一个 token，
     # 不做全命令行扫描——``grep codex`` 之类的 helper 永不误分类。
-    script_base = _token_basename(_argv1(cmdline or "")).lower()
+    argv0_base = _token_basename(_argv_tokens(cmdline or "")[0]
+                                 if (cmdline or "").strip() else "")
+    interpreted = bool(_INTERPRETER_RE.match(base) or
+                       _INTERPRETER_RE.match(argv0_base))
+    script_base = (_token_basename(_argv1(cmdline or "")).lower()
+                   if interpreted else "")
     if script_base.endswith(".exe"):
         script_base = script_base[:-4]
     if script_base:
@@ -570,43 +651,33 @@ def _codex_resume_token(cmdline: str) -> str | None:
 
 def _unique_native_named(base_dir: str, filename: str, *, depth: int,
                          codex_rollout: bool = False) -> str | None:
-    """Return one transcript, counting legacy and rollout matches together."""
+    """Return one transcript, counting legacy and rollout matches together.
+
+    按已知目录布局直接定位（每层一个 ``*`` 通配的 glob），不再整树扫描并在
+    512 个文件处静默失败——``~/.claude/projects`` / ``~/.codex/sessions``
+    在真实机器上轻易超过该数量。多个匹配仍按歧义返回 ``None``。
+    """
     if not base_dir or not os.path.isdir(base_dir):
         return None
-    target = os.path.normcase(filename)
+    if not _NATIVE_ID_RE.fullmatch(filename):
+        return None
+    names = [glob.escape(filename)]
+    if codex_rollout:
+        names.append("rollout-*-" + glob.escape(filename))
+    root = glob.escape(base_dir)
     found = None
-    scanned_files = 0
-    scanned_dirs = 0
-    pending = [(base_dir, 0)]
-    while pending:
-        dirpath, level = pending.pop()
-        try:
-            entries = os.scandir(dirpath)
-            with entries:
-                for entry in entries:
-                    if entry.is_dir(follow_symlinks=False):
-                        scanned_dirs += 1
-                        if scanned_dirs > 512:
-                            return None
-                        if level < depth:
-                            pending.append((entry.path, level + 1))
+    try:
+        for level in range(depth + 1):
+            for name in names:
+                pattern = os.path.join(root, *(["*"] * level), name)
+                for path in glob.iglob(pattern):
+                    if os.path.islink(path) or not os.path.isfile(path):
                         continue
-                    if not entry.is_file(follow_symlinks=False):
-                        continue
-                    scanned_files += 1
-                    if scanned_files > 512:
+                    if found is not None and os.path.normcase(path) != os.path.normcase(found):
                         return None
-                    name = os.path.normcase(entry.name)
-                    matches = name == target or (
-                        codex_rollout and name.startswith("rollout-")
-                        and name.endswith("-" + target))
-                    if not matches:
-                        continue
-                    if found is not None:
-                        return None
-                    found = entry.path
-        except OSError:
-            return None
+                    found = path
+    except (OSError, ValueError):
+        return None
     return found
 
 
@@ -623,7 +694,9 @@ def _codex_native_path(cmdline: str) -> str | None:
         return rollout
     try:
         with open(rollout, "r", encoding="utf-8") as stream:
-            first = stream.readline(16 * 1024)
+            # 真实 Codex rollout 首行 session_meta（含 base_instructions）常达
+            # 20KB+，16KB 上限会截断成非法 JSON，导致 resume 绑定永远失败。
+            first = stream.readline(1 << 20)
         metadata = json.loads(first)
         if metadata.get("type") == "session_meta" and metadata.get("payload", {}).get("id") == resume:
             return rollout

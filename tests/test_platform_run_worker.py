@@ -707,11 +707,32 @@ def test_slow_provider_keeps_both_leases_alive_and_cleans_heartbeat(tmp_path):
     repo = _catalog(app, tmp_path)
     run = _queued(app)
     worker = app.extensions['fleet']['services']['platform_worker']
-    worker.lease_s = 5
+    # Virtual clock for lease expiry: the provider advances time past several
+    # lease windows and only proceeds once the heartbeat thread has renewed at
+    # the new time, so the outcome never depends on real scheduling latency.
+    worker.lease_s = 0.3  # heartbeat interval 0.1s of real time
+    virtual = {'now': time.time()}
+    worker.clock = lambda: virtual['now']
+    worker.resource_leases.clock = worker.clock
+    renewed = threading.Condition()
+    renewals = []
+    original_renew = repo.renew_run_lease
+
+    def counting_renew(*args, **kwargs):
+        ok = original_renew(*args, **kwargs)
+        with renewed:
+            renewals.append(kwargs.get('now'))
+            renewed.notify_all()
+        return ok
+    repo.renew_run_lease = counting_renew
 
     class SlowProvider:
         def complete(self, messages, tools, *, request_observer=None):
-            time.sleep(5.3)
+            for _ in range(6):  # 6 * 0.6 * lease_s = 3.6 lease windows
+                virtual['now'] += worker.lease_s * 0.6
+                target = virtual['now']
+                with renewed:
+                    assert renewed.wait_for(lambda: renewals and renewals[-1] >= target, timeout=10)
             return ModelResponse(kind='final', text='slow but complete')
 
     worker.provider_factory = lambda profile: SlowProvider()

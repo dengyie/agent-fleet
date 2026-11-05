@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 
 from hub.application.task_service import ApplicationError
-from hub.domain.service import HEALTH_DIMENSIONS, ServiceValidationError
+from hub.domain.service import HEALTH_DIMENSIONS
 from hub.infrastructure.service_repository import ServiceRepositoryError
 from hub.integrations.http_probe import canonical_probe_origin, parse_http_probe_policy
 from platform_schema import validate_id, validate_owner_id

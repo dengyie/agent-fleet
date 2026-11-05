@@ -22,6 +22,7 @@ Task 8 新增 transport-only 身份提取原语，供薄 HTTP 适配器复用：
 import functools
 import hmac
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -29,6 +30,8 @@ from pathlib import Path
 from flask import current_app, g, request
 
 from hub.http.errors import ApplicationError, error_response
+
+logger = logging.getLogger(__name__)
 
 FLEET_HOME = Path(__file__).resolve().parent.parent
 INGEST_TOKEN_FILE = FLEET_HOME / "credentials" / "ingest-token"
@@ -44,6 +47,42 @@ _PLATFORM_NODE_CREDENTIAL_HEADER = "X-Platform-Node-Credential"
 
 #: 其他认证域的凭据头。携带这些头的请求，即使配置了 DEV_OPERATOR 也不回退成 operator 身份，
 #: 否则 runner 凭据或 ingest token 可冒充 operator 调用任务 API。蓝图边界 = 认证边界。
+#: 显式开发开关：未配置 ingest token 时才允许匿名写 ingest 端点。生产默认 fail closed。
+ALLOW_INSECURE_INGEST_ENV = "AGENT_FLEET_ALLOW_INSECURE_INGEST"
+
+
+class CredentialStoreUnavailable(RuntimeError):
+    """凭据存储读取失败（与"凭据无效"区分）：守卫返回 503 而非 403。
+
+    节点据此重试，而不会误以为自己的凭据被吊销。错误文本不含路径或凭据值。
+    """
+
+    def __init__(self, code: str = "credential_store_unavailable"):
+        self.code = code
+        super().__init__(code)
+
+
+def _store_unavailable(code: str = "credential_store_unavailable"):
+    return error_response(ApplicationError(code, "凭据存储暂不可用，请稍后重试", 503))
+
+
+def mark_machine_auth(wrapper):
+    """把 ``wrapper`` 显式登记为机器认证视图。
+
+    标记值是 wrapper 自身：``functools.wraps`` 会把 ``__dict__`` 复制到外层
+    装饰器，但复制过去的值指向内层函数，``is_machine_auth_view`` 只认
+    ``view._fleet_machine_auth is view``，因此标记不会被外层 operator 装饰器
+    意外继承（否则账户模式的 Origin/CSRF 边界会被跳过）。
+    """
+    wrapper._fleet_machine_auth = wrapper
+    return wrapper
+
+
+def is_machine_auth_view(view) -> bool:
+    """注册到路由的视图函数本身是否为机器认证入口（不沿 ``__wrapped__`` 下钻）。"""
+    return view is not None and getattr(view, "_fleet_machine_auth", None) is view
+
+
 _FOREIGN_IDENTITY_HEADERS = (
     _AF_TOKEN_HEADER,
     _RUNNER_CREDENTIAL_HEADER,
@@ -69,14 +108,16 @@ def load_supervisor_credentials():
                 return {str(k): str(v) for k, v in data.items() if k and v}
         except (ValueError, TypeError):
             pass
+    path = FLEET_HOME / "credentials" / "supervisor-credentials.json"
     try:
-        path = FLEET_HOME / "credentials" / "supervisor-credentials.json"
-        if path.exists():
-            data = json.loads(path.read_text())
-            if isinstance(data, dict):
-                return {str(k): str(v) for k, v in data.items() if k and v}
+        if not path.exists():
+            return {}
+        data = json.loads(path.read_text())
     except (OSError, ValueError, TypeError):
-        pass
+        # 文件存在但读不出：存储故障，不是"无凭据"。
+        raise CredentialStoreUnavailable() from None
+    if isinstance(data, dict):
+        return {str(k): str(v) for k, v in data.items() if k and v}
     return {}
 
 
@@ -179,12 +220,14 @@ def require_supervisor(view):
     """
     @functools.wraps(view)
     def wrapper(*args, **kwargs):
-        identity = extract_supervisor_identity()
+        try:
+            identity = extract_supervisor_identity()
+        except CredentialStoreUnavailable as exc:
+            return _store_unavailable(exc.code)
         if identity is None:
             return _forbidden()
         return view(*args, **kwargs)
-    wrapper._fleet_machine_auth = True
-    return wrapper
+    return mark_machine_auth(wrapper)
 
 
 def extract_platform_node_identity(req=None) -> tuple[str, str] | None:
@@ -204,10 +247,17 @@ def extract_platform_node_identity(req=None) -> tuple[str, str] | None:
     repository = fleet.get("platform_repository")
     if repository is None:
         return None
+    from hub.infrastructure.platform_db import (
+        PlatformRepositoryError,
+        PlatformValidationError,
+    )
     try:
         identity = repository.authenticate_node_credential(node_id, secret)
-    except Exception:
+    except PlatformValidationError:
         return None
+    except (PlatformRepositoryError, OSError) as exc:
+        # 存储故障 ≠ 凭据无效：抛给守卫映射为 503，节点不会误判凭据失效。
+        raise CredentialStoreUnavailable() from exc
     if not identity:
         return None
     g.platform_node_id = identity["node_id"]
@@ -219,11 +269,14 @@ def require_platform_node(view):
     """Platform node domain; never falls back to operator identity."""
     @functools.wraps(view)
     def wrapper(*args, **kwargs):
-        if extract_platform_node_identity() is None:
+        try:
+            identity = extract_platform_node_identity()
+        except CredentialStoreUnavailable as exc:
+            return _store_unavailable(exc.code)
+        if identity is None:
             return _forbidden()
         return view(*args, **kwargs)
-    wrapper._fleet_machine_auth = True
-    return wrapper
+    return mark_machine_auth(wrapper)
 
 
 def resolve_ingest_token(cli_token=None):
@@ -236,8 +289,10 @@ def resolve_ingest_token(cli_token=None):
     try:
         if INGEST_TOKEN_FILE.exists():
             return INGEST_TOKEN_FILE.read_text().strip() or None
-    except Exception:
-        pass
+    except OSError:
+        # 启动期解析：读不出 token 文件按"未配置"处理（ingest 端点随之 fail
+        # closed 返回 503），但必须留下诊断，不能静默。
+        logger.warning("ingest token file unreadable; ingest endpoints fail closed")
     return None
 
 
@@ -247,12 +302,14 @@ def load_runner_credentials():
     文件须 0600、不进 git；单台机器吊销 = 删对应键。
     """
     try:
-        if RUNNER_CREDENTIALS_FILE.exists():
-            data = json.loads(RUNNER_CREDENTIALS_FILE.read_text())
-            if isinstance(data, dict):
-                return {str(k): str(v) for k, v in data.items()}
-    except Exception:
-        pass
+        if not RUNNER_CREDENTIALS_FILE.exists():
+            return {}
+        data = json.loads(RUNNER_CREDENTIALS_FILE.read_text())
+    except (OSError, ValueError, TypeError):
+        # 文件存在但读不出/解析失败：存储故障（503），不是凭据无效（403）。
+        raise CredentialStoreUnavailable() from None
+    if isinstance(data, dict):
+        return {str(k): str(v) for k, v in data.items()}
     return {}
 
 
@@ -326,8 +383,22 @@ def _forbidden():
     return error_response(err)
 
 
+def insecure_ingest_allowed() -> bool:
+    """显式开发开关：``app.config['ALLOW_INSECURE_INGEST']`` 或 env=1。"""
+    if current_app.config.get("ALLOW_INSECURE_INGEST"):
+        return True
+    return os.environ.get(ALLOW_INSECURE_INGEST_ENV, "").strip() == "1"
+
+
 def require_ingest_token(view):
-    """observe 域：X-Agent-Fleet-Token 头与 app.config['INGEST_TOKEN'] 比对。"""
+    """observe 域：X-Agent-Fleet-Token 头与 app.config['INGEST_TOKEN'] 比对。
+
+    - 未配置 token → fail closed 503 ``ingest_token_not_configured``，除非显式
+      开发开关 ``ALLOW_INSECURE_INGEST`` / ``AGENT_FLEET_ALLOW_INSECURE_INGEST=1``；
+    - 请求额外携带 ``X-Runner-Credential`` 时校验该每机凭据：无效 → 403，有效
+      → ``g.ingest_machine`` 绑定为凭据机器（适配器要求 payload machine 一致）；
+      否则 ``g.ingest_machine = None``、``g.ingest_auth = "shared_token"``。
+    """
     @functools.wraps(view)
     def wrapper(*args, **kwargs):
         token = current_app.config.get("INGEST_TOKEN")
@@ -335,20 +406,69 @@ def require_ingest_token(view):
             got = extract_ingest_token()
             if not hmac.compare_digest(got, token):
                 return _forbidden()
+        elif not insecure_ingest_allowed():
+            return error_response(ApplicationError(
+                "ingest_token_not_configured", "ingest token 未配置", 503))
+        g.ingest_machine = None
+        g.ingest_auth = "shared_token"
+        if request.headers.get(_RUNNER_CREDENTIAL_HEADER):
+            try:
+                identity = extract_runner_identity()
+            except CredentialStoreUnavailable as exc:
+                return _store_unavailable(exc.code)
+            if identity is None:
+                return _forbidden()
+            g.ingest_machine = identity[0]
+            g.ingest_auth = "machine_credential"
         return view(*args, **kwargs)
-    wrapper._fleet_machine_auth = True
-    return wrapper
+    return mark_machine_auth(wrapper)
+
+
+_SAFE_METHODS = frozenset(("GET", "HEAD", "OPTIONS"))
+
+
+def operator_origin_allowed(req=None) -> bool:
+    """非账户模式（CF Access / DEV）写请求的同源校验。
+
+    CF Access 身份由边缘注入、DEV_OPERATOR 无需任何凭据，浏览器跨站提交会
+    "自动带上"这两种身份，因此写操作必须证明来自本站页面：
+    - 有 ``Origin``：其 host 必须等于请求 Host，或在
+      ``app.config['OPERATOR_ALLOWED_ORIGINS']`` 中（只比 host，兼容 TLS 终止在
+      代理、内部看到 http 的部署）；``Origin: null`` 一律拒绝；
+    - 无 ``Origin``：``Sec-Fetch-Site`` 为 cross-site/same-site 拒绝；两者都缺
+      （curl/脚本等非浏览器客户端）放行——它们不会携带受害者的浏览器身份。
+    账户模式由 ``account_boundary`` 负责 Origin，此处不重复判断。
+    """
+    src = request if req is None else req
+    if src.method in _SAFE_METHODS or current_app.config.get("ACCOUNTS_ENABLED"):
+        return True
+    origin = src.headers.get("Origin")
+    if origin is None:
+        return src.headers.get("Sec-Fetch-Site", "") not in ("cross-site", "same-site")
+    from urllib.parse import urlsplit
+    host = urlsplit(origin).netloc.lower()
+    if not host:
+        return False
+    allowed = {src.host.lower()}
+    for extra in current_app.config.get("OPERATOR_ALLOWED_ORIGINS") or ():
+        extra_host = urlsplit(str(extra)).netloc.lower()
+        if extra_host:
+            allowed.add(extra_host)
+    return host in allowed
 
 
 def require_operator(view):
     """tasks 域：CF Access 认证（或仅限未携带他域凭据头的 DEV fallback）。
-    没有身份 → 401（统一错误外型）。"""
+    没有身份 → 401；非账户模式跨站写请求 → 403 ``invalid_origin``。"""
     @functools.wraps(view)
     def wrapper(*args, **kwargs):
         email = extract_operator_identity()
         if not email:
             return error_response(
                 ApplicationError("unauthorized", "operator identity required", 401))
+        if not operator_origin_allowed():
+            return error_response(
+                ApplicationError("invalid_origin", "请求来源无效", 403))
         g.operator = email
         return view(*args, **kwargs)
     return wrapper
@@ -358,12 +478,14 @@ def require_runner(view):
     """commands 域：X-Runner-Credential: <machine>:<secret>，凭据与机器绑定。"""
     @functools.wraps(view)
     def wrapper(*args, **kwargs):
-        identity = extract_runner_identity()
+        try:
+            identity = extract_runner_identity()
+        except CredentialStoreUnavailable as exc:
+            return _store_unavailable(exc.code)
         if identity is None:
             return _forbidden()
         return view(*args, **kwargs)
-    wrapper._fleet_machine_auth = True
-    return wrapper
+    return mark_machine_auth(wrapper)
 
 
 def require_task_store(view):

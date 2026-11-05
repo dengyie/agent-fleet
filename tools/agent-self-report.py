@@ -43,9 +43,10 @@ import uuid
 from tools.probe_collectors import (
     DEFAULT_AGENT_TYPES,
     build_payload,
-    collect_all,
+    collect_all,  # noqa: F401 — 契约：probe 模块须暴露 collect_all（tests/test_push_only）
     redacted_json,
 )
+from tools.transport import Transport, require_secure_url
 
 
 def parse_agent_types(raw):
@@ -59,19 +60,32 @@ def parse_agent_types(raw):
     return selected
 
 
-def send_payload(endpoint, token, payload):
-    req = urllib.request.Request(
-        endpoint.rstrip("/") + "/api/ingest",
-        data=json.dumps(payload).encode(),
-        headers={
+def send_payload(endpoint, token, payload, *, allow_insecure=False):
+    """经统一加固传输（tools.transport）上报：不跟随重定向、只发 https。
+
+    非 2xx 抛 HTTPError、传输失败重抛底层异常，保持重试分类语义不变。
+    """
+    url = endpoint.rstrip("/") + "/api/ingest"
+    require_secure_url(url, allow_insecure=allow_insecure)
+    transport = Transport(timeout=15, attempts=1, allow_insecure=allow_insecure)
+    status, body = transport.post_json(
+        url,
+        payload,
+        {
             "Content-Type": "application/json",
             "X-Agent-Fleet-Token": token,
             "User-Agent": "agent-fleet-probe/1.0",
         },
-        method="POST",
+        timeout=15,
     )
-    with urllib.request.urlopen(req, timeout=15) as response:
-        return response.status, response.read().decode()
+    if status == 0:
+        exc = transport.last_exception
+        if exc is None:
+            exc = ConnectionError(str(body.get("error") or "transport_failed"))
+        raise exc
+    if not 200 <= status < 300:
+        raise urllib.error.HTTPError(url, status, "report rejected", None, None)
+    return status, json.dumps(body, ensure_ascii=False)
 
 
 def _is_retryable_report_error(exc):

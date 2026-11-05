@@ -132,6 +132,22 @@ _TERMINAL_RECEIPTS = frozenset({
 #: revoke/retry.
 _TRACK_TTL_S = 24 * 60 * 60
 
+#: Terminal receipt statuses that mean an ``adopt`` did NOT take effect.  The
+#: pending seat is closed (``pending -> revoked``) so the same process can be
+#: re-adopted / the operator is not stuck on a dead pending row.
+_ADOPT_FAILED_RECEIPTS = frozenset({"rejected", "failed", "expired"})
+#: ``rejected`` is always decided by the probe BEFORE (or rolled back after) an
+#: attach, so nothing is left bound.  ``failed``/``expired`` are indeterminate
+#: (e.g. ``execution_unknown`` after a probe crash) and get ONE cleanup detach.
+_ADOPT_INDETERMINATE_RECEIPTS = frozenset({"failed", "expired"})
+#: Fixed audit action for an adopt the probe refused / that never completed.
+_ADOPT_REJECTED_AUDIT_ACTION = "adopt_rejected"
+#: Fixed reason_code for the cleanup detach after an indeterminate adopt.
+_ADOPT_CLEANUP_DETACH_REASON = "adopt_cleanup"
+#: Adoption session ids are minted as ``adopt_<hex>``; only those are looked up
+#: in the adoption store when a receipt is resolved from the durable queue.
+_ADOPTION_SESSION_PREFIX = "adopt_"
+
 
 class AdoptionServiceError(RuntimeError):
     """Bounded adoption-service error: a stable short code only.
@@ -385,8 +401,11 @@ class AdoptionService:
 
         An already-revoked record is idempotent: it is re-confirmed in the
         store and re-audited but never re-enqueues a ``detach`` command.  Only
-        the CAS winner of ``adopted -> revoked`` issues the detach, so a
+        the CAS winner of ``adopted|pending -> revoked`` issues the detach, so a
         concurrent operator revoke and a drift auto-revoke cannot double-fire.
+        A still-``pending`` seat is revocable too (its receipt may never
+        arrive); the detach then cleans up an attach that may have landed on
+        the probe after all (an unknown session is a harmless rejection).
         """
         with self._admission_lock:
             try:
@@ -659,14 +678,19 @@ class AdoptionService:
         self._evict_stale_tracked()
         tracked = self._tracked.get(cid)
         if tracked is None:
-            return {"command_id": cid, "handled": False}
+            # ``_tracked`` is only a cache: after a hub restart (or TTL
+            # eviction) the receipt is resolved from the DURABLE supervisor
+            # command row (session_id / action / machine) instead of dropped.
+            tracked = self._resolve_persisted(cid)
+            if tracked is None:
+                return {"command_id": cid, "handled": False}
         session_id = str(tracked["session_id"])
         action = str(tracked["action"])
         status_text = str(status or "")[:32]
         reason_text = str(reason or "")[:120]
         if action == "adopt":
             result = self._receipt_adopt(cid, session_id, status_text,
-                                         reason_text)
+                                         reason_text, tracked)
         elif action == "detach":
             result = self._receipt_detach(cid, session_id, status_text)
         else:
@@ -697,8 +721,50 @@ class AdoptionService:
             self._tracked.pop(cid, None)
         return result
 
+    def _resolve_persisted(self, cid: str) -> dict | None:
+        """Rebuild a tracking entry from the durable supervisor command row.
+
+        Only commands targeting an adoption session (``adopt_*``) that exists
+        in the adoption store and whose action this service issues are
+        resolved; everything else stays an inert untracked receipt.  A
+        supervisor lookup failure is treated as untracked (never raised); a
+        genuine adoption-store failure propagates like every other store
+        error on the receipt path.
+        """
+        if not cid:
+            return None
+        lookup = getattr(self.supervisor, "receipt_status", None)
+        if not callable(lookup):
+            return None
+        try:
+            command = lookup(cid)
+        except Exception:
+            return None
+        if not isinstance(command, dict):
+            return None
+        session_id = str(command.get("session_id") or "")
+        action = str(command.get("action") or "")
+        if not session_id.startswith(_ADOPTION_SESSION_PREFIX):
+            return None
+        if action not in ({"adopt", "detach"} | _SOURCE_CONTROL_ACTIONS):
+            return None
+        try:
+            record = self.adoption_repo.get(session_id)
+        except AdoptionRepositoryError as exc:
+            if exc.code == "invalid_adoption":
+                return None
+            raise
+        if record is None:
+            return None
+        return {
+            "session_id": session_id,
+            "action": action,
+            "machine_id": str(command.get("machine_id") or record.machine_id),
+            "actor": str(record.actor or ""),
+        }
+
     def _receipt_adopt(self, cid: str, session_id: str, status: str,
-                       reason: str) -> dict:
+                       reason: str, tracked: dict | None = None) -> dict:
         """Promote a ``pending`` seat on the probe's successful adopt receipt.
 
         A genuine ``AdoptionRepositoryError`` (from the ``get`` OR the
@@ -709,7 +775,12 @@ class AdoptionService:
         job, once a result has settled.
         """
         if reason != ADOPT_SUCCESS:
-            # An adopt-denied / refused receipt never promotes the store.
+            # An adopt-denied / refused receipt never promotes the store; a
+            # TERMINAL refusal closes the still-pending seat instead of
+            # leaving it blocking re-adopt / revoke forever.
+            if status in _ADOPT_FAILED_RECEIPTS:
+                return self._fail_pending_adopt(cid, session_id, status,
+                                                reason, tracked or {})
             return {"command_id": cid, "handled": False}
         record = self.adoption_repo.get(session_id)
         if record is not None and record.status == "pending":
@@ -719,6 +790,45 @@ class AdoptionService:
         # already adopted / already revoked / unknown — clean no-change replay
         return {"command_id": cid, "handled": True,
                 "outcome": "noop", "session_id": session_id}
+
+    def _fail_pending_adopt(self, cid: str, session_id: str, status: str,
+                            reason: str, tracked: dict) -> dict:
+        """Close a ``pending`` seat after a terminal adopt refusal.
+
+        ``pending -> revoked`` only (an ``adopted`` seat — an earlier adopt
+        already succeeded — is never touched), ONE bounded audit, and for an
+        indeterminate outcome (``failed``/``expired``) ONE cleanup detach.
+        """
+        with self._admission_lock:
+            if not self.adoption_repo.fail_pending(session_id):
+                return {"command_id": cid, "handled": True,
+                        "outcome": "noop", "session_id": session_id}
+            self.transcripts.append_audit(
+                str(tracked.get("actor") or ""), _ADOPT_REJECTED_AUDIT_ACTION,
+                target=session_id,
+                detail={"status": status, "reason": reason[:32]})
+            detach_enqueued = False
+            if status in _ADOPT_INDETERMINATE_RECEIPTS:
+                machine_id = str(tracked.get("machine_id") or "")
+                if not machine_id:
+                    record = self.adoption_repo.get(session_id)
+                    machine_id = record.machine_id if record else ""
+                try:
+                    envelope = self.supervisor.enqueue(
+                        machine_id, session_id, None, "detach",
+                        _ADOPT_CLEANUP_DETACH_REASON,
+                        nonce=secrets.token_hex(16))
+                except Exception:
+                    envelope = {}
+                detach_cid = str(envelope.get("command_id") or "")
+                if detach_cid:
+                    detach_enqueued = True
+                    self._track(detach_cid, session_id=session_id,
+                                action="detach", machine_id=machine_id,
+                                actor=str(tracked.get("actor") or ""))
+            return {"command_id": cid, "handled": True,
+                    "outcome": "rejected", "session_id": session_id,
+                    "detach_enqueued": detach_enqueued}
 
     def _receipt_detach(self, cid: str, session_id: str, status: str) -> dict:
         """A tracked ``detach`` command's terminal confirmation — no mutation."""

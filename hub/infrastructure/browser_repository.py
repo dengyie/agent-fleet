@@ -7,7 +7,7 @@ import math
 import secrets
 import sqlite3
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -15,6 +15,7 @@ from typing import Any
 from platform_schema import validate_id, validate_owner_id
 
 from hub.domain.browser_submit import APPROVAL_TTL_S, submit_selector, utc_timestamp, opaque_browser_id
+from hub.infrastructure.sqlite import connect as sqlite_connect
 
 
 class BrowserRepositoryError(RuntimeError):
@@ -54,10 +55,8 @@ class BrowserRepository:
         self.approval_id_factory = approval_id_factory
 
     def _connect(self):
-        conn = sqlite3.connect(str(self.db_path), timeout=10, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        # 该库历史上未切换 WAL；保持原日志模式。
+        return sqlite_connect(self.db_path, timeout=10, wal=False)
 
     def init(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

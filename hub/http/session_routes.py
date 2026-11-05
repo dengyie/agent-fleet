@@ -78,6 +78,31 @@ def _query_bool(name: str) -> bool:
     }
 
 
+def _ingest_machine_binding_error(events):
+    """会话事件的机器绑定（与 /api/ingest 同一规则）。
+
+    - 每机凭据（``g.ingest_machine``）：每个事件 ``machine_id`` 必须等于凭据机器；
+    - 共享 token：不得为已由每机凭据绑定的机器写事件（``machine_bound``）。
+    非 dict 事件交给服务层逐条 reject，这里不处理。
+    """
+    bound = getattr(g, "ingest_machine", None)
+    machines = [e.get("machine_id") for e in events if isinstance(e, dict)]
+    if bound is not None:
+        if any(m != bound for m in machines):
+            return error_response(ApplicationError(
+                "machine_mismatch", "事件 machine_id 与凭据机器不一致", 403))
+        return None
+    observe = current_app.extensions.get("fleet", {}).get(
+        "services", {}).get("observe")
+    if observe is None:
+        return None
+    if any(observe.is_credential_bound(m) for m in set(
+            m for m in machines if isinstance(m, str))):
+        return error_response(ApplicationError(
+            "machine_bound", "该机器已绑定每机凭据", 403))
+    return None
+
+
 @bp.route("/api/session-events", methods=["POST"])
 @require_ingest_token
 def api_session_events():
@@ -91,6 +116,9 @@ def api_session_events():
     if not isinstance(data, list):
         return error_response(ApplicationError(
             "invalid_json", "请求体必须是事件列表", 400))
+    denied = _ingest_machine_binding_error(data)
+    if denied is not None:
+        return denied
     try:
         result = _sessions().ingest_events(data)
     except SessionServiceError as exc:

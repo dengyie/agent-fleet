@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from platform_schema import PlatformValidationError, validate_client_token, validate_id, validate_message_text, validate_owner_id
+from platform_schema import validate_client_token, validate_id, validate_message_text, validate_owner_id
 
 
 @dataclass(frozen=True)

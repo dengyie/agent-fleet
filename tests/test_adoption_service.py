@@ -376,11 +376,11 @@ def test_revoke_unknown_session_is_bounded(service):
     assert str(exc.value) == "invalid_adoption"
 
 
-def test_revoke_pending_to_revoked_is_blocked(service, candidate):
+def test_revoke_pending_closes_seat_and_detaches(service, candidate):
     row = service.adopt("m1", candidate.pid, candidate.started_at, "op-1")
-    with pytest.raises(AdoptionServiceError) as exc:
-        service.revoke(row.session_id, "op-1")
-    assert exc.value.code == "invalid_status_transition"
+    service.revoke(row.session_id, "op-1")
+    assert service.adoption_repo.get(row.session_id).status == "revoked"
+    assert service.supervisor.commands[-1]["action"] == "detach"
 
 
 def test_revoke_does_not_touch_signal_field(service, candidate):

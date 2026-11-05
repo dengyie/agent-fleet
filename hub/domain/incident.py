@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from platform_schema import validate_id, validate_owner_id
+from platform_schema import validate_id
 
 INCIDENT_STATES = frozenset({"open", "closed"})
 INCIDENT_FAILURE_CLASSES = frozenset({

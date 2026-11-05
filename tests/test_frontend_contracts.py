@@ -58,6 +58,8 @@ CLIENT_JS = FRONTEND_DIR / 'assets' / 'api' / 'client.js'
 CONTRACTS_JS = FRONTEND_DIR / 'assets' / 'api' / 'contracts.js'
 SSE_JS = FRONTEND_DIR / 'assets' / 'realtime' / 'sse.js'
 STORE_JS = FRONTEND_DIR / 'assets' / 'state' / 'store.js'
+NAVIGATION_JS = FRONTEND_DIR / 'assets' / 'shell' / 'navigation.js'
+APP_JS = FRONTEND_DIR / 'assets' / 'app.js'
 
 
 # Node-only fixture runner for the pure contract parsers.  Contracts are pure
@@ -529,6 +531,45 @@ if (fixture === 'task_reject') {
   } else {
     fail('sse_poll_fence.stop_aborts_and_resume', 'aborts=' + aborts + ' calls=' + fetchCalls + ' pend=' + poll._pollPending);
   }
+} else if (fixture === 'sse_poll_auth') {
+  // 降级轮询收到 401 时必须与 api/client.js 一样触发统一登录守卫，并停止轮询。
+  const storeMod = await import(process.env.FLEET_STORE_URL);
+  const sseMod = await import(process.env.FLEET_SSE_URL);
+  const dispatched = [];
+  globalThis.window = { dispatchEvent: function (event) { dispatched.push(event.type); return true; } };
+  const poll = new sseMod.SseClient(new (storeMod.FleetStore)(), { apiBaseUrl: '/api' });
+  let fetchCalls = 0;
+  globalThis.fetch = function () {
+    fetchCalls += 1;
+    return Promise.resolve({ status: 401, json: function () { return Promise.resolve({ ok: false, error: 'unauthenticated' }); } });
+  };
+  poll._startPoll();
+  poll._pollOnce();
+  await new Promise((r) => setTimeout(r, 20));
+  if (dispatched.length === 1 && dispatched[0] === 'fleet-auth-required') ok('sse_poll_auth.dispatches_auth_required');
+  else fail('sse_poll_auth.dispatches_auth_required', 'events=' + dispatched.join(','));
+  if (poll._pollTimer === null && poll._pollPending === false && fetchCalls === 1) ok('sse_poll_auth.stops_polling');
+  else fail('sse_poll_auth.stops_polling', 'timer=' + Boolean(poll._pollTimer) + ' pend=' + poll._pollPending + ' calls=' + fetchCalls);
+  poll.stop();
+  delete globalThis.window;
+} else if (fixture === 'account_pages') {
+  // 点击导航与登录后守卫共用同一份普通账号允许页面清单。
+  const nav = await import(process.env.FLEET_NAVIGATION_URL);
+  const user = { id: 'u', role: 'user' };
+  const admin = { id: 'a', role: 'admin' };
+  const expected = ['assistant', 'account', 'usage', 'muse'];
+  if (JSON.stringify(Array.from(nav.ACCOUNT_PAGES)) === JSON.stringify(expected) && Object.isFrozen(nav.ACCOUNT_PAGES)) ok('account_pages.list');
+  else fail('account_pages.list', JSON.stringify(nav.ACCOUNT_PAGES));
+  for (const page of expected) {
+    if (nav.isPageAllowedForAccount(page, user)) ok('account_pages.user_allows_' + page);
+    else fail('account_pages.user_allows_' + page, 'denied');
+  }
+  for (const page of ['fleet', 'monitoring', 'machine', 'task', 'session', 'session-search', 'invalid']) {
+    if (!nav.isPageAllowedForAccount(page, user)) ok('account_pages.user_denies_' + page);
+    else fail('account_pages.user_denies_' + page, 'allowed');
+    if (nav.isPageAllowedForAccount(page, admin) && nav.isPageAllowedForAccount(page, null)) ok('account_pages.admin_allows_' + page);
+    else fail('account_pages.admin_allows_' + page, 'denied');
+  }
 } else if (fixture === 'sse_reconnect') {
   const storeMod = await import(process.env.FLEET_STORE_URL);
   const sseMod = await import(process.env.FLEET_SSE_URL);
@@ -831,10 +872,27 @@ class ApiClientSourceTests(unittest.TestCase):
 
     def test_views_are_not_allowed_to_call_fetch_directly(self):
         views_dir = FRONTEND_DIR / 'assets' / 'views'
-        if not views_dir.is_dir():
-            self.skipTest('frontend/assets/views not yet present (Task 15)')
-        for path in views_dir.glob('*.js'):
-            self.assertNotIn('fetch(', path.read_text())
+        checked = sorted(views_dir.rglob('*.js'))
+        # Subdirectories (views/assistant/, views/muse/) are views too.
+        self.assertTrue(any(p.parent != views_dir for p in checked))
+        offenders = [p.relative_to(REPO_ROOT).as_posix() for p in checked
+                     if re.search(r'\bfetch\s*\(', p.read_text())]
+        self.assertEqual(offenders, [])
+
+    def test_only_api_client_and_sse_fallback_call_fetch(self):
+        # The SSE poll fallback keeps its own abortable fetch but mirrors the
+        # client's 401 handling (see sse_poll_auth fixture).
+        assets = FRONTEND_DIR / 'assets'
+        callers = sorted(p.relative_to(assets).as_posix() for p in assets.rglob('*.js')
+                         if 'vendor' not in p.relative_to(assets).parts
+                         and re.search(r'(?<![\w.])fetch\s*\(', p.read_text()))
+        self.assertEqual(callers, ['api/client.js', 'realtime/sse.js'])
+
+    def test_account_page_allow_list_is_shared(self):
+        source = APP_JS.read_text()
+        self.assertEqual(source.count('isPageAllowedForAccount('), 2)
+        self.assertNotIn("['assistant', 'account'", source)
+        self.assertNotIn('["assistant", "account"', source)
 
     def test_client_owns_all_api_paths(self):
         source = CLIENT_JS.read_text()
@@ -1131,6 +1189,18 @@ class SseBoundaryFixtureTests(unittest.TestCase):
         # 复位计数、stop()/显式 start() 清除孤儿计时器、陈旧源回调 no-op。
         self._run_fixture('sse_reconnect_bound', 'sse')
 
+    @unittest.skipUnless(shutil.which('node'),
+                         'node unavailable; skipping JS fixture')
+    def test_sse_poll_auth_fixture(self):
+        # 降级轮询 401：触发 fleet-auth-required 并停止轮询（与 api/client 一致）。
+        self._run_fixture('sse_poll_auth', 'sse')
+
+    @unittest.skipUnless(shutil.which('node'),
+                         'node unavailable; skipping JS fixture')
+    def test_account_pages_fixture(self):
+        # 普通账号允许页面（含用量看板）只有一份清单，点击与直达行为一致。
+        self._run_fixture('account_pages', 'navigation')
+
     def _run_fixture(self, fixture_name, kind):
         # kind 用于区分 fixture 用途；store/sse/两者皆有时都注入全部 URL，
         # 以便 fixture 按需 import 而无需额外 plumbing。
@@ -1138,6 +1208,7 @@ class SseBoundaryFixtureTests(unittest.TestCase):
         env['FLEET_CONTRACTS_URL'] = CONTRACTS_JS.resolve().as_uri()
         env['FLEET_STORE_URL'] = STORE_JS.resolve().as_uri()
         env['FLEET_SSE_URL'] = SSE_JS.resolve().as_uri()
+        env['FLEET_NAVIGATION_URL'] = NAVIGATION_JS.resolve().as_uri()
         env['FLEET_FIXTURE'] = fixture_name
         proc = subprocess.run(
             [self.NODE, '--input-type=module', '-e', NODE_FIXTURE_RUNNER],

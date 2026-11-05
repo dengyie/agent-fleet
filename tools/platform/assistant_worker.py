@@ -6,7 +6,6 @@ so it must never turn an exception into a successful Run or blindly replay it.
 """
 from __future__ import annotations
 
-from .runtime.native import NativeAssistantRuntime
 
 
 class AssistantWorker:

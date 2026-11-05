@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import math
 from typing import Any, Mapping
 
-from platform_schema import bounded_text, validate_id, validate_owner_id
+from platform_schema import bounded_text, validate_id
 
 SERVICE_ADAPTERS = frozenset({"systemd", "supervisor", "docker", "http"})
 SERVICE_ACTIONS = frozenset({"inspect", "restart"})

@@ -3,18 +3,21 @@
 # Runtime state is intentionally outside release archives and must survive
 # both normal cutovers and rollback.
 
+# Must equal deploy/auto_release.py MANAGED plus the overlay-only frontend.
+# fleet-gates.conf is live operator config: never shipped, never overwritten.
 FLEET_RELEASE_MANAGED_PATHS=(
-    agent_profiles.py README.md requirements.txt report_schema.py
-    session_schema.py platform_schema.py fleet-gates.conf RELEASE_ORIGIN frontend connectors hub tools deploy
+    agent_profiles.py README.md requirements.txt requirements-test.txt report_schema.py
+    session_schema.py platform_schema.py RELEASE_ORIGIN frontend connectors hub tools deploy
     docs tests
 )
 FLEET_RUNTIME_PATHS=(credentials state var)
-FLEET_RUNTIME_FILES=(hosts.yaml)
+FLEET_RUNTIME_FILES=(hosts.yaml fleet-gates.conf)
 FLEET_RSYNC_RUNTIME_EXCLUDES=(
     --exclude=credentials/
     --exclude=state/
     --exclude=var/
     --exclude=hosts.yaml
+    --exclude=fleet-gates.conf
     --exclude=.git/
     --exclude=.env
 )

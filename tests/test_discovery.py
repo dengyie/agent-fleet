@@ -501,7 +501,8 @@ def test_claude_duplicate_session_id_fails_closed(tmp_path, monkeypatch):
     assert d._claude_native_path(f"claude --session-id={session_id}") is None
 
 
-def test_claude_native_scan_cap_fails_closed(tmp_path, monkeypatch):
+def test_claude_native_lookup_has_no_512_file_cap(tmp_path, monkeypatch):
+    # 评审 #6：按已知布局直接定位，超过 512 个文件不再静默失败。
     from tools.probe import discovery as d
 
     project = tmp_path / "C--workspace"
@@ -513,7 +514,8 @@ def test_claude_native_scan_cap_fails_closed(tmp_path, monkeypatch):
         lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
     )
 
-    assert d._claude_native_path("claude --session-id session-000") is None
+    expected = project / "session-000.jsonl"
+    assert d._claude_native_path("claude --session-id session-000") == str(expected)
 
 
 def test_claude_native_scan_accepts_exact_cap(tmp_path, monkeypatch):
@@ -532,7 +534,7 @@ def test_claude_native_scan_accepts_exact_cap(tmp_path, monkeypatch):
     assert d._claude_native_path("claude --session-id session-511") == str(expected)
 
 
-def test_claude_native_scan_cap_counts_non_transcript_files(tmp_path, monkeypatch):
+def test_claude_native_lookup_ignores_many_non_transcript_files(tmp_path, monkeypatch):
     from tools.probe import discovery as d
 
     project = tmp_path / "C--workspace"
@@ -545,10 +547,11 @@ def test_claude_native_scan_cap_counts_non_transcript_files(tmp_path, monkeypatc
         lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
     )
 
-    assert d._claude_native_path("claude --session-id session-current") is None
+    assert d._claude_native_path("claude --session-id session-current") == str(
+        project / "session-current.jsonl")
 
 
-def test_claude_native_scan_cap_counts_directories(tmp_path, monkeypatch):
+def test_claude_native_lookup_handles_many_project_directories(tmp_path, monkeypatch):
     from tools.probe import discovery as d
 
     for index in range(513):
@@ -560,4 +563,4 @@ def test_claude_native_scan_cap_counts_directories(tmp_path, monkeypatch):
         lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
     )
 
-    assert d._claude_native_path("claude --session-id session-current") is None
+    assert d._claude_native_path("claude --session-id session-current") == str(target)

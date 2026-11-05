@@ -6,7 +6,6 @@
 
 import json
 import re
-import time
 from typing import Iterator
 
 from .base import BaseConnector
@@ -49,10 +48,10 @@ pattern_re = re.compile(pattern, re.IGNORECASE)
 # 进程
 try:
     ps = subprocess.run(
-        ["ps", "-eo", "user,pid,time,rss,comm,args"],
-        capture_output=True, text=True
+        ["ps", "-eo", "user,pid,time,rss,args"],
+        capture_output=True, text=True, timeout=__PS_TIMEOUT__
     ).stdout
-except Exception:
+except Exception:  # 含 TimeoutExpired：ps 卡住时降级为空进程表
     ps = ""
 procs = []
 for line in ps.splitlines()[1:]:
@@ -60,10 +59,11 @@ for line in ps.splitlines()[1:]:
     if pattern_re.search(low):
         if any(s in line for s in ("grep ", "collect", "agent-fleet", "hermes-snap", " ps ")):
             continue
-        parts = line.split(None, 5)
-        if len(parts) >= 6:
+        # 不取 comm 列：macOS comm 是含空格的完整路径，会把列拆错
+        parts = line.split(None, 4)
+        if len(parts) >= 5:
             procs.append({"user": parts[0], "pid": parts[1],
-                          "cpu_time": parts[2], "rss_kb": parts[3], "cmd": parts[5][:150]})
+                          "cpu_time": parts[2], "rss_kb": parts[3], "cmd": parts[4][:150]})
 # 最近日志
 logs = []
 for d in ("~/.claude/projects", "~/.codex", "~/.config/claude"):
@@ -81,20 +81,10 @@ print(json.dumps({"processes": procs[:15], "recent_logs": logs[:5],
                   "process_count": len(procs)}))
 """
         remote_script = remote_script.replace("__PATTERN__", self.pattern)
+        remote_script = remote_script.replace(
+            "__PS_TIMEOUT__", repr(_probe_discovery.PS_TIMEOUT_S))
         raw = ctx.run_python(remote_script)
         try:
             return json.loads(raw)
         except Exception:
             return {"error": "collect parse failed", "raw": raw[:200]}
-
-    # ------------------------------------------------------------------
-    def control(self, ctx, action, **kwargs):
-        if action == "status":
-            return {"ok": True, "data": self.collect(ctx)}
-        if action == "restart":
-            pat = kwargs.get("pattern", self.pattern)
-            return ctx.restart_process(pat)
-        if action == "exec":
-            cmd = kwargs.get("cmd", "")
-            return ctx.run(cmd)
-        return {"ok": False, "message": f"{self.TYPE} 不支持 action={action}"}

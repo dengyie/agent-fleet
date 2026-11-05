@@ -9,6 +9,7 @@ from typing import Any, Callable
 from contextlib import closing
 
 from hub.domain.platform_command import RECEIPT_STATES, PlatformCommand, TERMINAL_COMMAND_STATES, args_hash
+from hub.infrastructure.sqlite import connect as sqlite_connect
 
 
 class CommandRepositoryError(RuntimeError):
@@ -26,11 +27,7 @@ class CommandRepository:
         self.clock = clock
 
     def _connect(self):
-        conn = sqlite3.connect(str(self.db_path), timeout=10, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        return sqlite_connect(self.db_path, timeout=10)
 
     def init(self):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

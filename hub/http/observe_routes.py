@@ -14,11 +14,12 @@
 模块级路径存储、hosts 解析器或 SSE 全局门面。
 """
 import json
+import logging
 import queue
 import re
 import threading
 
-from flask import Blueprint, current_app, jsonify, request, Response, stream_with_context
+from flask import Blueprint, current_app, g, jsonify, request, Response, stream_with_context
 from werkzeug.exceptions import BadRequest
 
 from hub.application.observe_service import ObserveError, ObserveService
@@ -27,6 +28,7 @@ from hub.http.errors import ApplicationError, error_response
 from report_schema import sanitize_agents, sanitize_system
 
 bp = Blueprint("observe", __name__)
+logger = logging.getLogger(__name__)
 
 #: The ONLY fields an anonymous caller sees in each ``instances[]`` row of the
 #: machine-detail endpoint.  Raw ``pid``/``pgid``/``started_at``/
@@ -86,6 +88,42 @@ def _publisher():
     return publisher
 
 
+#: 默认的并发 SSE 流上限（每个流占一个 worker 线程）；``SSE_MAX_STREAMS`` 可覆盖。
+DEFAULT_SSE_MAX_STREAMS = 64
+_STATE_GUARD = threading.Lock()
+
+
+class _StreamSlots:
+    """有界的 SSE 并发名额；``release`` 幂等由调用方的 once 闭包保证。"""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = int(limit)
+        self.active = 0
+        self._lock = threading.Lock()
+
+    def try_acquire(self) -> bool:
+        with self._lock:
+            if self.active >= self.limit:
+                return False
+            self.active += 1
+            return True
+
+    def release(self) -> None:
+        with self._lock:
+            self.active = max(0, self.active - 1)
+
+
+def _http_state() -> dict:
+    """每个 app 一份的传输层状态（scan 单飞锁、SSE 名额）。"""
+    with _STATE_GUARD:
+        state = current_app.extensions.get("observe_http")
+        if state is None:
+            limit = current_app.config.get("SSE_MAX_STREAMS", DEFAULT_SSE_MAX_STREAMS)
+            state = {"scan_lock": threading.Lock(), "sse": _StreamSlots(limit)}
+            current_app.extensions["observe_http"] = state
+        return state
+
+
 def _observe_error(exc: ObserveError):
     """ObserveError → 统一错误外型；保留 bounded detail 与 status。
 
@@ -116,7 +154,9 @@ def api_ingest():
     if not isinstance(data, dict):
         return error_response(_observe_service_error("invalid_json"))
     try:
-        result = _observe_service().ingest(data)
+        # 每机凭据认证时 g.ingest_machine 为凭据机器；共享 token 为 None。
+        result = _observe_service().ingest(
+            data, bound_machine=getattr(g, "ingest_machine", None))
     except ObserveError as exc:
         return _observe_error(exc)
     return jsonify(result)
@@ -125,8 +165,26 @@ def api_ingest():
 @bp.route("/api/scan", methods=["POST"])
 @require_ingest_token
 def api_scan():
-    thread = threading.Thread(target=_observe_service().reconcile, daemon=True)
-    thread.start()
+    # 单飞：同一时刻最多一个 reconcile 线程，重复触发不再无界开线程。
+    lock = _http_state()["scan_lock"]
+    if not lock.acquire(blocking=False):
+        return jsonify({"ok": True, "message": "scan already running",
+                        "already_running": True})
+    service = _observe_service()
+
+    def run():
+        try:
+            service.reconcile()
+        except Exception:
+            logger.exception("observe reconcile failed")
+        finally:
+            lock.release()
+
+    try:
+        threading.Thread(target=run, daemon=True).start()
+    except RuntimeError:
+        lock.release()
+        raise
     return jsonify({"ok": True, "message": "scan triggered (async)"})
 
 
@@ -245,15 +303,30 @@ def api_stream():
             cursor_kind = "timestamp"
             cursor = 0.0
     publisher = _publisher()
-    q, unsubscribe = publisher.subscribe_sse(queue_size=200)
-    # Subscribe first so events arriving while we establish the replay end
-    # are queued too. The generator removes that replay/live overlap.
-    recent = publisher.read_recent(1) if cursor and cursor_kind == "sequence" else []
-    watermark = max((e["event_seq"] for e in recent
-                     if isinstance(e.get("event_seq"), int)), default=0)
+    slots = _http_state()["sse"]
+    if not slots.try_acquire():
+        return error_response(ApplicationError(
+            "stream_capacity", "实时流连接数已满，请稍后重试", 503))
+    released = threading.Event()
+
+    def release_slot():
+        # gen 的 finally 与 response.close 都会调用；只释放一次。
+        if not released.is_set():
+            released.set()
+            slots.release()
 
     def gen():
+        # 订阅放在生成器内部：响应若从未被迭代（客户端提前断开）就不会留下
+        # 永不注销的订阅；一旦订阅，try/finally 保证注销。
+        unsubscribe = None
         try:
+            q, unsubscribe = publisher.subscribe_sse(queue_size=200)
+            # Subscribe first so events arriving while we establish the replay
+            # end are queued too. The loop below removes that replay/live overlap.
+            recent = (publisher.read_recent(1)
+                      if cursor and cursor_kind == "sequence" else [])
+            watermark = max((e["event_seq"] for e in recent
+                             if isinstance(e.get("event_seq"), int)), default=0)
             yield ": connected\n\n"
             replay_cursor = cursor if cursor_kind == "sequence" else 0
             delivered_sequence = 0
@@ -297,7 +370,16 @@ def api_stream():
                 name = _sse_event_name(e)
                 yield f"event: {name}\ndata: {json.dumps(_sse_payload(e), ensure_ascii=False)}\n\n"
         finally:
-            unsubscribe()
+            if unsubscribe is not None:
+                unsubscribe()
+            release_slot()
 
-    return Response(stream_with_context(gen()), mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    try:
+        response = Response(stream_with_context(gen()), mimetype="text/event-stream",
+                            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    except Exception:
+        release_slot()
+        raise
+    # WSGI 服务器总会 close 响应（即使从未迭代），保证名额归还。
+    response.call_on_close(release_slot)
+    return response

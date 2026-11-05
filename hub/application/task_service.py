@@ -25,12 +25,12 @@ from collections.abc import Mapping
 from itertools import islice
 from typing import Any
 
+from hub.application.event_emit import safe_emit
 from hub.domain.handoff import HandoffConflict
 
 from hub.domain.task import (
     DEFAULT_AGENT_TYPES,
     DomainError,
-    MAX_DIFF_PATCH,
     public_task,
     validate_task_input,
 )
@@ -123,16 +123,33 @@ class TaskService:
 
     # -- helpers ------------------------------------------------------------
 
-    def _machine_online(self, machine: str) -> bool:
-        """True when the machine has a reachable observation snapshot."""
+    def _online_snapshot(self, machine: str):
+        """Reachable observation snapshot of ``machine``, or ``None``."""
         current = self.observation_repo.read_current(machine)
-        return bool(current and current.get("reachable", True))
+        return current if current and current.get("reachable", True) else None
+
+    @staticmethod
+    def _agent_reported_unavailable(snapshot, agent_type: str) -> bool:
+        """最近一次上报明确表明该机没有 ``agent_type`` 时返回 True。
+
+        未知一律放行：快照没有 agents 字段/为空（旧探针或未采集），或该 agent
+        采集出错（``error``）。只有上报了 agents 但其中缺少该类型、或明确
+        ``installed: false`` 时才拒绝。
+        """
+        agents = snapshot.get("agents") if isinstance(snapshot, dict) else None
+        if not isinstance(agents, dict) or not agents:
+            return False
+        state = agents.get(agent_type)
+        if state is None:
+            return True
+        if not isinstance(state, dict) or state.get("error"):
+            return False
+        return state.get("installed") is False
 
     def _emit(self, event: str, machine=None, task_id=None, state=None) -> None:
-        try:
-            self.publisher.emit(event, machine=machine, task_id=task_id, state=state)
-        except (TypeError, ValueError, RuntimeError):
-            pass
+        # 提交后副作用：统一走 safe_emit（记日志、绝不抛出）。
+        safe_emit(self.publisher, event, machine=machine, task_id=task_id,
+                  state=state)
 
     def _task_op(self, fn, *args, **kwargs):
         """Run a task-repository operation, converting infra failures to 503.
@@ -168,8 +185,13 @@ class TaskService:
             data, agent_types=DEFAULT_AGENT_TYPES)
         machine = validated["machine"]
         project = validated["project"]
-        if not self._machine_online(machine):
+        snapshot = self._online_snapshot(machine)
+        if snapshot is None:
             raise ApplicationError("machine_offline", f"{machine} 不在线")
+        if self._agent_reported_unavailable(snapshot, validated["agent_type"]):
+            raise ApplicationError(
+                "agent_unavailable",
+                f"{machine} 最近一次上报未包含可用的 {validated['agent_type']}")
         if not self.hosts.project_allowed(machine, project):
             raise ApplicationError(
                 "project_not_allowed", f"{machine} 未注册项目 {project}")

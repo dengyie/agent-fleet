@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from tools.session.redact import Redactor
+from hub.infrastructure.sqlite import connect as sqlite_connect
 
 SCHEMA_VERSION = 2
 MIN_QUERY_CHARS = 2
@@ -216,15 +217,7 @@ class SessionSearchRepository:
         return self._failure_code
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=10, isolation_level=None)
-        try:
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            return conn
-        except BaseException:
-            conn.close()
-            raise
+        return sqlite_connect(self.db_path, timeout=10)
 
     def _require_enabled(self) -> None:
         if not self.enabled:

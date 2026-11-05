@@ -23,7 +23,7 @@ import base64
 import json
 import re
 import secrets
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 # --------------------------------------------------------------------------- #

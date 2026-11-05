@@ -1,10 +1,11 @@
 """Operator read-only service catalog and health evidence endpoints."""
 from __future__ import annotations
 
-from flask import Blueprint, current_app, g, jsonify, request
+from flask import Blueprint, current_app, g, jsonify
 
 from hub.auth import require_operator
 from hub.http.errors import ApplicationError, error_response
+from hub.http._common import json_object as _body
 from hub.infrastructure.service_repository import ServiceRepositoryError
 from hub.domain.service import ServiceValidationError
 
@@ -16,13 +17,6 @@ def _service():
     if service is None:
         raise ApplicationError("service_monitoring_unavailable", "服务监控不可用", 503)
     return service
-
-
-def _body():
-    body = request.get_json(silent=True)
-    if not isinstance(body, dict):
-        raise ApplicationError("invalid_json", "请求体必须是 JSON 对象", 400)
-    return body
 
 
 def _invoke(fn):

@@ -385,15 +385,50 @@ def _validate_backup_files(backup_root: Path) -> dict[str, Any]:
     }
 
 
+def _fsync_path(path: Path) -> None:
+    """fsync one regular file or directory (directories are skipped on Windows)."""
+    if os.name == "nt" and Path(path).is_dir():
+        return
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_tree(root: Path) -> None:
+    """Make every staged file and directory entry durable before publication.
+
+    Files first, then their directories bottom-up, so a crash right after the
+    publishing rename can never expose a backup whose contents or directory
+    entries are still only in the page cache.
+    """
+    for current, dirnames, filenames in os.walk(root, topdown=False):
+        for name in filenames:
+            path = Path(current) / name
+            if not path.is_symlink():
+                _fsync_path(path)
+        _fsync_path(Path(current))
+
+
 def _publish_new_directory(stage: Path, target: Path) -> None:
-    """Publish a staged directory after an explicit no-overwrite check."""
+    """Publish a durable staged directory after an explicit no-overwrite check."""
     if os.path.lexists(target):
         _raise("destination_exists")
+    try:
+        _fsync_tree(stage)
+    except OSError:
+        _raise("publish_failed")
     try:
         _rename_directory_no_replace(stage, target)
     except OSError as exc:
         if exc.errno == errno.EEXIST:
             _raise("destination_exists")
+        _raise("publish_failed")
+    try:
+        # The rename itself lives in the parent directory entry.
+        _fsync_path(target.parent)
+    except OSError:
         _raise("publish_failed")
 
 

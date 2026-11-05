@@ -11,7 +11,7 @@ from hub.config import FleetConfig
 from hub.domain.platform_command import PlatformCommand
 from hub.infrastructure.browser_repository import BrowserRepository
 from hub.domain.control import generate_ed25519_keypair
-from hub.http.node_routes import _png_dimensions
+from hub.application.browser_artifact_service import png_dimensions as _png_dimensions
 from tools.platform.backends.directory import DirectoryBackend
 from tools.platform.node_client import NodeClient
 from tools.platform.node_executor import BROWSER_TOOLS, NodeToolExecutor

@@ -10,3 +10,6 @@ class CodexAdapter(BaseAdapter):
         "codex", "exec", "--approve-for-me",
         "--ephemeral", "--ignore-user-config", "--json", "{instruction}",
     ]
+    # clap / commander 均支持 "--" 结束选项解析
+    end_of_options = True
+    env_keys = ("CODEX_HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL")

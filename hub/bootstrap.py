@@ -43,6 +43,23 @@ def _load_hosts_rows(hosts_file) -> list[dict]:
     return [dict(host) for host in (data.get("hosts") or []) if isinstance(host, dict)]
 
 
+def _platform_retention(config, platform_repository):
+    """Bounded platform-table retention, run hourly by the lease reconciler.
+
+    Also prunes ``redacted_events`` in the transcript DB when session/adoption
+    repositories are enabled (that table lives in its own SQLite file).
+    """
+    platform_db = config.platform_db if platform_repository is not None else None
+    transcript_db = None
+    if (getattr(config, "session_repositories_enabled", False)
+            or getattr(config, "adoption_repositories_enabled", False)):
+        transcript_db = getattr(config, "session_transcript_root", None)
+    if platform_db is None and transcript_db is None:
+        return None
+    from hub.infrastructure.platform_retention import PlatformRetention
+    return PlatformRetention(platform_db, transcript_db=transcript_db)
+
+
 def create_app(
     config: FleetConfig,
     *,
@@ -483,9 +500,12 @@ def create_app(
     runner_service = RunnerService(task_repository, publisher)
 
     # Task 9: supervisor control-plane.  Construction is additive — when
-    # ``supervisor_enabled`` is off, the service is built with no signing key
-    # (fail-closed issuance) and no route is registered.  Signing key/credential
-    # VALUES are never logged or printed; only their resolved source is noted.
+    # ``supervisor_enabled`` is off, no route is registered, no durable command
+    # store is opened and the service gets NO signing key (fail-closed issuance:
+    # nothing could ever poll such a queue).  When on, the queue/audit always
+    # live in the durable ``SupervisorCommandRepository``; the service has no
+    # separate in-memory queue.  Signing key/credential VALUES are never logged
+    # or printed; only their resolved source is noted.
     from hub.application.supervisor_service import SupervisorService
     from hub.infrastructure.supervisor_command_repository import SupervisorCommandRepository
     from hub.auth import (
@@ -495,11 +515,13 @@ def create_app(
 
     # Signing key resolution: explicit raw bytes > env/file.  ``None`` (no
     # key anywhere) is the fail-closed state — commands can never be issued.
-    supervisor_key = (
-        config.supervisor_signing_raw
-        if config.supervisor_signing_raw is not None
-        else load_supervisor_signing_key()
-    )
+    supervisor_key = None
+    if config.supervisor_enabled:
+        supervisor_key = (
+            config.supervisor_signing_raw
+            if config.supervisor_signing_raw is not None
+            else load_supervisor_signing_key()
+        )
     supervisor_command_repository = None
     if config.supervisor_enabled:
         command_db = (getattr(config, "supervisor_command_db", None)
@@ -606,6 +628,9 @@ def create_app(
     app.config["EVENT_LOG"] = str(config.event_log)
     app.config["TASK_DB"] = str(config.task_db)
     app.config["PLATFORM_ENABLED"] = bool(config.platform_enabled)
+    # 实际生效的会话/纳管门控（服务真正接线才为 True）。
+    app.config["SESSION_REPOSITORIES_ENABLED"] = bool(session_service is not None)
+    app.config["ADOPTION_REPOSITORIES_ENABLED"] = bool(adoption_service is not None)
     app.config["PLATFORM_DB"] = str(config.platform_db) if config.platform_db else None
     app.config["PLATFORM_REQUIRE_COMMAND_SIGNATURE"] = bool(
         getattr(config, "platform_require_command_signature", False))
@@ -663,7 +688,13 @@ def create_app(
     # ``require_supervisor``; otherwise it is loaded from env/file.
     supervisor_credentials = config.supervisor_credentials
     if supervisor_credentials is None:
-        supervisor_credentials = load_supervisor_credentials()
+        from hub.auth import CredentialStoreUnavailable
+        try:
+            supervisor_credentials = load_supervisor_credentials()
+        except CredentialStoreUnavailable:
+            # 凭据文件存在但不可读：不阻断启动；保持 None 让守卫在请求期重读，
+            # 仍失败则返回 503（而非把节点误判为无凭据 403）。
+            supervisor_credentials = None
     app.config["SUPERVISOR_CREDENTIALS"] = supervisor_credentials
 
     if app.config["TASKS_ENABLED"]:
@@ -696,6 +727,7 @@ def create_app(
                 observe_service=observe_service,
                 task_repository=task_repository,
                 event_publisher=publisher,
+                retention=_platform_retention(config, platform_repository),
             ),
         },
     }
@@ -824,10 +856,8 @@ def create_app(
                                    owner_enabled=muse_accounts.is_active if muse_accounts else None,
                                    owner_operation=muse_accounts.background_operation if muse_accounts else None)
         app.extensions['fleet']['services']['muse'] = muse_service
-        # Lazy persistence; only imported, explicitly opted-in accounts are
-        # polled. A blank installation makes no outbound Muse requests.
-        if muse_service.repository.path.exists():
-            muse_service.start()
+        # create_app 不派生线程：已有 Muse 持久化时的自动审批 worker 由
+        # start_background_jobs 启动；运行期操作员显式开启时服务自行按需启动。
         app.register_blueprint(muse_bp)
         app.register_blueprint(conversation_bp)
         app.register_blueprint(node_bp)
@@ -978,6 +1008,12 @@ def start_background_jobs(
             capture_gc.cleanup_expired,
             interval_s=browser_capture_retention_interval_s,
         )
+    muse_service = fleet.get("services", {}).get("muse")
+    # Lazy persistence; only imported, explicitly opted-in accounts are
+    # polled. A blank installation makes no outbound Muse requests.
+    if muse_service is not None and muse_service.repository.path.exists():
+        muse_service.start()
+        stops["muse_approvals"] = muse_service.stop_event
     platform_monitoring = fleet.get("services", {}).get("platform_monitoring")
     if platform_monitoring is not None:
         stops["platform_monitoring"] = platform_monitoring.start()
@@ -1002,7 +1038,6 @@ def start_platform_worker(app, *, owner_id: str | None = None, interval_s: float
     ``owner_id``; multi-owner deployments use ``start_platform_run_scheduler``.
     """
     import threading
-    import time
 
     fleet = app.extensions.get("fleet", {})
     worker = fleet.get("services", {}).get("platform_worker")

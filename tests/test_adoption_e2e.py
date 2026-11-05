@@ -164,9 +164,6 @@ class _RecordingOps(GroupOps):
     def proc_wait(self, handle, timeout=None):
         return None
 
-    def group_id(self, handle):
-        return f"grp_{getattr(handle, 'pgid', 0)}"
-
     def group_alive(self, handle):
         return True
 

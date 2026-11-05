@@ -17,10 +17,11 @@ archive_tar=$staging_dir/release.tar
 # hosts.yaml stays tracked as a local example, but MUST NOT ship in the
 # CI artifact: overlaying it onto LIVE bind-mount clobbers the production
 # inventory. §0 restores LIVE hosts.yaml from bak; tests assert absence.
+# fleet-gates.conf is likewise live operator config (not a release artifact);
+# this list must equal deploy/auto_release.py MANAGED minus RELEASE_ORIGIN.
 git archive --format=tar HEAD \
     agent_profiles.py \
     README.md requirements.txt requirements-test.txt report_schema.py session_schema.py platform_schema.py \
-    fleet-gates.conf \
     connectors hub tools deploy docs tests \
     > "$archive_tar"
 

@@ -6,6 +6,7 @@ from flask import Blueprint, current_app, g, jsonify, request
 from hub.auth import require_operator
 from hub.application.task_service import ApplicationError
 from hub.http.errors import error_response
+from hub.http._common import json_object_or_empty as _body
 
 bp = Blueprint("platform_service_actions", __name__, url_prefix="/api/platform/v1")
 
@@ -17,15 +18,6 @@ def _service():
     if service is None:
         raise ApplicationError("service_actions_unavailable", "服务动作不可用", 503)
     return service
-
-
-def _body():
-    body = request.get_json(silent=True)
-    if body is None:
-        return {}
-    if not isinstance(body, dict):
-        raise ApplicationError("invalid_json", "请求体必须是 JSON 对象", 400)
-    return body
 
 
 def _invoke(fn):

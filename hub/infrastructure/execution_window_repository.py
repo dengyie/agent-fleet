@@ -16,8 +16,9 @@ from typing import Any, Mapping
 
 from hub.domain.execution_window import (
     BROWSER_MUTATION_ACTIONS, TERMINAL_WINDOW_STATES, WINDOW_EVENT_FIELDS,
-    WINDOW_EVENT_KINDS, WINDOW_STATES, public_window,
+    WINDOW_EVENT_KINDS, public_window,
 )
+from hub.infrastructure.sqlite import connect as sqlite_connect
 from platform_schema import validate_id, validate_owner_id
 
 MAX_METADATA_BYTES = 16 * 1024
@@ -113,17 +114,46 @@ def _event_json(value: Mapping[str, Any] | None, kind: str) -> str:
     return encoded
 
 
+# Every table holding a FOREIGN KEY to execution_windows(window_id). Purging a
+# window must clear all of them first; keep this list next to the schema below
+# so a new child table cannot be forgotten by cascading deletes elsewhere.
+EXECUTION_WINDOW_CHILD_TABLES = (
+    "execution_window_tickets", "execution_window_leases",
+    "execution_window_events", "execution_window_frames",
+    "execution_window_frame_reads",
+)
+
+
 class ExecutionWindowRepository:
     def __init__(self, db_path: Path, *, clock=time.time):
         self.db_path = Path(db_path)
         self.clock = clock
 
     def _connect(self):
-        conn = sqlite3.connect(str(self.db_path), timeout=10, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        return sqlite_connect(self.db_path, timeout=10)
+
+    @staticmethod
+    def purge_windows(conn, owner_id: str, window_scope_sql: str,
+                      params: tuple, *, existing_tables=None) -> None:
+        """Delete the owner's windows selected by ``window_scope_sql`` and
+        every child row, inside the caller's open transaction.
+
+        ``window_scope_sql`` is a ``SELECT window_id FROM execution_windows``
+        subquery; ``params`` binds it. ``existing_tables`` lets a caller that
+        operates on a partially initialized store skip absent tables.
+        """
+        present = (set(existing_tables) if existing_tables is not None else None)
+        for table in EXECUTION_WINDOW_CHILD_TABLES:
+            if present is not None and table not in present:
+                continue
+            conn.execute(
+                f"DELETE FROM {table} WHERE owner_id=? "
+                f"AND window_id IN ({window_scope_sql})", (owner_id, *params),
+            )
+        conn.execute(
+            "DELETE FROM execution_windows WHERE owner_id=? "
+            f"AND window_id IN ({window_scope_sql})", (owner_id, *params),
+        )
 
     def init(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

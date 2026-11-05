@@ -112,11 +112,12 @@ def test_job_cleanup_failure_still_reaps_child_and_retains_timeout(tmp_path: Pat
 
     monkeypatch.setattr(bounded_process, "popen_local", spawn)
     started = time.monotonic()
-    with pytest.raises(OSError, match="injected_job_cleanup_failure") as error:
+    # Job 清理失败不得把正在传播的超时改写成 OSError（adapter 会误报 127）。
+    with pytest.raises(subprocess.TimeoutExpired) as error:
         bounded_process._run_owned(
             [sys.executable, "-c", "import time;time.sleep(2)"], tmp_path, None,
             started + 0.1, 0.1, 100, 100, {}, FailedJob(),
         )
     assert time.monotonic() - started < 1.5
-    assert isinstance(error.value.__context__, subprocess.TimeoutExpired)
+    assert "injected_job_cleanup_failure" in " ".join(getattr(error.value, "__notes__", []))
     assert children[0].poll() is not None

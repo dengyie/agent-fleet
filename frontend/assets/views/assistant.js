@@ -87,14 +87,15 @@ export function mountAssistant(target, options) {
     {id: 'context', title: '上下文', sections: contextSections}
   ]);
   var conversationId = options.conversationId || null; var conversationWorkspaceId = null; var conversationArchived = false; var activeRunId = null; var latestRunId = null; var cursor = 0; var polling = false; var windowEventCursor = 0; var windowPolling = false; var windowState = { loading: false, error: null, window: null, mode: 'disconnected', events: [], holderId: token(), leaseToken: null, leaseExpiresAt: 0 };
-  var disposed = false; var timers = new Set(); var windowPollTimer = null; var resumeWindowPoll = false;
-  function later(fn, delay) { if (disposed) return; var timer = setTimeout(function () { timers.delete(timer); if (!disposed) fn(); }, delay); timers.add(timer); }
+  var disposed = false; var suspended = false; var timers = new Set(); var windowPollTimer = null; var resumeWindowPoll = false;
+  // A cached (suspended) route view must not poll runs or renew the writer lease.
+  function later(fn, delay) { if (disposed || suspended) return; var timer = setTimeout(function () { timers.delete(timer); if (!disposed && !suspended) fn(); }, delay); timers.add(timer); }
   function scheduleWindowPoll(delay) {
-    if (disposed || document.hidden || windowPollTimer !== null) return;
+    if (disposed || suspended || document.hidden || windowPollTimer !== null) return;
     var timer = setTimeout(function () {
       timers.delete(timer);
       if (windowPollTimer === timer) windowPollTimer = null;
-      if (!disposed && !document.hidden) pollExecutionWindow();
+      if (!disposed && !suspended && !document.hidden) pollExecutionWindow();
     }, delay);
     windowPollTimer = timer;
     timers.add(timer);
@@ -106,6 +107,7 @@ export function mountAssistant(target, options) {
     windowPollTimer = null;
   }
   function onVisibilityChange() {
+    if (suspended) return;
     if (document.hidden) {
       pauseWindowPoll();
       resumeWindowPoll = false;
@@ -170,7 +172,7 @@ export function mountAssistant(target, options) {
     return (error && (error.detail || error.message || error.code)) || '执行窗口不可用';
   }
   async function pollExecutionWindow() {
-    if (disposed || document.hidden || windowPolling || !windowState.window || !windowState.window.window_id) return;
+    if (disposed || suspended || document.hidden || windowPolling || !windowState.window || !windowState.window.window_id) return;
     windowPolling = true;
     try {
       var windowId = windowState.window.window_id;
@@ -216,7 +218,7 @@ export function mountAssistant(target, options) {
       }
     } finally {
       windowPolling = false;
-      if (resumeWindowPoll && !document.hidden && !disposed) {
+      if (resumeWindowPoll && !document.hidden && !disposed && !suspended) {
         resumeWindowPoll = false;
         pauseWindowPoll();
         scheduleWindowPoll(0);
@@ -465,7 +467,7 @@ export function mountAssistant(target, options) {
     if (latestRunId) refreshLegacy(latestRunId);
   }
   async function poll() {
-    if (disposed || polling || !activeRunId) return;
+    if (disposed || suspended || polling || !activeRunId) return;
     polling = true;
     var runId = activeRunId;
     try {
@@ -494,7 +496,7 @@ export function mountAssistant(target, options) {
       if (!disposed) { showError(eventHost, error); setStatus('连接中断，稍后恢复'); }
     } finally {
       polling = false;
-      if (!disposed && activeRunId) later(poll, 1200);
+      if (!disposed && !suspended && activeRunId) later(poll, 1200);
     }
   }
   memorySearch.addEventListener('click', function () { refreshMemoryItems(memoryQuery.value); });
@@ -590,12 +592,28 @@ export function mountAssistant(target, options) {
     }
   }
   initialize();
-  return function teardown() {
+  function teardown() {
     disposed = true;
     document.removeEventListener('visibilitychange', onVisibilityChange);
     pauseWindowPoll();
     inspectorUi.dispose();
     timers.forEach(clearTimeout);
     timers.clear();
+  }
+  teardown.suspend = function () {
+    if (disposed || suspended) return;
+    suspended = true;
+    pauseWindowPoll();
+    resumeWindowPoll = false;
+    timers.forEach(clearTimeout);
+    timers.clear();
+    requestClockActive = false;
   };
+  teardown.resume = function () {
+    if (disposed || !suspended) return;
+    suspended = false;
+    if (activeRunId) { poll(); startRequestClock(); }
+    if (windowState.window && windowState.window.state !== 'closed' && windowState.window.state !== 'expired') scheduleWindowPoll(0);
+  };
+  return teardown;
 }

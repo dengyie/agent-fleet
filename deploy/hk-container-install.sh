@@ -227,6 +227,30 @@ switch_live() {
     esac
 }
 
+# Symlink cutover: the pre-switch runtime copy only seeds the candidate so it
+# can be validated.  The previous hub keeps writing to its own tree until it is
+# stopped, so anything committed after that copy would be lost, and a SQLite
+# WAL database copied while live is not a consistent snapshot.  Once the
+# previous hub is confirmed stopped, discard the seed and re-take the runtime
+# snapshot from the quiesced previous tree.  Never merge over the seed: a stale
+# -wal/-shm must not be paired with a newer database file.
+refresh_symlink_runtime_snapshot() {
+    local rel staged_token="$release/.ingest-token.staged"
+    # The token source may be the previous live token, so keep the staged copy
+    # before the candidate credentials are replaced.
+    install -m 600 "$release/credentials/ingest-token" "$staged_token"
+    for rel in "${FLEET_RUNTIME_PATHS[@]}" "${FLEET_RUNTIME_FILES[@]}"; do
+        rm -rf "${release:?}/$rel"
+    done
+    fleet_preserve_runtime_tree "$backup" "$release"
+    mkdir -p "$release/credentials" "$release/state"
+    install -m 600 "$staged_token" "$release/credentials/ingest-token"
+    rm -f "$staged_token"
+    if (( EUID == 0 )); then
+        chown -R "$FLEET_USER:$FLEET_USER" "$release"
+    fi
+}
+
 rollback_live() {
     case "$FLEET_LIVE_MODE" in
         symlink)
@@ -382,6 +406,10 @@ stop_result=$(python3 "$release/deploy/hk-web-process-control.py" \
     exit 1
 }
 old_stopped=1
+
+if [[ "$FLEET_LIVE_MODE" == symlink ]]; then
+    refresh_symlink_runtime_snapshot
+fi
 
 start_hub "$live"
 wait_for_status

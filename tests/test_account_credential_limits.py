@@ -37,8 +37,9 @@ def test_verified_replacement_allows_new_password_after_lockout(credentials, act
         assert post(attacker, 'login', {'email': EMAIL, 'password': 'wrong'}).status_code == 401
     assert post(attacker, 'login', {'email': EMAIL, 'password': PASSWORD}).status_code == 429
     user = repo.users()[0]
-    for _ in range(10):
-        repo.limit('login:other@example.test', 10, 900)
+    # 账户级全局软阈值打满（与 IP 无关）
+    for _ in range(repo.LOGIN_ACCOUNT_LIMIT):
+        repo.limit('login:other@example.test', repo.LOGIN_ACCOUNT_LIMIT, 900)
     for _ in range(9):
         repo.limit('password:' + user['id'], 10, 900)
     if action == 'reset':
@@ -50,8 +51,9 @@ def test_verified_replacement_allows_new_password_after_lockout(credentials, act
         unaffected = [tuple(row) for row in db.execute('SELECT * FROM limits WHERE key LIKE "ip:%" OR key LIKE "mail-%" OR key=? ORDER BY key', ('login:other@example.test',))]
     assert post(client, action, data).status_code == 200
     with repo.connect() as db:
-        assert db.execute('SELECT count(*) FROM limits WHERE key IN (?,?)',
-                          ('login:' + EMAIL, 'password:' + user['id'])).fetchone()[0] == 0
+        assert db.execute('SELECT count(*) FROM limits WHERE key IN (?,?) OR key LIKE ?',
+                          ('login:' + EMAIL, 'password:' + user['id'],
+                           'login:' + EMAIL + ':ip:%')).fetchone()[0] == 0
         assert [tuple(row) for row in db.execute('SELECT * FROM limits WHERE key LIKE "ip:%" OR key LIKE "mail-%" OR key=? ORDER BY key', ('login:other@example.test',)) if not row['key'].endswith(':accounts.reset')] == unaffected
     assert post(client, 'login', {'email': EMAIL, 'password': NEW}).status_code == 200
     with pytest.raises(ApplicationError) as error:
@@ -63,10 +65,9 @@ def test_verified_replacement_allows_new_password_after_lockout(credentials, act
 def test_unverified_reset_cannot_clear_login_limit(credentials, invalid):
     app, repo, mail = credentials
     client = app.test_client()
-    repo.limit('login:' + EMAIL, 1, 900)
-    # Fill the real account limit, independently of the request IP limit.
-    for _ in range(9):
-        repo.limit('login:' + EMAIL, 10, 900)
+    # Fill the real account (global soft) limit, independently of the request IP limit.
+    for _ in range(repo.LOGIN_ACCOUNT_LIMIT):
+        repo.limit('login:' + EMAIL, repo.LOGIN_ACCOUNT_LIMIT, 900)
     assert post(client, 'code', {'email': EMAIL, 'purpose': 'reset'}).status_code == 200
     code = mail[-1][2]
     if invalid == 'wrong':

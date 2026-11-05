@@ -69,7 +69,7 @@ def error_response(error, request_id: str | None = None):
 def _is_api_path() -> bool:
     """True when the current request targets an ``/api/*`` endpoint.
 
-    API 404/405/500 responses are converted to the bounded JSON contract;
+    API 400/404/405/413/500 responses are converted to the bounded JSON contract;
     page routes keep their compatibility plain-text behavior.
     """
     return request.path.startswith("/api/") or request.path == "/api"
@@ -78,6 +78,8 @@ def _is_api_path() -> bool:
 def register_error_handlers(app):
     """Bind the unified HTTP error contract at the app edge.
 
+    - Malformed bodies (400) and oversized bodies (413) on ``/api/*`` return
+      the bounded JSON shape as well.
     - Unknown ``/api/*`` routes (404) and disallowed methods (405) return the
       bounded ``{ok:false,...}`` JSON shape instead of the Flask HTML page.
     - Unexpected programmer exceptions on ``/api/*`` are logged by Flask and
@@ -107,6 +109,22 @@ def register_error_handlers(app):
             log_failure(app.logger, 'api_request_failed', request_id=rid,
                         method=request.method, route=route, status=response.status_code)
         return response
+
+    @app.errorhandler(400)
+    def _bad_request(exc):
+        # 畸形 JSON / 非法表单在 /api 上同样走 bounded JSON 契约，
+        # 不回 werkzeug 的 HTML 页（也不回显解析器的原始报错）。
+        if _is_api_path():
+            return error_response(ApplicationError(
+                "invalid_json", "请求体格式不正确", 400))
+        return "bad request", 400
+
+    @app.errorhandler(413)
+    def _payload_too_large(exc):
+        if _is_api_path():
+            return error_response(ApplicationError(
+                "payload_too_large", "请求体超过大小限制", 413))
+        return "payload too large", 413
 
     @app.errorhandler(404)
     def _not_found(exc):

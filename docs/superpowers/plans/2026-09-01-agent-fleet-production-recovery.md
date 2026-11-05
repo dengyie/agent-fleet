@@ -329,7 +329,7 @@ Expected: tests pass; no production endpoint is used by the local scripts unless
 - Modify: `README.md`
 - Modify: `docs/HANDOFF.md`
 - Modify: `docs/architecture-v3.md`
-- Modify: `deploy/nginx-agent-site.conf`
+- Modify: `deploy/nginx-agent-site.conf` (since removed; superseded by `deploy/nginx-frontend-backend.example.conf`)
 - Modify: `deploy/nginx-expose.md`
 - Modify: `deploy/cloudflare-access.md`
 - Modify: `deploy/frontend-release-layout.md`

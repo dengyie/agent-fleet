@@ -263,6 +263,15 @@ SseClient.prototype._pollOnce = function () {
     signal: controller.signal,
   })
     .then(function (r) {
+      if (r.status === 401) {
+        // 与 api/client.js 的 request 边界一致：会话失效交给统一登录守卫，
+        // 并停止本降级轮询，避免带着失效凭据反复打 /status。
+        self._clearPoll();
+        if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+          window.dispatchEvent(new Event('fleet-auth-required'));
+        }
+        return null;
+      }
       if (r.status !== 200) {
         return null;
       }

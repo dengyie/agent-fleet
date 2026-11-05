@@ -17,15 +17,25 @@
 
 设计约束：不引入新依赖；每次尝试新建 opener（不复用全局 urlopen 池，
 这是 128a52c 原始教训）；重试/退避节奏仍归各客户端自己管。
+
+安全加固（携带凭据头的唯一出站口）：
+
+* 永不跟随 3xx：默认 urlopen 会把自定义头（X-Runner-Credential /
+  X-Agent-Fleet-Token）原样带到 Location 指向的任意主机；这里 3xx 作为
+  状态码原样返回，凭据只发往配置的 URL。
+* 只允许 https；明文 http 仅限 loopback（本机开发）或显式
+  ``allow_insecure=True``。拒绝时不发出任何请求。
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import time
 import urllib.error
 import urllib.request
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 # CF 边缘拦截外型：403 + 纯文本 "error code: 101x"（1010 浏览器指纹 /
 # 1020 Access rule 等）。hub 自身错误是 JSON（{"error": ...}），不会命中。
@@ -35,6 +45,41 @@ _MODES = ("auto", "direct", "proxy")
 
 _TRANSIENT = (TimeoutError, urllib.error.URLError, OSError,
               ConnectionError, BrokenPipeError)
+
+
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """拒绝跟随任何重定向：3xx 以 HTTPError 形式交还调用方。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "redirect denied",
+                                     headers, fp)
+
+
+class InsecureTransportError(ValueError):
+    """目标 URL 不是 https（且非 loopback / 未显式允许明文）。"""
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def require_secure_url(url: str, *, allow_insecure: bool = False) -> str:
+    """校验携带凭据的出站 URL：https，或 loopback/显式允许的 http。"""
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
+    if not parsed.hostname or scheme not in ("https", "http"):
+        raise InsecureTransportError("invalid_transport_url")
+    if scheme == "http" and not (allow_insecure
+                                 or _is_loopback_host(parsed.hostname)):
+        raise InsecureTransportError("insecure_transport_url")
+    return url
 
 
 def _is_cf_block(status: int, body: bytes | str) -> bool:
@@ -61,7 +106,8 @@ class Transport:
     def __init__(self, *, mode: str = "auto",
                  timeout: float = 15.0,
                  attempts: int = 3,
-                 retry_sleep_s: float = 0.4):
+                 retry_sleep_s: float = 0.4,
+                 allow_insecure: bool = False):
         if mode not in _MODES:
             raise ValueError(f"transport.mode 必须是 {'|'.join(_MODES)}，得到 {mode!r}")
         self._mode = mode
@@ -71,6 +117,9 @@ class Transport:
         self._sleeper: Callable[[float], None] = time.sleep
         #: sticky: None=未定向; "direct"/"proxy"=上次成功路径（仅 auto 模式使用）
         self._preferred: str | None = None
+        self._allow_insecure = bool(allow_insecure)
+        #: 最近一次失败的底层异常（仅供单线程调用方区分可重试性）
+        self.last_exception: BaseException | None = None
 
     # -- 每跳的 opener ----------------------------------------------------
 
@@ -78,8 +127,9 @@ class Transport:
         if use_proxy:
             # 系统代理（macOS = scutil；无代理时 getproxies() 为空 → 等价直连）
             return urllib.request.build_opener(urllib.request.ProxyHandler(
-                urllib.request.getproxies()))
-        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                urllib.request.getproxies()), NoRedirectHandler())
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                           NoRedirectHandler())
 
     # -- 单路径一轮 --------------------------------------------------------
 
@@ -127,6 +177,7 @@ class Transport:
         返回 (status, payload, last_error_str)。status=0 表示两路径均传输失败。
         """
         last_err = ""
+        self.last_exception = None
         if self._mode == "auto":
             # 路径优先级：sticky > alternate；首选路径失败自动回退到备用路径
             if self._preferred:
@@ -150,11 +201,13 @@ class Transport:
                     last_err = "cf_blocked"
                     break
                 except _TRANSIENT as exc:
+                    self.last_exception = exc
                     last_err = f"{type(exc).__name__}: {exc}"
                     if attempt + 1 < self._attempts:
                         self._sleeper(self._retry_sleep_s)
                     continue
                 except Exception as exc:  # 不可分类：不重试，换/终止路径
+                    self.last_exception = exc
                     last_err = f"{type(exc).__name__}: {exc}"
                     break
 
@@ -164,11 +217,23 @@ class Transport:
 
     # -- 公共入口 -----------------------------------------------------------
 
+    def _refuse_insecure(self, url: str):
+        """非 https 目标：不发请求，按网络失败外型返回 (0, error)。"""
+        try:
+            require_secure_url(url, allow_insecure=self._allow_insecure)
+        except InsecureTransportError as exc:
+            self.last_exception = exc
+            return 0, {"error": str(exc)}
+        return None
+
     def post_bytes(self, url: str, body: bytes, headers: dict[str, str],
                    timeout: float | None = None):
         """POST binary data using the configured transport policy."""
         if not isinstance(body, bytes):
             raise TypeError("body must be bytes")
+        refused = self._refuse_insecure(url)
+        if refused is not None:
+            return refused
         req_headers = dict(headers or {})
         req_headers.setdefault("Content-Type", "application/octet-stream")
         req = urllib.request.Request(url, data=body, headers=req_headers,
@@ -186,6 +251,9 @@ class Transport:
         网络层完全失败返回 (0, {"error": ...})；hub 业务 4xx/5xx 原样透传。
         timeout 作为参数透传到每次尝试——不落实例状态（调用方可能跨线程复用）。
         """
+        refused = self._refuse_insecure(url)
+        if refused is not None:
+            return refused
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, headers=headers,
                                      method="POST")

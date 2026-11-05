@@ -15,8 +15,9 @@ Design rules enforced here (see the Task 7 brief):
 - Managed/unmanaged semantics are authoritative: an unmanaged session reports
   ``managed=False``, ``capture_quality='best_effort'``,
   ``control_capability='unavailable'`` and may only ever capture best-effort.
-- Normalized previews are redacted before append. Opted-in source_record
-  archives preserve all observable field values. The spool is encrypted,
+- Normalized previews and opted-in source_record archives keep agent text
+  and paths, but secret/credential patterns are redacted on the node before
+  append (secrets never leave the machine). The spool is encrypted,
   append-only and quota-bounded.
 - Uploads go through the injected :class:`SessionUploader` / ``post_json``
   callable and honor the Task 6 response contract
@@ -53,7 +54,7 @@ from session_schema import (
 from tools.session.capture import pty as _pty
 from tools.session.capture.native_jsonl import tailer as _tailer
 from tools.session.capture.structured_stream import iter_json as _iter_json
-from tools.session.redact import Redactor
+from tools.session.redact import Redactor, redact_event_secrets, redact_secrets_text
 from tools.session.spool import LocalSpool, SpoolError
 from tools.session.uploader import SessionUploader
 
@@ -883,6 +884,8 @@ class SessionBridge:
         Consecutive chunks end with is_complete=true and retain source order.
         """
         text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+        # 先对整行做 secret 脱敏再分块：密钥可能跨 4000 码点边界被拆开。
+        text = redact_secrets_text(text)[0]
         parts = [text[i:i + 4000] for i in range(0, len(text), 4000)] or [""]
         for index, part in enumerate(parts):
             event = self._build("source_record", payload={
@@ -1201,9 +1204,12 @@ class SessionBridge:
             # control event); do not redact or persist a rejected event.
             return False
         # (1) redact
-        # Source records are the operator's complete conversation archive.
-        # Unlike the normalized preview, do not rewrite paths/values here.
-        redacted = event if event["kind"] == "source_record" else self._redactor.redact_event(event)[0]
+        # Source records are the operator's complete conversation archive:
+        # paths/prose are kept, but secret/credential patterns are always
+        # replaced on the node so they never leave this machine.
+        redacted = redact_event_secrets(event)
+        if event["kind"] != "source_record":
+            redacted = self._redactor.redact_event(redacted)[0]
         try:
             result = self._spool.append(redacted)
         except (ValueError, TypeError, SpoolError) as exc:
@@ -1221,7 +1227,7 @@ class SessionBridge:
         event = self._clamp_event_quality(self._bind_envelope(event))
         if event is None:
             return
-        redacted, _ = self._redactor.redact_event(event)
+        redacted, _ = self._redactor.redact_event(redact_event_secrets(event))
         try:
             self._spool.append(redacted)
         except (ValueError, TypeError, SpoolError):

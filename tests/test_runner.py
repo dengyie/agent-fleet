@@ -547,6 +547,61 @@ class AgentRunnerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(data.get("ok"))
 
+    def test_post_json_never_follows_redirect_with_credential(self):
+        """runner 出站走加固 Transport：3xx 原样返回，凭据头绝不发往 Location。"""
+        import http.server
+
+        hits = {"target": 0}
+
+        class _Target(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                hits["target"] += 1
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *args):
+                return None
+
+        target = http.server.HTTPServer(("127.0.0.1", 0), _Target)
+        target_url = f"http://127.0.0.1:{target.server_address[1]}/steal"
+
+        class _Redirector(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(307)
+                self.send_header("Location", target_url)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                return None
+
+        hub = http.server.HTTPServer(("127.0.0.1", 0), _Redirector)
+        threads = [threading.Thread(target=srv.serve_forever, daemon=True)
+                   for srv in (target, hub)]
+        for t in threads:
+            t.start()
+        try:
+            self.cfg.hub = f"http://127.0.0.1:{hub.server_address[1]}"
+            self.cfg.transport = transport_mod.Transport(
+                mode="direct", attempts=1, retry_sleep_s=0, timeout=5)
+            status, _ = self.runner.post_json(self.cfg, "/api/commands/poll", {})
+        finally:
+            for srv in (target, hub):
+                srv.shutdown()
+                srv.server_close()
+        self.assertEqual(status, 307)
+        self.assertEqual(hits["target"], 0)
+
+    def test_post_json_refuses_plain_http_non_loopback_hub(self):
+        """非 loopback 的 http hub：不发出任何请求，按传输失败 (0) 返回。"""
+        self.cfg.hub = "http://hub.example.com"
+        with mock.patch.object(transport_mod.Transport, "_open") as opened:
+            status, data = self.runner.post_json(self.cfg, "/api/commands/poll", {})
+        opened.assert_not_called()
+        self.assertEqual(status, 0)
+        self.assertEqual(data.get("error"), "insecure_transport_url")
+
     def test_post_json_does_not_retry_http_error(self):
         calls = {"n": 0}
 
@@ -588,6 +643,39 @@ class AgentRunnerTests(unittest.TestCase):
         self.assertEqual(result_posts[0][1]["log_summary"], "done")
         # worktree 已清理
         self.assertFalse((self.temp / "proj.fleet-worktrees" / "t-1").exists())
+
+    def test_capture_failure_does_not_abort_or_override_exit_code(self):
+        """会话采集逐行失败只降级：adapter 不被中止，真实 exit_code 原样提交。"""
+        from tools.session.runner_capture import RunnerCapture
+
+        posts = []
+        abort_seen = []
+
+        def fake_urlopen(req, timeout):
+            posts.append((req.full_url, json.loads(req.data.decode()) if req.data else None))
+            return FakeResponse(200, {"ok": True, "task_id": "t-1",
+                                      "lease_expires_at": "..."})
+
+        def fake_run(instruction, wt, on_line, should_abort):
+            on_line("plain output that capture fails to persist")
+            abort_seen.append(should_abort())
+            return adapters.AdapterResult(exit_code=0, log_tail="done")
+
+        def broken_line(self, line, *, strict=False):
+            self.failed_lines += 1
+            self.degraded = "RuntimeError"
+            return False
+
+        with _patch_open(fake_urlopen), \
+             mock.patch.object(RunnerCapture, "line", broken_line), \
+             mock.patch.object(self.runner.adapters, "create",
+                               return_value=mock.Mock(run=fake_run)):
+            out = self.runner.run_task(self.cfg, self._task())
+        self.assertEqual(abort_seen, [False])
+        self.assertEqual(out["exit_code"], 0)
+        result_posts = [p for p in posts if p[0].endswith("/result")]
+        self.assertEqual(result_posts[0][1]["exit_code"], 0)
+        self.assertEqual(result_posts[0][1]["log_summary"], "done")
 
     def test_result_post_failure_cached_to_pending(self):
         def fail_urlopen(req, timeout):

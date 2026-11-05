@@ -152,9 +152,10 @@ class TranscriptRepositoryRedactedStreamTests(unittest.TestCase):
         no_key = TranscriptRepository(self.tmp / "tr.db", key=None)
         rows = no_key.read_redacted("sess_r")
         self.assertEqual(len(rows), 1)
-        # Live path is passthrough: operator query keeps agent text.
-        self.assertEqual(rows[0]["payload"]["text"], secret)
-        self.assertNotIn("[REDACTED:", rows[0]["payload"]["text"])
+        # Live path keeps agent text, but secret patterns are redacted
+        # before storage (secrets never persist on the Hub).
+        self.assertEqual(rows[0]["payload"]["text"],
+                         "token=[REDACTED:credential]")
 
     def test_redacted_stream_is_bounded(self):
         for seq in range(1, 11):
@@ -177,7 +178,9 @@ class TranscriptRawStreamTests(unittest.TestCase):
         self.repo.ingest(_event(seq=1, text=secret_text,
                                 event_id="evt_raw_1"))
         raw = self.repo.read_raw("sess_t5_tr1", "evt_raw_1", actor="operator-1")
-        self.assertEqual(raw["payload"]["text"], secret_text)
+        # raw 行同样先做 secret 脱敏再加密落库。
+        self.assertEqual(raw["payload"]["text"], "password=[REDACTED:password]")
+        self.assertNotIn("horse battery", json.dumps(raw))
 
     def test_raw_read_requires_restricted_key(self):
         self.repo.ingest(_event(seq=1, text="password=secret-value",

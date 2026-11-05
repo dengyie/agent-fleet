@@ -28,6 +28,7 @@ printed or stored here; only bounded identifiers and stable codes.
 """
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
@@ -58,6 +59,13 @@ _MAX_OPAQUE = 128
 _MAX_REASON = 32
 _MAX_AUDIT_STR = 200
 _SESSION_SCAN = 1000
+#: 进程内跟踪表上限：条目数与存活时间双重约束，长跑 hub 不会无限增长。
+_TRACK_MAX = 4096
+_TRACK_TTL_S = 24 * 3600.0
+#: Supervisor 无法确认进程组生死（如跨实例无法核验身份）：绝不能当作已停止。
+_UNVERIFIED_REASONS = frozenset({"escape_unverified", "liveness_unknown"})
+#: 会话仓库查询失败的哨兵（区别于「确实没有托管会话」）
+_LOOKUP_FAILED = object()
 
 
 def _bound(value: Any, limit: int = _MAX_OPAQUE, default: str = "") -> str:
@@ -107,6 +115,9 @@ class ControlRouter:
         self._tracked: dict[str, dict[str, str]] = {}
         # command_id -> bounded finalized outcome (immutable once set)
         self._finalized: dict[str, str] = {}
+        # command_id -> 登记时刻（按插入顺序，供 TTL/容量淘汰）
+        self._tracked_at: dict[str, float] = {}
+        self._clock = time.monotonic
 
     # ------------------------------------------------------------------ #
     # write use case
@@ -142,6 +153,12 @@ class ControlRouter:
             return None
         machine = _bound(task.get("machine"))
         session = self._managed_session(machine, attempt)
+        if session is _LOOKUP_FAILED:
+            # 查询失败 ≠ 非托管：记 control_failed，避免把托管尝试静默当作普通取消
+            self._note("control_failed", task_id=task_id, attempt_id=attempt,
+                       machine=machine, operator=_bound(operator),
+                       code="session_lookup_failed")
+            return None
         if session is None:
             # Unmanaged (or never-started) attempt: byte-identical cancel, no cmd.
             return None
@@ -163,6 +180,9 @@ class ControlRouter:
             self._note("control_failed", task_id=task_id, attempt_id=attempt,
                        machine=machine, code="malformed_command")
             return None
+        self._prune_tracking()
+        self._tracked_at.pop(command_id, None)
+        self._tracked_at[command_id] = self._clock()
         self._tracked[command_id] = {
             "command_id": command_id,
             "task_id": task_id,
@@ -201,7 +221,8 @@ class ControlRouter:
         # Older or incompatible clients could mark an unverified kill as
         # succeeded. Treat that bounded reason as a failed control outcome so
         # the session summary remains active until exit is actually observed.
-        if status == "succeeded" and receipt_reason == "escape_unverified":
+        if receipt_reason in _UNVERIFIED_REASONS and outcome in (
+                "terminated", "already_finished"):
             outcome = "failed"
         if outcome is None:
             # queued / delivered / accepted / executing are progress only.
@@ -212,6 +233,11 @@ class ControlRouter:
             return {"command_id": command_id, "outcome": finalized,
                     "first": False}
         tracked = self._tracked[command_id]
+        if receipt_reason == "liveness_unknown":
+            # 进程是否仍在运行未知：会话保持原状态，只记控制失败供运营排查
+            self._note("control_failed", command_id=command_id,
+                       task_id=tracked["task_id"], attempt_id=tracked["attempt_id"],
+                       machine=tracked.get("machine"), code="liveness_unknown")
         if outcome in ("terminated", "already_finished"):
             if not self._project_terminated_session(tracked):
                 return None
@@ -254,6 +280,17 @@ class ControlRouter:
                        code="session_unavailable")
             return False
 
+    def _prune_tracking(self) -> None:
+        """按登记顺序淘汰超龄或超额的跟踪条目（含其终态记录）。"""
+        now = self._clock()
+        while self._tracked_at:
+            oldest, at = next(iter(self._tracked_at.items()))
+            if len(self._tracked_at) < _TRACK_MAX and now - at <= _TRACK_TTL_S:
+                break
+            self._tracked_at.pop(oldest, None)
+            self._tracked.pop(oldest, None)
+            self._finalized.pop(oldest, None)
+
     def outcome_of(self, command_id: str) -> str | None:
         """Bounded finalized outcome for ``command_id`` or ``None``."""
         return self._finalized.get(command_id)
@@ -285,7 +322,7 @@ class ControlRouter:
             return None
         return dict(row) if isinstance(row, Mapping) else None
 
-    def _managed_session(self, machine: str, attempt_id: str) -> dict | None:
+    def _managed_session(self, machine: str, attempt_id: str) -> Any:
         """Return the managed session bound to ``(machine, attempt_id)``.
 
         Bounded scan: at most ``_SESSION_SCAN`` recent rows of the machine;
@@ -298,9 +335,9 @@ class ControlRouter:
             rows = self._session_repo.list_sessions(machine_id=machine,
                                                     limit=_SESSION_SCAN)
         except Exception:
-            return None
+            return _LOOKUP_FAILED
         if not isinstance(rows, list):
-            return None
+            return _LOOKUP_FAILED
         for row in rows:
             if not isinstance(row, Mapping):
                 continue

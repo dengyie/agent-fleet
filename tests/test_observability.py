@@ -104,9 +104,16 @@ class AuthIngestTokenTests(unittest.TestCase):
         self.assertEqual(
             client.post("/probe", headers={"X-Agent-Fleet-Token": "nope"}).status_code, 403)
 
-    def test_unconfigured_token_allows(self):
+    def test_unconfigured_token_fails_closed(self):
         client = self._make_app(None).test_client()
-        self.assertEqual(client.post("/probe").status_code, 200)
+        resp = client.post("/probe")
+        self.assertEqual(resp.status_code, 503)
+        self.assertEqual(resp.get_json()["error"], "ingest_token_not_configured")
+
+    def test_unconfigured_token_allows_with_explicit_dev_flag(self):
+        app = self._make_app(None)
+        app.config["ALLOW_INSECURE_INGEST"] = True
+        self.assertEqual(app.test_client().post("/probe").status_code, 200)
 
     def test_machine_re(self):
         from hub import auth
@@ -219,7 +226,7 @@ class SseStreamTests(unittest.TestCase):
         self.assertNotIn("session", text)
 
     def test_stream_maps_task_events(self):
-        from hub import routes_observe
+        from hub.http import observe_routes as routes_observe
         e = {"event": "task_queued", "machine": "mac-local", "ts": 1.0,
              "changes": [], "extra": {"task_id": "t-1", "state": "queued"}}
         self.assertEqual(routes_observe._sse_event_name(e), "task_update")

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 from tools.local_process import popen as popen_local
+from tools.process_group import LineAssembler, signal_group
 
 if TYPE_CHECKING:
     from tools.windows_job import WindowsJob
@@ -124,10 +125,7 @@ def _drain_posix(proc: subprocess.Popen[bytes], deadline: float,
 
 def _reap_group(proc: subprocess.Popen[bytes]) -> None:
     """Kill the owned group without ever masking the caller's exception."""
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except OSError:
-        pass
+    signal_group(proc.pid, signal.SIGKILL)
     _wait_quietly(proc)
 
 
@@ -151,22 +149,88 @@ class ProcessAborted(RuntimeError):
 
 def _drain_lines(proc: subprocess.Popen[bytes], deadline: float, timeout_s: float,
                  on_line: Callable[[str], None],
-                 should_abort: Callable[[], bool] | None) -> tuple[bytes, bytes]:
-    """Stream lines while the owner watches EOF, cancellation and the deadline."""
+                 should_abort: Callable[[], bool] | None,
+                 readers: list[threading.Thread] | None = None) -> tuple[bytes, bytes]:
+    """Stream lines while the owner watches EOF, cancellation and the deadline.
+
+    POSIX 用 selector + 非阻塞 ``os.read``：脱离进程组的孙进程即使一直持有
+    stdout，本函数也在 deadline 处返回（TimeoutExpired），绝不阻塞在读线程上。
+    Windows 无 pipe select，用 raw FileIO 读线程；读线程由调用方在 Job 关闭后
+    有界 join。
+    """
+    assert proc.stdout is not None
+    assembler = LineAssembler()
+    if os.name == "nt":
+        return _drain_lines_threaded(proc, deadline, timeout_s, on_line,
+                                     should_abort, assembler, readers)
+    fd = proc.stdout.fileno()
+    os.set_blocking(fd, False)
+    eof = False
+    with selectors.DefaultSelector() as selector:
+        selector.register(fd, selectors.EVENT_READ)
+        while True:
+            if should_abort is not None and should_abort():
+                raise ProcessAborted()
+            if eof and proc.poll() is not None:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(proc.args, timeout_s)
+            if eof:
+                # EOF does not imply process exit. Keep polling cancellation
+                # even when the child deliberately closes both descriptors.
+                time.sleep(min(0.1, remaining))
+                continue
+            if not selector.select(min(0.1, remaining)):
+                continue
+            try:
+                chunk = os.read(fd, 65536)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                eof = True
+                selector.unregister(fd)
+                for line in assembler.flush():
+                    on_line(line)
+                continue
+            for line in assembler.feed(chunk):
+                on_line(line)
+    return b"", b""
+
+
+def _drain_lines_threaded(proc: subprocess.Popen[bytes], deadline: float,
+                          timeout_s: float, on_line: Callable[[str], None],
+                          should_abort: Callable[[], bool] | None,
+                          assembler: LineAssembler,
+                          readers: list[threading.Thread] | None) -> tuple[bytes, bytes]:
     done = threading.Event()
     errors: list[BaseException] = []
 
+    def read_chunk() -> bytes:
+        try:
+            return proc.stdout.read(65536)
+        except (OSError, ValueError):
+            return b""  # Job 关闭 / 句柄被关：按 EOF 处理；仅限读取，回调异常必须传播
+
     def read_lines() -> None:
         try:
-            assert proc.stdout is not None
-            for raw in proc.stdout:
-                on_line(raw.rstrip(b"\r\n").decode("utf-8", errors="replace"))
+            while True:
+                chunk = read_chunk()
+                if not chunk:
+                    break
+                for line in assembler.feed(chunk):
+                    on_line(line)
+            for line in assembler.flush():
+                on_line(line)
         except BaseException as exc:
             errors.append(exc)
         finally:
             done.set()
 
-    threading.Thread(target=read_lines, name="owned-process-output", daemon=True).start()
+    reader = threading.Thread(target=read_lines, name="owned-process-output", daemon=True)
+    reader.start()
+    if readers is not None:
+        readers.append(reader)
     while True:
         if done.is_set() and errors:
             raise errors[0]
@@ -178,38 +242,63 @@ def _drain_lines(proc: subprocess.Popen[bytes], deadline: float, timeout_s: floa
         if remaining <= 0:
             raise subprocess.TimeoutExpired(proc.args, timeout_s)
         if done.is_set():
-            # EOF does not imply process exit. Keep polling cancellation even
-            # when the child deliberately closes both output descriptors.
             time.sleep(min(0.1, remaining))
         else:
             done.wait(min(0.1, remaining))
     return b"", b""
 
 
+def _close_job(job: WindowsJob | None, in_flight: BaseException | None) -> None:
+    """关闭 Job；正在传播的原始异常优先，close 失败不得把它改写成 OSError(127)。"""
+    if job is None:
+        return
+    try:
+        job.close()
+    except Exception as exc:
+        if in_flight is None:
+            raise
+        # 清理失败仍可观测，但不替换原始异常。
+        note = f"job_cleanup_failed: {type(exc).__name__}: {exc}"[:200]
+        add_note = getattr(in_flight, "add_note", None)
+        if add_note is not None:
+            add_note(note)
+        else:  # Python 3.10 无 add_note
+            in_flight.__notes__ = [*getattr(in_flight, "__notes__", []), note]
+
+
 def run_streamed(argv: Sequence[str], *, cwd: Path, timeout_s: float,
                  on_line: Callable[[str], None],
-                 should_abort: Callable[[], bool] | None = None) -> int:
+                 should_abort: Callable[[], bool] | None = None,
+                 env: Mapping[str, str] | None = None) -> int:
     """Run an owned process with line callbacks and a deadline through pipe EOF."""
     if not math.isfinite(timeout_s) or timeout_s <= 0:
         raise ValueError("invalid_process_timeout")
     deadline = time.monotonic() + timeout_s
     job = None
-    options = {"start_new_session": True, "preexec_fn": None}
+    # bufsize=0：raw FileIO 没有 BufferedReader 锁，Popen.__exit__ 关闭 stdout
+    # 时不会被仍在读的线程卡住。
+    options = {"start_new_session": True, "preexec_fn": None, "bufsize": 0}
     if os.name == "nt":
         from tools.windows_job import WindowsJob
         job = WindowsJob()
         options = {"creationflags": 0x00000004 | 0x00000200,
-                   "preexec_fn": None}
+                   "preexec_fn": None, "bufsize": 0}
+    readers: list[threading.Thread] = []
+    in_flight: BaseException | None = None
     try:
         result = _run_owned(
-            argv, cwd, None, deadline, timeout_s, 0, None, options, job,
+            argv, cwd, env, deadline, timeout_s, 0, None, options, job,
             drain=lambda proc, end, seconds: _drain_lines(
-                proc, end, seconds, on_line, should_abort),
+                proc, end, seconds, on_line, should_abort, readers),
         )
         return result.returncode
+    except BaseException as exc:
+        in_flight = exc
+        raise
     finally:
-        if job is not None:
-            job.close()
+        _close_job(job, in_flight)
+        for reader in readers:
+            reader.join(timeout=2)
 
 
 def run_bounded(argv: Sequence[str], *, cwd: Path, timeout_s: float,
@@ -237,12 +326,15 @@ def run_bounded(argv: Sequence[str], *, cwd: Path, timeout_s: float,
         # The child cannot spawn descendants before it belongs to our job.
         options = {"creationflags": 0x00000004 | 0x00000200,
                    "preexec_fn": preexec_fn}  # SUSPENDED | NEW_PROCESS_GROUP
+    in_flight: BaseException | None = None
     try:
         return _run_owned(argv, cwd, env, deadline, timeout_s, stdout_limit,
                           stderr_limit, options, job)
+    except BaseException as exc:
+        in_flight = exc
+        raise
     finally:
-        if job is not None:
-            job.close()
+        _close_job(job, in_flight)
 
 
 def _run_owned(argv: Sequence[str], cwd: Path, env: Mapping[str, str] | None,
@@ -255,16 +347,20 @@ def _run_owned(argv: Sequence[str], cwd: Path, env: Mapping[str, str] | None,
                      stdout=subprocess.PIPE,
                      stderr=subprocess.STDOUT if stderr_limit is None else subprocess.PIPE,
                      **options) as proc:
+        in_flight: BaseException | None = None
         try:
             if job is not None:
                 job.start(int(proc._handle))
             output, error = (drain(proc, deadline, timeout_s) if drain is not None
                              else _drain(proc, deadline, stdout_limit, stderr_limit, timeout_s))
             return subprocess.CompletedProcess(proc.args, proc.returncode, output, error)
+        except BaseException as exc:
+            in_flight = exc
+            raise
         finally:
             if job is not None:
                 try:
-                    job.close()
+                    _close_job(job, in_flight)
                 finally:
                     # Reap even if Job cleanup fails; an assignment failure
                     # also leaves an unstarted child outside the Job.
