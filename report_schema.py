@@ -6,6 +6,7 @@ conversation content, or unknown keys.
 """
 
 import dataclasses
+import re
 
 from agent_profiles import OBSERVABLE_AGENT_TYPES, PROFILES
 
@@ -193,6 +194,43 @@ def _instance_dict(item):
     return None
 
 
+# --settings 的值是 JSON/路径，可能内嵌 env（API key / auth token），整段
+# 替换到下一个 ``--flag`` 或行尾（ps 输出不保留引号，无法按 argv 精确切分）。
+_SETTINGS_ARG_RE = re.compile(r"(--settings)(?:=|\s+)(?:(?!\s--?[A-Za-z]).)+")
+# 名字中含凭据词（按 -/_ 分段整词匹配，--max-tokens 等不误伤）的 flag 值。
+_FLAG_ARG_RE = re.compile(r"(?:(?<=\s)|^)(--?([A-Za-z][\w-]*))(=|\s+)(?!-)(\S+)")
+_SECRET_FLAG_WORDS = frozenset({
+    "key", "apikey", "token", "secret", "password", "passwd", "pass",
+    "credential", "credentials", "auth"})
+
+
+def _redact_flag(match):
+    flag, name, sep, value = match.groups()
+    parts = [part for part in re.split(r"[-_]", name.lower()) if part]
+    if (not parts or parts[0] == "no" or value.startswith("[REDACTED:")
+            or not _SECRET_FLAG_WORDS.intersection(parts)):
+        return match.group(0)
+    return f"{flag}{sep}[REDACTED:credential]"
+
+
+def redact_cmdline(cmdline: str) -> str:
+    """Replace secret-looking argument values before a cmdline is reported.
+
+    Covers ``--settings <json>``, ``--api-key=...``/``--token X`` style flags,
+    then the shared secret rules (``KEY=value`` env prefixes, ``sk-``/Bearer
+    tokens …).  Idempotent; runs on the full string before truncation.
+    """
+    if not cmdline:
+        return cmdline
+    text = _SETTINGS_ARG_RE.sub(r"\1 [REDACTED:settings]", cmdline)
+    text = _FLAG_ARG_RE.sub(_redact_flag, text)
+    try:
+        from tools.session.redact import redact_secrets_text
+    except ImportError:  # 极简部署缺少 tools 包时仍保留上面的 flag 级脱敏
+        return text
+    return redact_secrets_text(text)[0]
+
+
 def sanitize_instances(value: object) -> list[dict]:
     """Sanitize discovered agent instances into the fixed allowlisted pivot.
 
@@ -222,7 +260,10 @@ def sanitize_instances(value: object) -> list[dict]:
             exe_path = ""
         if not exe_path.strip():
             continue
-        cmdline = _safe_value(record.get("cmdline"))
+        raw_cmdline = record.get("cmdline")
+        # 先在完整字符串上脱敏再截断，避免密钥被 200 字符截断拆开后漏检
+        cmdline = _safe_value(redact_cmdline(raw_cmdline)
+                              if isinstance(raw_cmdline, str) else raw_cmdline)
         if not isinstance(cmdline, str):
             cmdline = ""
         native = _safe_value(record.get("native_file_path"))

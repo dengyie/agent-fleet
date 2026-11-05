@@ -28,7 +28,6 @@ import secrets
 from collections.abc import Mapping
 from typing import Any
 
-from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 NONCE_LENGTH = 12

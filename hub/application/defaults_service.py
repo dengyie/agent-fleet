@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from hub.application.task_service import ApplicationError
 from hub.domain.platform import resolve_run_config
 from platform_schema import PlatformValidationError, public_model, validate_owner_id
-from hub.infrastructure.platform_db import PlatformRepositoryError
 
 
 class DefaultsService:

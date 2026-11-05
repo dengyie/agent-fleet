@@ -319,13 +319,13 @@ def test_delete_unknown_session_is_404(client):
     assert not body["ok"]
 
 
-def test_delete_pending_conflict_is_409(client):
+def test_delete_pending_revokes_stuck_seat(client):
+    # 评审修复：pending 行可以被操作员撤销，不再永久卡死。
     session_id = client.post("/api/adoptions", json=valid_candidate(),
                              headers=operator_headers()).get_json()["session_id"]
     resp = client.delete(f"/api/adoptions/{session_id}",
                          headers=operator_headers())
-    assert resp.status_code == 409
-    assert resp.get_json()["error"] == "invalid_status_transition"
+    assert resp.status_code == 202, resp.get_json()
 
 
 def test_delete_bounded_error_never_exposes_paths(client):

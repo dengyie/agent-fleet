@@ -158,6 +158,32 @@ def _read_summary_file(path: Path) -> bytes | None:
     return body
 
 
+def _read_capped(path: Path, limit: int) -> bytes | None:
+    """先 stat 再读：只读普通文件，且最多读 ``limit`` 字节（巨型产物不整份入内存）。"""
+    try:
+        original = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(original.st_mode):
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) \
+        | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (original.st_dev, original.st_ino):
+            return None
+        with open(descriptor, "rb", closefd=False) as stream:
+            return stream.read(limit)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
 def collect_test_summary(worktree: Path) -> dict[str, Any] | None:
     """Read bounded regular reports; absent evidence differs from invalid."""
     for name in TEST_RESULT_NAMES:
@@ -256,9 +282,8 @@ def collect_result_files(
             norm = normalize_path(rel)
         except (PathRejected, ValueError):
             continue
-        try:
-            raw = path.read_bytes()
-        except OSError:
+        raw = _read_capped(path, MAX_FILE_BYTES * 4 + 1)
+        if raw is None:
             continue
         if b"\x00" in raw:
             continue

@@ -553,7 +553,6 @@ class AuthDecoratorTests(unittest.TestCase):
 class LeaseReconcilerTests(TaskApiTestBase):
     def test_reconcile_once_requeues_and_emits(self):
         import time as _time
-        from hub import web
         self.client.post("/api/tasks", json={
             "machine": "mac-local", "agent_type": "codex",
             "project": "agent-fleet", "instruction": "x"})
@@ -565,7 +564,8 @@ class LeaseReconcilerTests(TaskApiTestBase):
         conn.execute("UPDATE leases SET expires_at=? WHERE attempt_id=?",
                      ("2000-01-01T00:00:00Z", leased["attempt_id"]))
         conn.close()
-        requeued = web.reconcile_leases_once(now=_time.time())
+        requeued = self.app.extensions["fleet"]["services"]["reconciliation"].reconcile_leases(
+            now=_time.time())
         self.assertEqual(requeued, [leased["task_id"]])
         task = self.client.get(f"/api/tasks/{leased['task_id']}").get_json()["task"]
         self.assertEqual(task["state"], "queued")

@@ -147,7 +147,12 @@ def test_source_archive_preserves_values_rewritten_in_preview(tmp_path):
     capture.line(json.dumps(source));capture.finish(0)
     rows=client.get('/api/sessions/'+capture.session_id+'/events?limit=100').get_json()['events']
     texts=[e['payload']['text'] for e in rows if e['kind']=='source_record']
-    assert json.dumps(source) in texts
+    # 完整归档保留路径与正文，但密钥形态（password=）在节点侧已脱敏
+    archived=[json.loads(t) for t in texts if 'agent_message' in t]
+    assert archived and archived[0]['type']=='item.completed'
+    text=archived[0]['item']['text']
+    assert text.startswith('Inspect /home/example/private/project.py; password=[REDACTED:')
+    assert 'fixture-only-value' not in json.dumps(rows)
 
 
 def test_natural_completion_retains_native_identity_and_distinct_reason(tmp_path):

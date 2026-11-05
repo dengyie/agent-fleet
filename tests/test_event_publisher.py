@@ -9,7 +9,9 @@ import json
 import queue
 import threading
 import time
+import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -141,11 +143,15 @@ class EventPublisherTests(unittest.TestCase):
     def test_read_since_delegates_to_repository(self):
         repo = FakeEventRepository()
         publisher = self._cls(repo)
-        publisher.emit("one", machine="hk")
-        t = time.time() + 0.001  # ensure next event is strictly after
-        time.sleep(0.002)
-        publisher.emit("two", machine="tebi")
-        recent = publisher.read_since(t)
+        # Deterministic module-local clock: no dependence on real millisecond
+        # resolution, and the global ``time`` module is left untouched.
+        from hub.application import event_publisher as module
+        clock = iter([1000.0, 1000.5])
+        fake_time = types.SimpleNamespace(time=lambda: next(clock))
+        with mock.patch.object(module, "time", fake_time):
+            publisher.emit("one", machine="hk")
+            publisher.emit("two", machine="tebi")
+        recent = publisher.read_since(1000.0)
         self.assertEqual(len(recent), 1)
         self.assertEqual(recent[0]["machine"], "tebi")
 

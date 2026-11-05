@@ -1,7 +1,7 @@
 """connectors/base.py — Connector 抽象基类
 
 每种 agent 类型实现一个 Connector 子类，注册后即可被中枢调度。
-接入新 agent 只需：写一个继承 BaseConnector 的类 + 实现 collect/control。
+接入新 agent 只需：写一个继承 BaseConnector 的类 + 实现 collect（push-only，只读采集，不做管控）。
 """
 
 from abc import ABC, abstractmethod
@@ -29,20 +29,6 @@ class BaseConnector(ABC):
             dict: 该 agent 的状态快照（任意结构，事件总线与汇总会消费）
         """
         raise NotImplementedError
-
-    # ------------------------------------------------------------------
-    def control(self, ctx, action, **kwargs):
-        """管控操作（可选实现）。
-
-        Args:
-            ctx (ProbeContext): 执行上下文
-            action (str): status | restart | tmux | exec | ...
-            **kwargs: 附加参数
-
-        Returns:
-            dict: {"ok": bool, "message": str, ...}
-        """
-        raise NotImplementedError(f"{self.TYPE} 连接器未实现 control")
 
     # ------------------------------------------------------------------
     def detect(self, ctx):
@@ -91,8 +77,8 @@ def jsonl_session_script(base: str, command: str) -> str:
 class JsonlConnector(BaseConnector):
     """只读扫描远端 jsonl 会话目录元数据的连接器基类（codex/pi 共用）。
 
-    子类仅需声明 TYPE、SESSION_BASE 与文案前缀；collect 跑共用脚本并解析，
-    control 只支持 status（这类 CLI 自管 agent 不做远程管控）。
+    子类仅需声明 TYPE、SESSION_BASE 与文案前缀；collect 跑共用脚本并解析
+    （这类 CLI 自管 agent 不做远程管控）。
     """
 
     SESSION_BASE = ""  # 子类必须覆盖：远端会话根目录（如 ~/.codex/sessions）
@@ -123,9 +109,3 @@ class JsonlConnector(BaseConnector):
                 "error": f"collect failed: {type(exc).__name__}: {exc}",
                 "raw_preview": raw[:500]
             }
-
-    def control(self, ctx, action, **kwargs):
-        if action == "status":
-            return {"ok": True, "data": self.collect(ctx)}
-        return {"ok": False,
-                "message": f"{self.TYPE} 不支持 action={action}（CLI 自管，建议只观测）"}

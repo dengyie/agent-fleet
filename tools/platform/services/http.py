@@ -9,14 +9,11 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 from urllib.request import Request
 from urllib.error import HTTPError
-from urllib.request import HTTPRedirectHandler, build_opener
+from urllib.request import build_opener
+
+from tools.transport import NoRedirectHandler as _NoRedirectHandler
 
 from .base import CollectorError, HealthEvidence, _detail
-
-
-class _NoRedirectHandler(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, new):
-        raise HTTPError(req.full_url, code, "redirect denied", headers, fp)
 
 
 _DEFAULT_OPENER = build_opener(_NoRedirectHandler())

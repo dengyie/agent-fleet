@@ -33,16 +33,25 @@ def sync_file(cfg, family, path, send=post):
     checkpoint = capture.root / (capture.session_id + '.cursor')
     reader = tailer(str(path), checkpoint_path=str(checkpoint), max_line_bytes=16 << 20)
     try:
-        rows = reader.read()
+        start = reader.offset
+        entries = reader.read_entries()
         if reader.last_error:
             raise RuntimeError(reader.last_error)
-        for row in rows:
-            capture.line(json.dumps(row, ensure_ascii=False))
+        end = reader.offset
+        # 逐行推进 checkpoint：配额/写入失败在中途抛出时，已入 spool 的前缀
+        # 已落盘为 checkpoint，下次从失败行续传，不会以新 sequence 重复上送。
+        reader.offset = start
+        for row, row_end in entries:
+            capture.line(json.dumps(row, ensure_ascii=False), strict=True)
+            reader.offset = row_end
+            reader.checkpoint_to(str(checkpoint))
+        # 尾部被跳过的空行/坏行也一并确认
+        reader.offset = end
         reader.checkpoint_to(str(checkpoint))
         capture.flush()
         if capture.bridge.uploader.last_error:
             raise RuntimeError("conversation_upload_pending")
-        return len(rows)
+        return len(entries)
     finally:
         capture.bridge.close()
 

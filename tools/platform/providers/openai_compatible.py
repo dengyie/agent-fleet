@@ -567,6 +567,10 @@ class OpenAICompatibleProvider:
             raise ProviderUnavailable('provider_network_disabled')
         payload = {"model": self.model, "messages": _messages(messages, tool_names),
                    "tools": _tools(tools, tool_names), "stream": self.stream}
+        if payload["tools"]:
+            # ModelResponse 一次只承载一个工具调用；显式关闭并行调用，
+            # 防止上游在同一轮返回多个 tool_calls（流式时会被拼接成一个）。
+            payload["parallel_tool_calls"] = False
         if self.stream:
             payload['stream_options'] = {'include_usage': True}
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -635,8 +639,10 @@ class OpenAICompatibleProvider:
     def _parse_sse(self, body: bytes | Iterable[bytes], tool_names: Mapping[str, str]) -> ModelResponse:
         metadata_payload = {}
         text_parts = []
-        tool_name, arguments = '', ''
-        tool_id = finish_reason = None
+        # 流式 tool_calls 按 delta 的 index 分组累积；不同 index 是不同调用，
+        # 绝不能把它们的 name/arguments 拼接成一个。与非流式一致取第一个调用。
+        tool_calls: dict[int, dict[str, Any]] = {}
+        finish_reason = None
         completed = False
         usage = {}
         for payload in _sse_payloads(body):
@@ -662,20 +668,28 @@ class OpenAICompatibleProvider:
             if isinstance(delta.get('content'), str):
                 text_parts.append(delta['content'])
             calls = delta.get('tool_calls')
-            if isinstance(calls, list) and calls:
-                call = calls[0]
-                if not isinstance(call, Mapping):
-                    raise ProviderError('invalid_response')
-                tool_id = tool_id or call.get('id')
-                function = call.get('function')
-                if isinstance(function, Mapping):
-                    if isinstance(function.get('name'), str):
-                        tool_name += function['name']
-                    if isinstance(function.get('arguments'), str):
-                        arguments += function['arguments']
+            if isinstance(calls, list):
+                for position, call in enumerate(calls):
+                    if not isinstance(call, Mapping):
+                        raise ProviderError('invalid_response')
+                    index = call.get('index', position)
+                    if isinstance(index, bool) or not isinstance(index, int):
+                        raise ProviderError('invalid_response')
+                    slot = tool_calls.setdefault(index, {'id': None, 'name': '', 'arguments': ''})
+                    slot['id'] = slot['id'] or call.get('id')
+                    function = call.get('function')
+                    if isinstance(function, Mapping):
+                        if isinstance(function.get('name'), str):
+                            slot['name'] += function['name']
+                        if isinstance(function.get('arguments'), str):
+                            slot['arguments'] += function['arguments']
         if not completed and not finish_reason:
             raise ProviderError('invalid_response')
         metadata = _metadata(metadata_payload, self.pricing)
+        first = tool_calls[min(tool_calls)] if tool_calls else None
+        tool_name = first['name'] if first else ''
+        arguments = first['arguments'] if first else ''
+        tool_id = first['id'] if first else None
         if tool_name:
             return ModelResponse(kind='tool_call', text=''.join(text_parts)[:MAX_TEXT_CHARS],
                 tool=_internal_tool_name(tool_name, tool_names), arguments=_arguments(arguments or '{}'),

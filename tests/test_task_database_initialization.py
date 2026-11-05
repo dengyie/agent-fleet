@@ -11,6 +11,11 @@ from hub.infrastructure.task_repository import SqliteTaskRepository
 from hub.infrastructure import task_repository
 
 
+def _quarantined(database: Path) -> list[Path]:
+    """Quarantined main database files (timestamped ``.corrupt-*`` suffix)."""
+    return sorted(database.parent.glob(database.name + ".corrupt-*"))
+
+
 @pytest.fixture
 def database(tmp_path: Path) -> Path:
     path = tmp_path / "fleet.db"
@@ -37,7 +42,7 @@ def test_exclusive_lock_does_not_quarantine_healthy_database(
                 SqliteTaskRepository(database).init()
             assert time.monotonic() - started < 1.0
             assert database.stat().st_ino == inode
-            assert not database.with_suffix(".db.corrupt").exists()
+            assert not _quarantined(database)
         finally:
             writer.execute("ROLLBACK")
     repo = SqliteTaskRepository(database)
@@ -66,7 +71,7 @@ def test_unavailable_database_preserves_original_file_and_error(
     assert failure.value is error
     assert database.stat().st_ino == inode
     assert database.read_bytes() == original
-    assert not database.with_suffix(".db.corrupt").exists()
+    assert not _quarantined(database)
 
 
 @pytest.mark.parametrize("pragma", ["journal_mode", "foreign_keys", "integrity_check"])
@@ -99,7 +104,7 @@ def test_failed_initialization_closes_each_open_connection(
         with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
             SqliteTaskRepository(database).init()
         assert opened and closed == opened
-        assert not database.with_suffix(".db.corrupt").exists()
+        assert not _quarantined(database)
     finally:
         for conn in opened:
             if conn not in closed:
@@ -125,7 +130,7 @@ def test_python310_corruption_errors_keep_recovery_compatibility(
 
     monkeypatch.setattr(repo, "_connect", corrupt_then_connect)
     repo.init()
-    assert database.with_suffix(".db.corrupt").read_bytes() == original
+    assert _quarantined(database)[0].read_bytes() == original
     assert repo.get_task("t-old") is None
 
 
@@ -135,7 +140,7 @@ def test_actual_non_database_file_is_preserved_before_rebuild(tmp_path: Path) ->
     path.write_bytes(original)
     repo = SqliteTaskRepository(path)
     repo.init()
-    assert path.with_suffix(".db.corrupt").read_bytes() == original
+    assert _quarantined(path)[0].read_bytes() == original
     assert repo.get_task("missing") is None
 
 
@@ -154,7 +159,7 @@ def test_extended_corruption_code_preserves_recovery(
 
     monkeypatch.setattr(repo, "_connect", corrupt_once)
     repo.init()
-    assert database.with_suffix(".db.corrupt").read_bytes() == original
+    assert _quarantined(database)[0].read_bytes() == original
     assert repo.get_task("t-old") is None
 
 
@@ -192,7 +197,7 @@ def test_transient_wal_lock_retries_setup_with_closed_connections(
         repo.init()
         assert failures == 2
         assert closed == opened
-        assert not database.with_suffix(".db.corrupt").exists()
+        assert not _quarantined(database)
         assert repo.get_task("t-old")["instruction"] == "preserve me"
     finally:
         for conn in opened:

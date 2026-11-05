@@ -957,9 +957,6 @@ class _FakeOps:
     def proc_wait(self, handle, timeout=None):
         return 0
 
-    def group_id(self, handle):
-        return "grp_1"
-
     def group_alive(self, handle):
         return self.alive
 
@@ -1237,10 +1234,123 @@ class AgentControlClientTestsTests(unittest.TestCase):
         self.assertTrue(factory.last.started)
         self.assertIs(factory.last.cfg["managed"], True)
         self.assertEqual(factory.last.cfg["session_id"], attached_sid)
-        # no raw pid leaks into the receipt
-        self.assertNotIn(str(pid), json.dumps(receipt))
+        # no raw pid leaks into the receipt: every identifier/text field is
+        # checked by name; ``received_at`` is a wall-clock RFC3339 stamp whose
+        # digits may coincide with the pid, so it is pinned to its format
+        # instead of substring-scanned (deterministic).
+        for field in ("command_id", "machine_id", "status", "reason"):
+            self.assertNotIn(str(pid), str(receipt[field]), field)
+        self.assertRegex(
+            receipt["received_at"],
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$")
         # the entry remains bound in the supervisor
         self.assertIn(attached_sid, self.sup.all_status())
+
+    def _adopt_cmd(self, sid, pid, started, exe, *, nonce, command_id):
+        body = _command_payload(
+            action="adopt", session=sid, nonce=nonce, machine="agent-a",
+            command_id=command_id)
+        body["candidate"] = {
+            "pid": pid, "started_at": started, "exe_path": exe,
+            "agent_family": "codex", "native_file_path": None,
+        }
+        return _sign(body, self.priv)
+
+    def test_redelivered_adopt_reuses_single_bridge(self):
+        # A second, independently signed adopt for the SAME session/pid (Hub
+        # retried with a fresh cid/nonce after a lost receipt) is idempotent:
+        # attach answers ``adopted`` again but no second SessionBridge is ever
+        # built and the first one keeps running.
+        sid = _opaque("adopt")
+        pid, started, exe = 4242, "2026-08-30T12:00:00Z", "/opt/agent/bin/run"
+        self.sup._default_attach_probe = (
+            lambda p: (started, exe) if int(p) == pid else None)
+        built = []
+
+        class _Bridge:
+            def __init__(self, cfg):
+                self.closed = False
+                built.append(self)
+
+            def start(self):
+                pass
+
+            def ingest_native(self, path, checkpoint_path=None):
+                pass
+
+            def flush(self):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        pipe = _Pipe([
+            self._adopt_cmd(sid, pid, started, exe, nonce="ra1",
+                            command_id=_opaque("cmd")),
+            self._adopt_cmd(sid, pid, started, exe, nonce="ra2",
+                            command_id=_opaque("cmd")),
+        ])
+        client = self._client(pipe, bridge_factory=_Bridge)
+        client.poll_once()
+        self.assertEqual([(r["status"], r["reason"]) for r in pipe.uploads],
+                         [("accepted", "adopted"), ("accepted", "adopted")])
+        self.assertEqual(len(built), 1)
+        self.assertFalse(built[0].closed)
+        self.assertEqual(client.iter_bridges(), [built[0]])
+        self.assertIn(sid, self.sup.all_status())
+
+    def test_adopt_bridge_failure_after_start_closes_partial_bridge(self):
+        # start() ran (threads/handles may exist) and then construction
+        # failed: the half-built bridge is closed, the attach rolled back and
+        # the receipt is the bounded ``capture_gap``; a later adopt builds
+        # exactly one fresh bridge.
+        sid = _opaque("adopt")
+        pid, started, exe = 4343, "2026-08-30T12:00:00Z", "/opt/agent/bin/run"
+        self.sup._default_attach_probe = (
+            lambda p: (started, exe) if int(p) == pid else None)
+        built = []
+
+        class _Bridge:
+            fail = True
+
+            def __init__(self, cfg):
+                self.started = False
+                self.closed = False
+                built.append(self)
+
+            def start(self):
+                self.started = True
+                if _Bridge.fail:
+                    raise RuntimeError("spool unavailable")
+
+            def ingest_native(self, path, checkpoint_path=None):
+                pass
+
+            def flush(self):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        pipe = _Pipe([self._adopt_cmd(sid, pid, started, exe, nonce="pf1",
+                                      command_id=_opaque("cmd"))])
+        client = self._client(pipe, bridge_factory=_Bridge)
+        client.poll_once()
+        self.assertEqual((pipe.uploads[0]["status"], pipe.uploads[0]["reason"]),
+                         ("rejected", "capture_gap"))
+        self.assertTrue(built[0].started)
+        self.assertTrue(built[0].closed)
+        self.assertEqual(client.iter_bridges(), [])
+        self.assertNotIn(sid, self.sup.all_status())
+
+        _Bridge.fail = False
+        pipe.commands = [self._adopt_cmd(sid, pid, started, exe, nonce="pf2",
+                                         command_id=_opaque("cmd"))]
+        client.poll_once()
+        self.assertEqual((pipe.uploads[-1]["status"], pipe.uploads[-1]["reason"]),
+                         ("accepted", "adopted"))
+        self.assertEqual(len(built), 2)
+        self.assertEqual(client.iter_bridges(), [built[1]])
 
     def test_detach_missing_session_still_unknown_session(self):
         # the bypass must NOT widen: detach (like every other action) still

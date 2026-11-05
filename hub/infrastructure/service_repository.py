@@ -9,12 +9,12 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from hub.domain.service import (
-    HEALTH_DIMENSIONS,
     ServiceValidationError,
     validate_health_evidence,
     validate_service_definition,
 )
 from platform_schema import validate_id, validate_owner_id
+from hub.infrastructure.sqlite import connect as sqlite_connect
 
 MAX_DETAIL_BYTES = 64 * 1024
 
@@ -47,11 +47,7 @@ class ServiceRepository:
         self.clock = clock
 
     def _connect(self):
-        conn = sqlite3.connect(str(self.db_path), timeout=10, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        return sqlite_connect(self.db_path, timeout=10)
 
     def init(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

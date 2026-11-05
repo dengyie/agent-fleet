@@ -12,8 +12,12 @@ import hmac
 import math
 import secrets
 import sqlite3
+import threading
 import time
+from collections import deque
 from hub.domain.request_metadata import project_requests
+from hub.infrastructure.execution_window_repository import ExecutionWindowRepository
+from hub.infrastructure.sqlite import connect as sqlite_connect
 
 from collections.abc import Mapping
 from pathlib import Path
@@ -27,6 +31,11 @@ from platform_schema import (
 
 SCHEMA_VERSION = 3
 MAX_JSON_BYTES = 64 * 1024
+# Node credential auth runs on every node request: keep it cheap and bounded.
+NODE_LAST_USED_WRITE_INTERVAL_S = 60.0
+NODE_AUTH_FAILURE_WINDOW_S = 60.0
+NODE_AUTH_MAX_FAILURES = 20
+NODE_AUTH_LIMITER_MAX_KEYS = 4096
 
 
 class PlatformRepositoryError(RuntimeError):
@@ -66,17 +75,15 @@ class PlatformRepository:
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
         self.path = self.db_path
+        # In-memory failed-auth limiter keyed by ("node", id) / ("ip", addr).
+        self._auth_failures: dict[tuple[str, str], deque] = {}
+        self._auth_failures_lock = threading.Lock()
 
     def _connect(self):
-        conn = sqlite3.connect(str(self.db_path), timeout=10, isolation_level=None)
-        conn.row_factory = sqlite3.Row
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
+            return sqlite_connect(self.db_path, timeout=10)
         except sqlite3.Error:
-            conn.close()
             raise PlatformRepositoryError("platform_store") from None
-        return conn
 
     def init(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -250,6 +257,7 @@ class PlatformRepository:
                 ("model_profiles", "provider_config", "TEXT NOT NULL DEFAULT '{}'"),
                 ("nodes", "last_seen_at", "REAL"),
                 ("nodes", "status", "TEXT NOT NULL DEFAULT 'unknown'"),
+                ("node_credentials", "fast_digest", "BLOB"),
             ):
                 columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
                 if column not in columns:
@@ -465,7 +473,50 @@ class PlatformRepository:
 
     @staticmethod
     def _derive_node_digest(secret: str, salt: bytes) -> bytes:
+        """Legacy PBKDF2 digest (``secret_digest``); kept so a rollback to an
+        older release can still authenticate nodes provisioned by this one."""
         return hashlib.pbkdf2_hmac("sha256", secret.encode("utf-8"), salt, 120_000)
+
+    @staticmethod
+    def _fast_node_digest(secret: str, salt: bytes) -> bytes:
+        """Per-request digest (``fast_digest``). Node secrets are >=32 random
+        characters, so a slow KDF adds no brute-force margin but costs ~100ms
+        CPU on every authenticated node request."""
+        return hashlib.sha256(b"fleet-node-credential:v2:" + salt + secret.encode("utf-8")).digest()
+
+    def _auth_keys(self, node_id: str, remote_addr: str | None) -> list[tuple[str, str]]:
+        keys = [("node", node_id)]
+        if isinstance(remote_addr, str) and remote_addr:
+            keys.append(("ip", remote_addr[:64]))
+        return keys
+
+    def _auth_rate_limited(self, keys, now: float) -> bool:
+        cutoff = now - NODE_AUTH_FAILURE_WINDOW_S
+        with self._auth_failures_lock:
+            for key in keys:
+                bucket = self._auth_failures.get(key)
+                if bucket is None:
+                    continue
+                while bucket and bucket[0] <= cutoff:
+                    bucket.popleft()
+                if not bucket:
+                    del self._auth_failures[key]
+                elif len(bucket) >= NODE_AUTH_MAX_FAILURES:
+                    return True
+        return False
+
+    def _record_auth_failure(self, keys, now: float) -> None:
+        cutoff = now - NODE_AUTH_FAILURE_WINDOW_S
+        with self._auth_failures_lock:
+            if len(self._auth_failures) >= NODE_AUTH_LIMITER_MAX_KEYS:
+                # Bound memory: drop expired buckets, then the oldest ones.
+                for key in [k for k, b in self._auth_failures.items() if not b or b[-1] <= cutoff]:
+                    del self._auth_failures[key]
+                while len(self._auth_failures) >= NODE_AUTH_LIMITER_MAX_KEYS:
+                    del self._auth_failures[next(iter(self._auth_failures))]
+            for key in keys:
+                bucket = self._auth_failures.setdefault(key, deque(maxlen=NODE_AUTH_MAX_FAILURES))
+                bucket.append(now)
 
     def provision_node_credential(self, owner_id: str, node_id: str, *, secret: str | None = None) -> dict[str, Any]:
         """Rotate a node credential and return the plaintext exactly once."""
@@ -483,8 +534,9 @@ class PlatformRepository:
                 raise PlatformRepositoryError("reference_forbidden")
             salt = secrets.token_bytes(16)
             digest = self._derive_node_digest(secret, salt)
+            fast = self._fast_node_digest(secret, salt)
             now = time.time()
-            conn.execute("INSERT INTO node_credentials(owner_id,node_id,salt,secret_digest,enabled,issued_at,last_used_at) VALUES(?,?,?,?,1,?,NULL) ON CONFLICT(owner_id,node_id) DO UPDATE SET salt=excluded.salt,secret_digest=excluded.secret_digest,enabled=1,issued_at=excluded.issued_at,last_used_at=NULL", (owner_id, node_id, salt, digest, now))
+            conn.execute("INSERT INTO node_credentials(owner_id,node_id,salt,secret_digest,fast_digest,enabled,issued_at,last_used_at) VALUES(?,?,?,?,?,1,?,NULL) ON CONFLICT(owner_id,node_id) DO UPDATE SET salt=excluded.salt,secret_digest=excluded.secret_digest,fast_digest=excluded.fast_digest,enabled=1,issued_at=excluded.issued_at,last_used_at=NULL", (owner_id, node_id, salt, digest, fast, now))
             return {"owner_id": owner_id, "node_id": node_id, "credential": f"{node_id}:{secret}", "issued_at": now}
         except PlatformRepositoryError:
             raise
@@ -493,29 +545,61 @@ class PlatformRepository:
         finally:
             if conn is not None: conn.close()
 
-    def authenticate_node_credential(self, node_id: str, secret: str) -> dict[str, Any] | None:
+    def authenticate_node_credential(self, node_id: str, secret: str, *,
+                                     remote_addr: str | None = None) -> dict[str, Any] | None:
+        """Verify ``node_id:secret``.
+
+        * digest: sha256 ``fast_digest`` + ``hmac.compare_digest``; a legacy
+          row (PBKDF2 only) is verified once and then gets its fast digest
+          (the PBKDF2 digest stays for rollback compatibility);
+        * ``last_used_at`` / ``last_seen_at`` are written at most once per
+          ``NODE_LAST_USED_WRITE_INTERVAL_S`` (or when the node was not
+          online), not on every request;
+        * failures are rate limited in memory per node id (and per
+          ``remote_addr`` when the caller supplies it).
+        """
         node_id = validate_id(node_id, "node_id")
         if not isinstance(secret, str) or not secret or len(secret) > 256:
+            return None
+        keys = self._auth_keys(node_id, remote_addr)
+        if self._auth_rate_limited(keys, time.monotonic()):
             return None
         conn = None
         try:
             conn = self._connect()
-            rows = conn.execute("SELECT c.owner_id,c.node_id,c.salt,c.secret_digest,n.enabled AS node_enabled,c.enabled AS credential_enabled FROM node_credentials c JOIN nodes n ON n.owner_id=c.owner_id AND n.node_id=c.node_id WHERE c.node_id=?", (node_id,)).fetchall()
+            rows = conn.execute("SELECT c.owner_id,c.node_id,c.salt,c.secret_digest,c.fast_digest,c.last_used_at,n.status AS node_status,n.enabled AS node_enabled,c.enabled AS credential_enabled FROM node_credentials c JOIN nodes n ON n.owner_id=c.owner_id AND n.node_id=c.node_id WHERE c.node_id=?", (node_id,)).fetchall()
             match = None
+            upgrade = None
             for row in rows:
                 if not bool(row["node_enabled"]) or not bool(row["credential_enabled"]):
                     continue
-                digest = self._derive_node_digest(secret, bytes(row["salt"]))
-                if hmac.compare_digest(digest, bytes(row["secret_digest"])):
+                salt = bytes(row["salt"])
+                fast = self._fast_node_digest(secret, salt)
+                if row["fast_digest"] is not None:
+                    ok = hmac.compare_digest(fast, bytes(row["fast_digest"]))
+                else:
+                    ok = hmac.compare_digest(
+                        self._derive_node_digest(secret, salt), bytes(row["secret_digest"]))
+                    if ok:
+                        upgrade = fast
+                if ok:
                     if match is not None:
                         return None
                     match = row
             if match is None:
+                self._record_auth_failure(keys, time.monotonic())
                 return None
             now = time.time()
-            conn.execute("UPDATE node_credentials SET last_used_at=? WHERE owner_id=? AND node_id=?", (now, match["owner_id"], node_id))
-            conn.execute("UPDATE nodes SET last_seen_at=?,status='online' WHERE owner_id=? AND node_id=?", (now, match["owner_id"], node_id))
-            return {"owner_id": match["owner_id"], "node_id": node_id, "last_seen_at": now}
+            owner_id = match["owner_id"]
+            if upgrade is not None:
+                conn.execute("UPDATE node_credentials SET fast_digest=? WHERE owner_id=? AND node_id=? AND fast_digest IS NULL AND secret_digest=?", (upgrade, owner_id, node_id, match["secret_digest"]))
+            last_used = match["last_used_at"]
+            if (last_used is None or match["node_status"] != "online"
+                    or now - float(last_used) >= NODE_LAST_USED_WRITE_INTERVAL_S
+                    or now < float(last_used)):
+                conn.execute("UPDATE node_credentials SET last_used_at=? WHERE owner_id=? AND node_id=?", (now, owner_id, node_id))
+                conn.execute("UPDATE nodes SET last_seen_at=?,status='online' WHERE owner_id=? AND node_id=?", (now, owner_id, node_id))
+            return {"owner_id": owner_id, "node_id": node_id, "last_seen_at": now}
         except (PlatformValidationError, sqlite3.Error):
             raise PlatformRepositoryError("platform_store") from None
         finally:
@@ -918,19 +1002,11 @@ class PlatformRepository:
                     "SELECT window_id FROM execution_windows WHERE owner_id=? "
                     f"AND run_id IN ({run_scope})"
                 )
-                window_params = (owner_id, owner_id, owner_id, conversation_id)
-                for table in (
-                    "execution_window_tickets", "execution_window_leases",
-                    "execution_window_events", "execution_window_frames",
-                ):
-                    if table in tables:
-                        conn.execute(
-                            f"DELETE FROM {table} WHERE owner_id=? "
-                            f"AND window_id IN ({window_scope})", window_params,
-                        )
-                conn.execute(
-                    "DELETE FROM execution_windows WHERE owner_id=? "
-                    f"AND run_id IN ({run_scope})", (owner_id, owner_id, conversation_id),
+                # 子表清单由 ExecutionWindowRepository 统一维护（含 frame_reads），
+                # 避免手写列表漏表导致删除会话时触发 FK 约束失败。
+                ExecutionWindowRepository.purge_windows(
+                    conn, owner_id, window_scope,
+                    (owner_id, owner_id, conversation_id), existing_tables=tables,
                 )
             if "platform_commands" in tables:
                 command_scope = (
@@ -1525,25 +1601,6 @@ class PlatformRepository:
             if conn is not None:
                 try: conn.execute("ROLLBACK")
                 except sqlite3.Error: pass
-            raise PlatformRepositoryError("platform_store") from None
-        finally:
-            if conn is not None: conn.close()
-
-    def renew_worker_owner(self, owner_id: str, *, lease_id: str,
-                           worker_id: str, now: float,
-                           lease_s: float = 60.0) -> bool:
-        owner_id = validate_owner_id(owner_id)
-        conn = None
-        try:
-            conn = self._connect()
-            cur = conn.execute(
-                "UPDATE platform_worker_owners SET lease_expires_at=?, updated_at=? "
-                "WHERE owner_id=? AND lease_id=? AND lease_owner=? AND lease_expires_at>?",
-                (float(now) + float(lease_s), float(now), owner_id, lease_id,
-                 worker_id, float(now)),
-            )
-            return cur.rowcount == 1
-        except (sqlite3.Error, TypeError, ValueError):
             raise PlatformRepositoryError("platform_store") from None
         finally:
             if conn is not None: conn.close()

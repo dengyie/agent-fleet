@@ -5,7 +5,8 @@ and ``scan`` entrypoints:
 
 - stale push-observation reconciliation (mark expired snapshots offline)
 - task lease expiration and requeue (``task_update`` per requeued task)
-- task TTL expiration (queued -> expired)
+- task TTL expiration (queued -> expired, ``task_update`` per expired task)
+- optional bounded store retention, piggybacked on the lease sweep
 
 The service is push-only. Reconciliation only calls the injected observation
 service, the injected task repository, and the injected event publisher; it
@@ -27,12 +28,18 @@ logger = logging.getLogger(__name__)
 class ReconciliationService:
     """Push-only lifecycle service for stale reports and task leases."""
 
+    RETENTION_INTERVAL_S = 3600.0
+
     def __init__(self, observe_service, task_repository, event_publisher, *,
-                 clock=time.time) -> None:
+                 clock=time.time, retention=None) -> None:
         self.observe = observe_service
         self.repo = task_repository
         self.publisher = event_publisher
         self._clock = clock
+        # ``retention(now=...)`` prunes old store rows in bounded batches; it
+        # runs at most once per RETENTION_INTERVAL_S from the lease sweep.
+        self._retention = retention
+        self._last_retention_at = None
 
     # -- observation reconciliation ----------------------------------------
 
@@ -73,10 +80,13 @@ class ReconciliationService:
         if now is None:
             now = self._clock()
         try:
-            return self.repo.expire_tasks(now=now)
+            expired = self.repo.expire_tasks(now=now)
         except Exception as exc:
             logger.exception("task TTL expiration failed: %r", exc)
             return []
+        for task_id in expired:
+            self._announce_state(task_id, "expired")
+        return expired
 
     def reconcile_leases(self, *, now=None) -> list[str]:
         """Run the full lease sweep: requeue expired leases, then expire stale tasks.
@@ -88,13 +98,34 @@ class ReconciliationService:
             now = self._clock()
         requeued = self.expire_task_leases(now=now)
         self.expire_tasks(now=now)
+        self.run_retention(now=now)
         return requeued
+
+    def run_retention(self, *, now=None, force=False):
+        """Run the injected retention job if due; failures are logged only."""
+        if self._retention is None:
+            return None
+        if now is None:
+            now = self._clock()
+        last = self._last_retention_at
+        if not force and last is not None and 0 <= now - last < self.RETENTION_INTERVAL_S:
+            return None
+        self._last_retention_at = now
+        try:
+            return self._retention(now=now)
+        except Exception as exc:
+            from hub.diagnostics import log_failure
+            log_failure(logger, "store_retention_failed", exc)
+            return None
 
     # -- helpers ------------------------------------------------------------
 
     def _announce_requeued(self, task_id: str) -> None:
+        self._announce_state(task_id, "queued")
+
+    def _announce_state(self, task_id: str, state: str) -> None:
         try:
-            self.publisher.emit("task_update", task_id=task_id, state="queued")
+            self.publisher.emit("task_update", task_id=task_id, state=state)
         except Exception as exc:
             from hub.diagnostics import log_failure
             log_failure(logger, "reconciliation_event_publish_failed", exc,

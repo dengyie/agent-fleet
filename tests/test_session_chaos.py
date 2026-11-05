@@ -248,9 +248,6 @@ class _FaultOps(_GroupOpsBase):
         proc.alive = False
         return proc.exit_code if proc.exit_code is not None else 0
 
-    def group_id(self, proc):
-        return f"grp_{proc.pid}"
-
     def group_alive(self, proc):
         if getattr(proc, "alive_unknown", False):
             raise RuntimeError("liveness unknown")

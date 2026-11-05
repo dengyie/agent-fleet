@@ -15,9 +15,11 @@ network/subprocess behavior.  The hub only processes pushed observations.
 """
 
 import re
+import threading
 import time
 from pathlib import Path
 
+from hub.application.event_emit import safe_emit
 from hub.domain.machine import public_machine_detail, public_machine_summary
 from hub.repositories import MACHINE_NAME_RE
 from report_schema import sanitize_agents, sanitize_instances, sanitize_system, sanitize_local_profiles
@@ -25,6 +27,11 @@ from report_schema import sanitize_agents, sanitize_instances, sanitize_system, 
 DEFAULT_STALE_AFTER_S = 300
 _HISTORY_LIMIT = 720
 _REPORT_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+#: 快照里记录上报认证方式的字段（公共摘要/详情白名单不含它，不会外泄）。
+INGEST_AUTH_FIELD = "ingest_auth"
+INGEST_AUTH_MACHINE = "machine_credential"
+INGEST_AUTH_SHARED = "shared_token"
 
 _DIFF_AGENT_FIELDS = (
     "installed", "gateway_state", "deployed", "error",
@@ -76,7 +83,8 @@ class ObserveError(Exception):
     validation/application errors to 400; the message text is never exposed.
     """
 
-    _STATUS_OVERRIDES = {"not_found": 404}
+    _STATUS_OVERRIDES = {"not_found": 404, "machine_mismatch": 403,
+                         "machine_bound": 403}
 
     def __init__(self, code: str, detail: str = "") -> None:
         self.code = code
@@ -144,14 +152,39 @@ class ObserveService:
         self.publisher = event_publisher
         self.hosts = host_config
         self._clock = clock
+        # 每台机器一把锁：ingest 与 reconcile 的 read→check→save 在同一临界区，
+        # 避免 reconcile 用旧快照覆盖刚到达的 ingest（把在线机器标成离线）。
+        self._locks_guard = threading.Lock()
+        self._machine_locks: dict[str, threading.Lock] = {}
+
+    def _machine_lock(self, machine: str) -> threading.Lock:
+        with self._locks_guard:
+            lock = self._machine_locks.get(machine)
+            if lock is None:
+                lock = self._machine_locks[machine] = threading.Lock()
+            return lock
+
+    def is_credential_bound(self, machine) -> bool:
+        """该机器最近一次 ingest 是否由每机凭据认证（共享 token 不得覆盖）。"""
+        if not isinstance(machine, str) or not MACHINE_NAME_RE.fullmatch(machine):
+            return False
+        current = self.repo.read_current(machine)
+        return bool(current) and current.get(INGEST_AUTH_FIELD) == INGEST_AUTH_MACHINE
 
     # -- write use case ----------------------------------------------------
 
-    def ingest(self, payload: dict) -> dict:
+    def ingest(self, payload: dict, *, bound_machine: str | None = None) -> dict:
         """Validate, sanitize, diff, persist, and publish one push report.
 
         Returns the legacy ``{"ok": True, "changes": [...]}`` result; raises
         :class:`ObserveError` for invalid machine names or malformed payloads.
+
+        机器绑定规则：
+        - ``bound_machine`` 非空（每机凭据认证）：payload ``machine`` 必须相同，
+          否则 ``machine_mismatch``（403）；快照记 ``ingest_auth=machine_credential``；
+        - ``bound_machine`` 为空（共享 token，兼容现有探针）：快照记
+          ``ingest_auth=shared_token``；若该机器当前快照已由每机凭据写入则拒绝
+          ``machine_bound``（403），共享 token 不能冒充/覆盖已绑定机器。
         """
         if not isinstance(payload, dict):
             raise ObserveError("invalid_json")
@@ -160,6 +193,8 @@ class ObserveService:
             raise ObserveError("invalid_machine", "machine 字段缺失")
         if not isinstance(machine, str) or not MACHINE_NAME_RE.fullmatch(machine):
             raise ObserveError("invalid_machine", "machine 名不合法")
+        if bound_machine is not None and machine != bound_machine:
+            raise ObserveError("machine_mismatch", "payload machine 与凭据机器不一致")
         report_id = payload.get("report_id")
         if "report_id" in payload and (
                 not isinstance(report_id, str) or not _REPORT_ID_RE.fullmatch(report_id)):
@@ -180,22 +215,24 @@ class ObserveService:
             "local_profiles": sanitize_local_profiles(payload.get("local_profiles")),
             "reachable": True,
             "remote_error": remote_error,
+            INGEST_AUTH_FIELD: (INGEST_AUTH_MACHINE if bound_machine is not None
+                                else INGEST_AUTH_SHARED),
         }
-        old = self.repo.read_current(machine)
-        changes = diff_snapshots(old, snapshot)
-        if report_id is None:
-            self.repo.save_snapshot(machine, snapshot)
-        else:
-            saved = self.repo.save_snapshot_once(machine, snapshot, report_id)
-            if not saved:
-                return {"ok": True, "changes": [], "duplicate": True}
+        with self._machine_lock(machine):
+            old = self.repo.read_current(machine)
+            if (bound_machine is None and old
+                    and old.get(INGEST_AUTH_FIELD) == INGEST_AUTH_MACHINE):
+                raise ObserveError("machine_bound", "该机器已绑定每机凭据")
+            changes = diff_snapshots(old, snapshot)
+            if report_id is None:
+                self.repo.save_snapshot(machine, snapshot)
+            else:
+                saved = self.repo.save_snapshot_once(machine, snapshot, report_id)
+                if not saved:
+                    return {"ok": True, "changes": [], "duplicate": True}
         if changes:
-            try:
-                self.publisher.emit(
-                    "state_changed", machine=machine, changes=changes, snapshot=snapshot
-                )
-            except Exception:
-                pass
+            safe_emit(self.publisher, "state_changed", machine=machine,
+                      changes=changes, snapshot=snapshot)
         return {"ok": True, "changes": changes}
 
     # -- read use cases ----------------------------------------------------
@@ -247,31 +284,31 @@ class ObserveService:
         results = []
         machines = [machine] if machine else sorted(self.repo.machines())
         for name in machines:
-            old = self.repo.read_current(name)
-            if not old or old.get("source") != "ingest":
-                continue
-            if not old.get("reachable", True):
-                continue
             ttl = self.hosts.stale_after_s(name)
-            last_seen = float(old.get("_ts", 0))
-            if now - last_seen <= ttl:
-                continue
-            snapshot = dict(old)
-            snapshot.update({
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
-                "reachable": False,
-                "remote_error": f"ingest 超过 {ttl}s 未上报",
-                "source": "ingest",
-            })
-            self.repo.save_snapshot(name, snapshot)
+            # read→判定→写 与 ingest 共用每机锁：判定所用的 ``_ts`` 就是被覆盖
+            # 的那份快照，期间到达的 ingest 要么先落盘（此处读到新 _ts 跳过），
+            # 要么等本次写完再覆盖成 reachable。
+            with self._machine_lock(name):
+                old = self.repo.read_current(name)
+                if not old or old.get("source") != "ingest":
+                    continue
+                if not old.get("reachable", True):
+                    continue
+                last_seen = float(old.get("_ts", 0))
+                if now - last_seen <= ttl:
+                    continue
+                snapshot = dict(old)
+                snapshot.update({
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+                    "reachable": False,
+                    "remote_error": f"ingest 超过 {ttl}s 未上报",
+                    "source": "ingest",
+                })
+                self.repo.save_snapshot(name, snapshot)
             changes = diff_snapshots(old, snapshot)
             if changes:
-                try:
-                    self.publisher.emit(
-                        "state_changed", machine=name, changes=changes, snapshot=snapshot
-                    )
-                except Exception:
-                    pass
+                safe_emit(self.publisher, "state_changed", machine=name,
+                          changes=changes, snapshot=snapshot)
             results.append({"machine": name, "changed": changes, "stale": True})
         return results
 

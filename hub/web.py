@@ -6,7 +6,6 @@ legacy CLI, helper functions, and ``make_app`` signature stable for callers.
 """
 import json
 import os
-import time
 from pathlib import Path
 
 # Direct ``python hub/web.py`` execution has no package import context. Keep
@@ -51,86 +50,13 @@ INGEST_TOKEN_FILE = FLEET_HOME / "credentials" / "ingest-token"
 INGEST_TOKEN_ENV = "AGENT_FLEET_INGEST_TOKEN"
 
 try:
-    from flask import Flask
+    from flask import Flask  # noqa: F401 — 仅探测 Flask 可用性，供 HAVE_FLASK 兼容旧调用方
     HAVE_FLASK = True
 except ImportError:
     HAVE_FLASK = False
 
-from hub.auth import MACHINE_RE, resolve_ingest_token
-
-
-def load_hosts():
-    """Load display metadata from the configured hosts file."""
-    try:
-        import yaml
-
-        data = yaml.safe_load(HOSTS_FILE.read_text()) if HOSTS_FILE.exists() else {}
-    except (OSError, ImportError, ValueError):
-        data = {}
-    hosts = []
-    for host in (data or {}).get("hosts", []):
-        if not isinstance(host, dict) or "name" not in host:
-            continue
-        hosts.append({
-            "name": host["name"],
-            "desc": host.get("desc", ""),
-            "transport": host.get("transport", "ingest"),
-        })
-    return hosts
-
-
-def collect_all():
-    """Trigger ingest stale reconciliation; no machine commands are executed."""
-    try:
-        from hub import scan
-
-        scan.scan_all()
-    except Exception:
-        pass
-    return True
-
-
-def start_reconciliation(interval_s=60):
-    """Legacy daemon: periodic ingest stale-reconciliation.
-
-    Compatibility wrapper around the push-only daemon runner in
-    :mod:`hub.application.reconciliation_service`. Keeps the legacy
-    ``interval_s``-only signature; the running app should use
-    ``hub.bootstrap.start_background_jobs`` instead.
-    """
-    interval_s = max(10, int(interval_s))
-    from hub.application.reconciliation_service import (
-        start_reconciliation as _start_reconciliation,
-    )
-    return _start_reconciliation(collect_all, interval_s=interval_s)
-
-
-def reconcile_leases_once(now=None):
-    """单轮 lease/任务过期处理；返回重派的 task_id 列表。"""
-    from hub import events as ev
-    from hub import task_store
-
-    requeued = task_store.expire_leases(now=now)
-    for task_id in requeued:
-        try:
-            ev.emit("task_update", task_id=task_id, state="queued")
-        except Exception:
-            pass
-    task_store.expire_tasks(now=now)
-    return requeued
-
-
-def start_lease_reconciler(interval_s=60):
-    """Legacy daemon: periodic lease expiry / requeue.
-
-    Compatibility wrapper over :mod:`hub.application.reconciliation_service`;
-    running apps should use ``hub.bootstrap.start_background_jobs``.
-    """
-    interval_s = max(10, int(interval_s))
-    from hub.application.reconciliation_service import (
-        start_lease_reconciler as _start_lease_reconciler,
-    )
-    return _start_lease_reconciler(reconcile_leases_once, interval_s=interval_s)
+# 兼容旧调用方的模块级再导出（hub.web.MACHINE_RE / hub.web.resolve_ingest_token）
+from hub.auth import MACHINE_RE, resolve_ingest_token  # noqa: F401
 
 
 #: Runtime feature gates for the additive Task 6/9 adoption + supervision
@@ -473,33 +399,9 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         platform_memory_enabled=platform_memory_on,
         platform_memory_context_enabled=platform_memory_context_on,
     )
+    # 门控只经 FleetConfig 传入；create_app 写入的是"实际生效"的门控（例如
+    # 依赖未接线时降级为 False），这里绝不回写请求值覆盖它。
     app = create_app(config)
-    # Reflect the runtime gates on the app config so routes can assert them.
-    app.config["SESSION_REPOSITORIES_ENABLED"] = bool(
-        config.session_repositories_enabled)
-    app.config["ADOPTION_REPOSITORIES_ENABLED"] = bool(
-        config.adoption_repositories_enabled)
-    app.config["PLATFORM_ENABLED"] = bool(config.platform_enabled)
-    app.config["PLATFORM_BROWSER_ENABLED"] = bool(
-        getattr(config, "platform_browser_enabled", False))
-    app.config["PLATFORM_BROWSER_NETWORK_ENABLED"] = bool(
-        getattr(config, "platform_browser_network_enabled", False))
-    app.config["PLATFORM_BROWSER_SUBMIT_ENABLED"] = bool(
-        getattr(config, "platform_browser_submit_enabled", False))
-    app.config["PLATFORM_MEMORY_ENABLED"] = bool(
-        getattr(config, "platform_memory_enabled", False))
-    app.config["PLATFORM_MEMORY_CONTEXT_ENABLED"] = bool(
-        getattr(config, "platform_memory_context_enabled", False))
-    app.config["SERVICE_ACTIONS_ENABLED"] = bool(
-        getattr(config, "service_actions_enabled", False))
-    app.config["EXECUTION_WINDOWS_ENABLED"] = bool(
-        getattr(config, "execution_windows_enabled", False))
-    app.config["HTTP_PROBE_ENABLED"] = bool(
-        getattr(config, "http_probe_enabled", False))
-    app.config["HTTP_PROBE_NETWORK_ENABLED"] = bool(
-        getattr(config, "http_probe_network_enabled", False))
-    app.config["HTTP_PROBE_SYNC_ENABLED"] = bool(
-        getattr(config, "http_probe_sync_enabled", False))
     return app
 
 

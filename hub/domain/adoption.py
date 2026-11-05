@@ -7,7 +7,8 @@ never touches the legacy observation stores.  It exists so a later
 adoption-control surface can accept, revoke, and list adoptions against a
 stable, validated contract.
 
-The lifecycle is ``pending -> adopted -> revoked``:
+The lifecycle is ``pending -> adopted -> revoked`` (plus ``pending ->
+revoked`` for a rejected / operator-cancelled adoption):
 
 - ``pending``  — an adoption record has been created but not yet enployed;
 - ``adopted``  — the record is in force;
@@ -21,8 +22,8 @@ Validation rules enforced here (pure Python, no persistence):
   every other repository;
 - ``pid`` / ``pgid`` must be positive integers (``pgid`` may be ``None``);
 - ``status`` must be a member of ``ADOPTION_STATUSES`` and transitions only
-  move along ``pending -> adopted -> revoked`` (idempotent same-status is
-  tolerated so retries never corrupt a row);
+  move along ``pending -> adopted -> revoked`` or ``pending -> revoked``
+  (idempotent same-status is tolerated so retries never corrupt a row);
 - ``capture_quality`` must be a member of ``CAPTURE_QUALITIES``.
 """
 
@@ -70,7 +71,10 @@ _ALLOWED_OLD_STATUSES: dict[str, tuple[str, ...]] = {
         AdoptionStatus.PENDING.value,
         AdoptionStatus.ADOPTED.value,
     ),
+    # ``pending -> revoked``：探针拒绝 adopt 或操作员撤销一个仍在等待的
+    # 纳管时，必须能关闭该行，否则 pending 永远阻塞同一进程的再次纳管。
     AdoptionStatus.REVOKED.value: (
+        AdoptionStatus.PENDING.value,
         AdoptionStatus.ADOPTED.value,
         AdoptionStatus.REVOKED.value,
     ),

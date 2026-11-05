@@ -5,6 +5,7 @@ from flask import Blueprint, current_app, g, jsonify, request
 
 from hub.auth import require_operator
 from hub.http.errors import ApplicationError, error_response
+from hub.http._common import json_object as _body
 from hub.infrastructure.platform_memory_repository import (
     PlatformMemoryRepositoryError,
 )
@@ -18,13 +19,6 @@ def _service():
     if service is None:
         raise ApplicationError("memory_unavailable", "记忆服务不可用", 404)
     return service
-
-
-def _body() -> dict:
-    body = request.get_json(silent=True)
-    if not isinstance(body, dict):
-        raise ApplicationError("invalid_json", "请求体必须是 JSON 对象", 400)
-    return body
 
 
 def _limit(default: int) -> int:

@@ -20,7 +20,6 @@
 #       .env / *.pem / *.key       环境变量文件/私钥/密钥
 #   - 全程不访问外部网络、不访问生产端点；只使用标准库 shell 工具。
 set -euo pipefail
-set -eu
 
 start_dir="$(pwd)"
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -85,11 +84,13 @@ fi
 path_is_forbidden() {
   local rel="$1"
   local base="${rel##*/}"
+  local rest="$rel"
   local comp
 
-  # 逐路径成分检查凭据与密钥形态
-  IFS='/'
-  for comp in $rel; do
+  # 逐路径成分检查凭据与密钥形态。用参数展开逐段切分，不修改全局 IFS、
+  # 也不让文件名经历通配展开。
+  while :; do
+    comp="${rest%%/*}"
     case "$comp" in
       credentials)                 return 0 ;;
       *runner-credential*)         return 0 ;;
@@ -97,6 +98,8 @@ path_is_forbidden() {
       .env|.env.*|*.env)           return 0 ;;
       *.pem|*.key)                 return 0 ;;
     esac
+    [ "$rest" = "$comp" ] && break
+    rest="${rest#*/}"
   done
 
   # state/ 目录只允许静态模块文件（.js / .css）；其余视为状态/数据库快照拒绝。
@@ -118,12 +121,13 @@ path_is_forbidden() {
 }
 
 # --- 枚举文件清单（稳定排序，保证确定性）---
+# LC_ALL=C：排序按字节序，与调用者 locale（如 zh_CN.UTF-8）无关；任何层级的
+# .DS_Store 都不进入 release。
 cd "$frontend_dir"
 files=()
 while IFS= read -r rel; do
-  [ "$rel" = "./.DS_Store" ] && continue
   files+=("${rel#./}")
-done < <(find . -type f -print | sort)
+done < <(find . -name .DS_Store -prune -o -type f -print | LC_ALL=C sort)
 
 if [ "${#files[@]}" -eq 0 ]; then
   echo "error: frontend/ 下没有可打包文件" >&2
@@ -133,6 +137,14 @@ fi
 # --- fail-closed 红名单扫描：任何文件命中即整体拒绝 ---
 rejected=0
 for rel in "${files[@]}"; do
+  case "$rel" in
+    *[[:cntrl:]]*)
+      # 控制字符无法安全写入单行清单/manifest，直接拒绝。
+      echo "forbidden control character in frontend release path" >&2
+      rejected=1
+      continue
+      ;;
+  esac
   if path_is_forbidden "$rel"; then
     echo "forbidden path in frontend release: $rel" >&2
     rejected=1
@@ -155,16 +167,25 @@ for rel in "${files[@]}"; do
   cp "$frontend_dir/$rel" "$output_dir/$rel"
 done
 
+# JSON 字符串转义：路径已拒绝控制字符，此处只需转义反斜杠与双引号。
+json_string() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+
 manifest="$output_dir/manifest.json"
 {
-  printf '{ "version": "%s", "files": [' "$release_version"
+  printf '{ "version": %s, "files": [' "$(json_string "$release_version")"
   n="${#files[@]}"
   i=1
   for rel in "${files[@]}"; do
+    json_string "$rel"
     if [ "$i" -eq "$n" ]; then
-      printf '"%s"] }' "$rel"
+      printf '] }'
     else
-      printf '"%s", ' "$rel"
+      printf ', '
     fi
     i=$((i + 1))
   done

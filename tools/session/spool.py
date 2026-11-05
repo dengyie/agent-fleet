@@ -58,6 +58,7 @@ CODE_SEGMENT_BAD = "segment_corrupt"
 CODE_CHECKPOINT_BAD = "checkpoint_corrupt"
 CODE_KEY_MISSING = "spool_key_missing"
 CODE_SETUP = "spool_setup"
+CODE_WRITE = "spool_write_failed"
 
 _MAGIC = b"SP4SEG01"
 _HEADER_SIZE = len(_MAGIC) + 8  # magic + reserved u64
@@ -200,13 +201,20 @@ class _FrameReader:
         self.box = box
         self.corrupt = False
 
-    def frames(self):
+    def frames(self, after: int = 0):
+        """Yield ``(seq, plaintext)``; frames with ``seq <= after`` are
+        skipped by header only (seek past the ciphertext, never decrypted)."""
         try:
             handle = open(self.path, "rb")
         except OSError:
             self.corrupt = True
             return
         with handle:
+            try:
+                file_size = os.fstat(handle.fileno()).st_size
+            except OSError:
+                self.corrupt = True
+                return
             head = handle.read(_HEADER_SIZE)
             if head[: len(_MAGIC)] != _MAGIC or len(head) != _HEADER_SIZE:
                 self.corrupt = True
@@ -224,6 +232,12 @@ class _FrameReader:
                 if enc_len < 13 or enc_len > (MAX_EVENT_BYTES + 64):
                     self.corrupt = True
                     return
+                if seq <= after:
+                    if handle.tell() + enc_len > file_size:
+                        self.corrupt = True
+                        return
+                    handle.seek(enc_len, os.SEEK_CUR)
+                    continue
                 blob = handle.read(enc_len)
                 if len(blob) != enc_len:
                     self.corrupt = True
@@ -338,7 +352,7 @@ class LocalSpool:
             return []
         out: list = []
         budget = max_bytes
-        for seq, plain in self._scan_all():
+        for seq, plain in self._scan_all(after=base):
             if seq <= base:
                 continue
             try:
@@ -490,9 +504,14 @@ class LocalSpool:
         body = json.dumps(gap_evt, ensure_ascii=True,
                           separators=(",", ":")).encode("utf-8")
         if self._within_quota(_frame_footprint(len(body))):
-            self._write_frame(seq, body)
-            self._last_sequence = seq
-            self._persist_checkpoint()
+            try:
+                self._write_frame(seq, body)
+            except SpoolError:
+                # 标记写入失败：仍然发出内存中的 gap 信号，不推进序号。
+                pass
+            else:
+                self._last_sequence = seq
+                self._persist_checkpoint()
         # The gap is always *signaled*, even if only the in-memory marker
         # could be produced (the quota is exhausted).
         self._gap_signaled = True
@@ -617,11 +636,27 @@ class LocalSpool:
             return 0
         return best
 
-    def _scan_all(self):
-        """Yield ``(seq, plaintext)`` for every complete frame, in order."""
+    def _scan_all(self, after: int = 0):
+        """Yield ``(seq, plaintext)`` for every complete frame with
+        ``seq > after``, in order.
+
+        已确认前缀不再逐批解密：sealed 段不可变，缓存其最大序号，整段都
+        ``<= after`` 时直接跳过；段内已确认帧只读帧头并 seek 过密文。
+        """
+        cache = self.__dict__.setdefault("_sealed_max_seq", {})
         for path in self._segment_paths():
+            if after > 0 and path.suffix == ".sealed":
+                try:
+                    st = path.stat()
+                    key = (path.name, st.st_size, st.st_mtime_ns)
+                except OSError:
+                    key = None
+                if key is not None and key not in cache:
+                    cache[key] = self._frame_max_seq(path)
+                if key is not None and cache[key] <= after:
+                    continue
             reader = _FrameReader(path, self._box)
-            for seq, plain in reader.frames():
+            for seq, plain in reader.frames(after=after):
                 yield seq, plain
 
     def _size(self) -> int:
@@ -665,18 +700,49 @@ class LocalSpool:
             except OSError:
                 pass
         self._open_writer = handle
+        self._active_path = path
 
     def _write_frame(self, seq: int, body: bytes) -> None:
+        """Durably write one frame or raise :class:`SpoolError`.
+
+        写入/flush/fsync 任一步失败（如 ENOSPC）都不能把序号交给调用方：
+        截断回写入前位置并抛 ``spool_write_failed``，调用方不推进
+        ``_last_sequence``/checkpoint。半截帧若无法截断，则换新段，避免它挡住
+        后续帧（读取器在坏帧处停止的是本段，不影响其它段）。
+        """
         self._open_active()
         blob = self._box.encrypt(
             body, associated_data=str(seq).encode("utf-8"))
         frame = struct.pack(">QI", seq, len(blob)) + blob
-        self._open_writer.write(frame)
+        writer = self._open_writer
         try:
-            self._open_writer.flush()
-            os.fsync(self._open_writer.fileno())
+            start = writer.tell()
+        except OSError as exc:
+            raise SpoolError(CODE_WRITE) from exc
+        try:
+            writer.write(frame)
+            writer.flush()
+            os.fsync(writer.fileno())
+        except OSError as exc:
+            self._discard_partial_frame(writer, start)
+            raise SpoolError(CODE_WRITE) from exc
+
+    def _discard_partial_frame(self, writer, start: int) -> None:
+        """Drop the writer and cut the active segment back to ``start``."""
+        self._open_writer = None
+        path = getattr(self, "_active_path", None)
+        try:
+            # close() 可能再次尝试 flush 缓冲区；失败也必须继续截断。
+            writer.close()
         except OSError:
             pass
+        try:
+            if path is None:
+                raise OSError("no active segment")
+            os.truncate(path, start)
+        except OSError:
+            # 无法截断：后续帧写到新段，坏尾只影响当前段的回放。
+            self._seg_index += 1
 
     def _maybe_rotate(self) -> None:
         try:

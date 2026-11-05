@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 from hub.domain.incident import IncidentValidationError, validate_incident_input
 from platform_schema import validate_id, validate_owner_id
+from hub.infrastructure.sqlite import connect as sqlite_connect
 
 MAX_EVIDENCE_IDS = 100
 MAX_DETAIL_BYTES = 64 * 1024
@@ -116,11 +117,7 @@ class IncidentRepository:
         self.clock = clock
 
     def _connect(self):
-        conn = sqlite3.connect(str(self.db_path), timeout=10, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        return sqlite_connect(self.db_path, timeout=10)
 
     def init(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

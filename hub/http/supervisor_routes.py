@@ -9,7 +9,7 @@ Transport only: supervisor credential auth (machine-bound) → JSON parse →
 authenticated ``g.supervisor_machine``, never a field from the Agent payload.
 No raw exception/path/token ever leaves this module.
 """
-from flask import Blueprint, current_app, g, jsonify, request
+from flask import Blueprint, current_app, g, jsonify
 
 from hub.application.supervisor_service import (
     SupervisorService,
@@ -17,6 +17,7 @@ from hub.application.supervisor_service import (
 )
 from hub.auth import require_operator, require_supervisor
 from hub.http.errors import ApplicationError, error_response, get_request_id
+from hub.http._common import json_object_or_error as _json_object
 
 bp = Blueprint("supervisor", __name__)
 
@@ -28,16 +29,6 @@ def _supervisor() -> SupervisorService:
     if service is None:
         raise RuntimeError("supervisor service not wired")
     return service
-
-
-def _json_object() -> tuple[dict | None, object | None]:
-    data = request.get_json(silent=True)
-    if data is None:
-        return {}, None
-    if not isinstance(data, dict):
-        return None, error_response(ApplicationError(
-            "invalid_json", "请求体必须是 JSON 对象", 400))
-    return data, None
 
 
 @bp.route("/api/supervisor/poll", methods=["POST"])

@@ -116,13 +116,20 @@ class AccountStore:
         self.path.chmod(0o600)
         self.dummy_hash = generate_password_hash(secrets.token_urlsafe(32), method='scrypt')
 
+    #: 每 (账户, 客户端 IP) 的硬上限：攻击者 IP 耗尽后只锁自己。
+    LOGIN_LIMIT = 10
+    #: 每账户全局软上限（明显更高）：分布式撞库的兜底，不让单个攻击 IP 锁死本人。
+    LOGIN_ACCOUNT_LIMIT = 100
+    LOGIN_WINDOW = 900
+
     @contextmanager
-    def connect(self):
+    def connect(self, write=True):
+        """``write=False`` 用 DEFERRED 事务：只读路径不抢写锁、不和写操作串行。"""
         db = sqlite3.connect(self.path, timeout=10)
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA foreign_keys=ON')
         try:
-            db.execute('BEGIN IMMEDIATE')
+            db.execute('BEGIN IMMEDIATE' if write else 'BEGIN DEFERRED')
             yield db
             db.commit()
         except Exception:
@@ -172,7 +179,7 @@ class AccountStore:
         return code
 
     def invitations(self):
-        with self.connect() as db:
+        with self.connect(write=False) as db:
             now = self.clock()
             rows = db.execute('SELECT code, email, created, expires, claimed_by, claimed_at '
                               'FROM invitations WHERE expires > ? AND claimed_by IS NULL ORDER BY created DESC LIMIT 100',
@@ -280,12 +287,23 @@ class AccountStore:
         if not success:
             fail('invalid_code', '验证码无效或已过期')
 
-    def login(self, email, password):
+    @staticmethod
+    def login_limit_keys(account, client):
+        """(硬 key: 账户+客户端 IP, 软 key: 账户全局)。"""
+        return 'login:' + account + ':ip:' + (client or '-'), 'login:' + account
+
+    def login(self, email, password, client=None):
         identifier = login_identifier(email)
-        with self.connect() as db:
+        with self.connect(write=False) as db:
             user = db.execute('SELECT * FROM users WHERE email=? OR username=?', (identifier, identifier)).fetchone()
         # Alias and email share the account's credential-attempt budget.
-        self.limit('login:' + (user['email'] if user else identifier), 10, 900)
+        # 硬限按 (账户, 客户端 IP)：攻击者 IP 打满只锁住它自己，本人换 IP 仍可登录；
+        # 账户级只保留更高的全局软阈值，兜底分布式撞库。
+        hard, soft = self.login_limit_keys(user['email'] if user else identifier, client)
+        now = self.clock()
+        with self.connect() as db:
+            self._limit(db, hard, self.LOGIN_LIMIT, self.LOGIN_WINDOW, now)
+            self._limit(db, soft, self.LOGIN_ACCOUNT_LIMIT, self.LOGIN_WINDOW, now)
         if not isinstance(password, str) or len(password) > 128:
             fail('invalid_login', '账号或密码错误', 401)
         valid = check_password_hash(user['password'] if user else self.dummy_hash, password)
@@ -304,7 +322,7 @@ class AccountStore:
     def identity(self, token):
         if not token or len(token) > 128:
             return None
-        with self.connect() as db:
+        with self.connect(write=False) as db:
             row = db.execute('SELECT users.* FROM sessions JOIN users ON users.id=sessions.user_id '
                              'WHERE token=? AND expires>? AND active=1', (digest(token), self.clock())).fetchone()
             return self.public(row) if row else None
@@ -314,7 +332,7 @@ class AccountStore:
             db.execute('DELETE FROM sessions WHERE token=?', (digest(token),))
 
     def sessions(self, user_id, token):
-        with self.connect() as db:
+        with self.connect(write=False) as db:
             rows = db.execute('SELECT token,created,expires FROM sessions WHERE user_id=? AND expires>? ORDER BY created DESC LIMIT 100',
                               (user_id, self.clock())).fetchall()
             return [{'id': row['token'], 'created': row['created'], 'expires': row['expires'],
@@ -332,8 +350,11 @@ class AccountStore:
         db.execute('UPDATE users SET password=? WHERE id=?', (hashed, user['id']))
         db.execute('DELETE FROM sessions WHERE user_id=?', (user['id'],))
         # Verified replacement retires the old credential's attempt state only.
-        db.execute('DELETE FROM limits WHERE key IN (?,?)',
-                   ('login:' + user['email'], 'password:' + user['id']))
+        # 包括所有 (账户, IP) 硬限行：前缀匹配用 substr，避免 LIKE 通配 ``_``/``%``。
+        ip_prefix = 'login:' + user['email'] + ':ip:'
+        db.execute('DELETE FROM limits WHERE key IN (?,?) OR substr(key,1,?)=?',
+                   ('login:' + user['email'], 'password:' + user['id'],
+                    len(ip_prefix), ip_prefix))
 
     def change_password(self, user_id, old_password, new_password):
         hashed = password_hash(new_password)
@@ -355,12 +376,12 @@ class AccountStore:
             db.execute('UPDATE users SET name=? WHERE id=?', (name.strip(), user_id))
 
     def users(self, after=''):
-        with self.connect() as db:
+        with self.connect(write=False) as db:
             return [self.public(row) for row in db.execute('SELECT * FROM users WHERE id>? ORDER BY id LIMIT 100', (after,))]
 
     def is_active(self, user_id):
         """Authorize background account work without a browser session."""
-        with self.connect() as db:
+        with self.connect(write=False) as db:
             row = db.execute('SELECT active FROM users WHERE id=?', (user_id,)).fetchone()
             return bool(row and row['active'])
 

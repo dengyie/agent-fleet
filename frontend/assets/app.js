@@ -5,7 +5,7 @@ import * as api from './api/client.js';
 import * as platform from './api/platform.js';
 import { FleetStore } from './state/store.js';
 import { SseClient } from './realtime/sse.js';
-import { resolveRoute, mountNavigation } from './shell/navigation.js';
+import { resolveRoute, mountNavigation, isPageAllowedForAccount } from './shell/navigation.js';
 import { mountFleet } from './views/fleet.js';
 import { mountMachine } from './views/machine.js';
 import { mountTask } from './views/task.js';
@@ -140,7 +140,7 @@ function protectConsole() {
     if (target.origin !== window.location.origin) return false;
     let nextRoute = resolveRoute(target);
     if (nextRoute.page === 'invalid') return false;
-    const forbiddenForAccount = account && account.role !== 'admin' && !['assistant', 'account', 'muse'].includes(nextRoute.page);
+    const forbiddenForAccount = !isPageAllowedForAccount(nextRoute.page, account);
     if (forbiddenForAccount) {
       target = new URL('/assistant', window.location.origin);
       nextRoute = resolveRoute(target);
@@ -210,7 +210,7 @@ function protectConsole() {
         document.querySelector('[data-nav="fleet"]').hidden = true;
         document.querySelector('[data-nav="monitoring"]').hidden = true;
         document.getElementById("sidebar-nodes").textContent = "节点由管理员分配";
-        if (!["assistant", "account", "usage", "muse"].includes(route.page)) {
+        if (!isPageAllowedForAccount(route.page, account)) {
           window.history.replaceState(null, '', '/assistant');
           route = resolveRoute();
         }

@@ -31,6 +31,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 
+from hub.infrastructure.jsonl import repair_jsonl_tail
 from hub.repositories import MACHINE_NAME_RE, validate_machine_name
 
 MAX_JSONL_BYTES = 5 * 1024 * 1024
@@ -135,31 +136,7 @@ class JsonlObservationRepository:
 
     def _remove_incomplete_history_tail(self, machine: str) -> None:
         """Repair a torn final JSONL record before resuming a pending receipt."""
-        history_path = self._mach_file(machine)
-        try:
-            with open(history_path, "r+b") as history:
-                history.seek(0, os.SEEK_END)
-                size = history.tell()
-                if not size:
-                    return
-                history.seek(-1, os.SEEK_END)
-                if history.read(1) == b"\n":
-                    return
-                history.seek(0)
-                content = history.read()
-                tail_start = content.rfind(b"\n") + 1
-                tail = content[tail_start:]
-                try:
-                    json.loads(tail.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    history.truncate(tail_start)
-                else:
-                    history.seek(0, os.SEEK_END)
-                    history.write(b"\n")
-                history.flush()
-                os.fsync(history.fileno())
-        except FileNotFoundError:
-            return
+        repair_jsonl_tail(self._mach_file(machine))
 
     def _recover_pending_reports(self, machine: str) -> None:
         if not (self.state_dir / "observation-reports.sqlite3").exists():

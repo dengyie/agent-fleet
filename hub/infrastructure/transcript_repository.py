@@ -57,8 +57,9 @@ from session_schema import (
     is_valid_session_id,
     try_validate_event,
 )
+from hub.infrastructure.sqlite import connect as sqlite_connect
 from tools.session.crypto import AeadBox
-from tools.session.redact import Redactor
+from tools.session.redact import Redactor, redact_event_secrets
 
 SCHEMA_VERSION = 1
 
@@ -155,16 +156,9 @@ class TranscriptRepository:
     # -- connection / schema ------------------------------------------------------
 
     def _connect(self):
-        conn = sqlite3.connect(str(self.db_path), timeout=10,
-                               isolation_level=None)
-        try:
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-        except BaseException:
-            conn.close()   # fail closed — never leak a half-initialized conn
-            raise
-        return conn
+        # 共享 helper：Row/WAL/foreign_keys/autocommit，timeout=10；
+        # 失败时总会关闭半初始化连接（fail closed），WAL 协商遇锁重试。
+        return sqlite_connect(self.db_path, timeout=10)
 
     def init(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -235,12 +229,59 @@ class TranscriptRepository:
                 conn.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS uq_redacted_stream_sequence "
                     "ON redacted_events(machine_id, session_id, COALESCE(stream_id,''), sequence)")
+            self._init_raw_bytes_counter(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO meta (key, value)"
                 " VALUES ('schema_version', ?)",
                 (str(SCHEMA_VERSION),))
         finally:
             conn.close()
+
+    @staticmethod
+    def _init_raw_bytes_counter(conn) -> None:
+        """维护每会话 raw 密文字节计数，避免每个事件都 SUM 全表扫描。
+
+        计数由 raw_events 上的触发器维护（插入/删除/改写都覆盖，包括清理
+        路径）；旧库首次升级时在同一事务里用一次 SUM 回填。
+        """
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS raw_bytes ("
+                " session_id TEXT PRIMARY KEY,"
+                " total INTEGER NOT NULL DEFAULT 0)")
+            seeded = conn.execute(
+                "SELECT 1 FROM meta WHERE key='raw_bytes_counter'").fetchone()
+            if seeded is None:
+                conn.execute("DELETE FROM raw_bytes")
+                conn.execute(
+                    "INSERT INTO raw_bytes (session_id, total)"
+                    " SELECT session_id, SUM(length(nonce_ciphertext))"
+                    " FROM raw_events GROUP BY session_id")
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value)"
+                    " VALUES ('raw_bytes_counter', '1')")
+            for stmt in (
+                "CREATE TRIGGER IF NOT EXISTS trg_raw_bytes_ins AFTER INSERT ON raw_events BEGIN"
+                " INSERT OR IGNORE INTO raw_bytes (session_id, total) VALUES (NEW.session_id, 0);"
+                " UPDATE raw_bytes SET total = total + length(NEW.nonce_ciphertext)"
+                " WHERE session_id = NEW.session_id; END",
+                "CREATE TRIGGER IF NOT EXISTS trg_raw_bytes_del AFTER DELETE ON raw_events BEGIN"
+                " UPDATE raw_bytes SET total = total - length(OLD.nonce_ciphertext)"
+                " WHERE session_id = OLD.session_id; END",
+                "CREATE TRIGGER IF NOT EXISTS trg_raw_bytes_upd AFTER UPDATE ON raw_events BEGIN"
+                " UPDATE raw_bytes SET total = total - length(OLD.nonce_ciphertext)"
+                " WHERE session_id = OLD.session_id;"
+                " INSERT OR IGNORE INTO raw_bytes (session_id, total) VALUES (NEW.session_id, 0);"
+                " UPDATE raw_bytes SET total = total + length(NEW.nonce_ciphertext)"
+                " WHERE session_id = NEW.session_id; END",
+            ):
+                conn.execute(stmt)
+            conn.commit()
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
 
     def schema_version(self) -> int:
         conn = self._connect()
@@ -298,14 +339,14 @@ class TranscriptRepository:
         database across many sessions, so a heavy session can never exhaust
         another session's budget.
         """
+        # 计数表由 init() 建立并由触发器维护：O(1) 主键查找，不再全表 SUM。
         if session_id is None:
             row = conn.execute(
-                "SELECT COALESCE(SUM(length(nonce_ciphertext)), 0) AS total"
-                " FROM raw_events").fetchone()
+                "SELECT COALESCE(SUM(total), 0) AS total FROM raw_bytes").fetchone()
         else:
             row = conn.execute(
-                "SELECT COALESCE(SUM(length(nonce_ciphertext)), 0) AS total"
-                " FROM raw_events WHERE session_id=?", (session_id,)).fetchone()
+                "SELECT total FROM raw_bytes WHERE session_id=?",
+                (session_id,)).fetchone()
         total = row["total"] if row is not None and row["total"] is not None else 0
         return int(total)
 
@@ -381,7 +422,9 @@ class TranscriptRepository:
                 # A stable bounded code - never the raw error text.
                 return IngestResult("rejected", event_id=None, reason=result)
 
-        clean = result
+        # 纵深防御：节点侧已做 secret 脱敏，Hub 在落库（redacted 行与加密 raw
+        # 行）前再跑一遍同一套幂等 secret 规则，旧版/异常节点也不会把密钥入库。
+        clean = redact_event_secrets(result)
         event_id = clean.get("event_id")
         session_id = clean["session_id"]
         sequence = int(clean["sequence"])
@@ -415,8 +458,9 @@ class TranscriptRepository:
             is_gap = sequence > max_seq + 1
 
             # Redact the clean event deterministically.
-            # source_record is an explicitly complete operator archive;
-            # normalized message/tool previews retain their existing redaction.
+            # source_record is the complete operator archive (secret patterns
+            # already replaced above); normalized message/tool previews keep
+            # their existing redaction metadata.
             redacted = clean if clean["kind"] == "source_record" else Redactor().redact_event(clean)[0]
 
             sequence_row = conn.execute(

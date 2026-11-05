@@ -28,6 +28,7 @@ import subprocess
 import threading
 import time
 import json
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -35,6 +36,8 @@ from typing import Any, Mapping, Sequence
 from report_schema import INSTANCE_FAMILIES
 from tools.local_process import popen as popen_local
 from tools.local_process import run as run_local
+from tools.process_group import (pid_alive, posix_group_alive,
+                                 posix_group_only_zombies, process_start_identity)
 
 from tools.supervisor.model import (
     GROUP_CAPABILITY_CGROUP,
@@ -78,11 +81,15 @@ _CONTROL_OUTCOMES = frozenset({
     "already_finished", "no_live_process", "control_failed",
     "appended", "applied", "unknown_profile", "family_mismatch",
     "resume_unverified", "unsupported_action",
+    # 跨实例控制时无法证明进程身份/存活：既不是成功也不是 already_finished。
+    "liveness_unknown",
 })
 
 # Raw byte-buffer cap per process group handle (drops oldest bytes beyond
 # this, so a child emitting a huge line-free stream cannot OOM the Reader).
 _ABUF_MAX = 1 << 20
+# 单行保留上限：行 head + 一个读块恒 ≤ _ABUF_MAX。
+_LINE_MAX = _ABUF_MAX - 65536
 # Post-exit tail-flush bounds: per-pump step and the whole-flush wall budget.
 _FLUSH_STEP = 0.2
 _FLUSH_BUDGET = 2.0
@@ -151,9 +158,6 @@ class GroupOps:
     def proc_wait(self, handle, timeout: float | None = None) -> int | None:
         raise NotImplementedError
 
-    def group_id(self, handle) -> str:
-        raise NotImplementedError
-
     def group_alive(self, handle) -> bool:
         raise NotImplementedError
 
@@ -169,6 +173,14 @@ class GroupOps:
 
     def escaped(self, handle) -> bool:
         return False
+
+    def owner_identity(self, handle) -> dict[str, Any] | None:
+        """Durable owner record ``{pid, pgid, start}`` for a spawned handle.
+
+        供另一个 Supervisor 实例（control-client 进程）跨实例校验并控制本
+        实例拉起的进程组。无真实进程的后端返回 None（不写记录）。
+        """
+        return None
 
     def close(self, handle) -> None:
         pass
@@ -236,13 +248,6 @@ class POSIXGroupOps(GroupOps):
         except (subprocess.TimeoutExpired, OSError, ValueError):
             return None
 
-    def group_id(self, handle):
-        # Not used to derive the manifest's process_group_id (opaque keeps it
-        # so the raw leader PID never reaches public outputs).
-        if self._attached(handle):
-            return f"grp_{handle.pgid}"
-        return f"grp_{handle.proc.pid}"
-
     def group_alive(self, handle):
         if self._attached(handle):
             # liveness = the process GROUP still exists (no /proc deref).
@@ -250,10 +255,18 @@ class POSIXGroupOps(GroupOps):
                 os.killpg(int(handle.pgid), 0)
             except ProcessLookupError:
                 return False
-            except (PermissionError, OSError):
+            except PermissionError:
+                # macOS 对仅剩僵尸的组返回 EPERM：全员僵尸才视为已退出，否则按存活处理
+                return not posix_group_only_zombies(int(handle.pgid))
+            except OSError:
                 return True  # cannot verify → assume alive
+            # 非本进程子进程的 leader 无法回收：全员僵尸即视为已退出
+            return not posix_group_only_zombies(int(handle.pgid))
+        if handle.proc.poll() is None:
             return True
-        return handle.proc.poll() is None
+        # leader 已退出不代表组已空：仍在组内的孙进程（含 trap TERM 的）
+        # 同样是存活成员，必须由 killpg(pgid, 0) 判定。
+        return posix_group_alive(handle.proc.pid)
 
     def group_terminate(self, handle, sig):
         if self._attached(handle):
@@ -274,11 +287,39 @@ class POSIXGroupOps(GroupOps):
     def group_reap(self, handle, timeout=None):
         if self._attached(handle):
             return True  # not our child — nothing to wait/reap
+        budget = max(0.0, timeout or 0)
         try:
-            handle.proc.wait(timeout=max(0.0, timeout or 0))
+            handle.proc.wait(timeout=budget)
         except (subprocess.TimeoutExpired, OSError):
             return False
-        return True
+        # leader 已回收；组内残留成员（例如把 stdout 重定向走的孙进程）
+        # 同样属于本次执行，必须一并 SIGKILL 并在有界时间内确认消失。
+        pgid = handle.proc.pid
+        if not posix_group_alive(pgid):
+            return True
+        try:
+            os.killpg(pgid, _SIGKILL)
+        except OSError:
+            pass
+        deadline = time.monotonic() + max(1.0, budget)
+        while time.monotonic() < deadline:
+            if not posix_group_alive(pgid):
+                return True
+            time.sleep(0.02)
+        return not posix_group_alive(pgid)
+
+    def owner_identity(self, handle):
+        if self._attached(handle) or getattr(handle, "proc", None) is None:
+            return None
+        try:
+            pid = int(handle.proc.pid)
+            pgid = os.getpgid(pid)
+        except (AttributeError, OSError, TypeError, ValueError):
+            return None
+        start = process_start_identity(pid)
+        if start is None:
+            return None
+        return {"pid": pid, "pgid": int(pgid), "start": start}
 
     def close(self, handle):
         if self._attached(handle):
@@ -291,39 +332,30 @@ class POSIXGroupOps(GroupOps):
     # ---- deadline-safe output reading --------------------------------------
 
     def _drain_lines(self, handle, on_line, flush=False) -> bool:
-        """Split complete lines from the handle's internal byte buffer.
+        """Deliver complete lines buffered on the handle.
 
-        Delivers each line to ``on_line`` (truncated to a bounded cap).
+        超长行保留前 ``_LINE_MAX`` 字节并以 ``…[truncated N bytes]`` 标注，
+        计入 ``handle._truncated_lines``——有界但绝不静默丢失。
         Returns True if at least one line was delivered.
         """
-        buf = handle._abuf
+        if b"\n" in handle._abuf:
+            # 兼容直接写入 _abuf 的旧调用方：重新按行切分。
+            raw, handle._abuf = handle._abuf, b""
+            _buffer_chunk(handle, raw)
+        pending = _pending_lines(handle)
+        if flush and (handle._abuf or getattr(handle, "_dropped", 0)):
+            pending.append(_finish_line(handle))
         delivered = False
-        while True:
-            idx = buf.find(b"\n")
-            if idx < 0:
-                break
-            raw = buf[:idx]
-            buf = buf[idx + 1:]
-            if raw:
-                line = raw.decode("utf-8", "replace").rstrip("\r")
-                if line:
-                    delivered = True
-                    try:
-                        if on_line:
-                            on_line(line[:2048])
-                    except Exception:
-                        pass
-        if flush and buf:
-            line = buf.decode("utf-8", "replace").rstrip("\r\n")
-            if line:
-                delivered = True
-                try:
-                    if on_line:
-                        on_line(line[:2048])
-                except Exception:
-                    pass
-            buf = b""
-        handle._abuf = buf
+        while pending:
+            line = pending.popleft()
+            if not line:
+                continue
+            delivered = True
+            try:
+                if on_line:
+                    on_line(line)
+            except Exception:
+                pass
         return delivered
 
     def pump(self, handle, timeout, on_line=None, should_abort=None) -> str:
@@ -367,15 +399,8 @@ class POSIXGroupOps(GroupOps):
                 self._drain_lines(handle, on_line, flush=True)
                 handle._abuf = b""
                 return "eof"
-            # Append, but keep the raw byte buffer bounded: drop oldest bytes
-            # beyond the cap so a line-free stream (progress bars using
-            # ``\r``, binary tail) can never grow without limit.
-            if len(handle._abuf) + len(chunk) > _ABUF_MAX:
-                keep = handle._abuf[-(_ABUF_MAX - len(chunk)):] if len(
-                    chunk) < _ABUF_MAX else b""
-                handle._abuf = keep + chunk
-            else:
-                handle._abuf += chunk
+            # 有界追加：partial 行上限 _LINE_MAX，超出部分计数并在行尾标注。
+            _buffer_chunk(handle, chunk)
 
 
 class LinuxGroupOps(POSIXGroupOps):
@@ -477,9 +502,6 @@ class WindowsGroupOps(GroupOps):
         except (subprocess.TimeoutExpired, OSError, ValueError):
             return None
 
-    def group_id(self, handle):
-        return f"grp_{_handle_pid(handle) or 0}"
-
     def group_alive(self, handle):
         if self._attached(handle):
             pids = self._tree_pids(handle.pid)
@@ -522,9 +544,22 @@ class WindowsGroupOps(GroupOps):
             time.sleep(0.05)
         return not self.group_alive(handle)
 
+    def owner_identity(self, handle):
+        if self._attached(handle) or getattr(handle, "proc", None) is None:
+            return None
+        try:
+            pid = int(handle.proc.pid)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        start = process_start_identity(pid)
+        if start is None:
+            return None
+        return {"pid": pid, "pgid": pid, "start": start}
+
     def close(self, handle):
         if self._attached(handle):
             return
+        handle._reader_closed = True
         try:
             if handle.proc.stdout is not None:
                 handle.proc.stdout.close()
@@ -736,10 +771,17 @@ class WindowsGroupOps(GroupOps):
                     raw = stream.read(self._READ_CHUNK)
                     if not raw:
                         break
-                    try:
-                        handle._queue.put(raw, timeout=0.1)
-                    except queue.Full:
-                        pass
+                    # 队列满时阻塞等待消费（反压传给子进程），不丢块；
+                    # handle 被 close 后才放弃并计数。
+                    while True:
+                        try:
+                            handle._queue.put(raw, timeout=0.2)
+                            break
+                        except queue.Full:
+                            if getattr(handle, "_reader_closed", False):
+                                handle._dropped_chunks = getattr(
+                                    handle, "_dropped_chunks", 0) + 1
+                                return
             except Exception:
                 pass
             finally:
@@ -772,11 +814,7 @@ class WindowsGroupOps(GroupOps):
                 continue
             if not isinstance(raw, bytes):
                 raw = str(raw).encode("utf-8", "replace")
-            if len(handle._abuf) + len(raw) > _ABUF_MAX:
-                keep = handle._abuf[-(_ABUF_MAX - len(raw)):] if len(raw) < _ABUF_MAX else b""
-                handle._abuf = keep + raw
-            else:
-                handle._abuf += raw
+            _buffer_chunk(handle, raw)
 
 
 @dataclass
@@ -797,10 +835,15 @@ class _Bound:
     resume_token: str | None = None
     exe_path: str | None = None
     _abuf: bytes = b""
+    _dropped: int = 0
+    _truncated_lines: int = 0
+    _lines: Any = None
     _queue: Any = None
     _reader_thread: Any = None
     _reader_started: bool = False
     _reader_eof: bool = False
+    _reader_closed: bool = False
+    _dropped_chunks: int = 0
 
 
 @dataclass
@@ -826,6 +869,18 @@ class _AttachedHandle:
     env: dict[str, str] | None = None
     resume_token: str | None = None
     _abuf: bytes = b""
+
+
+@dataclass
+class _OwnerHandle(_AttachedHandle):
+    """跨实例控制句柄：由另一个 Supervisor 实例 launch、经 owner 记录校验。
+
+    与 adoption 一样按进程组（pgid）发信号、不持有管道；但身份来自本机
+    owner 记录（pid + 启动身份），guard 失败时只丢弃句柄、绝不 detach /
+    删除 manifest。
+    """
+
+    start_identity: str = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -953,6 +1008,8 @@ class Supervisor:
         # process_group_id stays the opaque id; the real pid is never copied.
         # cwd/env stay on the private entry so they survive handle release.
         self._persist(manifest)
+        self._write_owner(session_id, handle)
+        self._maybe_prune()
         return manifest
 
     # ---- adoption (attach an existing local process) --------------------- #
@@ -1181,6 +1238,12 @@ class Supervisor:
             # NOT an adopted session — the LAUNCHED path passes untouched
             # (the "launched sessions run unchanged" invariant).
             return "adopted"
+        if isinstance(entry.handle, _OwnerHandle):
+            # 跨实例句柄：信号前再确认 pid 未被复用。
+            current = process_start_identity(entry.handle.pid)
+            if current is None or current != entry.handle.start_identity:
+                return "liveness_unknown"
+            return "adopted"
         # live re-read through the SAME reader used at attach (mirror gate 3
         # in attach_to_existing): fail closed on every unverifiable branch.
         reader = entry.probe if entry.probe is not None else self._default_attach_probe
@@ -1210,6 +1273,11 @@ class Supervisor:
         """
         code = self.validate_attached_identity(session_id)
         if code != "adopted":
+            entry = self._entries.get(session_id)
+            if entry is not None and isinstance(entry.handle, _OwnerHandle):
+                # 跨实例句柄失效：只丢弃句柄，manifest 归属仍属 launch 实例。
+                entry.handle = None
+                return code
             self.detach(session_id)   # idempotent; NEVER a signal
             return code
         return ""
@@ -1219,8 +1287,118 @@ class Supervisor:
     def get(self, session_id: str) -> ManagedSessionManifest:
         entry = self._entries.get(session_id)
         if entry is None:
+            entry = self._refresh_from_disk(session_id)
+        if entry is None:
             raise UnknownSessionError(session_id)
         return entry.manifest
+
+    # ---- cross-instance ownership ------------------------------------------ #
+
+    def _owner_path(self, session_id: str) -> Path:
+        return self._manifest_dir / "owners" / f"{session_id}{self.MANIFEST_SUFFIX}"
+
+    def _write_owner(self, session_id: str, handle) -> None:
+        """Best-effort：把 launch 实例的进程身份落到共享 manifest_dir。
+
+        owner 记录与 manifest 分目录存放（``recover`` 的 ``*.json`` glob 不会
+        误读），只在本机私有目录，永不进入任何公开输出。
+        """
+        try:
+            ident = self._ops.owner_identity(handle)
+        except Exception:
+            ident = None
+        if not ident:
+            return
+        target = self._owner_path(session_id)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(ident))
+            os.replace(str(tmp), str(target))
+        except OSError:
+            pass
+
+    def _drop_owner(self, session_id: str) -> None:
+        try:
+            self._owner_path(session_id).unlink()
+        except OSError:
+            pass
+
+    def _read_disk_manifest(self, session_id: str) -> ManagedSessionManifest | None:
+        try:
+            validate_opaque(session_id, "session_id")
+        except ValueError:
+            return None
+        path = self._manifest_dir / f"{session_id}{self.MANIFEST_SUFFIX}"
+        try:
+            m = ManagedSessionManifest.from_json(path.read_text())
+        except Exception:
+            return None
+        if (m.session_id != session_id or not m.process_group_id
+                or m.machine_id != self._machine_id):
+            return None
+        return m
+
+    def _refresh_from_disk(self, session_id: str) -> _ManagedEntry | None:
+        """另一实例 launch 的会话：从共享 manifest_dir 读入（不持久化、无句柄）。"""
+        if session_id in self._adoption_revoked:
+            return None
+        m = self._read_disk_manifest(session_id)
+        if m is None:
+            return None
+        entry = self._entries.setdefault(session_id, _ManagedEntry(m, None))
+        return entry
+
+    def _rebind_owner(self, session_id: str, entry: _ManagedEntry):
+        """无句柄会话的跨实例绑定。返回 ``(handle, code)``。
+
+        * 可证明仍是同一进程（pid 存活 + 启动身份一致 + pgid 一致）→ 句柄；
+        * 可证明 leader 与整组都已消失 → ``(None, "no_live_process")``；
+        * 磁盘 manifest 已是终态 → 同步终态，``(None, <state>)``；
+        * 其余一律 ``(None, "liveness_unknown")``——绝不当作已结束。
+        """
+        m = entry.manifest
+        disk = self._read_disk_manifest(session_id)
+        if disk is not None and disk.state in TERMINAL_STATES:
+            m.state, m.reason, m.updated_at = disk.state, disk.reason, disk.updated_at
+            return None, m.state
+        try:
+            raw = json.loads(self._owner_path(session_id).read_text())
+            pid, pgid, start = int(raw["pid"]), int(raw["pgid"]), str(raw["start"])
+        except FileNotFoundError:
+            return None, "liveness_unknown"
+        except (OSError, ValueError, TypeError, KeyError):
+            return None, "liveness_unknown"
+        if pid <= 0 or pgid <= 0 or not start:
+            return None, "liveness_unknown"
+        leader = pid_alive(pid)
+        if leader is None:
+            return None, "liveness_unknown"
+        if leader:
+            if process_start_identity(pid) != start:
+                return None, "liveness_unknown"  # pid 已被复用或身份不可读
+            if os.name != "nt":
+                try:
+                    if os.getpgid(pid) != pgid:
+                        return None, "liveness_unknown"
+                except OSError:
+                    return None, "liveness_unknown"
+            handle = _OwnerHandle(pid=pid, pgid=pgid, started_at="",
+                                  exe_path="", start_identity=start)
+            entry.handle = handle
+            return handle, ""
+        if os.name == "nt":
+            return None, "no_live_process"
+        # leader 已不在：组内仍有成员时无法证明 pgid 未被复用 → unknown。
+        if posix_group_alive(pgid):
+            return None, "liveness_unknown"
+        return None, "no_live_process"
+
+    def _live_handle(self, session_id: str, entry: _ManagedEntry):
+        """``(handle, code)``：已有句柄直接返回，否则尝试跨实例绑定。"""
+        if entry.handle is not None:
+            return entry.handle, ""
+        return self._rebind_owner(session_id, entry)
 
     def _handle_of(self, session_id: str):
         entry = self._entries.get(session_id)
@@ -1268,8 +1446,11 @@ class Supervisor:
         m = entry.manifest
         if m.state in TERMINAL_STATES:
             return m.state
-        handle = entry.handle
-        if handle is None or not self._group_alive_checked(handle):
+        handle, code = self._live_handle(session_id, entry)
+        if handle is None:
+            return code if code == "liveness_unknown" else (
+                m.state if m.state in TERMINAL_STATES else "no_live_process")
+        if not self._group_alive_checked(handle):
             return "no_live_process"
         gate = self._guard_adopted(session_id)
         if gate:
@@ -1296,8 +1477,11 @@ class Supervisor:
         m = entry.manifest
         if m.state in TERMINAL_STATES:
             return m.state
-        handle = entry.handle
-        if handle is None or not self._group_alive_checked(handle):
+        handle, code = self._live_handle(session_id, entry)
+        if handle is None:
+            return code if code == "liveness_unknown" else (
+                m.state if m.state in TERMINAL_STATES else "no_live_process")
+        if not self._group_alive_checked(handle):
             return "no_live_process"
         gate = self._guard_adopted(session_id)
         if gate:
@@ -1328,8 +1512,11 @@ class Supervisor:
         m = entry.manifest
         if m.state in TERMINAL_STATES:
             return m.state
-        handle = entry.handle
-        if handle is None or not self._group_alive_checked(handle):
+        handle, code = self._live_handle(session_id, entry)
+        if handle is None:
+            return code if code == "liveness_unknown" else (
+                m.state if m.state in TERMINAL_STATES else "no_live_process")
+        if not self._group_alive_checked(handle):
             return "no_live_process"
         gate = self._guard_adopted(session_id)
         if gate:
@@ -1479,6 +1666,7 @@ class Supervisor:
             _stamp_private_identity(handle, entry)
             m.state = RUNNING
             self._set_reason(m, "appended")
+            self._write_owner(session_id, handle)
             return "appended"
 
     def _prepare_user_turn(self, session_id: str, text: str,
@@ -1571,11 +1759,16 @@ class Supervisor:
         m = entry.manifest
         if m.state in TERMINAL_STATES:
             return m.state
-        handle = entry.handle
-        if handle is None or not self._group_alive_checked(handle):
-            if handle is None:
-                self._mark_terminated(m, "no_live_process")
-                return "no_live_process"
+        handle, code = self._live_handle(session_id, entry)
+        if handle is None:
+            if code == "liveness_unknown":
+                # 无法证明进程已结束：不标记终态，交由 hub 记 control_failed。
+                return code
+            if m.state in TERMINAL_STATES:
+                return m.state
+            self._mark_terminated(m, "no_live_process")
+            return "no_live_process"
+        if not self._group_alive_checked(handle):
             self._mark_terminated(m, "already_finished")
             self._ops.close(handle)
             self._release_handle(session_id)
@@ -1800,6 +1993,7 @@ class Supervisor:
     def _mark_terminated(self, m: ManagedSessionManifest, outcome: str) -> None:
         m.state = TERMINATED
         self._set_reason(m, outcome)
+        self._drop_owner(m.session_id)
 
     def _wait_gone(self, handle, timeout: float) -> bool:
         """True iff the group is *provably* gone within ``timeout``.
@@ -1837,6 +2031,7 @@ class Supervisor:
         manifest was already terminal.  There is NO automatic adoption of
         existing OS processes.
         """
+        self._maybe_prune(force=True)
         out: dict[str, ManagedSessionManifest] = {}
         for p in sorted(self._manifest_dir.glob(f"*{self.MANIFEST_SUFFIX}")):
             try:
@@ -1853,6 +2048,76 @@ class Supervisor:
                 self._entries[m.session_id] = _ManagedEntry(m, None)
             out[m.session_id] = m
         return out
+
+    #: 终态 manifest / owner 记录保留期与清理节流间隔。
+    PRUNE_MAX_AGE_S = 7 * 86400
+    PRUNE_INTERVAL_S = 3600
+
+    def _maybe_prune(self, force: bool = False) -> None:
+        now = time.monotonic()
+        last = getattr(self, "_last_prune", None)
+        if not force and last is not None and now - last < self.PRUNE_INTERVAL_S:
+            return
+        self._last_prune = now
+        try:
+            self.prune_manifests()
+        except Exception:
+            pass
+
+    def prune_manifests(self, max_age_s: float | None = None) -> int:
+        """删除超过保留期的终态 manifest、孤儿 owner 记录与残留 tmp。
+
+        只删终态（或无法解析）且 mtime 早于保留期的文件；非终态会话的
+        manifest 永不因年龄被删。返回删除的 manifest 数。
+        """
+        max_age = self.PRUNE_MAX_AGE_S if max_age_s is None else float(max_age_s)
+        cutoff = time.time() - max_age
+        removed = 0
+
+        def old(path: Path) -> bool:
+            try:
+                return path.stat().st_mtime < cutoff
+            except OSError:
+                return False
+
+        for p in list(self._manifest_dir.glob(f"*{self.MANIFEST_SUFFIX}")):
+            if not old(p):
+                continue
+            try:
+                m = ManagedSessionManifest.from_json(p.read_text())
+                sid, terminal = m.session_id, m.state in TERMINAL_STATES
+            except Exception:
+                sid, terminal = None, True
+            if not terminal:
+                continue
+            entry = self._entries.get(sid) if sid else None
+            if entry is not None and entry.handle is not None:
+                continue
+            try:
+                p.unlink()
+            except OSError:
+                continue
+            removed += 1
+            if sid:
+                self._entries.pop(sid, None)
+                self._drop_owner(sid)
+        for p in list(self._manifest_dir.glob("*.json.tmp")):
+            if old(p):
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+        owners = self._manifest_dir / "owners"
+        if owners.is_dir():
+            for p in list(owners.iterdir()):
+                sid = p.name[:-len(self.MANIFEST_SUFFIX)] if p.name.endswith(self.MANIFEST_SUFFIX) else None
+                manifest = self._manifest_dir / p.name if sid else None
+                if old(p) and (manifest is None or not manifest.exists()):
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+        return removed
 
     def _persist(self, m: ManagedSessionManifest) -> None:
         target = self._manifest_dir / f"{m.session_id}{self.MANIFEST_SUFFIX}"
@@ -1919,14 +2184,6 @@ def _flags_for(cap: str) -> list[str]:
 # must never map to ``None`` (which would inherit the entire parent env,
 # including secrets); it maps to a bounded, well-known-safe base instead.
 # Arbitrary parent env vars are never passed through.
-_SAFE_ENV_KEYS = (
-    "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL",
-    "PATH", "TMPDIR", "TERM", "COLORTERM", "CI", "GITHUB_ACTIONS",
-    "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "SYSTEMROOT",
-    "WINDIR", "ComSpec", "PATHEXT",
-)
-
-
 def _live_process_cwd(pid: int) -> str | None:
     """Best-effort live cwd for an attached pid.  Never opens files.
 
@@ -1966,25 +2223,54 @@ def _live_process_cwd(pid: int) -> str | None:
     return None
 
 
+def _pending_lines(handle) -> deque:
+    lines = getattr(handle, "_lines", None)
+    if lines is None:
+        lines = deque()
+        handle._lines = lines
+    return lines
+
+
+def _finish_line(handle) -> str:
+    """把 handle 上的 partial 行收尾为一行文本（含截断标注）。"""
+    text = handle._abuf.decode("utf-8", "replace").rstrip("\r")
+    dropped = getattr(handle, "_dropped", 0)
+    if dropped:
+        handle._truncated_lines = getattr(handle, "_truncated_lines", 0) + 1
+        text += f"…[truncated {dropped} bytes]"
+    handle._abuf = b""
+    handle._dropped = 0
+    return text
+
+
+def _buffer_chunk(handle, chunk: bytes) -> None:
+    """有界行切分：完整行进入待投递队列，partial 行 ≤ ``_LINE_MAX``。"""
+    pending = _pending_lines(handle)
+    start = 0
+    while True:
+        idx = chunk.find(b"\n", start)
+        seg = chunk[start:] if idx < 0 else chunk[start:idx]
+        room = _LINE_MAX - len(handle._abuf)
+        if room > 0:
+            handle._abuf += seg[:room]
+        overflow = len(seg) - max(0, room)
+        if overflow > 0:
+            handle._dropped = getattr(handle, "_dropped", 0) + overflow
+        if idx < 0:
+            return
+        pending.append(_finish_line(handle))
+        start = idx + 1
+
+
 def _bounded_spawn_env(env):
-    """Return the exact allowlist, or a bounded base env when empty."""
+    """Return the exact allowlist, or the shared bounded base env when empty.
+
+    基础白名单与 legacy adapter 路径共用 ``spawn_policy.build_child_env``。
+    """
     if env:
         return dict(env)
-    base = {}
-    for key in _SAFE_ENV_KEYS:
-        val = os.environ.get(key)
-        if val is not None:
-            base[key] = val
-    base.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
-    base.setdefault("LANG", "C.UTF-8")
-    if os.name == "nt":
-        base.setdefault("HOME", os.environ.get("USERPROFILE") or os.path.expanduser("~"))
-        base.setdefault("USERPROFILE", os.path.expanduser("~"))
-        base.setdefault("SYSTEMROOT", os.environ.get("SystemRoot", r"C:\Windows"))
-        base.setdefault("ComSpec", os.environ.get("ComSpec", r"C:\Windows\System32\cmd.exe"))
-    else:
-        base.setdefault("HOME", os.environ.get("HOME") or os.path.expanduser("~"))
-    return base
+    from tools.spawn_policy import build_child_env
+    return build_child_env()
 
 
 def _rfc3339() -> str:
@@ -2101,11 +2387,18 @@ def _native_resume_argv(family: str, exe: str, token: str, text: str) -> list[st
     """Build the family-specific native resume argv."""
     if not exe or not token or not isinstance(text, str) or not text:
         return []
+    # token 以 '-' 开头会被当作选项；text 以 '-' 开头时只有支持 '--' 的
+    # CLI（clap / commander）插 '--'，其余拒绝。
+    if str(token).startswith("-"):
+        return []
+    leading_dash = text.startswith("-")
     if family == "codex":
-        argv = [exe, "exec", "resume", "--json", token, text]
+        argv = [exe, "exec", "resume", "--json", token] + (["--", text] if leading_dash else [text])
     elif family == "claude_code":
-        argv = [exe, "--resume", token, text]
+        argv = [exe, "--resume", token] + (["--", text] if leading_dash else [text])
     elif family == "pi":
+        if leading_dash:
+            return []
         # --resume is an interactive picker; --session takes path or id.
         argv = [exe, "--session", token, text]
     else:

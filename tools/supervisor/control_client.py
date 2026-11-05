@@ -38,7 +38,6 @@ import hashlib
 import json
 import os
 import time
-import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,6 +56,11 @@ from hub.domain import control as ctrl
 
 #: The only actions the client may dispatch — mirror of both the Hub's fixed
 #: set and ``tools.supervisor.supervisor.CONTROL_ACTIONS``.
+#: nonce 标记 / 回执的保留期与清理频率
+NONCE_MARKER_MIN_AGE_S = 86400.0
+RECEIPT_MAX_AGE_S = 7 * 86400.0
+NONCE_PRUNE_INTERVAL_S = 3600.0
+
 _LOCAL_ACTIONS = frozenset(ctrl.CONTROL_ACTIONS)
 _PAYLOAD_ACTIONS = frozenset(ctrl.PAYLOAD_ACTIONS)
 
@@ -261,6 +265,40 @@ class NonceStore:
             return False
         return True
 
+    def prune(self, *, marker_max_age_s: float, receipt_max_age_s: float,
+              now: float | None = None) -> int:
+        """删除过期的 nonce 标记与回执，返回删除数量；失败一律跳过（尽力而为）。
+
+        nonce 标记只需活过「签发时间 ± 时钟偏差」窗口：超出窗口的重放本身就会被
+        ``clock_skew`` 拒绝，所以按 mtime 删除足够旧的标记不会放过重放。
+        """
+        if self._dir is None:
+            return 0
+        now = time.time() if now is None else float(now)
+        removed = 0
+        try:
+            entries = list(os.scandir(self._dir))
+        except OSError:
+            return 0
+        for entry in entries:
+            name = entry.name
+            if name.endswith(".used"):
+                limit = marker_max_age_s
+            elif name.endswith(".json") or name.endswith(".tmp"):
+                limit = receipt_max_age_s
+            else:
+                continue
+            try:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                if now - entry.stat(follow_symlinks=False).st_mtime <= limit:
+                    continue
+                os.unlink(entry.path)
+                removed += 1
+            except OSError:
+                continue
+        return removed
+
 
 class ControlClient:
     """Pulls + validates + dispatches + receipts every supervisor command."""
@@ -310,6 +348,8 @@ class ControlClient:
         self._spool_key = spool_key
         self._uploader = uploader
         self._post_json = post_json
+        # nonce/回执目录的周期清理（限频，首次 poll 即执行一次）
+        self._last_prune = 0.0
 
     # ------------------------------------------------------------------ #
     # probe gate
@@ -321,6 +361,7 @@ class ControlClient:
         Never raises on a transport/parse failure — a degraded result surface is
         what the caller logs/backs off on.
         """
+        self._maybe_prune_nonces()
         try:
             status, body = self._transport(
                 "/api/supervisor/poll", None, self._headers())
@@ -340,6 +381,19 @@ class ControlClient:
                 self._handle_command(command)
                 handled += 1
         return {"ok": True, "commands": handled}
+
+    def _maybe_prune_nonces(self) -> None:
+        now = time.monotonic()
+        if self._last_prune and now - self._last_prune < NONCE_PRUNE_INTERVAL_S:
+            return
+        self._last_prune = now
+        # 标记至少保留 2×时钟偏差（重放可被接受的最长窗口）再加一天余量
+        marker_age = max(2 * self._skew + 86400.0, NONCE_MARKER_MIN_AGE_S)
+        try:
+            self._nonces.prune(marker_max_age_s=marker_age,
+                               receipt_max_age_s=RECEIPT_MAX_AGE_S)
+        except Exception:
+            pass  # 清理失败不影响拉取命令
 
     # ------------------------------------------------------------------
     # per-command gate + execution (+ bounded receipt)
@@ -491,12 +545,25 @@ class ControlClient:
             # probe has no bridge capability: refuse before attach, so no
             # private entry is EVER created (nothing to roll back).
             return ("rejected", "bridge_unavailable")
+        # 同一 session 的 adopt 可能被重复下发（Hub 丢回执后换 cid/nonce 重发，
+        # 或 rejected 后再次 adopt）：attach_to_existing 对同 pid 幂等返回
+        # ``adopted``，若不在此去重会再起一个 SessionBridge，旧的被字典覆盖后
+        # 继续 tail/上传（重复事件 + 线程泄漏）。桥按 session_id 幂等。
+        previously_bound = self._is_bound(session_id)
         rc = self._supervisor.attach_to_existing(
             pid, started_at, exe_path, native_file_path, family,
             session_id=session_id)
         if rc != "adopted":
             return ("rejected", rc)   # pid_reused / exe_changed / …
+        existing = self._bridges.get(session_id)
+        if existing is not None:
+            if previously_bound:
+                # 幂等重放：已绑定且桥在跑 → 复用，不新建、不回滚。
+                return ("accepted", "adopted")
+            # 旧绑定已不在 supervisor 中（残留桥）：先关掉再按新绑定重建。
+            self._close_bridge(self._bridges.pop(session_id))
         # bridge construction — ONLY on a real attach success.
+        bridge = None
         try:
             cfg = self._build_bridge_config(session_id, family,
                                             native_file_path)
@@ -507,11 +574,35 @@ class ControlClient:
                     native_file_path, checkpoint_path=cfg["checkpoint_path"])
             self._bridges[session_id] = bridge
         except Exception:
+            # 已 start 的半成品桥必须关掉，否则其线程/句柄泄漏。
+            if bridge is not None:
+                self._close_bridge(bridge, flush=False)
             # rollback the just-attached private entry; never a signal, never
             # a raw exception/reason on the wire.
             self._safe_detach(session_id)
             return ("rejected", "capture_gap")
         return ("accepted", "adopted")
+
+    def _is_bound(self, session_id: str) -> bool:
+        """session_id 当前是否已在 supervisor 中绑定（读失败按未绑定处理）。"""
+        try:
+            self._supervisor.get(session_id)
+        except Exception:
+            return False
+        return True
+
+    @staticmethod
+    def _close_bridge(bridge, *, flush: bool = True) -> None:
+        """flush（可选）+ close；任何异常都被吞掉，绝不影响控制面。"""
+        if flush:
+            try:
+                bridge.flush()
+            except Exception:
+                pass
+        try:
+            bridge.close()
+        except Exception:
+            pass
 
     def _build_bridge_config(self, session_id: str, family: str,
                              native_file_path: str | None) -> dict:
@@ -629,14 +720,7 @@ class ControlClient:
             # failing tail can never abort the detach or signal the process).
             first = self._bridges.pop(session_id, None)
             if first is not None:
-                try:
-                    first.flush()
-                except Exception:
-                    pass
-                try:
-                    first.close()
-                except Exception:
-                    pass
+                self._close_bridge(first)
             try:
                 self._supervisor.detach(session_id)
             except KeyError:  # UnknownSessionError - lost mid-flight
@@ -674,9 +758,6 @@ class ControlClient:
         if result in _TERMINAL_STATES:
             return ("succeeded", result)
         return ("failed", result or _UNEXPECTED)
-
-    def _reject(self, cid: str, reason: str) -> None:
-        self._receipt(cid, "rejected", reason)
 
     def _receipt(self, cid: str, status: str, reason: str) -> None:
         # Bounded in every dimension: keys exactly, reason capped.

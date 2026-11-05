@@ -46,6 +46,7 @@ Bounds and fail-closed behavior
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -149,7 +150,8 @@ _DB_URL_RE = re.compile(
 # or end of line, so "client_secret=correct horse battery staple" is fully
 # redacted instead of leaking the tail.  Env, generic secret and password
 # assignments below all use this one rule.
-_ASSIGN_VALUE_RE = r"[^;\]\n\}]+"
+# 已替换的占位符（含其 ``]``）作为整体被消费，保证规则对二次脱敏幂等。
+_ASSIGN_VALUE_RE = r"(?:\[REDACTED:[a-z_]+\]|[^;\]\n\}])+"
 
 # Env-style secret assignments consume a multi-token value (until ``;``, a
 # newline, ``}``/``]``, or end of line), so a password like
@@ -331,6 +333,9 @@ def _redact_blocks(text: str, ctx: RedactionContext) -> str:
     # Env-style secret assignment (value can be multi-token).
     def _env_repl(match: re.Match) -> str:
         key = match.group("key")
+        if match.group("val").startswith(_PLACEHOLDER_BASE):
+            # 已脱敏的值（节点侧先脱敏、Hub 再兜底）保持幂等，不重复包裹。
+            return match.group(0)
         ctx.add("env", replacement("env"), uncertain=False)
         return f"{key}={replacement('env')}"
 
@@ -388,6 +393,8 @@ def _apply_tokens_and_assignments(text: str, ctx: RedactionContext) -> str:
     def _assign_repl(match: re.Match) -> str:
         key = match.group("key")
         val = match.group("val")
+        if val.startswith(_PLACEHOLDER_BASE):
+            return match.group(0)
         cat = "password" if key in _PASSWORD_KEYS else "credential"
         strong = _certain_token(val)
         ctx.add(cat, replacement(cat), uncertain=not strong)
@@ -398,6 +405,8 @@ def _apply_tokens_and_assignments(text: str, ctx: RedactionContext) -> str:
     # Password assignments with multi-token values.
     def _pass_repl(match: re.Match) -> str:
         key = match.group("key")
+        if match.group("val").startswith(_PLACEHOLDER_BASE):
+            return match.group(0)
         ctx.add("password", replacement("password"), uncertain=True)
         return f"{key}={replacement('password')}"
 
@@ -406,6 +415,8 @@ def _apply_tokens_and_assignments(text: str, ctx: RedactionContext) -> str:
     # Header-style auth lines.
     def _header_repl(match: re.Match) -> str:
         header = match.group(0).split(":", 1)[0]
+        if match.group("value").startswith(_PLACEHOLDER_BASE):
+            return match.group(0)
         ctx.add("credential", replacement("credential"), uncertain=False)
         return f"{header}: {replacement('credential')}"
 
@@ -423,6 +434,120 @@ def _redact_paths(text: str, ctx: RedactionContext) -> str:
 
     out, _ = _PATH_ABS_RE.subn(_path_repl, text)
     out, _ = _WINDOWS_PATH_RE.subn(_path_repl, out)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Secret-only redaction (transcript archive / log lines)
+# ---------------------------------------------------------------------------
+#
+# 完整会话归档（source_record）与普通预览保留路径和正文，但凭据/密钥形态的
+# 片段（sk-/ghp_/AKIA/JWT/Bearer/env 赋值/PEM 私钥/DB URL 口令/敏感键值）
+# 必须在节点侧被替换，绝不离开本机。这里只跑 secret 规则，不改写路径；
+# JSON 文本先解析再逐个字符串值脱敏后重新序列化，保证结构仍是合法 JSON。
+# 规则对已替换的占位符幂等（节点脱敏后 Hub 再兜底不会叠加）。
+
+
+def _redact_secret_string(text: str, key_lower: str,
+                          ctx: RedactionContext) -> str:
+    if not text:
+        return text
+    if key_lower in _SENSITIVE_VALUE_KEYS:
+        if text.startswith(_PLACEHOLDER_BASE) and text.endswith("]"):
+            return text
+        category = "password" if key_lower in _PASSWORD_KEYS else "credential"
+        ctx.add(category, replacement(category), uncertain=True)
+        return replacement(category)
+    out = _redact_blocks(text, ctx)
+    return _apply_tokens_and_assignments(out, ctx)
+
+
+def _redact_secret_value(value: Any, key_lower: str, ctx: RedactionContext,
+                         depth: int) -> Any:
+    if depth > MAX_REDACT_DEPTH:
+        ctx.add("unclassified", replacement("unclassified"), uncertain=True)
+        return replacement("unclassified")
+    if isinstance(value, str):
+        return _redact_secret_string(value, key_lower, ctx)
+    if isinstance(value, Mapping):
+        if key_lower in _SENSITIVE_VALUE_KEYS:
+            category = ("password" if key_lower in _PASSWORD_KEYS
+                        else "credential")
+            ctx.add(category, replacement(category), uncertain=True)
+            return replacement(category)
+        return {str(k): _redact_secret_value(v, str(k).lower(), ctx, depth + 1)
+                for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        if key_lower in _SENSITIVE_VALUE_KEYS and value:
+            category = ("password" if key_lower in _PASSWORD_KEYS
+                        else "credential")
+            ctx.add(category, replacement(category), uncertain=True)
+            return replacement(category)
+        return [_redact_secret_value(item, key_lower, ctx, depth + 1)
+                for item in value]
+    return value
+
+
+def _report(ctx: RedactionContext) -> RedactionReport:
+    return RedactionReport(
+        replaced=ctx.count,
+        categories=tuple(sorted(ctx.categories)),
+        uncertain=ctx.uncertain,
+        details=tuple(ctx.details),
+    )
+
+
+def redact_secrets_text(text: str) -> tuple[str, RedactionReport]:
+    """Secret-only redaction of one text blob (log line / raw source line).
+
+    A text that parses as a JSON object/array is redacted value-by-value and
+    re-serialized, so the archive stays valid JSON and an assignment rule can
+    never swallow JSON quotes/commas.  Paths and ordinary prose are kept.
+    """
+    ctx = RedactionContext()
+    if not isinstance(text, str) or not text:
+        return text, _report(ctx)
+    stripped = text.strip()
+    if stripped[:1] in ("{", "["):
+        try:
+            parsed = json.loads(stripped)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, (dict, list)):
+            cleaned = _redact_secret_value(parsed, "", ctx, 0)
+            if not ctx.count:
+                return text, _report(ctx)
+            return (json.dumps(cleaned, ensure_ascii=False,
+                               separators=(",", ":")), _report(ctx))
+    return _redact_secret_string(text, "", ctx), _report(ctx)
+
+
+def redact_secrets_value(value: Any) -> tuple[Any, RedactionReport]:
+    """Secret-only redaction of a JSON-like value (structure preserved)."""
+    ctx = RedactionContext()
+    if isinstance(value, str):
+        return redact_secrets_text(value)
+    return _redact_secret_value(value, "", ctx, 0), _report(ctx)
+
+
+def redact_event_secrets(event: Mapping[str, Any]) -> dict:
+    """Return a shallow event copy whose payload carries no secret patterns.
+
+    ``source_record`` text is treated as a raw source line (JSON-aware); every
+    other payload string goes through the same secret-only rules.  Envelope
+    identity fields are never touched.
+    """
+    out: dict[str, Any] = dict(event)
+    payload = out.get("payload")
+    if not isinstance(payload, Mapping):
+        return out
+    if out.get("kind") == "source_record":
+        cleaned = dict(payload)
+        if isinstance(cleaned.get("text"), str):
+            cleaned["text"] = redact_secrets_text(cleaned["text"])[0]
+        out["payload"] = cleaned
+        return out
+    out["payload"] = redact_secrets_value(dict(payload))[0]
     return out
 
 
@@ -541,5 +666,8 @@ __all__ = [
     "MAX_REDACT_STRING",
     "RedactionReport",
     "Redactor",
+    "redact_event_secrets",
+    "redact_secrets_text",
+    "redact_secrets_value",
     "replacement",
 ]

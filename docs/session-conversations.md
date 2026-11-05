@@ -5,9 +5,9 @@
 ## 数据链路
 
 - 普通 runner 和 managed runner 在摘要截断前接收 CLI 输出，写入本地加密 spool，经 `/api/runner-session-events` 上传到既有会话库。上传线程与 lease heartbeat 分离。
-- `source_record` 保存源事件所有字段，不做预览用的路径/值替换。长记录按顺序分片，`is_complete=true` 表示最后一片。相邻片的 text 拼接还原记录；JSON 可能重新序列化，但字段值保留。普通消息和工具卡片仍是规范化预览，源记录是完整性依据。
+- `source_record` 把完整会话转录归档到 Hub，不做预览用的路径替换；但密钥/凭据形态（`sk-…`、`ghp_…`、`AKIA…`、JWT、Bearer token、`AWS_SECRET_ACCESS_KEY=…` 等赋值、PEM 私钥、数据库 URL 口令、`token`/`password` 等敏感键的值）在节点侧写入 spool 前即被替换为 `[REDACTED:…]`，Hub 落库前再用同一套规则兜底一次。普通消息和工具卡片同样做该 secret 脱敏。环境变量与密钥本身从不上传。长记录先整条脱敏再按顺序分片，`is_complete=true` 表示最后一片。相邻片的 text 拼接还原记录；JSON 记录会按值脱敏后重新序列化，结构与非敏感字段值保留。普通消息和工具卡片仍是规范化预览，源记录是完整性依据。
 - Codex exec 的 item 消息、命令执行、MCP 调用、文件修改、网页查询具有对应结构化事件。其它源字段（包括模型、用量、错误或附件）可在源记录中读取，不声称 CLI 未提供的数据已被采集。
-- 上传失败保留未确认 spool，后续轮询重传。源记录无法落盘时不能静默成功；runner 中止并报告采集失败。Hub 通过 sequence 确认去重。
+- 上传失败保留未确认 spool，后续轮询重传。源记录无法落盘时不能静默当作完整：采集降级并在日志/任务结果里标记采集失败，但不中止正在正常执行的任务。已全部确认的 spool 在任务结束后清理。Hub 通过 sequence 确认去重。
 - 任务与会话按 machine + attempt_id 关联；普通会话也保留 attempt_id，但不因此虚标为可控制。
 
 ## 历史会话同步

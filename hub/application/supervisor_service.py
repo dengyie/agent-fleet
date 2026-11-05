@@ -19,12 +19,20 @@ queue (spec §13).  It:
 
 Queue state != execution: ``queued`` never implies the action ran.  Only an
 Agent receipt says that.
+
+The queue/audit ALWAYS live in a ``SupervisorCommandRepository`` (single code
+path).  Bootstrap wires the durable ``var/supervisor/commands.db`` whenever
+the supervisor is enabled; a service built without one (tests, or a disabled
+hub that never issues) lazily gets a private throwaway SQLite file instead of a
+second in-memory implementation.
 """
 from __future__ import annotations
 
 import logging
 import secrets
 import sqlite3
+import tempfile
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
@@ -49,15 +57,6 @@ logger = logging.getLogger(__name__)
 _TERMINAL = frozenset({
     "succeeded", "already_finished", "failed", "rejected", "expired",
 })
-_RECEIPT_PROGRESS = {"accepted": 0, "executing": 1}
-
-
-def _receipt_advances(current: str, incoming: str) -> bool:
-    if current in _TERMINAL:
-        return False
-    current_progress = _RECEIPT_PROGRESS.get(current, -1)
-    incoming_progress = _RECEIPT_PROGRESS.get(incoming, -1)
-    return incoming_progress < 0 or incoming_progress > current_progress
 
 #: Actions that pre-empt a lower-precedence queued resume / follow-up.
 _HIGH_PRECEDENCE = frozenset({"terminate_session", "quarantine_session"})
@@ -159,36 +158,10 @@ class AuditStore:
         return list(self._rows[-limit:])
 
 
-class SupervisorCommand:
-    """In-memory queue row for one signed control command."""
-
-    __slots__ = ("command_id", "machine", "session_id", "attempt_id",
-                 "action", "nonce", "wire", "issued_s", "expires_s",
-                 "status", "receipt_status", "receipt_reason")
-
-    def __init__(self, *, command_id, machine, session_id, attempt_id, action,
-                 nonce, wire, issued_s, expires_s):
-        self.command_id = command_id
-        self.machine = machine
-        self.session_id = session_id
-        self.attempt_id = attempt_id
-        self.action = action
-        self.nonce = nonce
-        self.wire = wire
-        self.issued_s = issued_s
-        self.expires_s = expires_s
-        self.status = "queued"
-        self.receipt_status = ""
-        self.receipt_reason = ""
-
-    def as_envelope(self) -> dict:
-        return dict(self.wire)
-
-
 class SupervisorService:
-    """Hub-side control queue authority (in-memory queue + bounded audit)."""
+    """Hub-side control queue authority (repository-backed queue + audit)."""
 
-    def __init__(self, *, signing_key: bytes | None, audit_store=None,
+    def __init__(self, *, signing_key: bytes | None,
                  now_fn: Callable[[], float] | None = None,
                  ttl_s: float = 3600.0, max_clock_skew_s: float = 300.0,
                  append_user_turn_enabled: bool = False,
@@ -196,19 +169,27 @@ class SupervisorService:
                  command_repository: SupervisorCommandRepository | None = None,
                  delivery_lease_s: float = 60.0):
         self._signing_key = signing_key
-        self._audit = audit_store if audit_store is not None else AuditStore()
         self._now_fn = now_fn or _now_s
         self._ttl_s = float(ttl_s)
         self._max_clock_skew_s = float(max_clock_skew_s)
         self._append_user_turn_enabled = bool(append_user_turn_enabled)
         self._apply_local_profile_enabled = bool(apply_local_profile_enabled)
-        self._command_repository = command_repository
+        self._repository = command_repository
         self._delivery_lease_s = max(1.0, float(delivery_lease_s))
-        if self._command_repository is not None:
-            self._command_repository.init()
-        self._commands: dict[str, SupervisorCommand] = {}
-        self._nonces: dict[str, str] = {}
-        self._target_cmds: dict[str, str] = {}
+        if self._repository is not None:
+            self._repository.init()
+
+    @property
+    def _command_repository(self) -> SupervisorCommandRepository:
+        """The queue repository; a private throwaway one when none was wired."""
+        if self._repository is None:
+            # 未接入持久库（测试 / 未启用 supervisor 的 hub）时用私有临时 SQLite，
+            # 与生产走同一条代码路径；首次使用才创建，禁用态不产生文件。
+            path = Path(tempfile.mkdtemp(prefix="fleet-supervisor-")) / "commands.db"
+            repository = SupervisorCommandRepository(path)
+            repository.init()
+            self._repository = repository
+        return self._repository
 
     # ------------------------------------------------------------------
     # key gate
@@ -255,7 +236,7 @@ class SupervisorService:
         started_at / exe_path / agent_family / native_file_path) that rides
         INSIDE the signed envelope only for ``adopt``.  It is embedded BEFORE
         signing so the Ed25519 signature covers it, and it never reaches the
-        bounded audit (``_note`` rows carry ids only).  An invalid candidate
+        bounded audit (audit rows carry ids only).  An invalid candidate
         raises ``invalid_candidate`` 400.
 
         ``payload`` is the optional bounded Phase 4/5 body.  ``append_user_turn``
@@ -284,14 +265,11 @@ class SupervisorService:
         elif payload is not None:
             raise SupervisorServiceError("invalid_payload", "", 400)
         action_nonce = nonce or secrets.token_hex(16)
-        if self._command_repository is not None:
-            try:
-                if self._command_repository.nonce_exists(action_nonce):
-                    raise SupervisorServiceError("duplicate_nonce", "")
-            except SupervisorCommandRepositoryError as exc:
-                raise SupervisorServiceError(exc.code, "", 503) from exc
-        if action_nonce in self._nonces:
-            raise SupervisorServiceError("duplicate_nonce", "")
+        try:
+            if self._command_repository.nonce_exists(action_nonce):
+                raise SupervisorServiceError("duplicate_nonce", "")
+        except SupervisorCommandRepositoryError as exc:
+            raise SupervisorServiceError(exc.code, "", 503) from exc
 
         now = self._now_fn()
         expires_at_s = now + self._ttl_s
@@ -316,32 +294,16 @@ class SupervisorService:
             {k: v for k, v in body.items() if k != "signature"})
         body["signature"] = sign_payload(self._signing_key, body_bytes)
 
-        row = SupervisorCommand(
-            command_id=body["command_id"],
-            machine=machine,
-            session_id=session_id,
-            attempt_id=attempt_id,
-            action=action,
-            nonce=action_nonce,
-            wire=body,
-            issued_s=now,
-            expires_s=expires_at_s,
-        )
+        command_id = body["command_id"]
         # conflict-precedence gate BEFORE the row owns the target: a stale
         # higher-precedence command (terminate/quarantine) for the same target
         # rejects a later resume / follow-up outright.
-        target_key = _bounded_target_key(session_id, attempt_id)
-        if self._command_repository is not None:
-            try:
-                existing = self._command_repository.target_owner(session_id, attempt_id)
-            except SupervisorCommandRepositoryError as exc:
-                raise SupervisorServiceError(exc.code, "", 503) from exc
-        else:
-            existing = self._commands.get(self._target_cmds.get(target_key))
-        existing_action = (existing.get("action") if isinstance(existing, dict)
-                           else getattr(existing, "action", None))
-        existing_status = (existing.get("status") if isinstance(existing, dict)
-                           else getattr(existing, "status", None))
+        try:
+            existing = self._command_repository.target_owner(session_id, attempt_id)
+        except SupervisorCommandRepositoryError as exc:
+            raise SupervisorServiceError(exc.code, "", 503) from exc
+        existing_action = existing.get("action") if existing else None
+        existing_status = existing.get("status") if existing else None
         if existing and existing_status in ("queued", "delivered"):
             if (existing_action in _HIGH_PRECEDENCE
                     and action in _LOW_PRECEDENCE):
@@ -349,56 +311,25 @@ class SupervisorService:
                     "resume_superseded",
                     "目标已有终止/隔离命令，resume 被更高优先级命令取代", 409)
 
-        previous_owner = self._target_cmds.get(target_key)
-        if self._command_repository is not None:
-            try:
-                stored = self._command_repository.insert(
-                    command_id=row.command_id, machine=machine, session_id=session_id,
-                    attempt_id=attempt_id, action=action, nonce=action_nonce,
-                    idempotency_key=idempotency_key, wire=body,
-                    issued_s=now, expires_s=expires_at_s,
-                    audit_row=_bound_row({
-                        "event": "enqueue", "ts": _iso(now),
-                        "command_id": row.command_id, "machine": machine,
-                        "session_id": session_id, "action": action,
-                    }))
-                if stored["command_id"] != row.command_id:
-                    return dict(stored["wire"])
-            except SupervisorCommandRepositoryError as exc:
-                status = 409 if exc.code in {"resume_superseded", "command_conflict"} else 503
-                raise SupervisorServiceError(exc.code, "", status) from exc
-        else:
-            self._commands[row.command_id] = row
-            self._nonces[action_nonce] = row.command_id
-            self._target_cmds[target_key] = row.command_id
-
-        # terminate/quarantine supersedes a queued lower-precedence resume or
-        # follow-up for the same target so the stale command is never delivered.
-        if action in _HIGH_PRECEDENCE and self._command_repository is None:
-            self._supersede_queued_resume(
-                target_key, action, previous_owner=previous_owner)
-
-        if self._command_repository is None:
-            self._note({"event": "enqueue", "ts": _iso(now),
-                        "command_id": row.command_id, "machine": machine,
-                        "session_id": session_id, "action": action})
-        return row.as_envelope()
-
-    def _supersede_queued_resume(self, target_key: str, by_action: str,
-                                 *, previous_owner: str | None = None) -> None:
-        cid = previous_owner or self._target_cmds.get(target_key)
-        if not cid:
-            return
-        row = self._commands.get(cid)
-        if row is None or row.status != "queued":
-            return
-        if row.action in _LOW_PRECEDENCE:
-            row.status = "expired"
-            row.receipt_status = "expired"
-            row.receipt_reason = "superseded"
-            self._note({"event": "supersede", "ts": _iso(self._now_fn()),
-                        "command_id": row.command_id,
-                        "action": row.action, "by": by_action})
+        # 仓储 insert 原子地完成：幂等键回放、目标占用切换、以及
+        # terminate/quarantine 取代同目标仍排队的低优先级命令。
+        try:
+            stored = self._command_repository.insert(
+                command_id=command_id, machine=machine, session_id=session_id,
+                attempt_id=attempt_id, action=action, nonce=action_nonce,
+                idempotency_key=idempotency_key, wire=body,
+                issued_s=now, expires_s=expires_at_s,
+                audit_row=_bound_row({
+                    "event": "enqueue", "ts": _iso(now),
+                    "command_id": command_id, "machine": machine,
+                    "session_id": session_id, "action": action,
+                }))
+        except SupervisorCommandRepositoryError as exc:
+            status = 409 if exc.code in {"resume_superseded", "command_conflict"} else 503
+            raise SupervisorServiceError(exc.code, "", status) from exc
+        if stored["command_id"] != command_id:
+            return dict(stored["wire"])
+        return dict(body)
 
     # ------------------------------------------------------------------
     # poll
@@ -408,51 +339,23 @@ class SupervisorService:
         """Hand out queued signed envelopes for ``machine`` (each once)."""
         self.assert_keyed()
         self._expire_stale()
-        out: list[dict] = []
-        if self._command_repository is not None:
-            try:
-                now = self._now_fn()
-                rows = self._command_repository.claim_available(
-                    machine, now, max(1, min(int(max_commands), 100)),
-                    now + self._delivery_lease_s,
-                    audit_row={"event": "deliver", "ts": _iso(now),
-                               "machine": machine})
-                out = []
-                for item in rows:
-                    out.append(dict(item["wire"]))
-                return out
-            except SupervisorCommandRepositoryError as exc:
-                raise SupervisorServiceError(exc.code, "", 503) from exc
-        for cid in sorted(self._commands):
-            row = self._commands[cid]
-            if row.machine != machine or row.status != "queued":
-                continue
-            out.append(row.as_envelope())
-            row.status = "delivered"
-            self._note({"event": "deliver", "ts": _iso(self._now_fn()),
-                        "command_id": row.command_id, "machine": row.machine,
-                        "action": row.action})
-            if len(out) >= max_commands:
-                break
-        return out
+        try:
+            now = self._now_fn()
+            rows = self._command_repository.claim_available(
+                machine, now, max(1, min(int(max_commands), 100)),
+                now + self._delivery_lease_s,
+                audit_row={"event": "deliver", "ts": _iso(now),
+                           "machine": machine})
+        except SupervisorCommandRepositoryError as exc:
+            raise SupervisorServiceError(exc.code, "", 503) from exc
+        return [dict(item["wire"]) for item in rows]
 
     def _expire_stale(self) -> None:
         now = self._now_fn()
-        if self._command_repository is not None:
-            try:
-                self._command_repository.expire(now, audit_ts=_iso(now))
-            except SupervisorCommandRepositoryError as exc:
-                raise SupervisorServiceError(exc.code, "", 503) from exc
-            return
-        for row in list(self._commands.values()):
-            if row.status in _TERMINAL:
-                continue
-            if row.expires_s < now:
-                row.status = "expired"
-                row.receipt_status = "expired"
-                row.receipt_reason = "expired"
-                self._note({"event": "expire", "ts": _iso(now),
-                            "command_id": row.command_id})
+        try:
+            self._command_repository.expire(now, audit_ts=_iso(now))
+        except SupervisorCommandRepositoryError as exc:
+            raise SupervisorServiceError(exc.code, "", 503) from exc
 
     # ------------------------------------------------------------------
     # receipts
@@ -462,81 +365,45 @@ class SupervisorService:
                 *, machine: str | None = None) -> dict:
         """Record an Agent receipt; duplicate receipts replay the original."""
         self.assert_keyed()
-        persisted = None
-        if self._command_repository is not None:
-            try:
-                persisted = self._command_repository.find_command(command_id)
-            except (SupervisorCommandRepositoryError, sqlite3.Error, OSError) as exc:
-                code = exc.code if isinstance(exc, SupervisorCommandRepositoryError) else "command_unavailable"
-                raise SupervisorServiceError(code, "", 503) from exc
-            row = None
-        else:
-            row = self._commands.get(command_id)
-        if row is None and persisted is None:
+        try:
+            persisted = self._command_repository.find_command(command_id)
+        except (SupervisorCommandRepositoryError, sqlite3.Error, OSError) as exc:
+            code = exc.code if isinstance(exc, SupervisorCommandRepositoryError) else "command_unavailable"
+            raise SupervisorServiceError(code, "", 503) from exc
+        if persisted is None:
             raise SupervisorServiceError("command_not_found", "")
-        if machine and (row.machine if row is not None else persisted["machine"]) != machine:
+        if machine and persisted["machine"] != machine:
             raise SupervisorServiceError("machine_mismatch", "", 403)
         if status not in RECEIPT_STATUSES:
             raise SupervisorServiceError("invalid_receipt_status", "", 400)
 
         receipt_now = self._now_fn()
-        current_status = row.status if row is not None else persisted["status"]
-        if (row is not None and current_status not in _TERMINAL
-                and row.expires_s < receipt_now):
-            row.status = "expired"
-            row.receipt_status = "expired"
-            row.receipt_reason = "expired"
-            self._note({"event": "expire", "ts": _iso(receipt_now),
-                        "command_id": row.command_id})
-            current_status = row.status
-        if current_status in _TERMINAL:
+        if persisted["status"] in _TERMINAL:
             # Already terminal: deterministically replay the ORIGINAL persisted
             # sender receipt (status/reason), never accept a second receipt that
             # would overwrite it.  The source of truth is receipt_status /
             # receipt_reason — once recorded it is immutable.
-            if row is None:
-                return {"command_id": command_id, "status": persisted["receipt_status"] or persisted["status"],
-                        "reason": persisted["receipt_reason"] or "", "first": False}
-            return self._receipt_view(row, first=False)
-        if self._command_repository is not None:
-            try:
-                updated, first = self._command_repository.mark_status(
-                    command_id, status, status, str(reason)[:120],
-                    now_s=receipt_now, audit_ts=_iso(receipt_now),
-                    audit_row=_bound_row({
-                        "event": f"receipt:{status}", "ts": _iso(receipt_now),
-                        "command_id": command_id, "machine": persisted["machine"],
-                        "status": status,
-                    }))
-                if updated is None:
-                    raise SupervisorServiceError("command_not_found", "", 404)
-                return {"command_id": command_id, "status": updated["receipt_status"] or status,
-                        "reason": updated["receipt_reason"] or "", "first": first}
-            except (SupervisorCommandRepositoryError, sqlite3.Error, OSError) as exc:
-                code = exc.code if isinstance(exc, SupervisorCommandRepositoryError) else "command_unavailable"
-                raise SupervisorServiceError(code, "", 503) from exc
-        first = not bool(row.receipt_status)
-        if not _receipt_advances(row.status, status):
-            return self._receipt_view(row, first=False)
-        row.status = status
-        row.receipt_status = status
-        row.receipt_reason = str(reason)[:120]
-        self._note({"event": f"receipt:{status}", "ts": _iso(self._now_fn()),
-                    "command_id": row.command_id, "machine": row.machine,
-                    "status": status})
-        return self._receipt_view(row, first=first)
-
-    def _receipt_view(self, row: SupervisorCommand, *, first: bool) -> dict:
-        return {
-            "command_id": row.command_id,
-            "status": row.receipt_status or row.status,
-            "reason": row.receipt_reason or "",
-            "first": bool(first),
-        }
+            return {"command_id": command_id,
+                    "status": persisted["receipt_status"] or persisted["status"],
+                    "reason": persisted["receipt_reason"] or "", "first": False}
+        try:
+            updated, first = self._command_repository.mark_status(
+                command_id, status, status, str(reason)[:120],
+                now_s=receipt_now, audit_ts=_iso(receipt_now),
+                audit_row=_bound_row({
+                    "event": f"receipt:{status}", "ts": _iso(receipt_now),
+                    "command_id": command_id, "machine": persisted["machine"],
+                    "status": status,
+                }))
+        except (SupervisorCommandRepositoryError, sqlite3.Error, OSError) as exc:
+            code = exc.code if isinstance(exc, SupervisorCommandRepositoryError) else "command_unavailable"
+            raise SupervisorServiceError(code, "", 503) from exc
+        if updated is None:
+            raise SupervisorServiceError("command_not_found", "", 404)
+        return {"command_id": command_id, "status": updated["receipt_status"] or status,
+                "reason": updated["receipt_reason"] or "", "first": first}
 
     def pending_session_projections(self, machine: str) -> list[dict]:
-        if self._command_repository is None:
-            return []
         try:
             return self._command_repository.pending_session_projections(
                 machine, self._now_fn())
@@ -544,8 +411,6 @@ class SupervisorService:
             raise SupervisorServiceError(exc.code, "", 503) from exc
 
     def defer_session_projection(self, command_id: str, delay_s: float = 30.0) -> None:
-        if self._command_repository is None:
-            return
         try:
             self._command_repository.defer_session_projection(
                 command_id, self._now_fn() + delay_s)
@@ -553,26 +418,19 @@ class SupervisorService:
             raise SupervisorServiceError(exc.code, "", 503) from exc
 
     def complete_session_projection(self, command_id: str) -> None:
-        if self._command_repository is None:
-            return
         try:
             self._command_repository.complete_session_projection(command_id)
         except SupervisorCommandRepositoryError as exc:
             raise SupervisorServiceError(exc.code, "", 503) from exc
 
     def command_status(self, command_id: str) -> str | None:
-        if self._command_repository is not None:
-            try:
-                row = self._command_repository.find_command(command_id)
-            except SupervisorCommandRepositoryError as exc:
-                raise SupervisorServiceError(exc.code, "", 503) from exc
-            return row["status"] if row else None
-        row = self._commands.get(command_id)
-        return row.status if row else None
+        try:
+            row = self._command_repository.find_command(command_id)
+        except SupervisorCommandRepositoryError as exc:
+            raise SupervisorServiceError(exc.code, "", 503) from exc
+        return row["status"] if row else None
 
     def find_idempotency(self, key: str) -> dict | None:
-        if self._command_repository is None:
-            return None
         try:
             row = self._command_repository.find_idempotency(key)
         except SupervisorCommandRepositoryError as exc:
@@ -582,54 +440,27 @@ class SupervisorService:
     def receipt_status(self, command_id: str) -> dict:
         """Return a bounded operator view of one command's current receipt."""
         self._expire_stale()
-        if self._command_repository is not None:
-            try:
-                row = self._command_repository.find_command(str(command_id or ""))
-            except SupervisorCommandRepositoryError as exc:
-                raise SupervisorServiceError(exc.code, "", 503) from exc
-            if row is None:
-                raise SupervisorServiceError("command_not_found", "", 404)
-            return {"command_id": row["command_id"], "action": row["action"],
-                    "status": row["receipt_status"] or row["status"],
-                    "reason": row["receipt_reason"] or "", "issued_at": _iso(row["issued_s"]),
-                    "expires_at": _iso(row["expires_s"]), "attempt_id": row["attempt_id"],
-                    "machine_id": row["machine"], "session_id": row["session_id"]}
-        row = self._commands.get(str(command_id or ""))
+        try:
+            row = self._command_repository.find_command(str(command_id or ""))
+        except SupervisorCommandRepositoryError as exc:
+            raise SupervisorServiceError(exc.code, "", 503) from exc
         if row is None:
             raise SupervisorServiceError("command_not_found", "", 404)
-        return {
-            "command_id": row.command_id,
-            "action": row.action,
-            "status": row.receipt_status or row.status,
-            "reason": row.receipt_reason or "",
-            "issued_at": _iso(row.issued_s),
-            "expires_at": _iso(row.expires_s),
-            "attempt_id": row.attempt_id,
-            "machine_id": row.machine,
-            "session_id": row.session_id,
-        }
+        return {"command_id": row["command_id"], "action": row["action"],
+                "status": row["receipt_status"] or row["status"],
+                "reason": row["receipt_reason"] or "", "issued_at": _iso(row["issued_s"]),
+                "expires_at": _iso(row["expires_s"]), "attempt_id": row["attempt_id"],
+                "machine_id": row["machine"], "session_id": row["session_id"]}
 
     # ------------------------------------------------------------------
     # audit helpers
     # ------------------------------------------------------------------
 
     def audit_recent(self, limit: int = 200) -> list[dict]:
-        if self._command_repository is not None:
-            try:
-                return self._command_repository.audit_recent(limit=limit)
-            except SupervisorCommandRepositoryError as exc:
-                raise SupervisorServiceError(exc.code, "", 503) from exc
         try:
-            return self._audit.read(limit=limit)
-        except (TypeError, ValueError) as exc:
-            raise SupervisorServiceError("audit_unavailable", "", 503) from exc
-
-    def _note(self, row: dict) -> None:
-        self._audit.emit(row)
-
-
-def _bounded_target_key(session_id: str, attempt_id: str | None) -> str:
-    return f"{session_id}|{attempt_id or ''}"
+            return self._command_repository.audit_recent(limit=limit)
+        except SupervisorCommandRepositoryError as exc:
+            raise SupervisorServiceError(exc.code, "", 503) from exc
 
 
 def canonical_command_bytes(body: dict) -> bytes:
@@ -644,7 +475,6 @@ def is_control_action(action: str) -> bool:
 
 __all__ = [
     "AuditStore",
-    "SupervisorCommand",
     "SupervisorService",
     "SupervisorServiceError",
     "canonical_command_bytes",

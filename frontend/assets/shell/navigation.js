@@ -15,6 +15,12 @@ const labels = {
   'session-search': ['会话搜索', '会话搜索', '搜索脱敏会话记录，定位消息与工具结果。', 'SESSION SEARCH'],
   usage: ['用量看板', '用量看板', '按日期、项目、机器、Agent 和模型查看用量与费用来源。', 'USAGE'],
 };
+// The single allow-list of pages a non-admin account may open. Click/history
+// navigation and the post-login guard both consult it, so they cannot drift.
+export const ACCOUNT_PAGES = Object.freeze(['assistant', 'account', 'usage', 'muse']);
+export function isPageAllowedForAccount(page, account) {
+  return !account || account.role === 'admin' || ACCOUNT_PAGES.includes(page);
+}
 export function resolveRoute(location = window.location) {
   const parts = location.pathname.split('/').filter(Boolean);
   const query = new URLSearchParams(location.search);

@@ -44,7 +44,9 @@ def test_git_diff_marker_is_inside_utf8_budget(repository: Path, kind: str) -> N
 
 def fake_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: str) -> None:
     binary = tmp_path / "git-fixture.py"
+    (tmp_path / ".git").mkdir(exist_ok=True)
     binary.write_text("import os, sys, time\n"
+                      "while sys.argv[1] == '-c':\n    del sys.argv[1:3]\n"
                       "if sys.argv[1] == 'add':\n    sys.exit(0)\n" + script,
                       encoding="utf-8")
     run, bounded = worktree.run_local, worktree.run_bounded

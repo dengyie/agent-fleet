@@ -56,7 +56,7 @@ class TaskCreateTests(TaskStoreTestBase):
         task_store.init_db()  # 不抛异常
         task, created = self._create()
         self.assertTrue(created)
-        self.assertTrue((self.temp_dir / "fleet.db.corrupt").exists())
+        self.assertTrue(list(self.temp_dir.glob("fleet.db.corrupt-*")))
 
     def test_oversized_instruction_is_truncated_to_2000(self):
         task, created = self._create(instruction="x" * 5000)

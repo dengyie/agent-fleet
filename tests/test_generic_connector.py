@@ -37,4 +37,4 @@ def test_old_collect_behavior_is_preserved(monkeypatch):
     connector = GenericConnector()
     assert connector.pattern == "claude|codex|astrbot|openclaw|opencode|aider"
     assert callable(connector.collect)
-    assert callable(connector.control)
+    assert not hasattr(connector, "control")  # push-only：管控死代码已删除

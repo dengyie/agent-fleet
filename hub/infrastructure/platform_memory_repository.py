@@ -14,6 +14,8 @@ from platform_schema import validate_id, validate_owner_id
 from hub.domain.memory import (
     MEMORY_KINDS, MAX_TITLE, MAX_CONTENT_BYTES, MAX_TAGS, MAX_TAG_BYTES, MAX_SOURCE,
 )
+from hub.infrastructure.sqlite import connect as sqlite_connect
+
 MAX_QUERY = 512
 MAX_RESULT = 100
 
@@ -107,11 +109,7 @@ class PlatformMemoryRepository:
         self.clock = clock
 
     def _connect(self):
-        conn = sqlite3.connect(str(self.db_path), timeout=10, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        return sqlite_connect(self.db_path, timeout=10)
 
     def init(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

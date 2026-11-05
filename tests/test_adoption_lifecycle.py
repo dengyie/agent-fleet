@@ -212,8 +212,9 @@ def test_adopt_receipt_wrong_reason_never_promotes(tmp_path):
     cid = _last_cmd_id(service)
     result = service.on_supervisor_receipt(
         cid, status="rejected", reason="pid_reused")
-    assert result["handled"] is False
-    assert service.adoption_repo.get(row.session_id).status == "pending"
+    # never promoted: a terminal refusal closes the pending seat instead.
+    assert result["outcome"] == "rejected"
+    assert service.adoption_repo.get(row.session_id).status == "revoked"
 
 
 def test_untracked_receipt_is_inert(tmp_path):

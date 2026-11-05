@@ -95,6 +95,8 @@ def test_account_mode_off_leaves_legacy_identity(tmp_path):
 def test_stream_stops_after_session_revocation(account_app):
     from flask import Response
     app, _ = account_app
+    # 复核间隔归零：每个 chunk 前都复核（生产默认 30s 一次）。
+    app.config['ACCOUNT_STREAM_REVALIDATE_S'] = 0
     app.extensions['accounts'].bootstrap_admin('admin@example.test', PASSWORD)
     @app.get('/api/test-stream')
     def test_stream():

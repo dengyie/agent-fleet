@@ -5,6 +5,7 @@ from flask import Blueprint, current_app, g, jsonify, request
 
 from hub.auth import require_operator
 from hub.http.errors import ApplicationError, error_response, get_request_id
+from hub.http._common import json_object as _json_object
 from hub.infrastructure.platform_db import PlatformRepositoryError
 from platform_schema import PlatformValidationError
 
@@ -30,13 +31,6 @@ def _postcheck():
     if service is None:
         raise ApplicationError("platform_store", "命令 post-check 不可用", 503)
     return service
-
-
-def _json_object():
-    body = request.get_json(silent=True)
-    if not isinstance(body, dict):
-        raise ApplicationError("invalid_json", "请求体必须是 JSON 对象", 400)
-    return body
 
 
 def _expected_revision(body=None) -> int:

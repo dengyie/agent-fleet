@@ -32,7 +32,17 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-test.txt
+          # requirements-lock.txt pins the full transitive set of the
+          # test requirements (regenerate: see header of the lock file).
+          pip install -r requirements-lock.txt
+          pip install ruff==0.17.3 pip-audit==2.10.1
+      - name: Lint Python (syntax errors and undefined names)
+        # F401：有意的再导出用 ``# noqa: F401`` 标注原因（兼容门面/包级 API）。
+        run: ruff check --select E9,F63,F7,F82,F401 hub tools connectors
+      - name: Lint deploy shell scripts
+        run: shellcheck --shell=bash --severity=error deploy/*.sh
+      - name: Audit pinned dependencies
+        run: pip-audit -r requirements-lock.txt --disable-pip --no-deps --strict
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -78,7 +88,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-test.txt
+          pip install -r requirements-lock.txt
       - name: Run Windows process and workspace tests
         env:
           PYTHONPATH: .

@@ -45,6 +45,7 @@ from hub.application.adoption_service import (
 from hub.application.supervisor_service import SupervisorServiceError
 from hub.auth import require_operator
 from hub.http.errors import ApplicationError, error_response, get_request_id
+from hub.http._common import json_object_or_error as _json_object
 from hub.infrastructure.adoption_repository import AdoptionRepositoryError
 
 bp = Blueprint("adoptions", __name__)
@@ -70,16 +71,6 @@ def _adoptions() -> AdoptionService:
     if service is None:
         raise RuntimeError("adoptions service not wired")
     return service
-
-
-def _json_object() -> tuple[dict | None, object | None]:
-    data = request.get_json(silent=True)
-    if data is None:
-        return {}, None
-    if not isinstance(data, dict):
-        return None, error_response(ApplicationError(
-            "invalid_json", "请求体必须是 JSON 对象", 400))
-    return data, None
 
 
 def _project(record) -> dict:

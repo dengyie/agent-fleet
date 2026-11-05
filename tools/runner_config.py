@@ -174,8 +174,9 @@ def load_config(path=DEFAULT_CONFIG_PATH):
         supervisor_manifest_dir=supervisor_manifest_dir,
         supervisor_credential=supervisor_credential,
         supervisor_public_key=supervisor_public_key,
-        poll_interval_s=_to_int(data.get("poll_interval_s"), 15, "poll_interval_s", allow_zero=True),
-        heartbeat_interval_s=_to_int(data.get("heartbeat_interval_s"), 30, "heartbeat_interval_s", allow_zero=True),
+        # 间隔下限 1s：0/负数会让 poll / heartbeat 循环空转打满 hub。
+        poll_interval_s=max(1, _to_int(data.get("poll_interval_s"), 15, "poll_interval_s", allow_zero=True)),
+        heartbeat_interval_s=max(1, _to_int(data.get("heartbeat_interval_s"), 30, "heartbeat_interval_s", allow_zero=True)),
         cache_dir=Path(str(data.get("cache_dir") or DEFAULT_CACHE_DIR)).expanduser(),
         transport=_build_transport(transport_cfg),
     )

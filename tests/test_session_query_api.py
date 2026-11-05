@@ -291,8 +291,9 @@ class SessionQueryDtoTests(SessionQueryTestBase):
         self.client.post("/api/session-events", json=[evt],
                          headers={"X-Agent-Fleet-Token": "ingest-secret"})
         body = self.client.get("/api/sessions/sess_q_3/events").get_json()
-        self.assertIn("sk-ABCDEF", str(body))
-        self.assertNotIn("[REDACTED:", str(body))
+        # 正文透传给 operator，但 token= 赋值属 secret 形态，入库前已脱敏。
+        self.assertNotIn("sk-ABCDEF", str(body))
+        self.assertIn("token=[REDACTED:credential]", str(body))
 
     def test_unmanaged_session_dto_best_effort(self):
         evt = _event(1, session_id="sess_unmanaged", group=None, attempt=None,

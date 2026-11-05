@@ -7,13 +7,18 @@ result persistence semantics. It does not depend on Flask or module globals.
 
 import contextlib
 import json
+import logging
 import os
 import sqlite3
 import time
 import uuid
 from pathlib import Path
+from hub.domain.task import (
+    TASK_STATES, can_cancel, can_continue, can_pause, can_retry, holds_lease,
+)
+from hub.infrastructure.sqlite import connect as sqlite_connect
 from hub.domain.task_result import (
-    MAX_DIFF_PATCH, MAX_TEST_SUMMARY, bound_patch,
+    bound_patch,
     normalize_test_summary as _normalize_test_summary,
 )
 
@@ -23,11 +28,16 @@ from hub.domain.handoff import HandoffConflict
 LEASE_TTL_S = 300
 TASK_TTL_S = 24 * 3600
 SQLITE_CONNECT_TIMEOUT_S = 10.0
-AGENT_TYPES = ("codex", "claude_code", "hermes")
-TASK_STATES = (
-    "queued", "leased", "running", "paused",
-    "succeeded", "failed", "cancelled", "expired",
-)
+
+_log = logging.getLogger(__name__)
+
+
+def _sql_in(states) -> str:
+    """Render a domain state tuple as a literal SQL ``IN (...)`` list."""
+    return "(" + ",".join("'" + s + "'" for s in states) + ")"
+
+
+_TASK_STATES_SQL = _sql_in(TASK_STATES)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -38,7 +48,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   project TEXT NOT NULL,
   instruction TEXT NOT NULL CHECK(length(instruction) <= 2000),
   requested_by TEXT NOT NULL,
-  state TEXT NOT NULL CHECK(state IN ('queued','leased','running','paused','succeeded','failed','cancelled','expired')),
+  state TEXT NOT NULL CHECK(state IN """ + _TASK_STATES_SQL + """),
   attempt_id TEXT NOT NULL,
   created_at TEXT NOT NULL,
   expires_at TEXT NOT NULL
@@ -129,33 +139,9 @@ class SqliteTaskRepository:
         self.db_path = Path(db_path)
 
     def _connect(self) -> sqlite3.Connection:
-        deadline = time.monotonic() + SQLITE_CONNECT_TIMEOUT_S
-        while True:
-            conn = sqlite3.connect(str(self.db_path),
-                                   timeout=max(0.0, deadline - time.monotonic()),
-                                   isolation_level=None)
-            try:
-                conn.row_factory = sqlite3.Row
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA foreign_keys=ON")
-                return conn
-            except sqlite3.OperationalError as exc:
-                conn.close()
-                code = getattr(exc, "sqlite_errorcode", None)
-                locked = (code & 0xff) in (5, 6) if code is not None else str(exc) in (
-                    "database is locked", "database table is locked",
-                )
-                remaining = deadline - time.monotonic()
-                if not locked or remaining <= 0:
-                    raise
-                # WAL negotiation can fail immediately despite busy_timeout.
-                # Retry only this idempotent setup, after releasing all locks.
-                time.sleep(min(0.01, remaining))
-                if time.monotonic() >= deadline:
-                    raise
-            except BaseException:
-                conn.close()
-                raise
+        # WAL negotiation can fail immediately despite busy_timeout; the shared
+        # helper retries only the idempotent setup until the deadline.
+        return sqlite_connect(self.db_path, timeout=SQLITE_CONNECT_TIMEOUT_S)
 
 
     def init(self) -> None:
@@ -175,7 +161,7 @@ class SqliteTaskRepository:
                     raise
                 ok = False
             if not ok:
-                os.replace(self.db_path, self.db_path.with_name(self.db_path.name + ".corrupt"))
+                self._quarantine_corrupt_database()
         conn = self._connect()
         try:
             # Disable FK enforcement only on this initialization connection;
@@ -188,6 +174,34 @@ class SqliteTaskRepository:
                 self._migrate_schema(conn)
         finally:
             conn.close()
+
+    def _quarantine_corrupt_database(self) -> None:
+        """Move the corrupt db and its -wal/-shm sidecars aside together.
+
+        Leaving a stale ``-wal`` next to the rebuilt database would let SQLite
+        replay old frames into the fresh file. Every quarantine gets a unique
+        timestamped suffix so a second corruption never overwrites evidence.
+        """
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        suffix = ".corrupt-" + stamp
+        n = 0
+        while any(
+            self.db_path.with_name(self.db_path.name + sidecar + suffix).exists()
+            for sidecar in ("", "-wal", "-shm")
+        ):
+            n += 1
+            suffix = f".corrupt-{stamp}-{n}"
+        moved = []
+        for sidecar in ("", "-wal", "-shm"):
+            source = self.db_path.with_name(self.db_path.name + sidecar)
+            target = source.with_name(source.name + suffix)
+            try:
+                os.replace(source, target)
+            except FileNotFoundError:
+                continue
+            moved.append(target.name)
+        _log.error("task database failed integrity check; quarantined as %s and rebuilt",
+                   ", ".join(moved) or "(nothing)")
 
     def _migrate_schema(self, conn: sqlite3.Connection) -> None:
         """Apply v4 changes inside init's serialized schema transaction.
@@ -227,8 +241,7 @@ class SqliteTaskRepository:
                 " project TEXT NOT NULL,"
                 " instruction TEXT NOT NULL CHECK(length(instruction) <= 2000),"
                 " requested_by TEXT NOT NULL,"
-                " state TEXT NOT NULL CHECK(state IN "
-                "('queued','leased','running','paused','succeeded','failed','cancelled','expired')),"
+                " state TEXT NOT NULL CHECK(state IN " + _TASK_STATES_SQL + "),"
                 " attempt_id TEXT NOT NULL,"
                 " created_at TEXT NOT NULL,"
                 " expires_at TEXT NOT NULL)"
@@ -436,13 +449,16 @@ class SqliteTaskRepository:
         最新 attempt、或任务已被取消/完成/过期（非 leased/running）时返回 None 且不扫延。
         """
         now = time.time() if now is None else now
-        now_iso = _iso(now)
         conn = self._connect()
         try:
             with _tx(conn):
                 lease = conn.execute("SELECT * FROM leases WHERE attempt_id=?",
                                      (attempt_id,)).fetchone()
-                if not lease or lease["nonce"] != nonce or lease["expires_at"] <= now_iso:
+                # 栅栏是 attempt_id + nonce + 任务仍 leased/running，而不是墙钟：
+                # TTL 已过但 expire_leases 尚未回收（任务未回 queued、未被重派）时，
+                # 当前 attempt 仍是唯一持有者，续租必须成功，否则 sweep 间隙内的
+                # 慢心跳会被误判为租约丢失。
+                if not lease or lease["nonce"] != nonce:
                     return None
                 # 仅接受当前 attempt + 任务仍 leased/running：取消后旧 lease 的心跳必须失败，
                 # 否则 cancel 的 lease 失效语义被心跳击穿（lease 行会被顺延）。
@@ -452,7 +468,7 @@ class SqliteTaskRepository:
                     return None
                 if machine is not None and task["machine"] != machine:
                     return None
-                if task["state"] not in ("leased", "running"):
+                if not holds_lease(task["state"]):
                     return None
                 new_exp = _iso(now + extend_s)
                 conn.execute("UPDATE leases SET expires_at=? WHERE attempt_id=?",
@@ -473,7 +489,9 @@ class SqliteTaskRepository:
         ``files`` 是 runner 附带的有界快照（调用方已 sanitize）；幂等
         重交不替换已落库快照。
 
-        仅接受「当前 attempt + 任务仍 leased/running + lease 未过期」的完成；
+        仅接受「当前 attempt + nonce + 任务仍 leased/running」的完成：lease TTL
+        已过但 expire_leases 尚未把任务打回 queued 时仍接受（无人可能接手）；
+        一旦被回收/重派，attempt 或状态不再匹配即拒绝。
         同一 attempt 重复提交直接返回已落库状态（幂等），不被过期/陈旧 attempt 覆写。
         """
         log_summary = (log_summary or "")[:10240]
@@ -488,7 +506,6 @@ class SqliteTaskRepository:
             if summary_obj is not None else None
         )
         now = time.time() if now is None else now
-        now_iso = _iso(now)
         conn = self._connect()
         try:
             with _tx(conn):
@@ -509,14 +526,12 @@ class SqliteTaskRepository:
                 if existing:
                     persisted = "succeeded" if int(existing["exit_code"]) == 0 else "failed"
                     return {"task_id": existing["task_id"], "state": persisted, "stored": False}
-                # 仅接受当前 attempt：任务 attempt_id==此次、状态 leased/running、lease 未过期
+                # 仅接受当前 attempt：任务 attempt_id==此次、状态 leased/running
                 task = conn.execute("SELECT * FROM tasks WHERE task_id=?",
                                     (lease["task_id"],)).fetchone()
                 if not task or task["attempt_id"] != attempt_id:
                     return None
-                if task["state"] not in ("leased", "running"):
-                    return None
-                if lease["expires_at"] <= now_iso:
+                if not holds_lease(task["state"]):
                     return None
                 state = "succeeded" if int(exit_code) == 0 else "failed"
                 conn.execute(
@@ -609,7 +624,7 @@ class SqliteTaskRepository:
                     task = conn.execute(
                         "SELECT state FROM tasks WHERE task_id=? AND attempt_id=?",
                         (lease["task_id"], lease["attempt_id"])).fetchone()
-                    if task and task["state"] in ("leased", "running"):
+                    if task and holds_lease(task["state"]):
                         conn.execute("UPDATE tasks SET state='queued' WHERE task_id=?",
                                      (lease["task_id"],))
                         _audit(conn, "hub", "lease_expired", lease["task_id"],
@@ -649,7 +664,7 @@ class SqliteTaskRepository:
                 row = conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
                 if not row:
                     return None, False
-                if row["state"] not in ("queued", "leased", "running", "paused"):
+                if not can_cancel(row["state"]):
                     return dict(row), False
                 conn.execute("UPDATE tasks SET state='cancelled' WHERE task_id=?", (task_id,))
                 _audit(conn, actor, "cancel_task", task_id, {"from": row["state"]}, now)
@@ -671,11 +686,16 @@ class SqliteTaskRepository:
                 row = conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
                 if not row:
                     return None, False
-                if row["state"] not in ("succeeded", "failed", "cancelled", "expired"):
+                if not can_retry(row["state"]):
                     return dict(row), False
                 conn.execute(
                     "UPDATE tasks SET state='queued', attempt_id=?, expires_at=? WHERE task_id=?",
                     (uuid.uuid4().hex, _iso(now + TASK_TTL_S), task_id))
+                # 被拒绝的派发闸门在重试时重新进入 pending：否则 lease_task 永远跳过
+                # 该任务（gate=rejected），confirm 也因非 pending 失败，任务卡死在 queued。
+                conn.execute(
+                    "UPDATE task_gates SET state='pending', decided_by=NULL, decided_at=NULL"
+                    " WHERE task_id=? AND state='rejected'", (task_id,))
                 _audit(conn, actor, "retry_task", task_id, {"from": row["state"]}, now)
             out = dict(row)
             out["state"] = "queued"
@@ -702,7 +722,7 @@ class SqliteTaskRepository:
                     "SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
                 if not row:
                     return None, False
-                if row["state"] not in ("queued", "leased", "running"):
+                if not can_pause(row["state"]):
                     return dict(row), False
                 conn.execute(
                     "UPDATE tasks SET state='paused' WHERE task_id=?", (task_id,))
@@ -723,7 +743,7 @@ class SqliteTaskRepository:
                     "SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
                 if not row:
                     return None, False
-                if row["state"] != "paused":
+                if not can_continue(row["state"]):
                     return dict(row), False
                 attempt_id = uuid.uuid4().hex
                 conn.execute(

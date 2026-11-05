@@ -41,8 +41,16 @@ globalThis.window = { dispatchEvent() {}, FleetConfig: {apiBaseUrl: origin + '/a
 const realFetch = globalThis.fetch;
 const requests = [];
 const replies = [];
+const runPolls = [];
 globalThis.fetch = async (url, options) => {
+  if (/\/runs\/[^/?]+(\/events)?(\?|$)/.test(String(url))) runPolls.push(String(url));
   const response = await realFetch(url, options);
+  if (scenario === 'suspend' && /\/runs\/[^/?]+(\?|$)/.test(String(url)) && response.ok) {
+    // Pin the Run as active so only suspend/resume can stop the tracker.
+    const body = await response.json();
+    if (body.run) body.run.state = 'running'; else body.state = 'running';
+    return new Response(JSON.stringify(body), {status: response.status, headers: response.headers});
+  }
   if (String(url).endsWith('/turns')) {
     requests.push(JSON.parse(options.body));
     const body = await response.clone().json();
@@ -56,7 +64,7 @@ globalThis.fetch = async (url, options) => {
 };
 const {mountAssistant} = await import(pathToFileURL(modulePath));
 const root = new Element('main');
-mountAssistant(root);
+const teardown = mountAssistant(root);
 function find(predicate, node = root) {
   if (predicate(node)) return node;
   for (const child of node.children) { const result = find(predicate, child); if (result) return result; }
@@ -83,5 +91,19 @@ if (scenario === 'retry') {
   await submit();
 }
 await until(() => replies.length === (scenario === 'retry' ? 2 : 1));
+if (scenario === 'suspend') {
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  await until(() => runPolls.length >= 2);
+  teardown.suspend();
+  await sleep(300); // let an in-flight poll settle
+  const suspendedAt = runPolls.length;
+  await sleep(2600); // > 2 poll intervals of 1.2s
+  const whileSuspended = runPolls.length - suspendedAt;
+  teardown.resume();
+  await until(() => runPolls.length > suspendedAt + whileSuspended);
+  teardown();
+  console.log(JSON.stringify({requests, replies, text: root.textContent, whileSuspended, resumed: true}));
+  process.exit(0);
+}
 console.log(JSON.stringify({requests, replies, text: root.textContent}));
 process.exit(0);

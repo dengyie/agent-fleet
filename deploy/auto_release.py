@@ -16,6 +16,9 @@ MANAGED = (
     'report_schema.py', 'session_schema.py', 'platform_schema.py', 'RELEASE_ORIGIN',
     'connectors', 'hub', 'tools', 'deploy', 'docs', 'tests',
 )
+# Live operator config kept by every deploy. Older bundles may still carry
+# these at the backend root; they are tolerated but never copied.
+RUNTIME_FILES = ('fleet-gates.conf',)
 REQUIRED = ('hub/web.py', 'hub/bootstrap.py', 'requirements.txt', 'platform_schema.py', 'RELEASE_ORIGIN')
 MAX_ARCHIVE = 128 * 1024 * 1024
 MAX_EXPANDED = 512 * 1024 * 1024
@@ -54,7 +57,7 @@ def safe_extract(archive, target, *, bundle=False):
                     or not (member.isfile() or member.isdir())):
                 raise DeployError('unsafe_archive_member')
             seen.add(member.name)
-            allowed = ('backend', 'frontend', 'release.json') if bundle else (*MANAGED, 'fleet-gates.conf')
+            allowed = ('backend', 'frontend', 'release.json') if bundle else (*MANAGED, *RUNTIME_FILES)
             if path.parts[0] not in allowed:
                 raise DeployError('unexpected_archive_root')
         for member in members:
@@ -76,7 +79,7 @@ def validate_stage(stage, sha, run):
     backend, frontend = stage / 'backend', stage / 'frontend'
     if any(not (backend / path).is_file() for path in REQUIRED):
         raise DeployError('incomplete_backend')
-    if {p.name for p in backend.iterdir()} - set((*MANAGED, 'fleet-gates.conf')):
+    if {p.name for p in backend.iterdir()} - set((*MANAGED, *RUNTIME_FILES)):
         raise DeployError('runtime_in_backend')
     origin = dict(line.split(': ', 1) for line in (backend / 'RELEASE_ORIGIN').read_text().splitlines())
     if origin.get('commit') != sha or origin.get('run') != str(run):
@@ -149,6 +152,60 @@ def backup_databases(live, destination, paths):
                     raise DeployError('database_backup_invalid')
 
 
+def schema_version(path):
+    """Schema marker of one SQLite database: meta.schema_version, else user_version.
+
+    An unreadable database (e.g. left half-migrated) yields a sentinel that
+    never equals a readable version, so rollback treats it as changed.
+    """
+    try:
+        with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5) as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone():
+                row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+                if row is not None:
+                    return ('meta', str(row[0]))
+            return ('user_version', db.execute('PRAGMA user_version').fetchone()[0])
+    except sqlite3.Error:
+        return ('unreadable', None)
+
+
+def changed_schema_databases(live, saved, paths):
+    """Databases whose live schema differs from the pre-deploy backup copy."""
+    return [relative for relative in paths
+            if schema_version(live / relative) != schema_version(saved / relative)]
+
+
+def restore_databases(live, saved, aside, paths, *, uid=None, gid=None):
+    """Replace live databases with their backups; keep the replaced files aside.
+
+    Only used when the failed release changed a schema the old code cannot open
+    (newer schema_version => unsupported_schema_version).  Rows written by the
+    failed release are preserved in ``aside`` for manual recovery.
+    """
+    for relative in paths:
+        path = live / relative
+        if path.is_symlink() or not path.resolve().is_relative_to(live.resolve()):
+            raise DeployError('database_unavailable')
+        temporary = path.with_name(f'.{path.name}.restore')
+        shutil.copy2(saved / relative, temporary)
+        with temporary.open('rb') as stream:
+            os.fsync(stream.fileno())
+        target = aside / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        for suffix in ('', '-wal', '-shm', '-journal'):
+            sidecar = path.with_name(path.name + suffix)
+            if sidecar.exists():
+                shutil.move(sidecar, target.with_name(target.name + suffix))
+        if uid is not None:
+            os.chown(temporary, uid, gid)
+        temporary.replace(path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
 def tree_digest(root):
     return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in root.rglob('*') if p.is_file()}
@@ -200,12 +257,14 @@ class Deployment:
             atomic_json(pending, record)
             changed = False
             stopping = False
+            databases_saved = False
             try:
                 self.hooks.maintenance()
                 self.hooks.idle()  # Recheck after public admissions have stopped.
                 stopping = True
                 self.hooks.stop()
                 backup_databases(self.live, backup / 'databases', self.config['databases'])
+                databases_saved = True
                 record['phase'] = 'copying'
                 atomic_json(pending, record)
                 changed = True  # Copy failure can leave only part of the new tree.
@@ -235,6 +294,16 @@ class Deployment:
                         self.hooks.stop()
                         if changed:
                             copy_managed(code, self.live, uid=self.config.get('uid'), gid=self.config.get('gid'))
+                        # 默认保留新版本写入的数据(SOP)；但若新版本已升级 schema，
+                        # 旧代码会以 unsupported_schema_version 拒绝启动，只能回到备份。
+                        if databases_saved:
+                            migrated = changed_schema_databases(
+                                self.live, backup / 'databases', self.config['databases'])
+                            if migrated:
+                                restore_databases(
+                                    self.live, backup / 'databases', backup / 'failed-databases',
+                                    migrated, uid=self.config.get('uid'), gid=self.config.get('gid'))
+                                record['restored_databases'] = migrated
                         self.hooks.start()
                         self.hooks.verify(old_sha)
                         self.hooks.publish(None)

@@ -123,7 +123,7 @@ def test_domain_exports_validators_and_quality_set():
 def test_allowed_old_statuses_are_lifecycle_chain():
     assert allowed_old_statuses("pending") == ("pending",)
     assert allowed_old_statuses("adopted") == ("pending", "adopted")
-    assert allowed_old_statuses("revoked") == ("adopted", "revoked")
+    assert allowed_old_statuses("revoked") == ("pending", "adopted", "revoked")
     with pytest.raises(ValueError):
         allowed_old_statuses("nope")
 
@@ -192,7 +192,7 @@ TRANSITION_TABLE = [
     ("adopted", "adopted", True),
     ("adopted", "revoked", True),
     ("revoked", "revoked", True),
-    ("pending", "revoked", False),   # must go through adopted first
+    ("pending", "revoked", True),    # rejected / cancelled pending seat
     ("adopted", "pending", False),   # regression
     ("revoked", "adopted", False),   # revoked is terminal
     ("revoked", "pending", False),
@@ -446,13 +446,13 @@ def test_revoke_cas_captures_adopted_transition(tmp_path):
     assert again.status == "revoked"
 
 
-def test_revoke_cas_pending_is_blocked(tmp_path):
+def test_revoke_cas_pending_is_captured(tmp_path):
     repo = ready_repo(tmp_path)
     row = repo.upsert(adoption_dict(status="pending"))
-    with pytest.raises(AdoptionRepositoryError) as exc:
-        repo.revoke_cas(row.session_id)
-    assert exc.value.code == "invalid_status_transition"
-    assert repo.get(row.session_id).status == "pending"
+    revoked, captured = repo.revoke_cas(row.session_id)
+    assert captured is True and revoked.status == "revoked"
+    _again, captured_again = repo.revoke_cas(row.session_id)
+    assert captured_again is False
 
 
 def test_revoke_cas_missing_is_bounded(tmp_path):
@@ -534,16 +534,17 @@ def test_upsert_follows_status_chain_in_steps(tmp_path):
     assert repo.get("adopt_chain1").status == "revoked"
 
 
-def test_upsert_rejects_skipping_pending_to_revoked(tmp_path):
+def test_upsert_rejects_regressing_revoked_to_pending(tmp_path):
     repo = ready_repo(tmp_path)
-    repo.upsert(adoption_dict(session_id="adopt_skip", pid=100))
+    repo.upsert(adoption_dict(session_id="adopt_skip", pid=100,
+                              status="revoked"))
     with pytest.raises(AdoptionRepositoryError) as exc:
         repo.upsert(adoption_dict(session_id="adopt_skip", pid=200,
-                                  status="revoked"))
+                                  status="pending"))
     assert exc.value.code == "invalid_status_transition"
     # atomic: neither status nor any other field changed
     stored = repo.get("adopt_skip")
-    assert stored.status == "pending"
+    assert stored.status == "revoked"
     assert stored.pid == 100
 
 

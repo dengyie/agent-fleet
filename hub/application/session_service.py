@@ -134,81 +134,117 @@ class SessionService:
         projected_events: dict[str, list[str]] = {}
         search_diagnostic = None
         stored_count = 0
+        # 批内合并会话侧写入：同一 spec 只 upsert 一次、流状态只初始化一次，
+        # 观测游标与摘要推送在批末各一次（原先每个事件各开 4 个连接、3 次提交）。
+        bound_specs: dict[tuple, dict] = {}
+        noted_sequences: dict[str, int] = {}
+        last_noted_event: dict[str, tuple[str, str]] = {}
+        publish_event: Mapping | None = None
+        loop_completed = False
 
-        for index, raw in enumerate(events):
-            if not isinstance(raw, Mapping):
-                rejected.append({"index": index, "code": "invalid_event"})
-                continue
-            ok, clean = try_validate_event(raw)
-            if not ok:
-                rejected.append({"index": index, "code": clean})
-                continue
+        try:
+            for index, raw in enumerate(events):
+                if not isinstance(raw, Mapping):
+                    rejected.append({"index": index, "code": "invalid_event"})
+                    continue
+                ok, clean = try_validate_event(raw)
+                if not ok:
+                    rejected.append({"index": index, "code": clean})
+                    continue
 
-            # Exact is a source capability claim, not an event-controlled
-            # quality value. Until a signed source grant is wired here,
-            # reject it before creating session or transcript rows.
-            if clean["capture_quality"] == "exact":
-                rejected.append({
-                    "index": index,
-                    "code": "capture_source_unverified",
-                })
-                continue
+                # Exact is a source capability claim, not an event-controlled
+                # quality value. Until a signed source grant is wired here,
+                # reject it before creating session or transcript rows.
+                if clean["capture_quality"] == "exact":
+                    rejected.append({
+                        "index": index,
+                        "code": "capture_source_unverified",
+                    })
+                    continue
 
-            session_id = clean["session_id"]
-            current_key = (session_id, clean["stream_id"])
-            if batch_key is None:
-                batch_key = current_key
-                stream_id = clean.get("stream_id")
-            elif current_key != batch_key:
-                rejected.append({"index": index, "code": "mixed_stream"})
-                continue
-            sequence = int(clean["sequence"])
-            try:
-                bound_session = self.session_repo.upsert_session(self._session_spec_from_event(clean))
-                if clean.get("kind") == "agent_state_changed" and not bound_session.get("managed"):
-                    clean["capture_quality"] = "best_effort"
-                    clean["payload"].update(state="unknown", confidence="low", reason="unmanaged_source")
-                self.session_repo.init_stream(session_id)
-                self.session_repo.note_event(
-                    session_id, clean["event_id"], sequence, clean["kind"])
-            except (SessionError, ValueError, TypeError):
-                # Session-binding failures are per-event; the request continues.
-                rejected.append({"index": index, "code": "invalid_session_binding"})
-                continue
-            except (sqlite3.Error, OSError) as exc:
-                # Session-store unavailability (locked / read-only / corrupt)
-                # is a bounded store failure, isolated from the legacy
-                # observation ingest route — never an unhandled 500.
-                raise SessionServiceError(
-                    "session_unavailable", "会话存储不可用，观测链路不受影响") from exc
+                session_id = clean["session_id"]
+                current_key = (session_id, clean["stream_id"])
+                if batch_key is None:
+                    batch_key = current_key
+                    stream_id = clean.get("stream_id")
+                elif current_key != batch_key:
+                    rejected.append({"index": index, "code": "mixed_stream"})
+                    continue
+                sequence = int(clean["sequence"])
+                try:
+                    spec = self._session_spec_from_event(clean)
+                    spec_key = tuple(sorted(spec.items()))
+                    bound_session = bound_specs.get(spec_key)
+                    if bound_session is None:
+                        bound_session = self.session_repo.upsert_session(spec)
+                        bound_specs[spec_key] = bound_session
+                    if clean.get("kind") == "agent_state_changed" and not bound_session.get("managed"):
+                        clean["capture_quality"] = "best_effort"
+                        clean["payload"].update(state="unknown", confidence="low", reason="unmanaged_source")
+                    if session_id not in noted_sequences:
+                        self.session_repo.init_stream(session_id)
+                        noted_sequences[session_id] = sequence
+                    elif sequence > noted_sequences[session_id]:
+                        noted_sequences[session_id] = sequence
+                    last_noted_event[session_id] = (clean["event_id"], clean["kind"])
+                except (SessionError, ValueError, TypeError):
+                    # Session-binding failures are per-event; the request continues.
+                    rejected.append({"index": index, "code": "invalid_session_binding"})
+                    continue
+                except (sqlite3.Error, OSError) as exc:
+                    # Session-store unavailability (locked / read-only / corrupt)
+                    # is a bounded store failure, isolated from the legacy
+                    # observation ingest route — never an unhandled 500.
+                    raise SessionServiceError(
+                        "session_unavailable", "会话存储不可用，观测链路不受影响") from exc
 
-            try:
-                result = self.transcript_repo.ingest(clean)
-            except Exception as exc:
-                # Transcript persistence failure is a bounded session error,
-                # isolated from the legacy observation ingest route.
-                raise SessionServiceError(
-                    "session_unavailable", "会话存储不可用，观测链路不受影响") from exc
+                try:
+                    result = self.transcript_repo.ingest(clean)
+                except Exception as exc:
+                    # Transcript persistence failure is a bounded session error,
+                    # isolated from the legacy observation ingest route.
+                    raise SessionServiceError(
+                        "session_unavailable", "会话存储不可用，观测链路不受影响") from exc
 
-            stored = result.status in ("accepted", "duplicate") or (
-                result.status == "gap" and result.reason != "raw_quota_exceeded")
-            if stored:
-                stored_count += 1
-                accepted_sequences.setdefault(session_id, set()).add(sequence)
-                if self.search_service is not None and clean.get("kind") in {
-                    "user_message", "assistant_message", "tool_call", "tool_result"
-                }:
-                    search_events.setdefault(session_id, []).append(clean["event_id"])
-                if clean.get("kind") in {"agent_state_changed", "interaction_request",
-                        "interaction_response", "session_start", "session_metadata", "session_close"}:
-                    projected_events.setdefault(session_id, []).append(clean["event_id"])
-                if clean.get("kind") == "session_close":
-                    self._close_session_from_event(clean)
-                if result.status != "duplicate":
-                    self._publish_session_summary(clean)
-            else:
-                rejected.append({"index": index,
-                                 "code": result.reason or "rejected"})
+                stored = result.status in ("accepted", "duplicate") or (
+                    result.status == "gap" and result.reason != "raw_quota_exceeded")
+                if stored:
+                    stored_count += 1
+                    accepted_sequences.setdefault(session_id, set()).add(sequence)
+                    if self.search_service is not None and clean.get("kind") in {
+                        "user_message", "assistant_message", "tool_call", "tool_result"
+                    }:
+                        search_events.setdefault(session_id, []).append(clean["event_id"])
+                    if clean.get("kind") in {"agent_state_changed", "interaction_request",
+                            "interaction_response", "session_start", "session_metadata", "session_close"}:
+                        projected_events.setdefault(session_id, []).append(clean["event_id"])
+                    if clean.get("kind") == "session_close":
+                        self._close_session_from_event(clean)
+                    if result.status != "duplicate":
+                        publish_event = clean
+                else:
+                    rejected.append({"index": index,
+                                     "code": result.reason or "rejected"})
+            loop_completed = True
+        finally:
+            # 批末一次推进观测游标（取批内最大序号）；即使批中途因存储故障
+            # 中止，也补记已登记的事件，与旧的逐事件 note_event 行为一致。
+            loop_failed = not loop_completed
+            for noted_session_id, max_sequence in noted_sequences.items():
+                event_id, kind = last_noted_event[noted_session_id]
+                try:
+                    self.session_repo.note_event(
+                        noted_session_id, event_id, max_sequence, kind)
+                except (SessionError, sqlite3.Error, OSError, ValueError,
+                        TypeError) as exc:
+                    if loop_failed:
+                        continue
+                    raise SessionServiceError(
+                        "session_unavailable", "会话存储不可用，观测链路不受影响") from exc
+
+        # 摘要推送按批合并：只推最后一条新存储事件（前端按最大游标取值）。
+        if publish_event is not None:
+            self._publish_session_summary(publish_event)
 
         for projected_session_id, ids in projected_events.items():
             self._project_events(projected_session_id, ids)

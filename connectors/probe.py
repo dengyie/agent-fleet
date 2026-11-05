@@ -21,7 +21,6 @@ class ProbeContext:
         self.machine = machine
         self.local = True
         self.timeout = timeout
-        self.inner_reachable = True
 
     def run(self, cmd):
         shell = resolve_bash()
@@ -57,16 +56,3 @@ class ProbeContext:
         except (subprocess.TimeoutExpired, OSError,
                 subprocess.SubprocessError, ValueError):
             return "{}"
-
-    def run_batch(self, cmds):
-        script = "; ".join(f"echo __CMD__={i}; {cmd}" for i, cmd in enumerate(cmds))
-        return self.run(script)
-
-    def kill_gateway(self):
-        return {"ok": False, "message": "push-only 模式不提供远程进程控制"}
-
-    def restart_process(self, pattern):
-        return {"ok": False, "message": "push-only 模式不提供远程进程控制"}
-
-    def tmux_send(self, session, cmd):
-        return {"ok": False, "message": "push-only 模式不提供远程进程控制"}

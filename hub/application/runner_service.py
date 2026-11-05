@@ -20,6 +20,7 @@ import logging
 
 from hub.application.task_service import ApplicationError
 from tools.result_files import redact_patch, sanitize_files
+from tools.session.redact import redact_secrets_text
 from hub.domain.task_result import PatchError, TestSummaryError, normalize_test_summary
 
 logger = logging.getLogger(__name__)
@@ -93,8 +94,10 @@ class RunnerService:
         lines = log_lines or []
         if isinstance(lines, list):
             for line in lines[:MAX_LOG_LINES]:
+                # 先脱敏再截断：截断不能把半截密钥留在日志里。
                 self._emit("task_log", machine, result["task_id"],
-                           line=str(line)[:MAX_LOG_LINE])
+                           line=redact_secrets_text(
+                               str(line)[:MAX_LOG_LINE * 4])[0][:MAX_LOG_LINE])
         return {"ok": True, **result}
 
     def result(self, machine: str, attempt_id: str, nonce: str, exit_code,
@@ -128,7 +131,8 @@ class RunnerService:
             self.repo.complete_task,
             attempt_id=attempt_id, nonce=str(nonce or ""), machine=machine,
             exit_code=exit_code,
-            log_summary=str(log_summary)[:MAX_LOG_SUMMARY],
+            log_summary=redact_secrets_text(
+                str(log_summary)[:MAX_LOG_SUMMARY * 2])[0][:MAX_LOG_SUMMARY],
             diff_stat=str(diff_stat)[:MAX_DIFF_STAT],
             duration_s=duration_s,
             files=snapshot,

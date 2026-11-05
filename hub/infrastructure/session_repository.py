@@ -38,6 +38,7 @@ from session_schema import (
     is_valid_session_id,
     normalize_managed,
 )
+from hub.infrastructure.sqlite import connect as sqlite_connect
 
 SCHEMA_VERSION = 3
 
@@ -88,16 +89,8 @@ class SessionRepository:
     # -- connection / schema ---------------------------------------------------
 
     def _connect(self):
-        conn = sqlite3.connect(str(self.db_path), timeout=10,
-                               isolation_level=None)
-        try:
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-        except BaseException:
-            conn.close()   # fail closed — never leak a half-initialized conn
-            raise
-        return conn
+        # 共享 helper 失败时总会关闭半初始化连接（fail closed）。
+        return sqlite_connect(self.db_path, timeout=10)
 
     def _migrate_v3(self, conn) -> None:
         """Idempotent v1/v2->v3: add family and lifecycle summary columns.

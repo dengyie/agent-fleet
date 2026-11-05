@@ -1,11 +1,10 @@
 """connectors/hermes.py — Hermes agent 连接器
 
 采集: 读取远端 ~/.hermes/gateway_state.json + sessions/sessions.json
-管控: kill 重启 gateway、查看会话
+只读采集，不做管控（push-only）
 """
 
 import json
-import os
 
 from .base import BaseConnector
 
@@ -62,17 +61,3 @@ print(json.dumps(out))
     def detect(self, ctx):
         # 是否存在 ~/.hermes
         return ctx.run("test -d ~/.hermes && echo yes || echo no").strip() == "yes"
-
-    # ------------------------------------------------------------------
-    def control(self, ctx, action, **kwargs):
-        if action == "status":
-            out = self.collect(ctx)
-            return {"ok": True, "data": out}
-        if action == "restart":
-            # 重启 gateway（tini/pid 1 监管，kill -TERM 后自动拉起）
-            return ctx.kill_gateway()
-        if action == "sessions":
-            out = self.collect(ctx)
-            return {"ok": True, "sessions": out.get("sessions", [])}
-        return {"ok": False, "message": f"hermes 不支持 action={action}"}
-

@@ -1,5 +1,6 @@
 """Account HTTP endpoints and fail-closed role boundary for account mode."""
 import os
+import time
 from urllib.parse import urlsplit
 
 from flask import Blueprint, current_app, g, jsonify, request
@@ -8,6 +9,7 @@ from hub.accounts.client_address import client_address, proxy_networks
 from hub.accounts.mail import OneMailSender, SmtpSender
 from hub.accounts.captcha import verify_hcaptcha, verify_turnstile
 from hub.http.errors import ApplicationError, error_response
+from hub.auth import is_machine_auth_view
 
 bp = Blueprint('accounts', __name__, url_prefix='/api/accounts')
 def cookie_name():
@@ -31,11 +33,23 @@ def body():
     return data
 
 
+#: 流式响应的会话复核间隔（秒）；可用 app.config['ACCOUNT_STREAM_REVALIDATE_S'] 覆盖。
+STREAM_REVALIDATE_S = 30.0
+_IDENTITY_CACHE = '_account_identity_cache'
+
+
 def account_identity(req):
     if any(req.headers.get(header) for header in (
         'X-Agent-Fleet-Token', 'X-Runner-Credential', 'X-Supervisor-Credential', 'X-Platform-Node-Credential')):
         return None
-    return store().identity(req.cookies.get(cookie_name(), ''))
+    token = req.cookies.get(cookie_name(), '')
+    # 每个请求只查一次库：boundary 与 operator 解析共用 flask.g 缓存（按 token 键控）。
+    cached = g.get(_IDENTITY_CACHE)
+    if cached is not None and cached[0] == token:
+        return cached[1]
+    user = store().identity(token)
+    setattr(g, _IDENTITY_CACHE, (token, user))
+    return user
 
 
 def cookie(response, token='', *, clear=False):
@@ -93,11 +107,10 @@ def init_accounts(app, config):
             return None
         # Other machine-only handlers must keep their own credential guard, but
         # browser cookies must never be accepted as machine credentials.
-        view = app.view_functions.get(request.endpoint)
-        while view:
-            if getattr(view, '_fleet_machine_auth', False):
-                return None
-            view = getattr(view, '__wrapped__', None)
+        # 只认显式登记在路由视图本身的标记（见 hub.auth.mark_machine_auth），
+        # 不沿 __wrapped__ 下钻：外层 operator 装饰器不会意外继承机器认证。
+        if is_machine_auth_view(app.view_functions.get(request.endpoint)):
+            return None
         try:
             if request.method not in ('GET', 'HEAD', 'OPTIONS'):
                 if request.headers.get('Origin') != current_app.config['ACCOUNT_ORIGIN']:
@@ -137,11 +150,18 @@ def init_accounts(app, config):
             account_store = store()
             token = request.cookies.get(cookie_name(), '')
             original = response.response
+            interval = float(current_app.config.get('ACCOUNT_STREAM_REVALIDATE_S', STREAM_REVALIDATE_S))
             def authorized_stream():
+                # 会话在 boundary 已校验；之后每 ~30s 复核一次（而非每个 chunk 一次查库），
+                # 登出/停用最迟一个间隔后断流。
+                checked = time.monotonic()
                 try:
                     for chunk in original:
-                        if not account_store.identity(token):
-                            return
+                        now = time.monotonic()
+                        if now - checked >= interval:
+                            if not account_store.identity(token):
+                                return
+                            checked = now
                         yield chunk
                 finally:
                     close = getattr(original, 'close', None)
@@ -176,10 +196,13 @@ def code():
     email = data.get('email')
     address = client_address(request, current_app.config['ACCOUNT_TRUSTED_PROXIES'])
 
-    # Cloudflare Turnstile token validation if configured and supplied
+    # Cloudflare Turnstile token validation (required whenever a secret is configured)
     turnstile_secret = current_app.config.get('ACCOUNT_TURNSTILE_SECRET')
     turnstile_response = data.get('turnstile_response') or data.get('cf-turnstile-response')
-    if turnstile_secret and turnstile_response:
+    if turnstile_secret:
+        # 配置了 secret 就必须带 token：缺失不能当作"跳过验证"。
+        if not turnstile_response:
+            fail('turnstile_required', '请先完成人机验证', 400)
         verifier = current_app.config.get('TURNSTILE_VERIFIER', verify_turnstile)
         if not verifier(turnstile_response, turnstile_secret, remote_ip=address):
             fail('invalid_turnstile', '人机验证失败，请刷新重试', 400)
@@ -224,7 +247,8 @@ def register():
 @bp.post('/login')
 def login():
     data = body()
-    token, user = store().login(data.get('email'), data.get('password'))
+    address = client_address(request, current_app.config['ACCOUNT_TRUSTED_PROXIES'])
+    token, user = store().login(data.get('email'), data.get('password'), client=address)
     # A new login replaces the browser's previous session.
     store().logout(request.cookies.get(cookie_name(), ''))
     return cookie(jsonify(authenticated=True, user=user), token)

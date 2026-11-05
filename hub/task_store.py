@@ -5,20 +5,17 @@ bound to an explicit database path. This module keeps the legacy module-level
 API and patchable ``DB_PATH`` used by existing routes, tests, and CLI code.
 """
 
-import contextlib
-import sqlite3
 from pathlib import Path
 
 from hub.infrastructure.task_repository import (
-    AGENT_TYPES,
     LEASE_TTL_S,
-    SCHEMA,
-    TASK_STATES,
+    SCHEMA,  # noqa: F401 — 兼容门面：旧模块级 API 再导出
+    TASK_STATES,  # noqa: F401 — 同上
     TASK_TTL_S,
     SqliteTaskRepository,
-    _audit,
-    _iso,
-    _tx,
+    _audit,  # noqa: F401 — 兼容门面：旧模块级 API 再导出
+    _iso,  # noqa: F401 — 同上（tests/test_task_store 使用 task_store._iso）
+    _tx,  # noqa: F401 — 同上
 )
 
 FLEET_HOME = Path(__file__).resolve().parent.parent

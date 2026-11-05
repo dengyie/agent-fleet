@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from tools.platform.artifact_lock import artifact_snapshot_barrier
+from hub.infrastructure.sqlite import connect as sqlite_connect
 
 CAPTURE_RETENTION_SECONDS = 30 * 24 * 60 * 60
 GC_BATCH_LIMIT = 128
@@ -46,10 +47,8 @@ class BrowserCaptureGcRepository:
         self.clock = clock
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=10, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        # 该库历史上未切换 WAL；保持原日志模式。
+        return sqlite_connect(self.db_path, timeout=10, wal=False)
 
     def init(self) -> None:
         conn = None

@@ -84,27 +84,31 @@ def test_turnstile_verification_when_provided(captcha_app):
     assert len(turnstile_calls) == 2
 
 
+# Turnstile secret 已配置：每个请求都必须带有效 token（评审修复 #4）。
+TURNSTILE = {'turnstile_response': 'valid-turnstile-token'}
+
+
 def test_progressive_hcaptcha_after_three_attempts(captcha_app):
     app, mail, hcaptcha_calls, _ = captcha_app
     client = app.test_client()
 
     # Attempt 1: succeeds without hCaptcha (email 1)
-    resp1 = post(client, 'code', {'email': 'user1@example.test', 'purpose': 'register'})
+    resp1 = post(client, 'code', {'email': 'user1@example.test', 'purpose': 'register', **TURNSTILE})
     assert resp1.status_code == 200
     assert len(mail) == 1
 
     # Attempt 2: succeeds without hCaptcha (email 2)
-    resp2 = post(client, 'code', {'email': 'user2@example.test', 'purpose': 'register'})
+    resp2 = post(client, 'code', {'email': 'user2@example.test', 'purpose': 'register', **TURNSTILE})
     assert resp2.status_code == 200
     assert len(mail) == 2
 
     # Attempt 3: succeeds without hCaptcha (email 3, count reaches 3 upon completion)
-    resp3 = post(client, 'code', {'email': 'user3@example.test', 'purpose': 'register'})
+    resp3 = post(client, 'code', {'email': 'user3@example.test', 'purpose': 'register', **TURNSTILE})
     assert resp3.status_code == 200
     assert len(mail) == 3
 
     # Attempt 4 (3+ consecutive attempts from this client IP): blocked by captcha_required if token missing
-    resp4_blocked = post(client, 'code', {'email': 'user4@example.test', 'purpose': 'register'})
+    resp4_blocked = post(client, 'code', {'email': 'user4@example.test', 'purpose': 'register', **TURNSTILE})
     assert resp4_blocked.status_code == 400
     assert resp4_blocked.json['error'] == 'captcha_required'
     assert len(mail) == 3  # No new mail dispatched
@@ -113,6 +117,7 @@ def test_progressive_hcaptcha_after_three_attempts(captcha_app):
     resp5_invalid = post(client, 'code', {
         'email': 'user5@example.test',
         'purpose': 'register',
+        **TURNSTILE,
         'hcaptcha_response': 'bad-token'
     })
     assert resp5_invalid.status_code == 400
@@ -123,6 +128,7 @@ def test_progressive_hcaptcha_after_three_attempts(captcha_app):
     resp6_success = post(client, 'code', {
         'email': 'user6@example.test',
         'purpose': 'register',
+        **TURNSTILE,
         'hcaptcha_response': 'valid-hcaptcha-token'
     })
     assert resp6_success.status_code == 200
