@@ -289,7 +289,33 @@ def _collect_outputs(wt):
     return out
 
 
+def _start_capture(cfg, task, **kwargs):
+    """Construct and start conversation capture; any failure only degrades.
+
+    会话采集是旁路：构造失败（磁盘满、spool key 读写失败…）只记录有界告警并返回
+    None，任务照常执行，绝不因此以 125 失败或终止 agent。
+    """
+    capture = None
+    try:
+        from tools.session.runner_capture import RunnerCapture
+        capture = RunnerCapture(cfg, task, post_json, **kwargs)
+        capture.start_upload()
+        return capture
+    except Exception as exc:
+        log.warning("Conversation capture degraded: attempt=%s error=%s",
+                    task.get("attempt_id"), type(exc).__name__)
+        if capture is not None:
+            try:
+                capture.stop_upload()
+                capture.bridge.close()
+            except Exception:
+                pass
+        return None
+
+
 def _finish_capture(capture, exit_code):
+    if capture is None:
+        return
     try:
         capture.finish(exit_code)
     except Exception as exc:
@@ -393,7 +419,7 @@ def run_task_managed(cfg, task, supervisor):
                            "", time.monotonic() - started)
             return {"exit_code": result.exit_code}
 
-        from tools.session.runner_capture import RunnerCapture, session_prefix
+        from tools.session.runner_capture import session_prefix
         session_id = session_prefix(cfg.machine) + task["attempt_id"]
         manifest = supervisor.launch(
             agent=task.get("agent_type", "unknown"),
@@ -403,8 +429,7 @@ def run_task_managed(cfg, task, supervisor):
             session_id=session_id,
             attempt_id=task["attempt_id"],
         )
-        capture = RunnerCapture(cfg, task, post_json, process_group_id=manifest.process_group_id)
-        capture.start_upload()
+        capture = _start_capture(cfg, task, process_group_id=manifest.process_group_id)
         result = supervisor.wait_session(
             manifest.session_id,
             timeout_s=timeout_s,
@@ -512,9 +537,7 @@ def run_task(cfg, task):
         return lease_lost.is_set() or lease.expired()
 
     try:
-        from tools.session.runner_capture import RunnerCapture
-        capture = RunnerCapture(cfg, task, post_json)
-        capture.start_upload()
+        capture = _start_capture(cfg, task)
         wt = worktree.create_worktree(project, task_id)
         agent_cfg = cfg.agents.get(task["agent_type"], {})
         adapter = adapters.create(task["agent_type"],

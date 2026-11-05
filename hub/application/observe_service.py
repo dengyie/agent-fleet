@@ -154,6 +154,8 @@ class ObserveService:
         self._clock = clock
         # 每台机器一把锁：ingest 与 reconcile 的 read→check→save 在同一临界区，
         # 避免 reconcile 用旧快照覆盖刚到达的 ingest（把在线机器标成离线）。
+        # 进程内锁之外，临界区还进入仓库的 ``machine_transaction``（跨进程
+        # 文件锁），``hub/scan.py`` 等独立进程同样无法插入 read 与 save 之间。
         self._locks_guard = threading.Lock()
         self._machine_locks: dict[str, threading.Lock] = {}
 
@@ -218,7 +220,7 @@ class ObserveService:
             INGEST_AUTH_FIELD: (INGEST_AUTH_MACHINE if bound_machine is not None
                                 else INGEST_AUTH_SHARED),
         }
-        with self._machine_lock(machine):
+        with self._machine_lock(machine), self.repo.machine_transaction(machine):
             old = self.repo.read_current(machine)
             if (bound_machine is None and old
                     and old.get(INGEST_AUTH_FIELD) == INGEST_AUTH_MACHINE):
@@ -285,10 +287,10 @@ class ObserveService:
         machines = [machine] if machine else sorted(self.repo.machines())
         for name in machines:
             ttl = self.hosts.stale_after_s(name)
-            # read→判定→写 与 ingest 共用每机锁：判定所用的 ``_ts`` 就是被覆盖
-            # 的那份快照，期间到达的 ingest 要么先落盘（此处读到新 _ts 跳过），
-            # 要么等本次写完再覆盖成 reachable。
-            with self._machine_lock(name):
+            # read→判定→写 与 ingest 共用每机锁与仓库跨进程事务：判定所用的
+            # ``_ts`` 就是被覆盖的那份快照，期间到达的 ingest（含其他进程）
+            # 要么先落盘（此处读到新 _ts 跳过），要么等本次写完再覆盖成 reachable。
+            with self._machine_lock(name), self.repo.machine_transaction(name):
                 old = self.repo.read_current(name)
                 if not old or old.get("source") != "ingest":
                     continue

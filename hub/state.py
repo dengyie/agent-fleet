@@ -83,6 +83,11 @@ def read_current(machine):
     return _default_adapter().read_current(machine)
 
 
+def machine_transaction(machine):
+    """每机可重入事务（线程锁 + 跨进程文件锁），包住 read→判定→save 全程。"""
+    return _default_adapter().machine_transaction(machine)
+
+
 def read_history(machine, limit=50):
     return _default_adapter().read_history(machine, limit)
 

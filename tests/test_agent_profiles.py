@@ -72,3 +72,53 @@ def test_probe_default_agent_types_derived_from_registry():
     assert PROBE_TYPES is OBSERVABLE_AGENT_TYPES
     assert set(PROBE_TYPES) == set(OBSERVABLE_AGENT_TYPES)
     assert len(PROBE_TYPES) == 6
+
+
+import connectors
+import tools.adapters as adapters
+from agent_profiles import (
+    NATIVE_RESUME_AGENT_TYPES, RESUME_VERIFIABLE_AGENT_TYPES,
+    SESSION_PATH_RESUME_AGENT_TYPES,
+)
+from tools.probe import discovery
+from tools.supervisor import supervisor as sup_mod
+
+
+def test_adapter_registry_matches_executable_types():
+    # 每个可执行 family 都要有 runner adapter,且不多出注册表外的 adapter
+    assert set(adapters._REGISTRY) == set(EXECUTABLE_AGENT_TYPES)
+
+
+def test_connector_registry_subset_of_observable_types():
+    # generic 走 connectors.create 的回退分支,不进注册表
+    assert set(connectors._REGISTRY) <= set(OBSERVABLE_AGENT_TYPES)
+
+
+def test_resume_capability_types_derived_from_profiles():
+    assert NATIVE_RESUME_AGENT_TYPES == ("codex", "claude_code", "pi")
+    assert RESUME_VERIFIABLE_AGENT_TYPES == ("codex", "claude_code")
+    assert SESSION_PATH_RESUME_AGENT_TYPES == ("pi",)
+    # 可探针验证 / 按路径续接 都必须先是原生可续接 family
+    assert set(RESUME_VERIFIABLE_AGENT_TYPES) <= set(NATIVE_RESUME_AGENT_TYPES)
+    assert set(SESSION_PATH_RESUME_AGENT_TYPES) <= set(NATIVE_RESUME_AGENT_TYPES)
+    assert set(NATIVE_RESUME_AGENT_TYPES) <= set(EXECUTABLE_AGENT_TYPES)
+
+
+def test_supervisor_capability_sets_equal_profile_derived_sets():
+    assert sup_mod._NATIVE_RESUME_FAMILIES == frozenset(NATIVE_RESUME_AGENT_TYPES)
+    assert sup_mod._RESUME_VERIFIABLE_FAMILIES == frozenset(
+        RESUME_VERIFIABLE_AGENT_TYPES)
+    assert sup_mod._SESSION_PATH_RESUME_FAMILIES == frozenset(
+        SESSION_PATH_RESUME_AGENT_TYPES)
+
+
+def test_supervisor_resume_argv_exists_exactly_for_native_resume_families():
+    built = {
+        family for family in OBSERVABLE_AGENT_TYPES
+        if sup_mod._native_resume_argv(family, "/bin/agent", "tok", "hi")
+    }
+    assert built == set(NATIVE_RESUME_AGENT_TYPES)
+
+
+def test_discovery_native_resolver_keys_subset_of_profiles():
+    assert set(discovery._PROFILE_NATIVE_RESOLVERS) <= set(PROFILES)

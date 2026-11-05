@@ -28,6 +28,16 @@ class Profile:
     # families without a dedicated resolver; codex/claude_code keep theirs).
     native_session_root: str | None = None   # e.g. "~/.pi/agent/sessions"
     native_session_depth: int = 2            # os.walk depth covering the layout
+    # Native resume capabilities (supervisor).  ``native_resume``: the CLI can
+    # take a follow-up turn on its own native session (supervisor builds a
+    # family resume argv and stamps ``resume`` on attach with a native path).
+    # ``resume_verifiable``: without an explicit claim, resume may be proven by
+    # probing the attached exe (tools.session.probe verify_resume).
+    # ``resume_by_session_path``: the resume token is the native session file
+    # path rather than an id parsed from it (pi ``--session <path>``).
+    native_resume: bool = False
+    resume_verifiable: bool = False
+    resume_by_session_path: bool = False
 
 
 PROFILES: dict[str, Profile] = {
@@ -36,14 +46,17 @@ PROFILES: dict[str, Profile] = {
     "codex": Profile("codex", (
         "codex", "exec", "--approve-for-me",
         "--ephemeral", "--ignore-user-config", "--json", "{instruction}"),
-        basenames=("codex", "codex-cli", "codex.js")),
+        basenames=("codex", "codex-cli", "codex.js"),
+        native_resume=True, resume_verifiable=True),
     "claude_code": Profile("claude_code", ("claude", "-p", "{instruction}"),
-        basenames=("claude",)),
+        basenames=("claude",),
+        native_resume=True, resume_verifiable=True),
     "hermes": Profile("hermes", None, basenames=("hermes",)),
     "pi": Profile("pi", ("pi", "-p", "{instruction}"),
         basenames=("pi",),
         native_session_root="~/.pi/agent/sessions",
-        native_session_depth=2),
+        native_session_depth=2,
+        native_resume=True, resume_by_session_path=True),
     # ZCode CLI 非交互 print 模式（-p/--print）。桌面版内嵌 zcode.cjs 的机器
     # 没有 `zcode` shim，runner.yaml 需按本机覆盖 command（如
     # ["node", "<...>/resources/glm/zcode.cjs", "-p", "{instruction}"]）；
@@ -61,6 +74,12 @@ PROFILES: dict[str, Profile] = {
 
 EXECUTABLE_AGENT_TYPES = tuple(k for k, p in PROFILES.items() if p.executable)
 OBSERVABLE_AGENT_TYPES = tuple(PROFILES)
+NATIVE_RESUME_AGENT_TYPES = tuple(
+    k for k, p in PROFILES.items() if p.native_resume)
+RESUME_VERIFIABLE_AGENT_TYPES = tuple(
+    k for k, p in PROFILES.items() if p.resume_verifiable)
+SESSION_PATH_RESUME_AGENT_TYPES = tuple(
+    k for k, p in PROFILES.items() if p.resume_by_session_path)
 
 
 def is_executable(agent_type: str) -> bool:
@@ -82,9 +101,12 @@ def profile_basenames(agent_type: str) -> tuple[str, ...]:
 __all__ = [
     "DEFAULT_TIMEOUT_S",
     "EXECUTABLE_AGENT_TYPES",
+    "NATIVE_RESUME_AGENT_TYPES",
     "OBSERVABLE_AGENT_TYPES",
     "PROFILES",
     "Profile",
+    "RESUME_VERIFIABLE_AGENT_TYPES",
+    "SESSION_PATH_RESUME_AGENT_TYPES",
     "default_command",
     "is_executable",
     "profile_basenames",

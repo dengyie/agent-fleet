@@ -33,6 +33,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from agent_profiles import (NATIVE_RESUME_AGENT_TYPES,
+                            RESUME_VERIFIABLE_AGENT_TYPES,
+                            SESSION_PATH_RESUME_AGENT_TYPES)
 from report_schema import INSTANCE_FAMILIES
 from tools.local_process import popen as popen_local
 from tools.local_process import run as run_local
@@ -84,6 +87,14 @@ _CONTROL_OUTCOMES = frozenset({
     # 跨实例控制时无法证明进程身份/存活：既不是成功也不是 already_finished。
     "liveness_unknown",
 })
+
+# Per-family native resume capabilities, derived from agent_profiles (the
+# single source of truth).  Native: a family resume argv exists and attach with
+# a native path stamps ``resume``.  Verifiable: resume may be proven by probing
+# the attached exe.  Session-path: the resume token is the native file path.
+_NATIVE_RESUME_FAMILIES = frozenset(NATIVE_RESUME_AGENT_TYPES)
+_RESUME_VERIFIABLE_FAMILIES = frozenset(RESUME_VERIFIABLE_AGENT_TYPES)
+_SESSION_PATH_RESUME_FAMILIES = frozenset(SESSION_PATH_RESUME_AGENT_TYPES)
 
 # Raw byte-buffer cap per process group handle (drops oldest bytes beyond
 # this, so a child emitting a huge line-free stream cannot OOM the Reader).
@@ -1123,7 +1134,8 @@ class Supervisor:
         # so a later native resume does not have to re-read the live process.
         family = str(agent_family)[:32]
         token = _resume_token_from_native_path(native_file_path)
-        if family == "pi" and isinstance(native_file_path, str) and native_file_path:
+        if (family in _SESSION_PATH_RESUME_FAMILIES
+                and isinstance(native_file_path, str) and native_file_path):
             # pi --resume is an interactive picker. Deterministic follow-up
             # uses --session <path>.
             token = native_file_path
@@ -1140,7 +1152,7 @@ class Supervisor:
         )
         _stamp_private_identity(handle, entry)
         if (isinstance(native_file_path, str) and native_file_path
-                and family in ("codex", "claude_code", "pi")):
+                and family in _NATIVE_RESUME_FAMILIES):
             manifest.capability_manifest = {"resume": True}
         self._entries[sid] = entry
         self._persist(manifest)
@@ -1572,7 +1584,7 @@ class Supervisor:
         if "resume" in caps:
             return bool(caps.get("resume"))
         family = str(getattr(m, "agent", "") or "")
-        if family not in ("codex", "claude_code"):
+        if family not in _RESUME_VERIFIABLE_FAMILIES:
             return False
         exe = None
         try:
@@ -1692,7 +1704,7 @@ class Supervisor:
         family = str(getattr(m, "agent", "") or "")
         if family == "hermes":
             return "unsupported_action"
-        if family not in ("codex", "claude_code", "pi"):
+        if family not in _NATIVE_RESUME_FAMILIES:
             return "unsupported_action"
         if not self._resume_allowed(m, session_id):
             return "resume_unverified"
