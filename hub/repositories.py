@@ -7,7 +7,7 @@ remote commands.
 """
 
 import re
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, ContextManager, Protocol, runtime_checkable
 
 # Machine-name safety contract shared with the auth layer
 # (hub/auth.MACHINE_RE). Rejected names never escape ``state_dir``.
@@ -61,6 +61,10 @@ class ObservationRepository(Protocol):
     ) -> bool: ...
 
     def read_current(self, machine: str) -> dict | None: ...
+
+    def machine_transaction(self, machine: str) -> ContextManager[None]:
+        """Re-entrant per-machine critical section across threads/processes."""
+        ...
 
     def read_history(self, machine: str, limit: int = 50) -> list[dict]: ...
 

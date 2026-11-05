@@ -200,6 +200,7 @@ class FakeObservationRepository:
     def __init__(self, current=None) -> None:
         self._store = {}
         self.current = None
+        self._txn_lock = threading.RLock()
         for machine, snapshot in (current or {}).items():
             self._store[machine] = dict(snapshot)
 
@@ -210,6 +211,9 @@ class FakeObservationRepository:
     def read_current(self, machine):
         snapshot = self._store.get(machine)
         return dict(snapshot) if snapshot else None
+
+    def machine_transaction(self, machine):
+        return self._txn_lock
 
     def read_history(self, machine, limit=50):
         snapshot = self._store.get(machine)

@@ -15,7 +15,9 @@ import sqlite3
 import threading
 import time
 from collections import deque
-from hub.domain.request_metadata import project_requests
+from hub.domain.request_metadata import (
+    REQUEST_EVENT_KINDS, TERMINAL_STATES, freeze_requests, project_requests, thaw_requests,
+)
 from hub.infrastructure.execution_window_repository import ExecutionWindowRepository
 from hub.infrastructure.sqlite import connect as sqlite_connect
 
@@ -67,6 +69,19 @@ def _decode(value: str | None) -> dict[str, Any]:
     except (TypeError, ValueError):
         return {}
     return dict(data) if isinstance(data, Mapping) else {}
+
+
+def freeze_run_request_summary(conn, run_id: str, state: str) -> None:
+    """Persist the bounded request projection on ``runs.request_summary``.
+
+    Called inside the writer transaction of every terminal run transition so
+    the per-request metadata survives run_events retention pruning.
+    """
+    rows = conn.execute(
+        "SELECT kind,payload FROM run_events WHERE run_id=? AND kind IN (?,?) ORDER BY sequence",
+        (run_id, *REQUEST_EVENT_KINDS)).fetchall()
+    requests = project_requests([{"kind": row[0], "payload": _decode(row[1])} for row in rows], state)
+    conn.execute("UPDATE runs SET request_summary=? WHERE run_id=?", (freeze_requests(requests), run_id))
 
 
 class PlatformRepository:
@@ -258,6 +273,9 @@ class PlatformRepository:
                 ("nodes", "last_seen_at", "REAL"),
                 ("nodes", "status", "TEXT NOT NULL DEFAULT 'unknown'"),
                 ("node_credentials", "fast_digest", "BLOB"),
+                # Frozen request projection of terminal runs (see
+                # freeze_run_request_summary); NULL until the run terminates.
+                ("runs", "request_summary", "TEXT"),
             ):
                 columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
                 if column not in columns:
@@ -1344,6 +1362,8 @@ class PlatformRepository:
             run_state = {"linked": "waiting_task", "succeeded": "succeeded", "failed": "failed", "cancelled": "cancelled"}[bridge_state]
             if run and run["state"] not in {"succeeded", "failed", "unknown", "cancelled", "cancelling"}:
                 conn.execute("UPDATE runs SET state=?,result_text=?,updated_at=? WHERE owner_id=? AND run_id=?", (run_state, str(projection.get("summary") or "")[:32768], timestamp, owner_id, run_id))
+                if run_state in TERMINAL_STATES:
+                    freeze_run_request_summary(conn, run_id, run_state)
             next_sequence = conn.execute("SELECT COALESCE(MAX(sequence),0)+1 AS next_sequence FROM run_events WHERE run_id=?", (run_id,)).fetchone()["next_sequence"]
             event_payload = dict(projection)
             event_payload["bridge_state"] = bridge_state
@@ -1372,8 +1392,18 @@ class PlatformRepository:
         grouped = {}
         for row in rows:
             grouped.setdefault(row['run_id'], []).append({'kind': row['kind'], 'payload': _decode(row['payload'])})
+        frozen = {}
+        if any(run['run_id'] not in grouped for run in runs):
+            # Live events win; once retention pruned them, use the frozen copy.
+            frozen = {row['run_id']: row['request_summary'] for row in conn.execute(
+                "SELECT run_id,request_summary FROM runs WHERE owner_id=? AND " +
+                ("conversation_id=?" if conversation_id else "run_id=?") + " AND request_summary IS NOT NULL",
+                (owner_id, conversation_id or run_id)).fetchall()}
         for run in runs:
-            run['requests'] = project_requests(grouped.get(run['run_id'], []), run['state'])
+            if run['run_id'] in grouped or run['run_id'] not in frozen:
+                run['requests'] = project_requests(grouped.get(run['run_id'], []), run['state'])
+            else:
+                run['requests'] = thaw_requests(frozen[run['run_id']])
             for request in run['requests']:
                 if request.get('status') == 'running' and 'started_at' in request:
                     request['elapsed_ms'] = max(0, round((time.time() - request['started_at']) * 1000))
@@ -1478,6 +1508,7 @@ class PlatformRepository:
                     "lease_expires_at=NULL,updated_at=? WHERE owner_id=? AND run_id=?",
                     (now, owner_id, row["run_id"]),
                 )
+                freeze_run_request_summary(conn, row["run_id"], "unknown")
                 sequence = conn.execute(
                     "SELECT COALESCE(MAX(sequence),0)+1 FROM run_events WHERE run_id=?",
                     (row["run_id"],),
@@ -1498,6 +1529,7 @@ class PlatformRepository:
                     " WHERE owner_id=? AND run_id=?",
                     (now, owner_id, row["run_id"]),
                 )
+                freeze_run_request_summary(conn, row["run_id"], "cancelled")
                 row = conn.execute(
                     "SELECT r.*, m.role AS message_role, m.content AS message_content,"
                     " c.workspace_id AS conversation_workspace_id"
@@ -1819,7 +1851,7 @@ class PlatformRepository:
         try:
             conn = self._connect()
             conn.execute("BEGIN IMMEDIATE")
-            run = conn.execute("SELECT run_id,lease_id,lease_owner,lease_expires_at FROM runs WHERE owner_id=? AND run_id=?", (owner_id, run_id)).fetchone()
+            run = conn.execute("SELECT run_id,state,lease_id,lease_owner,lease_expires_at FROM runs WHERE owner_id=? AND run_id=?", (owner_id, run_id)).fetchone()
             if not run:
                 conn.execute("ROLLBACK")
                 raise PlatformRepositoryError("run_not_found")
@@ -1833,6 +1865,9 @@ class PlatformRepository:
             encoded = _json(payload or {})
             conn.execute("INSERT INTO run_events(run_id,sequence,kind,payload,created_at) VALUES(?,?,?,?,?)", (run_id, sequence, kind, encoded, float(now)))
             conn.execute("UPDATE runs SET updated_at=? WHERE owner_id=? AND run_id=?", (float(now), owner_id, run_id))
+            if kind in REQUEST_EVENT_KINDS and run["state"] in TERMINAL_STATES:
+                # A late request event must not leave the frozen copy stale.
+                freeze_run_request_summary(conn, run_id, run["state"])
             conn.execute("COMMIT")
             return {"run_id": run_id, "sequence": sequence, "kind": kind, "payload": dict(payload or {}), "created_at": float(now)}
         except PlatformRepositoryError:
@@ -1877,6 +1912,7 @@ class PlatformRepository:
                 " WHERE owner_id=? AND run_id=? AND lease_id=? AND lease_owner=?",
                 (state, str(result_text or "")[:32768], *usage_values, float(now), owner_id, run_id, lease_id, worker_id),
             )
+            freeze_run_request_summary(conn, run_id, state)
             row = conn.execute("SELECT * FROM runs WHERE owner_id=? AND run_id=?", (owner_id, run_id)).fetchone()
             conn.execute("COMMIT")
             result = self._row_run(row)
@@ -1941,6 +1977,10 @@ class PlatformRepository:
                 usage_values = tuple(max(0, int(usage.get(key, 0) or 0)) for key in (
                     "input_tokens", "output_tokens", "total_tokens", "provider_requests"))
             conn.execute("UPDATE runs SET state=?,result_text=?,usage_input_tokens=?,usage_output_tokens=?,usage_total_tokens=?,usage_provider_requests=?,updated_at=? WHERE owner_id=? AND run_id=?", (state, str(result_text or "")[:32768], *usage_values, float(now), owner_id, run_id))
+            if state in TERMINAL_STATES:
+                freeze_run_request_summary(conn, run_id, state)
+            else:
+                conn.execute("UPDATE runs SET request_summary=NULL WHERE run_id=?", (run_id,))
             conn.execute("COMMIT")
             result = self.get_run(owner_id, run_id)
             if result is not None and result_text:
@@ -1957,4 +1997,4 @@ class PlatformRepository:
             if conn is not None: conn.close()
 
 
-__all__ = ["PlatformRepository", "PlatformRepositoryError", "SCHEMA_VERSION"]
+__all__ = ["PlatformRepository", "PlatformRepositoryError", "SCHEMA_VERSION", "freeze_run_request_summary"]

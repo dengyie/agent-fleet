@@ -23,7 +23,8 @@ Rules (every table is optional; a missing table is skipped):
   the cutoff; child rows (outbox / reconciliations / postchecks) go first in
   the same transaction to keep foreign keys intact;
 * run events: only for terminal runs whose ``updated_at`` is older than the
-  cutoff;
+  cutoff; a run terminated before ``runs.request_summary`` existed gets its
+  request projection frozen first, so run history keeps per-request metadata;
 * redacted transcript events (30 days by default): whole sessions whose
   NEWEST ``emitted_at`` (RFC3339 text, compared via ``julianday``) is older
   than the cutoff — an active long session is never partially truncated, and
@@ -38,6 +39,7 @@ from pathlib import Path
 
 from hub.domain.platform_command import TERMINAL_COMMAND_STATES
 from hub.domain.run import TERMINAL_RUN_STATES
+from hub.infrastructure.platform_db import freeze_run_request_summary
 from hub.infrastructure.platform_schedule_repository import TERMINAL_TRIGGER_STATES
 from hub.infrastructure.sqlite import connect as sqlite_connect
 
@@ -180,10 +182,22 @@ class PlatformRetention:
         if "runs" not in tables:
             return 0
         marks, states = _placeholders(TERMINAL_RUN_STATES)
+        frozen = ""
+        if "request_summary" in {row[1] for row in conn.execute("PRAGMA table_info(runs)")}:
+            # Freeze before deleting, and only delete events of frozen runs.
+            unfrozen = conn.execute(
+                "SELECT r.run_id,r.state FROM runs r "
+                f"WHERE r.state IN ({marks}) AND r.updated_at<? AND r.request_summary IS NULL "
+                "AND EXISTS (SELECT 1 FROM run_events e WHERE e.run_id=r.run_id) LIMIT ?",
+                (*states, cutoff, self.policy.batch_size),
+            ).fetchall()
+            for run_id, state in unfrozen:
+                freeze_run_request_summary(conn, run_id, state)
+            frozen = " AND r.request_summary IS NOT NULL"
         return conn.execute(
             "DELETE FROM run_events WHERE rowid IN ("
             "SELECT e.rowid FROM run_events e JOIN runs r ON r.run_id=e.run_id "
-            f"WHERE r.state IN ({marks}) AND r.updated_at<? LIMIT ?)",
+            f"WHERE r.state IN ({marks}) AND r.updated_at<?{frozen} LIMIT ?)",
             (*states, cutoff, self.policy.batch_size),
         ).rowcount
 

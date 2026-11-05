@@ -677,6 +677,44 @@ class AgentRunnerTests(unittest.TestCase):
         self.assertEqual(result_posts[0][1]["exit_code"], 0)
         self.assertEqual(result_posts[0][1]["log_summary"], "done")
 
+    def test_capture_init_failure_does_not_fail_task(self):
+        """RunnerCapture 构造失败（磁盘满/spool key 读写失败）只降级，任务照常执行。"""
+        from tools.session.runner_capture import RunnerCapture
+
+        posts = []
+        abort_seen = []
+        lines_seen = []
+
+        def fake_urlopen(req, timeout):
+            posts.append((req.full_url, json.loads(req.data.decode()) if req.data else None))
+            return FakeResponse(200, {"ok": True, "task_id": "t-1",
+                                      "lease_expires_at": "..."})
+
+        def fake_run(instruction, wt, on_line, should_abort):
+            on_line("output while capture is unavailable")
+            lines_seen.append(True)
+            abort_seen.append(should_abort())
+            return adapters.AdapterResult(exit_code=0, log_tail="done")
+
+        def broken_init(self, *args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        with _patch_open(fake_urlopen), \
+             mock.patch.object(RunnerCapture, "__init__", broken_init), \
+             mock.patch.object(self.runner.adapters, "create",
+                               return_value=mock.Mock(run=fake_run)), \
+             self.assertLogs("agent-fleet.runner", level="WARNING") as logs:
+            out = self.runner.run_task(self.cfg, self._task())
+        self.assertEqual(lines_seen, [True])
+        self.assertEqual(abort_seen, [False])
+        self.assertEqual(out["exit_code"], 0)
+        result_posts = [p for p in posts if p[0].endswith("/result")]
+        self.assertEqual(len(result_posts), 1)
+        self.assertEqual(result_posts[0][1]["exit_code"], 0)
+        self.assertEqual(result_posts[0][1]["log_summary"], "done")
+        self.assertTrue(any("Conversation capture degraded" in m for m in logs.output))
+        self.assertFalse((self.temp / "proj.fleet-worktrees" / "t-1").exists())
+
     def test_result_post_failure_cached_to_pending(self):
         def fail_urlopen(req, timeout):
             raise OSError("network down")
@@ -1080,6 +1118,45 @@ class ManagedRunnerTests(unittest.TestCase):
         self.assertEqual(len(list(manifest_dir.glob("*.json"))), 1)
         result_posts = [u for u in posts if u.endswith("/result")]
         self.assertEqual(len(result_posts), 1)
+
+    def test_managed_capture_init_failure_does_not_kill_task(self):
+        """托管路径 RunnerCapture 构造失败只降级：进程组不被终止，真实 exit_code 原样提交。"""
+        from tools.session.runner_capture import RunnerCapture
+
+        cfg = self._cfg(managed=True)
+        cfg.agents["codex"] = {
+            "command": [sys.executable, "-c",
+                        "import time; time.sleep(0.3); print('managed-alive', flush=True); "
+                        "import os; os._exit(3)"],
+            "timeout_s": 30,
+        }
+        supervisor = self.runner._bf_supervisor().Supervisor(
+            manifest_dir=cfg.supervisor_manifest_dir, machine_id=cfg.machine)
+        posts = []
+
+        def fake_urlopen(req, timeout):
+            body = json.loads(req.data.decode())
+            if req.full_url.endswith("/heartbeat"):
+                return FakeResponse(200, {"ok": True, "task": None})
+            posts.append((req.full_url, body))
+            return FakeResponse(200, {"ok": True})
+
+        def broken_init(self, *args, **kwargs):
+            raise PermissionError(13, "spool.key unreadable")
+
+        with _patch_open(fake_urlopen), \
+             mock.patch.object(RunnerCapture, "__init__", broken_init), \
+             mock.patch.object(supervisor, "terminate_session",
+                               wraps=supervisor.terminate_session) as term, \
+             self.assertLogs("agent-fleet.runner", level="WARNING") as logs:
+            out = self.runner.run_task_managed(cfg, self._task(), supervisor)
+        self.assertEqual(out["exit_code"], 3)
+        term.assert_not_called()
+        result_posts = [b for u, b in posts if u.endswith("/result")]
+        self.assertEqual(len(result_posts), 1)
+        self.assertEqual(result_posts[0]["exit_code"], 3)
+        self.assertIn("managed-alive", result_posts[0]["log_summary"])
+        self.assertTrue(any("Conversation capture degraded" in m for m in logs.output))
 
     def test_poll_once_dispatch_uses_managed_when_enabled(self):
         cfg = self._cfg(managed=True)

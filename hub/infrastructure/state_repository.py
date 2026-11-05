@@ -3,6 +3,9 @@
 Owns observation persistence and idempotent ingest receipts:
 
 * per-machine ``RLock`` serializes access for one machine
+* ``machine_transaction`` holds the ``RLock`` plus a cross-process file lock
+  for a whole read→decide→save sequence; it is re-entrant per thread so the
+  nested ``save_snapshot`` never re-locks the same file through a new fd
 * ``state/<machine>.jsonl`` is appended with one JSON snapshot per line; each
   snapshot is stamped with ``_ts`` in-place before serialization
 * oversized JSONL files rotate by atomically replacing the file with the tail
@@ -72,6 +75,39 @@ class JsonlObservationRepository:
         self.max_jsonl_bytes = int(max_jsonl_bytes)
         self.keep_lines = int(keep_lines)
         self._locks = defaultdict(threading.RLock)
+        # 线程本地的每机事务深度：嵌套进入时只计数，不再对同一锁文件新开 fd
+        # 加 flock（flock 按 open file description 计，新 fd 会自死锁）。
+        self._txn_local = threading.local()
+
+    @contextmanager
+    def machine_transaction(self, machine: str):
+        """Re-entrant per-machine critical section across threads and processes.
+
+        Holds the in-process ``RLock`` and the machine's file lock for the
+        whole block, so a caller's read_current → decide → save sequence cannot
+        interleave with another Hub process (e.g. ``hub/scan.py``) writing the
+        same machine. Nested entries in the same thread only bump a depth
+        counter; the outermost entry owns (and releases) the file lock.
+        """
+        validated = validate_machine_name(machine)
+        with self._locks[validated]:
+            depths = getattr(self._txn_local, "depths", None)
+            if depths is None:
+                depths = self._txn_local.depths = {}
+            if depths.get(validated, 0):
+                depths[validated] += 1
+                try:
+                    yield
+                finally:
+                    depths[validated] -= 1
+                return
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            with _machine_file_lock(self.state_dir, validated):
+                depths[validated] = 1
+                try:
+                    yield
+                finally:
+                    depths.pop(validated, None)
 
     # -- internal helpers -------------------------------------------------
 
@@ -193,11 +229,9 @@ class JsonlObservationRepository:
         JSONL append, bounded rotation, and the atomic current-JSON replace.
         """
         validated = validate_machine_name(machine)
-        with self._locks[validated]:
-            self.state_dir.mkdir(parents=True, exist_ok=True)
-            with _machine_file_lock(self.state_dir, validated):
-                self._recover_pending_reports(validated)
-                self._append_and_publish(validated, snapshot)
+        with self.machine_transaction(validated):
+            self._recover_pending_reports(validated)
+            self._append_and_publish(validated, snapshot)
 
     def save_snapshot_once(
         self, machine: str, snapshot: dict, report_id: str
@@ -206,47 +240,45 @@ class JsonlObservationRepository:
         validated = validate_machine_name(machine)
         if not isinstance(report_id, str) or not report_id:
             raise ValueError("report_id must be a non-empty string")
-        with self._locks[validated]:
-            self.state_dir.mkdir(parents=True, exist_ok=True)
-            with _machine_file_lock(self.state_dir, validated):
-                self._recover_pending_reports(validated)
-                stored = dict(snapshot)
-                stored["_ingest_report_id"] = report_id
-                stored["_ts"] = time.time()
-                snapshot["_ts"] = stored["_ts"]
-                snapshot_json = json.dumps(stored, ensure_ascii=False)
-                with self._report_db() as connection:
+        with self.machine_transaction(validated):
+            self._recover_pending_reports(validated)
+            stored = dict(snapshot)
+            stored["_ingest_report_id"] = report_id
+            stored["_ts"] = time.time()
+            snapshot["_ts"] = stored["_ts"]
+            snapshot_json = json.dumps(stored, ensure_ascii=False)
+            with self._report_db() as connection:
+                connection.execute(
+                    "DELETE FROM observation_reports "
+                    "WHERE completed = 1 AND created_at < ?",
+                    (time.time() - REPORT_ID_RETENTION_S,),
+                )
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO observation_reports "
+                    "(machine, report_id, snapshot_json, completed, created_at) "
+                    "VALUES (?, ?, ?, 0, ?)",
+                    (validated, report_id, snapshot_json, time.time()),
+                )
+                inserted = cursor.rowcount == 1
+                row = connection.execute(
+                    "SELECT snapshot_json, completed FROM observation_reports "
+                    "WHERE machine = ? AND report_id = ?",
+                    (validated, report_id),
+                ).fetchone()
+                if row is None:
+                    raise RuntimeError("observation receipt disappeared")
+                if row[1]:
                     connection.execute(
-                        "DELETE FROM observation_reports "
-                        "WHERE completed = 1 AND created_at < ?",
-                        (time.time() - REPORT_ID_RETENTION_S,),
-                    )
-                    cursor = connection.execute(
-                        "INSERT OR IGNORE INTO observation_reports "
-                        "(machine, report_id, snapshot_json, completed, created_at) "
-                        "VALUES (?, ?, ?, 0, ?)",
-                        (validated, report_id, snapshot_json, time.time()),
-                    )
-                    inserted = cursor.rowcount == 1
-                    row = connection.execute(
-                        "SELECT snapshot_json, completed FROM observation_reports "
+                        "UPDATE observation_reports SET created_at = ? "
                         "WHERE machine = ? AND report_id = ?",
-                        (validated, report_id),
-                    ).fetchone()
-                    if row is None:
-                        raise RuntimeError("observation receipt disappeared")
-                    if row[1]:
-                        connection.execute(
-                            "UPDATE observation_reports SET created_at = ? "
-                            "WHERE machine = ? AND report_id = ?",
-                            (time.time(), validated, report_id),
-                        )
-                if not inserted and row[1]:
-                    return False
-                # The receipt is durably pending before JSONL/current writes.
-                # A later request recovers it before any further history append.
-                self._materialize_report(validated, report_id, json.loads(row[0]))
-                return inserted
+                        (time.time(), validated, report_id),
+                    )
+            if not inserted and row[1]:
+                return False
+            # The receipt is durably pending before JSONL/current writes.
+            # A later request recovers it before any further history append.
+            self._materialize_report(validated, report_id, json.loads(row[0]))
+            return inserted
 
     def _append_and_publish(self, machine: str, snapshot: dict) -> None:
         if "_ingest_report_id" not in snapshot:
@@ -341,6 +373,9 @@ class LegacyStateStoreAdapter:
         self, machine: str, snapshot: dict, report_id: str
     ) -> bool:
         return self.repository.save_snapshot_once(machine, snapshot, report_id)
+
+    def machine_transaction(self, machine: str):
+        return self.repository.machine_transaction(machine)
 
     def read_current(self, machine: str) -> dict | None:
         return self.repository.read_current(machine)

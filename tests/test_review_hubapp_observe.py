@@ -12,6 +12,10 @@ class _Repo:
     def __init__(self):
         self.rows = {}
         self.before_save = None
+        self._txn_lock = threading.RLock()
+
+    def machine_transaction(self, machine):
+        return self._txn_lock
 
     def machines(self):
         return list(self.rows)
