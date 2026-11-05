@@ -145,6 +145,73 @@ def _wait_quietly(proc: subprocess.Popen[bytes]) -> None:
             pass
 
 
+class ProcessAborted(RuntimeError):
+    """The caller withdrew permission to continue an owned child."""
+
+
+def _drain_lines(proc: subprocess.Popen[bytes], deadline: float, timeout_s: float,
+                 on_line: Callable[[str], None],
+                 should_abort: Callable[[], bool] | None) -> tuple[bytes, bytes]:
+    """Stream lines while the owner watches EOF, cancellation and the deadline."""
+    done = threading.Event()
+    errors: list[BaseException] = []
+
+    def read_lines() -> None:
+        try:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                on_line(raw.rstrip(b"\r\n").decode("utf-8", errors="replace"))
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            done.set()
+
+    threading.Thread(target=read_lines, name="owned-process-output", daemon=True).start()
+    while True:
+        if done.is_set() and errors:
+            raise errors[0]
+        if should_abort is not None and should_abort():
+            raise ProcessAborted()
+        if done.is_set() and proc.poll() is not None:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(proc.args, timeout_s)
+        if done.is_set():
+            # EOF does not imply process exit. Keep polling cancellation even
+            # when the child deliberately closes both output descriptors.
+            time.sleep(min(0.1, remaining))
+        else:
+            done.wait(min(0.1, remaining))
+    return b"", b""
+
+
+def run_streamed(argv: Sequence[str], *, cwd: Path, timeout_s: float,
+                 on_line: Callable[[str], None],
+                 should_abort: Callable[[], bool] | None = None) -> int:
+    """Run an owned process with line callbacks and a deadline through pipe EOF."""
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        raise ValueError("invalid_process_timeout")
+    deadline = time.monotonic() + timeout_s
+    job = None
+    options = {"start_new_session": True, "preexec_fn": None}
+    if os.name == "nt":
+        from tools.windows_job import WindowsJob
+        job = WindowsJob()
+        options = {"creationflags": 0x00000004 | 0x00000200,
+                   "preexec_fn": None}
+    try:
+        result = _run_owned(
+            argv, cwd, None, deadline, timeout_s, 0, None, options, job,
+            drain=lambda proc, end, seconds: _drain_lines(
+                proc, end, seconds, on_line, should_abort),
+        )
+        return result.returncode
+    finally:
+        if job is not None:
+            job.close()
+
+
 def run_bounded(argv: Sequence[str], *, cwd: Path, timeout_s: float,
                 stdout_limit: int, stderr_limit: int | None = None,
                 env: Mapping[str, str] | None = None,
@@ -181,7 +248,9 @@ def run_bounded(argv: Sequence[str], *, cwd: Path, timeout_s: float,
 def _run_owned(argv: Sequence[str], cwd: Path, env: Mapping[str, str] | None,
                deadline: float, timeout_s: float, stdout_limit: int,
                stderr_limit: int | None, options: dict[str, Any],
-               job: WindowsJob | None) -> subprocess.CompletedProcess[bytes]:
+               job: WindowsJob | None,
+               drain: Callable[[subprocess.Popen[bytes], float, float], tuple[bytes, bytes]] | None = None
+               ) -> subprocess.CompletedProcess[bytes]:
     with popen_local(list(argv), cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                      stdout=subprocess.PIPE,
                      stderr=subprocess.STDOUT if stderr_limit is None else subprocess.PIPE,
@@ -189,7 +258,8 @@ def _run_owned(argv: Sequence[str], cwd: Path, env: Mapping[str, str] | None,
         try:
             if job is not None:
                 job.start(int(proc._handle))
-            output, error = _drain(proc, deadline, stdout_limit, stderr_limit, timeout_s)
+            output, error = (drain(proc, deadline, timeout_s) if drain is not None
+                             else _drain(proc, deadline, stdout_limit, stderr_limit, timeout_s))
             return subprocess.CompletedProcess(proc.args, proc.returncode, output, error)
         finally:
             if job is not None:

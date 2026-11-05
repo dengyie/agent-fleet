@@ -33,7 +33,7 @@ def test_artifact_http_api_is_operator_scoped_and_integrity_checked(
     assert content.status_code == 200
     assert content.data == b"hello"
     assert content.mimetype == "text/markdown"
-    assert content.headers["Content-Disposition"] == 'attachment; filename="report.md"'
+    assert content.headers["Content-Disposition"] == 'attachment; filename=report.md'
     assert content.headers["X-Artifact-Sha256"] == manifest["sha256"]
 
     other = client.get(

@@ -157,6 +157,7 @@ async function request(path, options) {
       signal: controller.signal,
     });
   } catch (err) {
+    clearTimeout(timer);
     var aborted = err && (err.name === 'AbortError' || err.code === 20);
     if (aborted) {
       throw new ApiError('timeout', 0, 'request_timeout',
@@ -164,8 +165,6 @@ async function request(path, options) {
     }
     throw new ApiError('network', 0, 'network_error',
       '网络错误，无法连接服务', null);
-  } finally {
-    clearTimeout(timer);
   }
 
   // Every feature uses this boundary, including non-JSON edge rejections.
@@ -176,12 +175,18 @@ async function request(path, options) {
   try {
     data = await response.json();
   } catch (e) {
+    if (controller.signal.aborted || (e && (e.name === 'AbortError' || e.code === 20))) {
+      throw new ApiError('timeout', 0, 'request_timeout',
+        '请求超时，请稍后重试', null);
+    }
     if (!response.ok) {
       throw new ApiError('http', response.status, 'http_error',
         '服务返回异常，请稍后重试', null);
     }
     throw new ApiError('parse', response.status, 'invalid_json',
       '响应不是合法 JSON', null);
+  } finally {
+    clearTimeout(timer);
   }
 
   if (!response.ok) {
