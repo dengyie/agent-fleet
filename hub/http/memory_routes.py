@@ -5,7 +5,7 @@ from flask import Blueprint, current_app, g, jsonify, request
 
 from hub.auth import require_operator
 from hub.http.errors import ApplicationError, error_response
-from hub.http._common import json_object as _body
+from hub.http._common import json_object as _body, request_json
 from hub.infrastructure.platform_memory_repository import (
     PlatformMemoryRepositoryError,
 )
@@ -122,7 +122,7 @@ def update_memory(memory_id):
 @require_operator
 def delete_memory(memory_id):
     def _delete():
-        body = request.get_json(silent=True)
+        body = request_json()
         if body is not None and not isinstance(body, dict):
             raise ApplicationError("invalid_json", "请求体必须是 JSON 对象", 400)
         return jsonify(_service().delete(

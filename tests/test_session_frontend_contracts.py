@@ -408,7 +408,9 @@ class SessionFrontendModuleTests(unittest.TestCase):
                    'revokeAdoption', 'retryAdoption', 'controlSession'):
             self.assertIn(f'export async function {fn}(', source)
         self.assertIn("'/sessions'", source)
-        self.assertIn("'/adoption/'", source)
+        # Canonical plural path (inside the Access-protected /api/adoptions*).
+        self.assertNotIn("'/adoption/'", source)
+        self.assertIn("API.adoptions + '/' + encodeURIComponent(sessionId) + '/source/control'", source)
         self.assertIn("'/source/control'", source)
 
     def test_session_view_wires_five_actions_without_stdin(self):

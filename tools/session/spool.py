@@ -38,8 +38,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import struct
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -53,21 +55,38 @@ try:  # pragma: no cover - the fallback is exercised on non-POSIX hosts.
 except ImportError:  # pragma: no cover
     fcntl = None
 
+try:  # pragma: no cover - Windows-only owner lock primitive.
+    import msvcrt
+except ImportError:  # pragma: no cover
+    msvcrt = None
+
 # Stable diagnostic codes (never raw paths / exception text / payloads).
 CODE_SEGMENT_BAD = "segment_corrupt"
 CODE_CHECKPOINT_BAD = "checkpoint_corrupt"
 CODE_KEY_MISSING = "spool_key_missing"
 CODE_SETUP = "spool_setup"
 CODE_WRITE = "spool_write_failed"
+CODE_BUSY = "spool_busy"
 
-_MAGIC = b"SP4SEG01"
+# Segment format versions.  v1 frames authenticate only the sequence; v2
+# frames additionally bind the session id into the AEAD associated data so a
+# frame copied into another session's segment fails authentication.  The
+# segment magic selects the associated-data scheme, so v1 segments written by
+# older builds stay readable (and a v1 crash-survivor active segment keeps
+# being appended with v1 frames until it is sealed).
+_MAGIC_V1 = b"SP4SEG01"
+_MAGIC = b"SP4SEG02"
+_MAGICS = (_MAGIC_V1, _MAGIC)
 _HEADER_SIZE = len(_MAGIC) + 8  # magic + reserved u64
 _FRAME_HEADER = 12              # u64 seq + u32 enc_len
 _SEGMENT_TARGET = 262144        # 256 KiB per segment when full
 MAX_EVENT_BYTES = 65536         # shared single-event bound (post-redaction)
 
-# Global AEAD associated data: binds every segment frame to this spool format.
-_AD = b"fleet-spool-v1"
+_IS_WINDOWS = os.name == "nt"
+_OWNER_LOCK_NAME = ".owner.lock"
+_OWNER_POLL_S = 0.05
+#: Default bound on waiting for another holder of a spool's owner lock.
+OWNER_WAIT_S = 60.0
 _QUOTA_LOCKS: dict[str, threading.RLock] = {}
 _QUOTA_LOCKS_GUARD = threading.Lock()
 
@@ -80,6 +99,104 @@ def _thread_quota_lock(root: Path) -> threading.RLock:
             lock = threading.RLock()
             _QUOTA_LOCKS[key] = lock
         return lock
+
+
+def _frame_ad(version: bytes, session_id: str, seq: int) -> bytes:
+    """AEAD associated data for one frame of a ``version`` segment."""
+    if version == _MAGIC_V1:
+        return str(seq).encode("ascii")
+    return b"fleet-spool-v2\0" + session_id.encode("utf-8") + b"\0" + \
+        str(seq).encode("ascii")
+
+
+def _segment_pattern(session_id: str):
+    """Exact segment-name matcher for ONE session (never a prefix match:
+    session ``adopt`` must not claim ``adopt_ab``'s segments)."""
+    return re.compile(rf"^{re.escape(session_id)}_(\d{{6,}})\.(active|sealed)$")
+
+
+def _try_lock(handle) -> bool:
+    """Non-blocking exclusive lock on ``handle``; False when contended."""
+    try:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        elif msvcrt is not None:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        return True
+    except (BlockingIOError, PermissionError):
+        return False
+    except OSError as exc:
+        # EACCES/EAGAIN/EDEADLK are contention on every supported platform.
+        if exc.errno in (11, 13, 35, 36):
+            return False
+        raise
+
+
+def _unlock(handle) -> None:
+    try:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        elif msvcrt is not None:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+    finally:
+        try:
+            handle.close()
+        except OSError:
+            pass
+
+
+def acquire_owner_lock(root, *, timeout: float = OWNER_WAIT_S):
+    """Take the per-spool-root writer ownership lock.
+
+    The live writer (a runner capture or native sync) holds it for the
+    spool's lifetime so a concurrent replay never opens, appends to, seals or
+    compacts a spool another process is writing.  Waits at most ``timeout``
+    seconds (``0`` = try once) and then raises :class:`SpoolBusy`.  Returns
+    an opaque handle for :func:`release_owner_lock`.
+    """
+    root = Path(root)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        handle = open(root / _OWNER_LOCK_NAME, "a+b")
+    except OSError as exc:
+        raise SpoolError(CODE_SETUP) from exc
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    try:
+        while not _try_lock(handle):
+            if time.monotonic() >= deadline:
+                raise SpoolBusy()
+            time.sleep(_OWNER_POLL_S)
+    except SpoolBusy:
+        handle.close()
+        raise
+    except OSError as exc:
+        handle.close()
+        raise SpoolError(CODE_SETUP) from exc
+    return handle
+
+
+def release_owner_lock(handle) -> None:
+    if handle is not None:
+        _unlock(handle)
+
+
+def owner_lock_held(root) -> bool:
+    """True when another holder owns ``root``'s writer lock right now."""
+    root = Path(root)
+    if not (root / _OWNER_LOCK_NAME).exists():
+        return False
+    try:
+        handle = acquire_owner_lock(root, timeout=0)
+    except SpoolBusy:
+        return True
+    except SpoolError:
+        return False
+    release_owner_lock(handle)
+    return False
 
 
 @contextmanager
@@ -187,6 +304,13 @@ class SpoolError(RuntimeError):
         return self.code
 
 
+class SpoolBusy(SpoolError):
+    """Another live writer owns this spool root (see owner lock)."""
+
+    def __init__(self):
+        super().__init__(CODE_BUSY)
+
+
 class _FrameReader:
     """Incremental frame reader over ONE encrypted segment file.
 
@@ -196,9 +320,10 @@ class _FrameReader:
     rest of the spool stream.
     """
 
-    def __init__(self, path: Path, box: AeadBox):
+    def __init__(self, path: Path, box: AeadBox, session_id: str):
         self.path = path
         self.box = box
+        self.session_id = session_id
         self.corrupt = False
 
     def frames(self, after: int = 0):
@@ -216,7 +341,8 @@ class _FrameReader:
                 self.corrupt = True
                 return
             head = handle.read(_HEADER_SIZE)
-            if head[: len(_MAGIC)] != _MAGIC or len(head) != _HEADER_SIZE:
+            version = head[: len(_MAGIC)]
+            if version not in _MAGICS or len(head) != _HEADER_SIZE:
                 self.corrupt = True
                 return
             while True:
@@ -245,7 +371,8 @@ class _FrameReader:
                 try:
                     plain = self.box.decrypt(
                         blob,
-                        associated_data=str(seq).encode("ascii"))
+                        associated_data=_frame_ad(version, self.session_id,
+                                                  seq))
                 except Exception:
                     self.corrupt = True
                     return
@@ -260,6 +387,17 @@ class LocalSpool:
         root/segments/<session_id>_<NNNNNN>.active    # being written
         root/segments/<session_id>_<NNNNNN>.sealed    # sealed atomically
         root/checkpoints/<session_id>.json            # durable cursor
+
+    The active segment is created lazily on the first write, and a segment
+    that never received a frame is deleted (not sealed) on close, so idle
+    open/close cycles leave no files behind.
+
+    ``quota_root`` is the directory whose spools share the machine byte
+    quota (default ``root``).  Spool roots laid out as
+    ``quota_root/<session>/segments`` are all counted, and admission is
+    serialized on ``quota_root``.  ``owner_lock=True`` holds the per-root
+    writer lock (:func:`acquire_owner_lock`, waiting at most
+    ``owner_timeout`` seconds, else :class:`SpoolBusy`) until :meth:`close`.
     """
 
     def __init__(
@@ -271,8 +409,12 @@ class LocalSpool:
         max_machine_bytes: int = 134217728,
         key: bytes | None = None,
         segment_target_bytes: int = _SEGMENT_TARGET,
+        quota_root=None,
+        owner_lock: bool = False,
+        owner_timeout: float = OWNER_WAIT_S,
     ):
         self._root = Path(root)
+        self._quota_root = Path(quota_root) if quota_root is not None else self._root
         self._machine_id = machine_id
         self._session_id = session_id
         self._max_session_bytes = int(max_session_bytes)
@@ -289,17 +431,33 @@ class LocalSpool:
         try:
             self._seg_dir.mkdir(parents=True, exist_ok=True)
             self._cp_dir.mkdir(parents=True, exist_ok=True)
+            self._quota_root.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise SpoolError(CODE_SETUP) from exc
 
         self._checkpoint_path = self._cp_dir / f"{session_id}.json"
+        self._seg_re = _segment_pattern(session_id)
         self._open_writer = None
+        self._writer_version = _MAGIC
         self._seg_index = 0
         self._last_sequence = 0
         self._ack_sequence = 0
         self._gap_signaled = False
+        # A checkpoint write that failed AFTER its frame was durable: the
+        # frame is the durable truth (``_load`` recovers it), so the cursor is
+        # only marked dirty and re-persisted on the next operation/close.
+        self._checkpoint_dirty = False
 
-        self._load()
+        self._owner_handle = None
+        if owner_lock:
+            self._owner_handle = acquire_owner_lock(
+                self._root, timeout=owner_timeout)
+        try:
+            self._load()
+        except BaseException:
+            release_owner_lock(self._owner_handle)
+            self._owner_handle = None
+            raise
 
     # -- public surface -----------------------------------------------------
 
@@ -320,7 +478,8 @@ class LocalSpool:
         partial record.
         """
         clean = validate_event(event)  # raises ValueError on invalid
-        with _quota_guard(self._root):
+        with _quota_guard(self._quota_root):
+            self._retry_dirty_checkpoint()
             seq = self._next_sequence()
             # The spool owns sequence assignment: the caller-supplied value
             # (a best-effort redaction hint) never shapes the durable record.
@@ -336,7 +495,9 @@ class LocalSpool:
             self._last_sequence = seq
             self._gap_signaled = False  # a new accepted event ends the gap run
             self._maybe_rotate()
-            self._persist_checkpoint()
+            # The frame is durable and the sequence assigned: a checkpoint
+            # failure here must not report the event as lost.
+            self._persist_checkpoint_soft()
             return AppendResult(sequence=seq, capture_blocked=False)
 
     def read_after(self, sequence: int, limit: int, max_bytes: int) -> list:
@@ -395,7 +556,7 @@ class LocalSpool:
 
     def rotate(self) -> None:
         """Seal the active segment atomically and open a fresh segment."""
-        with _quota_guard(self._root):
+        with _quota_guard(self._quota_root):
             self._rotate_unlocked()
 
     def checkpoint(self) -> dict:
@@ -420,11 +581,17 @@ class LocalSpool:
         }
 
     def close(self) -> None:
-        """Flush, seal the active segment and close file handles."""
+        """Flush, seal the active segment and close file handles.
+
+        Idempotent; releases the owner lock (if held) last.
+        """
         try:
+            self._retry_dirty_checkpoint()
             self._seal_active()
         finally:
             self._open_writer = None
+            handle, self._owner_handle = self._owner_handle, None
+            release_owner_lock(handle)
 
     # ------------------------------------------------------------------
     # internals
@@ -458,7 +625,6 @@ class LocalSpool:
             self._last_sequence = recovered
             if self._ack_sequence > recovered:
                 self._ack_sequence = recovered
-        self._seg_index = self._max_seg_index()
         # Segment continuity after a restart: if the highest-index segment is
         # already sealed (clean close) a FRESH segment must be opened for new
         # appends, otherwise the new "active" would share an index with a
@@ -466,14 +632,21 @@ class LocalSpool:
         # survivor: truncate any torn trailing frame back to the last complete
         # frame boundary BEFORE appending, so replay never mis-frames later
         # bytes.
+        self._drop_empty_sealed()
+        self._seg_index = self._max_seg_index()
         current = self._seg_dir / f"{self._session_id}_{self._seg_index:06d}"
         if current.with_suffix(".sealed").exists():
             self._seg_index += 1
         else:
             self._repair_torn_tail()
-        self._open_active()
+        # The active segment itself is opened lazily on the first write.
 
     def _within_quota(self, frame_cost: int) -> bool:
+        if self._open_writer is None:
+            # The lazily created active segment's header is part of the cost.
+            active = self._seg_dir / f"{self._session_id}_{self._seg_index:06d}.active"
+            if not active.exists():
+                frame_cost += _HEADER_SIZE
         if self._session_bytes() + frame_cost > self._max_session_bytes:
             return False
         if self._machine_bytes() + frame_cost > self._max_machine_bytes:
@@ -511,7 +684,7 @@ class LocalSpool:
                 pass
             else:
                 self._last_sequence = seq
-                self._persist_checkpoint()
+                self._persist_checkpoint_soft()
         # The gap is always *signaled*, even if only the in-memory marker
         # could be produced (the quota is exhausted).
         self._gap_signaled = True
@@ -521,24 +694,37 @@ class LocalSpool:
     # -- filesystem ----------------------------------------------------------
 
     def _segment_paths(self) -> list:
-        return sorted(self._seg_dir.glob(f"{self._session_id}_*"),
-                      key=lambda p: p.name)
+        try:
+            names = os.listdir(self._seg_dir)
+        except OSError:
+            return []
+        return [self._seg_dir / name for name in sorted(names)
+                if self._seg_re.match(name)]
 
     def _segment_count(self) -> int:
         return len(self._segment_paths())
 
     def _seg_index_of(self, path: Path) -> int:
-        try:
-            digits = path.name.rsplit("_", 1)[1].split(".", 1)[0]
-            return int(digits)
-        except (IndexError, ValueError):
-            return 0
+        match = self._seg_re.match(path.name)
+        return int(match.group(1)) if match else 0
 
     def _max_seg_index(self) -> int:
         biggest = 0
-        for path in self._seg_dir.glob(f"{self._session_id}_*"):
+        for path in self._segment_paths():
             biggest = max(biggest, self._seg_index_of(path))
         return biggest
+
+    def _drop_empty_sealed(self) -> None:
+        """Delete header-only sealed segments left by older builds (every
+        idle open/close used to seal one); they hold no frame."""
+        for path in self._segment_paths():
+            if path.suffix != ".sealed":
+                continue
+            try:
+                if path.stat().st_size <= _HEADER_SIZE:
+                    path.unlink()
+            except OSError:
+                pass
 
     def _last_complete_frame_end(self, path: Path) -> int:
         """Byte offset just past the last COMPLETE frame in ``path``.
@@ -555,7 +741,7 @@ class LocalSpool:
             return 0
         with handle:
             head = handle.read(_HEADER_SIZE)
-            if head[: len(_MAGIC)] != _MAGIC or len(head) != _HEADER_SIZE:
+            if head[: len(_MAGIC)] not in _MAGICS or len(head) != _HEADER_SIZE:
                 return 0
             offset = _HEADER_SIZE
             last_good = 0
@@ -610,7 +796,7 @@ class LocalSpool:
         try:
             with open(path, "rb") as handle:
                 head = handle.read(_HEADER_SIZE)
-                if head[: len(_MAGIC)] != _MAGIC or len(head) != _HEADER_SIZE:
+                if head[: len(_MAGIC)] not in _MAGICS or len(head) != _HEADER_SIZE:
                     return 0
                 while True:
                     raw_seq = handle.read(8)
@@ -655,7 +841,7 @@ class LocalSpool:
                     cache[key] = self._frame_max_seq(path)
                 if key is not None and cache[key] <= after:
                     continue
-            reader = _FrameReader(path, self._box)
+            reader = _FrameReader(path, self._box, self._session_id)
             for seq, plain in reader.frames(after=after):
                 yield seq, plain
 
@@ -669,14 +855,36 @@ class LocalSpool:
         return self._size()
 
     def _machine_bytes(self) -> int:
+        """Segment bytes of every spool sharing ``quota_root``.
+
+        Counts ``quota_root/segments`` (sessions sharing one root) and each
+        ``quota_root/<session>/segments`` (one root per session, the runner
+        capture layout), plus this spool's own directory when it lives
+        elsewhere.
+        """
+        dirs = {self._seg_dir}
         try:
-            total = 0
-            for p in self._seg_dir.glob("*"):
-                if p.is_file() and self._owns_segment(p):
-                    total += p.stat().st_size
-            return total
+            for child in os.scandir(self._quota_root):
+                if child.name == "segments":
+                    dirs.add(Path(child.path))
+                elif child.is_dir(follow_symlinks=False):
+                    seg = Path(child.path) / "segments"
+                    if seg.is_dir():
+                        dirs.add(seg)
         except OSError:
-            return 0
+            pass
+        total = 0
+        for seg_dir in dirs:
+            try:
+                for entry in os.scandir(seg_dir):
+                    if self._owns_segment(Path(entry.name)):
+                        try:
+                            total += entry.stat(follow_symlinks=False).st_size
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+        return total
 
     @staticmethod
     def _owns_segment(path: Path) -> bool:
@@ -691,6 +899,7 @@ class LocalSpool:
             handle = open(path, "ab")
         except OSError as exc:
             raise SpoolError(CODE_SETUP) from exc
+        version = _MAGIC
         if handle.tell() == 0:
             handle.write(_MAGIC)
             handle.write(struct.pack(">Q", 0))
@@ -699,7 +908,17 @@ class LocalSpool:
                 os.fsync(handle.fileno())
             except OSError:
                 pass
+        else:
+            # A crash-survivor active segment keeps its on-disk format.
+            try:
+                with open(path, "rb") as head:
+                    magic = head.read(len(_MAGIC))
+            except OSError:
+                magic = _MAGIC
+            if magic == _MAGIC_V1:
+                version = _MAGIC_V1
         self._open_writer = handle
+        self._writer_version = version
         self._active_path = path
 
     def _write_frame(self, seq: int, body: bytes) -> None:
@@ -712,7 +931,8 @@ class LocalSpool:
         """
         self._open_active()
         blob = self._box.encrypt(
-            body, associated_data=str(seq).encode("utf-8"))
+            body, associated_data=_frame_ad(self._writer_version,
+                                            self._session_id, seq))
         frame = struct.pack(">QI", seq, len(blob)) + blob
         writer = self._open_writer
         try:
@@ -753,28 +973,37 @@ class LocalSpool:
             self._rotate_unlocked()
 
     def _rotate_unlocked(self) -> None:
-        """Rotate while the caller already owns the quota guard."""
+        """Rotate while the caller already owns the quota guard.
+
+        The next segment is created lazily by the next write.
+        """
         self._seal_active()
         self._seg_index += 1
-        self._open_active()
 
     def _seal_active(self) -> None:
+        """Seal the current active segment (also a crash survivor that was
+        never reopened for writing); a frame-less one is deleted instead."""
         w = self._open_writer
-        if w is None:
-            return
-        try:
-            w.flush()
-            os.fsync(w.fileno())
-        except OSError:
-            pass
-        finally:
+        if w is not None:
             try:
-                w.close()
+                w.flush()
+                os.fsync(w.fileno())
             except OSError:
                 pass
-        self._open_writer = None
+            finally:
+                try:
+                    w.close()
+                except OSError:
+                    pass
+            self._open_writer = None
         active = self._seg_dir / f"{self._session_id}_{self._seg_index:06d}.active"
         sealed = self._seg_dir / f"{self._session_id}_{self._seg_index:06d}.sealed"
+        try:
+            if active.stat().st_size <= _HEADER_SIZE:
+                active.unlink()
+                return
+        except OSError:
+            return
         try:
             active.replace(sealed)
         except OSError:
@@ -782,7 +1011,9 @@ class LocalSpool:
 
     def _compact_acked(self) -> None:
         """Delete fully-acked sealed segments (idempotent, isolated)."""
-        for path in self._seg_dir.glob(f"{self._session_id}_*.sealed"):
+        for path in self._segment_paths():
+            if path.suffix != ".sealed":
+                continue
             try:
                 if self._frame_max_seq(path) <= self._ack_sequence:
                     path.unlink()
@@ -805,18 +1036,52 @@ class LocalSpool:
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp, self._checkpoint_path)
-            dfd = os.open(self._cp_dir, os.O_RDONLY)
-            try:
-                os.fsync(dfd)
-            finally:
-                os.close(dfd)
         except OSError:
+            self._checkpoint_dirty = True
             raise SpoolError(CODE_CHECKPOINT_BAD) from None
+        self._checkpoint_dirty = False
+        self._fsync_dir(self._cp_dir)
+
+    @staticmethod
+    def _fsync_dir(path: Path) -> None:
+        """Best-effort directory fsync (rename durability on POSIX).
+
+        Windows cannot open a directory with ``os.open`` (and does not need
+        it: ``os.replace`` is durable there), so it is skipped; any other
+        failure is ignored — the file contents are already fsynced.
+        """
+        if _IS_WINDOWS:
+            return
+        try:
+            dfd = os.open(path, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(dfd)
+        except OSError:
+            pass
+        finally:
+            os.close(dfd)
+
+    def _persist_checkpoint_soft(self) -> None:
+        """Persist after a durable frame; a failure only marks it dirty."""
+        try:
+            self._persist_checkpoint()
+        except SpoolError:
+            self._checkpoint_dirty = True
+
+    def _retry_dirty_checkpoint(self) -> None:
+        if self._checkpoint_dirty:
+            self._persist_checkpoint_soft()
 
 
 __all__ = [
     "AppendResult",
     "LocalSpool",
+    "SpoolBusy",
     "SpoolError",
     "MAX_EVENT_BYTES",
+    "acquire_owner_lock",
+    "owner_lock_held",
+    "release_owner_lock",
 ]

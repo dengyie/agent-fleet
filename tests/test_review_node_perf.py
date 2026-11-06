@@ -186,7 +186,7 @@ def test_read_after_does_not_decrypt_acked_prefix(tmp_path):
     real_decrypt = spool._box.decrypt
 
     def counting(blob, associated_data=b""):
-        decrypted.append(int(associated_data))
+        decrypted.append(int(associated_data.rsplit(b"\0", 1)[-1]))  # v2 AD: ...\0<seq>
         return real_decrypt(blob, associated_data=associated_data)
 
     spool._box.decrypt = counting

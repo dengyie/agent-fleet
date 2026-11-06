@@ -5,7 +5,7 @@ from flask import Blueprint, current_app, g, jsonify, request
 
 from hub.auth import require_operator
 from hub.http.errors import ApplicationError, error_response, get_request_id
-from hub.http._common import json_object as _json_object
+from hub.http._common import json_object as _json_object, request_json
 from hub.infrastructure.platform_db import PlatformRepositoryError
 from platform_schema import PlatformValidationError
 
@@ -175,7 +175,7 @@ def get_command_postcheck(command_id):
 def provision_node_credential(node_id):
     """Issue or rotate a node credential; plaintext is returned once."""
     def _provision():
-        body = request.get_json(silent=True)
+        body = request_json()
         if body is None:
             body = {}
         if not isinstance(body, dict):

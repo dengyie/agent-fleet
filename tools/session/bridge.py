@@ -55,7 +55,7 @@ from tools.session.capture import pty as _pty
 from tools.session.capture.native_jsonl import tailer as _tailer
 from tools.session.capture.structured_stream import iter_json as _iter_json
 from fleet_core.session.redact import Redactor, redact_event_secrets, redact_secrets_text
-from tools.session.spool import LocalSpool, SpoolError
+from tools.session.spool import OWNER_WAIT_S, LocalSpool, SpoolError
 from tools.session.uploader import SessionUploader
 
 DEFAULT_STREAM = "stream"
@@ -634,9 +634,14 @@ class SessionBridge:
                 raise ValueError("session_config requires a spool or spool_root")
             if spool_key is None:
                 raise ValueError("session_config requires a 32-byte spool_key")
+            quota_root = config.get("spool_quota_root")
             self._spool = LocalSpool(
                 Path(spool_root), self._machine_id, self._session_id,
-                key=bytes(spool_key))
+                key=bytes(spool_key),
+                quota_root=Path(quota_root) if quota_root is not None else None,
+                owner_lock=bool(config.get("spool_owner_lock", False)),
+                owner_timeout=float(config.get("spool_owner_timeout",
+                                               OWNER_WAIT_S)))
         if self._spool is None:
             raise ValueError("session_config requires a spool")
 
@@ -783,11 +788,15 @@ class SessionBridge:
     def ingest_one(self, raw, *, source: str | None = None) -> bool:
         return self._handle_raw(source or self.source, raw)
 
-    def flush(self) -> int:
-        """Upload all pending unacked events (Task 6 ack/replay)."""
+    def flush(self, guard=None) -> int:
+        """Upload all pending unacked events (Task 6 ack/replay).
+
+        ``guard`` (a context manager, e.g. the capture lock) is held only
+        around spool access, never across the network POST.
+        """
         if self._uploader is None:
             return 0
-        return self._uploader.flush_once()
+        return self._uploader.flush_once(guard=guard)
 
     def replay(self) -> int:
         if self._uploader is None:

@@ -287,16 +287,35 @@ def collect_result_files(
             continue
         if b"\x00" in raw:
             continue
-        if len(raw) > MAX_FILE_BYTES * 4:
+        cut = len(raw) > MAX_FILE_BYTES * 4
+        if cut:
             raw = raw[:MAX_FILE_BYTES]
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
+        text = _decode_utf8_prefix(raw, cut)
+        if text is None:
             continue
         redacted_text, report = redact_content(text)
         bounded, truncated = bound_content(redacted_text)
-        found.append(_record(norm, bounded, truncated, report.replaced > 0))
+        found.append(_record(norm, bounded, truncated or cut,
+                             report.replaced > 0))
     return found
+
+
+def _decode_utf8_prefix(raw: bytes, cut: bool) -> str | None:
+    """Decode ``raw`` as UTF-8; ``None`` for a non-UTF-8 (binary) file.
+
+    When ``raw`` is a byte-truncated prefix (``cut``) the slice may end in
+    the middle of a multi-byte character: drop only that incomplete tail
+    (at most 3 bytes) instead of rejecting the whole file.
+    """
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        if not cut or exc.start < len(raw) - 3:
+            return None
+        try:
+            return raw[:exc.start].decode("utf-8")
+        except UnicodeDecodeError:
+            return None
 
 
 def public_file_meta(item: dict[str, Any]) -> dict[str, Any]:

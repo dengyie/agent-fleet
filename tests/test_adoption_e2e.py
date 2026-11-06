@@ -14,7 +14,7 @@ driven by a mutable in-memory ``process`` double:
   (the client uploads its bounded receipt through the same transport);
 * ``e2e.adopted_session()``        -> operator adopt + probe promote;
 * ``e2e.operator_delete()``        -> DELETE /api/adoptions/<session_id>;
-* ``e2e.operator_control()``       -> POST /api/adoption/<sid>/source/control;
+* ``e2e.operator_control()``       -> POST /api/adoptions/<sid>/source/control;
 * ``e2e.ingest_native_line()``     -> REAL session ingest pipeline;
 * ``e2e.read_redacted()``          -> REAL transcript repo read;
 * ``e2e.audit()``                  -> REAL adoption transcript ``read_audit()``.
@@ -333,7 +333,7 @@ class _E2E:
 
     def operator_control(self, session_id, action):
         resp = self.app.post(
-            f"/api/adoption/{session_id}/source/control",
+            f"/api/adoptions/{session_id}/source/control",
             json={"action": action, "reason_code": "test"},
             headers=operator_headers())
         assert resp.status_code == 202, resp.get_json()
@@ -376,7 +376,7 @@ def test_operator_terminate_receipt_closes_session_summary(e2e):
     repo = e2e.sessions.session_repo
     assert repo.get_session(row.session_id)["status"] == "running"
     response = e2e.app.post(
-        f"/api/adoption/{row.session_id}/source/control",
+        f"/api/adoptions/{row.session_id}/source/control",
         json={"action": "terminate_session", "reason_code": "test"},
         headers=operator_headers())
     assert response.status_code == 202
@@ -410,7 +410,7 @@ def test_failed_session_projection_recovers_on_poll_after_hub_restart(e2e, monke
     e2e.ingest_native_line("running", session_id=row.session_id)
     repo = e2e.sessions.session_repo
     response = e2e.app.post(
-        f"/api/adoption/{row.session_id}/source/control",
+        f"/api/adoptions/{row.session_id}/source/control",
         json={"action": "terminate_session", "reason_code": "test"},
         headers=operator_headers())
     cid = response.get_json()["command_id"]
@@ -444,7 +444,7 @@ def test_termination_before_session_start_recovers_without_command_replay(e2e, m
     repo = e2e.sessions.session_repo
     assert repo.get_session(row.session_id) is None
     response = e2e.app.post(
-        f"/api/adoption/{row.session_id}/source/control",
+        f"/api/adoptions/{row.session_id}/source/control",
         json={"action": "terminate_session", "reason_code": "test"},
         headers=operator_headers())
     assert response.status_code == 202
@@ -491,7 +491,7 @@ def test_non_termination_receipts_never_close_session(e2e, action, status, reaso
     row = e2e.adopted_session()
     e2e.ingest_native_line("running", session_id=row.session_id)
     response = e2e.app.post(
-        f"/api/adoption/{row.session_id}/source/control",
+        f"/api/adoptions/{row.session_id}/source/control",
         json={"action": action, "reason_code": "test"}, headers=operator_headers())
     cid = response.get_json()['command_id']
     for incoming_reason in (reason, 'terminated'):

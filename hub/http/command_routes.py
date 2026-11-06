@@ -11,12 +11,13 @@ lease TTL 300s，heartbeat 续期；结果按 attempt_id 幂等。
 统一错误序列化。机器来自认证后的 ``g.runner_machine``，绝不采信 runner JSON
 中的 machine 字段。业务逻辑在 ``hub.application.runner_service``。
 """
-from flask import Blueprint, current_app, g, jsonify, request
+from flask import Blueprint, current_app, g, jsonify
 
 from hub.application.runner_service import ApplicationError, RunnerService
 from hub.auth import require_runner, require_task_store
 from hub.http.errors import ApplicationError as HttpApplicationError
 from hub.http.errors import error_response
+from hub.http._common import request_json
 
 bp = Blueprint("commands", __name__)
 
@@ -36,7 +37,10 @@ def _error(exc):
 
 def _json_body():
     """解析 JSON 请求体；缺失/null → {}；非对象 JSON → 400 invalid_json（绝不 500）。"""
-    data = request.get_json(silent=True)
+    try:
+        data = request_json()
+    except HttpApplicationError as exc:
+        return None, error_response(exc)
     if data is None:
         return {}, None
     if not isinstance(data, dict):

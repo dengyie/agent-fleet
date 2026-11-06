@@ -99,7 +99,7 @@ def _run_fake_factory(entries):
 
 
 def patch_probe(entries):
-    return mock.patch("tools.session.probe.subprocess.run",
+    return mock.patch("tools.session.probe._spawn_probe",
                       new=_run_fake_factory(entries))
 
 
@@ -431,21 +431,21 @@ class PiProbeTests(unittest.TestCase):
 class ProbeFailureTests(unittest.TestCase):
     def test_bare_executable_rejected_never_resolves_path(self):
         # A bare name must never be resolved through PATH.
-        with mock.patch("tools.session.probe.subprocess.run") as fake:
+        with mock.patch("tools.session.probe._spawn_probe") as fake:
             m = probe_agent("codex", ["codex"], timeout_s=4.0)
         self.assertFalse(m.installed)
         self.assertIn("executable_not_configured", m.diagnostics)
         fake.assert_not_called()
 
     def test_relative_executable_rejected(self):
-        with mock.patch("tools.session.probe.subprocess.run") as fake:
+        with mock.patch("tools.session.probe._spawn_probe") as fake:
             m = probe_agent("codex", ["./codex"], timeout_s=4.0)
         self.assertFalse(m.installed)
         self.assertIn("executable_not_configured", m.diagnostics)
         fake.assert_not_called()
 
     def test_forbidden_basename_rejected(self):
-        with mock.patch("tools.session.probe.subprocess.run") as fake:
+        with mock.patch("tools.session.probe._spawn_probe") as fake:
             m = probe_agent("claude", ["/bin/rm"], timeout_s=4.0)
         self.assertFalse(m.installed)
         self.assertIn("executable_invalid", m.diagnostics)
@@ -516,14 +516,14 @@ class ProbeSafetyTests(unittest.TestCase):
             probe_agent("not-a-real-agent", [CLAUDE], timeout_s=4.0)
 
     def test_forbidden_executable_rejected(self):
-        with mock.patch("tools.session.probe.subprocess.run") as fake:
+        with mock.patch("tools.session.probe._spawn_probe") as fake:
             m = probe_agent("claude", ["/bin/rm", "-rf", "/"], timeout_s=4.0)
         self.assertFalse(m.installed)
         self.assertIn("executable_invalid", m.diagnostics)
         fake.assert_not_called()
 
     def test_all_help_probes_are_fixed_absolute_argv(self):
-        with mock.patch("tools.session.probe.subprocess.run") as fake:
+        with mock.patch("tools.session.probe._spawn_probe") as fake:
             fake.side_effect = lambda argv, **kw: SimpleNamespace(
                 stdout="Claude Code version 2.0.1\n", stderr="", returncode=0)
             probe_agent("claude", [CLAUDE], timeout_s=4.0)
@@ -540,7 +540,7 @@ class SubprocessIsolationTests(unittest.TestCase):
 
     def _captured_calls(self):
         """Run a claude probe with a mocked subprocess and return the calls."""
-        with mock.patch("tools.session.probe.subprocess.run") as fake:
+        with mock.patch("tools.session.probe._spawn_probe") as fake:
             fake.side_effect = lambda argv, **kw: SimpleNamespace(
                 stdout=(
                     "Claude Code version 2.0.1\n"
@@ -555,14 +555,37 @@ class SubprocessIsolationTests(unittest.TestCase):
         calls = self._captured_calls()
         for call in calls:
             kw = call.kwargs
-            self.assertIs(kw["stdin"], subprocess.DEVNULL)
-            self.assertTrue(kw["close_fds"])
             self.assertNotEqual(kw["cwd"], os.getcwd())
             self.assertNotIn("HOME", kw["env"])
             self.assertTrue(kw["env"]["PATH"].startswith(
                 os.path.dirname(CLAUDE) + ":"))
             self.assertIn("LANG", kw["env"])
-            self.assertEqual(kw["check"], False)
+
+    def test_spawn_goes_through_run_bounded(self):
+        # stdin=DEVNULL / close_fds / owned group are fixed by run_bounded;
+        # its single deadline also covers pipe drain (no Windows hang).
+        from tools.session import probe as pm
+        seen = {}
+
+        def fake(argv, **kw):
+            seen.update(kw)
+            return subprocess.CompletedProcess(
+                argv, 0, b"x" * (pm.MAX_PROBE_READ * 4), b"")
+
+        with mock.patch.object(pm, "run_bounded", side_effect=fake):
+            code, out = pm._run_binary([CLAUDE, "--version"], timeout_s=4.0)
+        self.assertEqual(code, "ok")
+        self.assertEqual(len(out), pm.MAX_PROBE_READ)
+        self.assertEqual(seen["timeout_s"], 4.0)
+        self.assertEqual(seen["stdout_limit"], pm.MAX_PROBE_READ * 4)
+        self.assertEqual(seen["stderr_limit"], 0)
+
+    def test_real_child_sees_eof_on_stdin(self):
+        from tools.session import probe as pm
+        if not os.path.exists("/bin/cat"):
+            self.skipTest("POSIX cat")
+        self.assertEqual(pm._run_binary(["/bin/cat"], timeout_s=4.0),
+                         ("ok", ""))
 
     def test_real_subprocess_call_is_sanitized(self):
         # A real (unmocked) bounded probe invokes with stdin=DEVNULL and an
@@ -633,7 +656,7 @@ class PathCanonicalizationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             link = os.path.join(tmp, "claude")
             os.symlink("/bin/rm", link)  # trusted-looking `claude` -> /bin/rm
-            with mock.patch("tools.session.probe.subprocess.run") as fake:
+            with mock.patch("tools.session.probe._spawn_probe") as fake:
                 m = probe_agent("claude", [link], timeout_s=4.0)
             self.assertFalse(m.installed)
             self.assertIn("executable_invalid", m.diagnostics)
@@ -644,7 +667,7 @@ class PathCanonicalizationTests(unittest.TestCase):
             link = os.path.join(tmp, "codex")
             os.symlink("/bin/cp", link)
             config = {"agents": {"codex": {"command": [link]}}}
-            with mock.patch("tools.session.probe.subprocess.run") as fake:
+            with mock.patch("tools.session.probe._spawn_probe") as fake:
                 result = probe_all(config)
             self.assertFalse(result["codex"].installed)
             self.assertIn("executable_invalid",
@@ -660,7 +683,7 @@ class PathCanonicalizationTests(unittest.TestCase):
             os.makedirs(real_dir)
             link = os.path.join(tmp, "claude")
             os.symlink(os.path.join(real_dir, "claude"), link)
-            with mock.patch("tools.session.probe.subprocess.run") as fake:
+            with mock.patch("tools.session.probe._spawn_probe") as fake:
                 fake.side_effect = lambda argv, **kw: SimpleNamespace(
                     stdout="Claude Code version 2.0.1\n", stderr="",
                     returncode=0)
@@ -675,7 +698,7 @@ class PathCanonicalizationTests(unittest.TestCase):
                                                            "claude")))
 
     def test_plain_absolute_is_executed_as_is(self):
-        with mock.patch("tools.session.probe.subprocess.run") as fake:
+        with mock.patch("tools.session.probe._spawn_probe") as fake:
             fake.side_effect = lambda argv, **kw: SimpleNamespace(
                 stdout="Claude Code version 2.0.1\n", stderr="", returncode=0)
             m = probe_agent("claude", [CLAUDE], timeout_s=4.0)
@@ -729,7 +752,7 @@ class PathAdditionsTests(unittest.TestCase):
                 return SimpleNamespace(stdout="codex 0.44.0\n", stderr="",
                                        returncode=0)
 
-            with mock.patch("tools.session.probe.subprocess.run",
+            with mock.patch("tools.session.probe._spawn_probe",
                             side_effect=fake):
                 probe_agent("codex", [CODEX], timeout_s=4.0,
                             path_adds=[helper])
@@ -757,7 +780,7 @@ class PathAdditionsTests(unittest.TestCase):
                                        else "codex 0.44.0\n", stderr="",
                                        returncode=0)
 
-            with mock.patch("tools.session.probe.subprocess.run",
+            with mock.patch("tools.session.probe._spawn_probe",
                             side_effect=fake):
                 result = probe_all(config)
             self.assertTrue(result["codex"].installed)
@@ -770,7 +793,7 @@ class PathAdditionsTests(unittest.TestCase):
     def test_path_adds_never_leak_into_manifest_or_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             helper = self._make_helper(tmp)
-            with mock.patch("tools.session.probe.subprocess.run",
+            with mock.patch("tools.session.probe._spawn_probe",
                             side_effect=lambda argv, **kw:
                             SimpleNamespace(stdout="", stderr="",
                                             returncode=0)):
@@ -854,7 +877,7 @@ class TimeoutSanitizationTests(unittest.TestCase):
                         in argv else ("  --print\n" if "--help" in argv
                                       else ""),
                         stderr="", returncode=0)
-                with mock.patch("tools.session.probe.subprocess.run",
+                with mock.patch("tools.session.probe._spawn_probe",
                                 side_effect=fake):
                     m = probe_agent("claude", [CLAUDE], timeout_s=raw)
                 self.assertTrue(m.installed)
@@ -880,7 +903,7 @@ class TimeoutSanitizationTests(unittest.TestCase):
                     return SimpleNamespace(
                         stdout="Claude Agent version 2.1.1\n" if "--version"
                         in argv else "", stderr="", returncode=0)
-                with mock.patch("tools.session.probe.subprocess.run",
+                with mock.patch("tools.session.probe._spawn_probe",
                                 side_effect=fake):
                     result = probe_all(self._config_with(raw))
                 self.assertIn("claude", result)
@@ -893,11 +916,11 @@ class TimeoutSanitizationTests(unittest.TestCase):
     def test_run_binary_catches_value_and_overflow_errors(self):
         from tools.session import probe as pm
         # A probe that would raise ValueError/OverflowError maps to "error".
-        with mock.patch("tools.session.probe.subprocess.run",
+        with mock.patch("tools.session.probe._spawn_probe",
                         side_effect=ValueError("boom")):
             self.assertEqual(pm._run_binary([CLAUDE, "--version"],
                                             timeout_s=4.0)[0], "error")
-        with mock.patch("tools.session.probe.subprocess.run",
+        with mock.patch("tools.session.probe._spawn_probe",
                         side_effect=OverflowError("boom")):
             self.assertEqual(pm._run_binary([CLAUDE, "--version"],
                                             timeout_s=4.0)[0], "error")
@@ -969,7 +992,7 @@ class TimeoutSanitizationTests(unittest.TestCase):
                                 in argv else
                                 ("" if "--help" in argv else "")),
                         stderr="", returncode=0)
-                with mock.patch("tools.session.probe.subprocess.run",
+                with mock.patch("tools.session.probe._spawn_probe",
                                 side_effect=fake):
                     m = probe_agent("claude", [CLAUDE], timeout_s=raw)
                 self.assertIsInstance(m, CapabilityManifest)
@@ -996,7 +1019,7 @@ class TimeoutSanitizationTests(unittest.TestCase):
                     return SimpleNamespace(
                         stdout="Claude Agent version 2.1.1\n" if "--version"
                         in argv else "", stderr="", returncode=0)
-                with mock.patch("tools.session.probe.subprocess.run",
+                with mock.patch("tools.session.probe._spawn_probe",
                                 side_effect=fake):
                     result = probe_all(cfg)
                 m = result["claude"]
@@ -1034,7 +1057,7 @@ class ProbeAllTests(unittest.TestCase):
         self.assertTrue(result["claude"].installed)
 
     def test_probe_all_missing_command_is_bounded_not_found(self):
-        with mock.patch("tools.session.probe.subprocess.run") as fake:
+        with mock.patch("tools.session.probe._spawn_probe") as fake:
             result = probe_all({})
         self.assertIn("claude", result)
         self.assertFalse(result["claude"].installed)
@@ -1044,7 +1067,7 @@ class ProbeAllTests(unittest.TestCase):
 
     def test_probe_all_relative_command_is_bounded_not_executed(self):
         config = {"agents": {"codex": {"command": "codex"}}}
-        with mock.patch("tools.session.probe.subprocess.run") as fake:
+        with mock.patch("tools.session.probe._spawn_probe") as fake:
             result = probe_all(config)
         self.assertFalse(result["codex"].installed)
         self.assertIn("executable_not_configured",

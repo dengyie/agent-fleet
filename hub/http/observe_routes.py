@@ -25,6 +25,7 @@ from werkzeug.exceptions import BadRequest
 from hub.application.observe_service import ObserveError, ObserveService
 from hub.auth import extract_operator_identity, require_ingest_token
 from hub.http.errors import ApplicationError, error_response
+from hub.http._common import request_json
 from report_schema import sanitize_agents, sanitize_system
 
 bp = Blueprint("observe", __name__)
@@ -148,8 +149,8 @@ def build_summary():
 @require_ingest_token
 def api_ingest():
     try:
-        data = request.get_json(force=True)
-    except (ValueError, TypeError, UnicodeDecodeError, BadRequest):
+        data = request_json(silent=False, force=True)
+    except (ValueError, TypeError, UnicodeDecodeError, BadRequest, ApplicationError):
         return error_response(_observe_service_error("invalid_json"))
     if not isinstance(data, dict):
         return error_response(_observe_service_error("invalid_json"))

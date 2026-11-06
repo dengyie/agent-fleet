@@ -17,6 +17,9 @@ from tools.transport import Transport
 
 log = logging.getLogger(__name__)
 
+#: Native JSONL lines above this size are skipped (logged), never synced.
+MAX_LINE_BYTES = 16 << 20
+
 
 def post(cfg, path, body):
     if cfg.transport is None:
@@ -31,11 +34,17 @@ def sync_file(cfg, family, path, send=post):
     identity = 'native_' + hashlib.sha256((family + '\0' + str(path)).encode()).hexdigest()[:32]
     capture = RunnerCapture(cfg, {'attempt_id': identity, 'agent_type': family, 'task_id': ''}, send)
     checkpoint = capture.root / (capture.session_id + '.cursor')
-    reader = tailer(str(path), checkpoint_path=str(checkpoint), max_line_bytes=16 << 20)
+    reader = tailer(str(path), checkpoint_path=str(checkpoint), max_line_bytes=MAX_LINE_BYTES)
     try:
         start = reader.offset
         entries = reader.read_entries()
-        if reader.last_error:
+        if reader.last_error == 'nlj_oversized_line':
+            # The tailer already consumed the oversized line's bytes and kept
+            # the rows around it: checkpoint past it instead of raising
+            # forever on the same offset (a permanent sync stall).
+            log.warning('Native conversation line over %d bytes skipped: family=%s file=%s',
+                        MAX_LINE_BYTES, family, path.name)
+        elif reader.last_error:
             raise RuntimeError(reader.last_error)
         end = reader.offset
         # 逐行推进 checkpoint：配额/写入失败在中途抛出时，已入 spool 的前缀

@@ -34,6 +34,7 @@ public status output is leak-free (no paths, exception text or payloads).
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import nullcontext
 from typing import Any
 
 from tools.session.spool import LocalSpool
@@ -90,7 +91,7 @@ class SessionUploader:
         """Opaque continuation token from the last accepted response."""
         return self._next_cursor
 
-    def flush_once(self) -> int:
+    def flush_once(self, guard=None) -> int:
         """Upload ALL pending unacked records in bounded batches.
 
         Returns the number of records successfully acknowledged across all
@@ -98,16 +99,26 @@ class SessionUploader:
         API reject) stops the pass early with the remaining records retained
         durably, so a later ``flush_once`` / ``replay_from_ack`` resumes
         exactly where it failed.
+
+        ``guard`` is an optional context manager (e.g. the writer's lock)
+        held while the spool is read and acked; the POST itself always runs
+        outside it so a slow Hub never blocks concurrent appends.
         """
+        if guard is None:
+            guard = nullcontext()
         total = 0
         while True:
-            cursor = self._spool.status()["ack_sequence"]
-            pending = self._spool.read_after(cursor, self._batch_events,
-                                             self._batch_bytes)
-            if not pending:
-                self.last_error = None
-                return total
-            acked = self._upload_pending(pending)
+            with guard:
+                cursor = self._spool.status()["ack_sequence"]
+                pending = self._spool.read_after(cursor, self._batch_events,
+                                                 self._batch_bytes)
+                if not pending:
+                    self.last_error = None
+                    return total
+            payload = {"events": pending}
+            response = self._transport_send(payload)
+            with guard:
+                acked = self._apply_response(payload, response)
             if acked == 0:
                 # retryable failure: nothing durable changed; stop the pass.
                 return total

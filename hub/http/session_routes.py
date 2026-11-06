@@ -20,6 +20,7 @@ from hub.application.session_service import SessionService, SessionServiceError
 from hub.application.session_search_service import SessionSearchServiceError
 from hub.auth import require_ingest_token, require_operator, require_runner
 from hub.http.errors import ApplicationError, error_response, get_request_id
+from hub.http._common import request_json
 
 bp = Blueprint("sessions", __name__)
 
@@ -112,7 +113,10 @@ def api_session_events():
     有界错误；逐事件校验失败的孤例以 ``rejected`` 数组返回，不丢合法事件。
     响应：``ok/status/stream_id/accepted_through/next_cursor/rejected``。
     """
-    data = request.get_json(force=False)
+    try:
+        data = request_json(silent=False)
+    except ApplicationError as exc:
+        return error_response(exc)
     if not isinstance(data, list):
         return error_response(ApplicationError(
             "invalid_json", "请求体必须是事件列表", 400))
@@ -134,7 +138,10 @@ def api_runner_session_events():
     # ingest credential is needed for the normal task execution path.
     import hashlib
     prefix = "runner_" + hashlib.sha256(g.runner_machine.encode()).hexdigest()[:16] + "_"
-    data = request.get_json(silent=True)
+    try:
+        data = request_json()
+    except ApplicationError as exc:
+        return error_response(exc)
     if not isinstance(data, list):
         return error_response(ApplicationError("invalid_json", "请求体必须是事件列表", 400))
     if any(not isinstance(e, dict) or e.get("machine_id") != g.runner_machine
@@ -172,7 +179,10 @@ def api_session_detail(session_id):
 @require_operator
 def api_session_message(session_id):
     from hub.application.supervisor_service import SupervisorServiceError
-    data = request.get_json(silent=True)
+    try:
+        data = request_json()
+    except ApplicationError as exc:
+        return error_response(exc)
     if not isinstance(data, dict):
         return error_response(ApplicationError("invalid_message", "请求必须为对象", 400))
     if "request_id" not in data and (set(data) != {"text"} or not isinstance(data.get("text"), str)):
@@ -239,6 +249,6 @@ def api_handoff_preview(session_id):
 @require_operator
 def api_handoff_create(session_id):
     try:
-        return jsonify(_handoffs().create(session_id, request.get_json(silent=True), g.operator)), 202
+        return jsonify(_handoffs().create(session_id, request_json(), g.operator)), 202
     except ApplicationError as exc:
         return error_response(exc)

@@ -397,28 +397,45 @@ class AdoptionService:
     # -- revocation -------------------------------------------------------------
 
     def revoke(self, session_id: str, actor: str) -> None:
-        """Revoke an adoption: CAS transition, audit, then at most one ``detach``.
+        """Revoke an adoption: enqueue one ``detach``, then CAS, then audit.
 
         An already-revoked record is idempotent: it is re-confirmed in the
-        store and re-audited but never re-enqueues a ``detach`` command.  Only
-        the CAS winner of ``adopted|pending -> revoked`` issues the detach, so a
+        store and re-audited but never re-enqueues a ``detach`` command.  The
+        detach is enqueued before the ``adopted|pending -> revoked`` CAS so a
+        failed enqueue leaves the seat unrevoked (a retried revoke detaches);
+        all revoke paths serialize on ``_admission_lock``, so a
         concurrent operator revoke and a drift auto-revoke cannot double-fire.
         A still-``pending`` seat is revocable too (its receipt may never
         arrive); the detach then cleans up an attach that may have landed on
         the probe after all (an unknown session is a harmless rejection).
         """
         with self._admission_lock:
+            # Enqueue BEFORE the CAS: a failed signed enqueue (e.g. 503
+            # signing unavailable) must leave the seat revocable, so an
+            # operator retry still issues the detach.  Every revoke path holds
+            # ``_admission_lock``, so the status read here cannot go stale
+            # before the CAS below.
+            try:
+                current = self.adoption_repo.get(session_id)
+            except AdoptionRepositoryError as exc:
+                raise AdoptionServiceError(exc.code) from None
+            if current is None:
+                raise AdoptionServiceError("invalid_adoption")
+            envelope = None
+            if current.status in ("adopted", "pending"):
+                envelope = self.supervisor.enqueue(
+                    current.machine_id, session_id, None, "detach",
+                    "operator_detach", nonce=secrets.token_hex(16))
             try:
                 revoked, captured = self.adoption_repo.revoke_cas(session_id)
             except AdoptionRepositoryError as exc:
+                # The queued detach is harmless without a CAS winner: the probe
+                # rejects a detach for an unknown/unattached session.
                 raise AdoptionServiceError(exc.code) from None
             self.transcripts.append_audit(str(actor), "revoke_session",
                                           target=session_id)
-            if not captured:
+            if envelope is None:
                 return
-            envelope = self.supervisor.enqueue(
-                revoked.machine_id, session_id, None, "detach",
-                "operator_detach", nonce=secrets.token_hex(16))
             self._track(str(envelope.get("command_id") or ""),
                         session_id=session_id, action="detach",
                         machine_id=revoked.machine_id, actor=actor)
@@ -431,20 +448,41 @@ class AdoptionService:
         ``adoption_revoked``.  Each explicit retry of a still-pending seat
         enqueues exactly one new signed command with a fresh nonce.
         """
-        try:
-            record = self.adoption_repo.get(session_id)
-        except AdoptionRepositoryError as exc:
-            raise AdoptionServiceError(exc.code) from None
-        if record is None:
-            raise AdoptionServiceError("invalid_adoption")
-        if record.status == "revoked":
-            raise AdoptionServiceError("adoption_revoked")
-        if record.status == "adopted":
+        # Same admission lock as ``revoke``: a concurrent revoke cannot land
+        # between the pending check and the signed adopt enqueue.
+        with self._admission_lock:
+            try:
+                record = self.adoption_repo.get(session_id)
+            except AdoptionRepositoryError as exc:
+                raise AdoptionServiceError(exc.code) from None
+            if record is None:
+                raise AdoptionServiceError("invalid_adoption")
+            if record.status == "revoked":
+                raise AdoptionServiceError("adoption_revoked")
+            if record.status == "adopted":
+                return record
+            if record.status != "pending":
+                raise AdoptionServiceError("invalid_status_transition")
+            # Re-confirm ``pending`` with a store CAS right before signing: a
+            # revoke/drift that slipped past the read above (any path outside
+            # this lock) turns the retry into a bounded refusal, never an
+            # ``adopt`` issued after the ``detach``.
+            try:
+                record = self.adoption_repo.update_status(session_id, "pending")
+            except AdoptionRepositoryError as exc:
+                if exc.code != "invalid_status_transition":
+                    raise AdoptionServiceError(exc.code) from None
+                try:
+                    current = self.adoption_repo.get(session_id)
+                except AdoptionRepositoryError as rex:
+                    raise AdoptionServiceError(rex.code) from None
+                if current is not None and current.status == "adopted":
+                    return current
+                if current is not None and current.status == "revoked":
+                    raise AdoptionServiceError("adoption_revoked")
+                raise AdoptionServiceError(exc.code) from None
+            self._enqueue_adopt(record, actor)
             return record
-        if record.status != "pending":
-            raise AdoptionServiceError("invalid_status_transition")
-        self._enqueue_adopt(record, actor)
-        return record
 
     # -- probe guard reconciliation (Task 9) --------------------------------------
 

@@ -80,7 +80,9 @@ class AdoptionPhase2ViewTests(unittest.TestCase):
     def test_client_owns_adoption_and_control_paths(self):
         source = CLIENT_JS.read_text()
         self.assertIn("adoptions: '/adoptions'", source)
-        self.assertIn("'/adoption/'", source)
+        # Canonical plural path (inside the Access-protected /api/adoptions*).
+        self.assertNotIn("'/adoption/'", source)
+        self.assertIn("API.adoptions + '/' + encodeURIComponent(sessionId) + '/source/control'", source)
         self.assertIn("'/source/control'", source)
         begin = source.index('export async function controlSession')
         nxt = source.find('export async function', begin + 10)

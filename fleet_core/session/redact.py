@@ -87,6 +87,53 @@ _SENSITIVE_VALUE_KEYS = frozenset({
     "aws_access_key_id",
 })
 
+# Key-name families matched by suffix/substring (``ANTHROPIC_AUTH_TOKEN``,
+# ``x-goog-api-key``, ``DB_PASSWORD``, ``client-secret`` ...).  Plural
+# counters (``max_tokens``/``input_tokens``) never end in ``token`` and stay
+# readable; a few structural ``*_key`` names are explicitly benign.
+_SENSITIVE_KEY_SUFFIXES = (
+    "token", "apikey", "api_key", "access_key", "secret_key", "private_key",
+    "signing_key", "encryption_key", "auth_key", "master_key", "account_key",
+    "storage_key", "client_key", "license_key", "webhook_key",
+    "credential", "credentials", "cookie", "session_id", "sessionid",
+)
+_SENSITIVE_KEY_PARTS = ("secret", "password", "passwd", "passphrase")
+_BENIGN_KEYS = frozenset({
+    "public_key", "publickey", "sort_key", "cache_key", "primary_key",
+    "foreign_key", "partition_key", "range_key", "hash_key", "idempotency_key",
+    "dedup_key", "group_key", "lookup_key", "map_key", "next_token",
+    "page_token", "next_page_token", "continuation_token", "pagination_token",
+    "eos_token", "bos_token", "pad_token", "unk_token", "stop_token",
+    "sep_token", "cls_token", "mask_token", "secret_name", "secret_ref",
+    "secret_id", "secretname", "password_policy", "token_type",
+})
+
+
+def _norm_key(key: str) -> str:
+    return key.strip().lower().replace("-", "_").replace(".", "_")
+
+
+def _is_sensitive_key(key_lower: str) -> bool:
+    """True when ``key_lower`` names a credential-bearing field."""
+    if not key_lower:
+        return False
+    if key_lower in _SENSITIVE_VALUE_KEYS:
+        return True
+    norm = _norm_key(key_lower)
+    if norm in _SENSITIVE_VALUE_KEYS:
+        return True
+    if norm in _BENIGN_KEYS or len(norm) > 128:
+        return False
+    if any(part in norm for part in _SENSITIVE_KEY_PARTS):
+        return True
+    return norm.endswith(_SENSITIVE_KEY_SUFFIXES)
+
+
+def _is_password_key(key_lower: str) -> bool:
+    norm = _norm_key(key_lower)
+    return key_lower in _PASSWORD_KEYS or norm in _PASSWORD_KEYS or \
+        any(part in norm for part in ("password", "passwd", "passphrase"))
+
 
 @dataclass(frozen=True)
 class RedactionReport:
@@ -141,8 +188,20 @@ _PEM_BLOCK_RE = re.compile(
 _DB_URL_RE = re.compile(
     r"\b(?P<scheme>postgres|postgresql|mysql|mariadb|mongodb(?:\+srv)?|"
     r"redis|rediss|amqp|amqps|mssql)://"
-    r"(?P<cred>[^@\s/]+?)@",
+    r"(?P<cred>[^@\s/\"'<>]+?)@",
     re.IGNORECASE,
+)
+
+# Any ``scheme://user:password@host``: the password may itself contain ``/``
+# or ``@`` (``postgres://u:Ab/cd@h``, ``postgres://u:p@ss@h``), so the
+# credential spans up to the LAST ``@`` before the host within the URL token
+# (whitespace/quotes end it).  ``host:port/...@x`` (``localhost:5173/@vite``)
+# is not userinfo: a purely numeric "password" followed by a path is skipped.
+# User/password lengths are bounded so a hostile line stays linear-time.
+_URL_CRED_RE = re.compile(
+    r"(?<![A-Za-z0-9+.\-])(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]{0,31})://"
+    r"(?P<cred>[^\s@/:\"'<>`]{0,256}:(?!\d{1,5}(?:[/?#]|$))"
+    r"[^\s\"'<>`]{0,512})@(?=[A-Za-z0-9\[_])",
 )
 
 # Shared assignment-value grammar for the whole secret/token/password family:
@@ -199,13 +258,30 @@ _SK_TOKEN_RE = re.compile(
 )
 
 _GITHUB_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(?:ghp_|ghs_|gho_|github_pat_)[A-Za-z0-9]{8,}",
+    r"(?<![A-Za-z0-9_])(?:github_pat_[A-Za-z0-9_]{8,}|"
+    r"gh[pousr]_[A-Za-z0-9]{8,})",
 )
 _SLACK_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:xox[bapr]|xapp)[_-][A-Za-z0-9_-]{6,}",
 )
 _AWS_KEY_RE = re.compile(
-    r"(?<![A-Za-z0-9_])AKIA[0-9A-Z]{16,}",
+    r"(?<![A-Za-z0-9_])(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Za-z])",
+)
+# AWS secret access key (40 chars, mixed case base64 alphabet); only
+# redacted when an access key id is present in the same text, so ordinary
+# 40-char hex digests (commit SHAs) are never touched.
+_AWS_SECRET_RE = re.compile(
+    r"(?<![A-Za-z0-9/+=])(?=[A-Za-z0-9/+]*[a-z])(?=[A-Za-z0-9/+]*[A-Z])"
+    r"[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+=])",
+)
+# Vendor token sigils: Stripe, Google API keys, GitLab, Hugging Face, npm.
+_VENDOR_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:"
+    r"(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{8,}|"
+    r"AIza[0-9A-Za-z_\-]{35}|"
+    r"glpat-[A-Za-z0-9_\-]{8,}|"
+    r"hf_[A-Za-z0-9]{16,}|"
+    r"npm_[A-Za-z0-9]{16,})",
 )
 _JWT_RE = re.compile(
     r"(?<![A-Za-z0-9_])eyJ[A-Za-z0-9_\-]{12,}\.[A-Za-z0-9._\-]{10,}",
@@ -227,8 +303,35 @@ _WINDOWS_PATH_RE = re.compile(
     r"[A-Za-z0-9._\- ]+|[A-Za-z]:\\[A-Za-z0-9._\-]+)",
 )
 _HEADER_VALUE_RE = re.compile(
-    r"(?m)^[ \t]*(?:Authorization|Proxy-Authorization|X-Api-Key|"
-    r"X-Auth-Token)[ \t]*:[ \t]*(?P<value>[^,\r\n]+)",
+    r"(?im)(?:^|(?<=[\s\"'(]))[ \t]*(?:Authorization|Proxy-Authorization|"
+    r"X-Api-Key|X-Auth-Token)[ \t]*:[ \t]*(?P<value>[^,\r\n\"']+)",
+)
+
+# Generic keyed assignment in free text: ``NAME=value``, ``name: value``
+# (YAML), ``"name": "value"``, ``'name': 'value'``.  The name is filtered by
+# :func:`_is_sensitive_key`; the separator ``:`` must be followed by blank or
+# a quote (so ``scheme://`` / ``a::b`` never match).
+_KEYED_ASSIGN_RE = re.compile(
+    r"(?<![A-Za-z0-9_.\-:/])(?P<kq>[\"']?)"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_.\-]{0,127})(?P=kq)"
+    r"(?P<sep>[ \t]*=[ \t]*|[ \t]*:(?=[ \t\"'])[ \t]*)"
+    r"(?:(?P<q>[\"'])(?P<qval>(?:\\.|(?!(?P=q))[^\\\r\n])*)(?P=q)"
+    r"|(?P<val>[^\s\"'`,;\}\]][^\r\n\"'`,;\}\]]*"
+    r"[^\s\"'`,;\}\]]|[^\s\"'`,;\}\]]))",
+)
+
+# CLI credential flags: ``--token VALUE``, ``--api-key=VALUE``,
+# ``--password "a b"``.
+_CLI_FLAG_RE = re.compile(
+    r"(?<![A-Za-z0-9_\-])(?P<flag>--?(?P<name>[A-Za-z][A-Za-z0-9_\-]{0,63}))"
+    r"(?P<sep>=|[ \t]+)"
+    r"(?:(?P<q>[\"'])(?P<qval>(?:\\.|(?!(?P=q))[^\\\r\n])*)(?P=q)"
+    r"|(?P<val>(?!-)[^\s\"'`]+))",
+)
+
+_TRIVIAL_VALUE_RE = re.compile(
+    r"^(?:-?\d{1,12}(?:\.\d+)?|true|false|null|none|nil|yes|no|"
+    r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|<[^<>]*>|\*+|x+)$",
     re.IGNORECASE,
 )
 
@@ -268,7 +371,7 @@ def _certain_token(text: str) -> bool:
         return False
     if _GITHUB_RE.search(text) or _SLACK_RE.search(text) or \
             _AWS_KEY_RE.search(text) or _JWT_RE.search(text) or \
-            _BEARER_RE.search(text):
+            _VENDOR_TOKEN_RE.search(text) or _BEARER_RE.search(text):
         return True
     m = _SK_TOKEN_RE.search(text)
     if m:
@@ -301,8 +404,8 @@ def _redact_string(text: str, key_lower: str, ctx: RedactionContext,
 
     # A whole value under a demonstrably sensitive key is replaced regardless
     # of whether its format matches a sigil - never leaked, marked uncertain.
-    if key_lower in _SENSITIVE_VALUE_KEYS:
-        category = "password" if key_lower in _PASSWORD_KEYS else "credential"
+    if _is_sensitive_key(key_lower):
+        category = "password" if _is_password_key(key_lower) else "credential"
         ctx.add(category, replacement(category), uncertain=True)
         return replacement(category)
 
@@ -329,6 +432,15 @@ def _redact_blocks(text: str, ctx: RedactionContext) -> str:
         return f"{scheme}://{replacement('credential')}@"
 
     out, _ = _DB_URL_RE.subn(_db_repl, out)
+
+    # Any scheme with ``user:password@`` (password may contain ``/``/``@``);
+    # a credential already reduced to the placeholder is left untouched.
+    def _url_repl(match: re.Match) -> str:
+        if match.group("cred") == replacement("credential"):
+            return match.group(0)
+        return _db_repl(match)
+
+    out, _ = _URL_CRED_RE.subn(_url_repl, out)
 
     # Env-style secret assignment (value can be multi-token).
     def _env_repl(match: re.Match) -> str:
@@ -386,8 +498,12 @@ def _apply_tokens_and_assignments(text: str, ctx: RedactionContext) -> str:
         ctx.add("credential", replacement("credential"), uncertain=False)
         return replacement("credential")
 
-    for pattern in (_GITHUB_RE, _SLACK_RE, _AWS_KEY_RE, _JWT_RE):
+    aws_present = bool(_AWS_KEY_RE.search(out))
+    for pattern in (_GITHUB_RE, _SLACK_RE, _AWS_KEY_RE, _JWT_RE,
+                    _VENDOR_TOKEN_RE):
         out, _ = pattern.subn(_sigil_repl, out)
+    if aws_present:
+        out, _ = _AWS_SECRET_RE.subn(_sigil_repl, out)
 
     # Generic single-token assignments (token=, api_key=...).
     def _assign_repl(match: re.Match) -> str:
@@ -422,6 +538,46 @@ def _apply_tokens_and_assignments(text: str, ctx: RedactionContext) -> str:
 
     out, _ = _HEADER_VALUE_RE.subn(_header_repl, out)
 
+    out = _redact_keyed_values(out, ctx)
+    return out
+
+
+def _keyed_value_is_secret(name: str, value: str) -> bool:
+    if not value or value.startswith(_PLACEHOLDER_BASE):
+        return False
+    if not _is_sensitive_key(name.lower()):
+        return False
+    if _is_password_key(name.lower()) or "secret" in _norm_key(name):
+        return value.strip() != ""
+    # token/key family: numeric config or placeholders are not secrets.
+    return not _TRIVIAL_VALUE_RE.match(value.strip())
+
+
+def _redact_keyed_values(text: str, ctx: RedactionContext) -> str:
+    """Redact sensitive-named CLI flags and key/value pairs in free text."""
+
+    def _value_repl(match: re.Match, head: str) -> str:
+        quote = match.group("q")
+        value = match.group("qval") if quote else match.group("val")
+        if not _keyed_value_is_secret(match.group("name"), value or ""):
+            return match.group(0)
+        cat = "password" if _is_password_key(match.group("name").lower()) \
+            else "credential"
+        ctx.add(cat, replacement(cat), uncertain=not _certain_token(value))
+        quote = quote or ""
+        return f"{head}{quote}{replacement(cat)}{quote}"
+
+    def _flag_repl(match: re.Match) -> str:
+        return _value_repl(match, match.group("flag") + match.group("sep"))
+
+    out, _ = _CLI_FLAG_RE.subn(_flag_repl, text)
+
+    def _keyed_repl(match: re.Match) -> str:
+        kq = match.group("kq")
+        head = f"{kq}{match.group('name')}{kq}{match.group('sep')}"
+        return _value_repl(match, head)
+
+    out, _ = _KEYED_ASSIGN_RE.subn(_keyed_repl, out)
     return out
 
 
@@ -452,10 +608,10 @@ def _redact_secret_string(text: str, key_lower: str,
                           ctx: RedactionContext) -> str:
     if not text:
         return text
-    if key_lower in _SENSITIVE_VALUE_KEYS:
+    if _is_sensitive_key(key_lower):
         if text.startswith(_PLACEHOLDER_BASE) and text.endswith("]"):
             return text
-        category = "password" if key_lower in _PASSWORD_KEYS else "credential"
+        category = "password" if _is_password_key(key_lower) else "credential"
         ctx.add(category, replacement(category), uncertain=True)
         return replacement(category)
     out = _redact_blocks(text, ctx)
@@ -470,16 +626,16 @@ def _redact_secret_value(value: Any, key_lower: str, ctx: RedactionContext,
     if isinstance(value, str):
         return _redact_secret_string(value, key_lower, ctx)
     if isinstance(value, Mapping):
-        if key_lower in _SENSITIVE_VALUE_KEYS:
-            category = ("password" if key_lower in _PASSWORD_KEYS
+        if _is_sensitive_key(key_lower):
+            category = ("password" if _is_password_key(key_lower)
                         else "credential")
             ctx.add(category, replacement(category), uncertain=True)
             return replacement(category)
         return {str(k): _redact_secret_value(v, str(k).lower(), ctx, depth + 1)
                 for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        if key_lower in _SENSITIVE_VALUE_KEYS and value:
-            category = ("password" if key_lower in _PASSWORD_KEYS
+        if _is_sensitive_key(key_lower) and value:
+            category = ("password" if _is_password_key(key_lower)
                         else "credential")
             ctx.add(category, replacement(category), uncertain=True)
             return replacement(category)
@@ -622,8 +778,8 @@ class Redactor:
             return _redact_string(value, key_lower, ctx, depth + 1)
 
         if isinstance(value, Mapping):
-            if key_lower in _SENSITIVE_VALUE_KEYS:
-                category = ("password" if key_lower in _PASSWORD_KEYS
+            if _is_sensitive_key(key_lower):
+                category = ("password" if _is_password_key(key_lower)
                             else "credential")
                 ctx.add(category, replacement(category), uncertain=True)
                 return replacement(category)
@@ -633,8 +789,8 @@ class Redactor:
             }
 
         if isinstance(value, list):
-            if key_lower in _SENSITIVE_VALUE_KEYS:
-                category = ("password" if key_lower in _PASSWORD_KEYS
+            if _is_sensitive_key(key_lower):
+                category = ("password" if _is_password_key(key_lower)
                             else "credential")
                 ctx.add(category, replacement(category), uncertain=True)
                 return replacement(category)

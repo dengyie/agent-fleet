@@ -27,6 +27,7 @@ from hub.application.task_service import ApplicationError, TaskService
 from hub.auth import require_operator, require_task_store
 from hub.domain.task import DomainError
 from hub.http.errors import error_response
+from hub.http._common import request_json
 
 bp = Blueprint("tasks", __name__)
 
@@ -50,7 +51,7 @@ def _error(exc):
 @require_task_store
 def create_task():
     try:
-        result = _tasks().create(request.get_json(silent=True), g.operator)
+        result = _tasks().create(request_json(), g.operator)
     except (DomainError, ApplicationError) as exc:
         return _error(exc)
     return jsonify(result), 201 if result["created"] else 200
