@@ -15,6 +15,7 @@ from hub.application.supervisor_service import (
     SupervisorService,
     SupervisorServiceError,
 )
+from hub.infrastructure.adoption_repository import AdoptionRepositoryError
 from hub.auth import require_operator, require_supervisor
 from hub.http.errors import ApplicationError, error_response, get_request_id
 from hub.http._common import json_object_or_error as _json_object
@@ -38,14 +39,28 @@ def poll():
     if err:
         return err
     machine = g.get("supervisor_machine", "")
+    recovery = None
     try:
-        commands = _supervisor().poll(machine)
+        if "adoption_recovery_after" in data:
+            after = data["adoption_recovery_after"]
+            if (not isinstance(after, str) or len(after) > 160
+                    or any(not (c.isascii() and (c.isalnum() or c in "_-")) for c in after)):
+                return error_response(ApplicationError("invalid_cursor", "", 400))
+            adoptions = current_app.extensions["fleet"]["services"].get("adoptions")
+            recovery = (adoptions.recover_for_machine(machine, after) if adoptions
+                        else {"commands": [], "next_cursor": None})
+        # Wait for the client to acknowledge all bindings before leasing
+        # controls. A bridge failure must not consume a queued pause/stop.
+        commands = [] if recovery and recovery["commands"] else _supervisor().poll(machine)
+    except AdoptionRepositoryError:
+        return error_response(ApplicationError("adoption_store", "", 503))
     except SupervisorServiceError as exc:
         return error_response(ApplicationError(
             code=exc.code, detail=exc.detail, status=exc.status))
     return jsonify({
         "ok": True,
         "commands": commands,
+        **({"adoption_recovery": recovery} if recovery is not None else {}),
         "machine": machine,
         "request_id": get_request_id(),
     })

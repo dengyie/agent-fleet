@@ -43,6 +43,7 @@ python -m tools.session.sync --config /path/to/runner.yaml \
 - Codex 续聊使用 `codex exec resume --json <native-id> <text>`。
 - Supervisor 保存 thread.started 返回的原生 ID；正常完成标为 completed，与主动终止区分，正常完成后允许下一轮。
 - VPS 已有会话需要先纳管，单独同步历史不等于取得可控制的活动进程。原生身份、工作目录或源会话已不存在时不新建一个伪装成原会话的进程。
+- ControlClient 启动后通过机器认证的 supervisor poll 分页请求有效纳管记录，由 Hub 重新签发 adopt 指令；节点重新校验进程身份，沿用原会话及进程组标识重建采集桥和 native checkpoint。恢复期间不领取普通控制命令；全部恢复后才写新版接管回执。已撤销记录不恢复，进程漂移会撤销原纳管，网络或采集失败保留恢复重试。
 - 普通 runner 的临时任务仍清理 worktree；查看这些任务的完整对话不代表能在已清理目录继续执行。长驻/纳管会话的续聊单独验收。
 
 ## Agent 状态、问题卡片与接力

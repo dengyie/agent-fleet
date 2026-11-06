@@ -434,7 +434,21 @@ export function mountAssistant(target, options) {
   }
   function fill(select, rows, valueKey, labelKey) { clear(select); (Array.isArray(rows) ? rows : []).filter(function (row) { return row.enabled !== false; }).forEach(function (row) { var option = document.createElement('option'); option.value = row[valueKey] || ''; option.textContent = row[labelKey] || option.value; select.appendChild(option); }); }
   async function refreshLegacy(runId) { if (!runId || legacyForm.hidden) return; try { var data = await getPlatformLegacyTask(runId); var link = data.legacy_task || data; legacyStatus.textContent = '状态：' + (link.state || 'unknown') + (link.task_state ? ' · ' + link.task_state : '') + (link.task_id ? ' · task ' + link.task_id : ''); renderLegacyProjection(legacyDetails, link); if (link.session_id) { var session = document.createElement('a'); session.href = pagePath('session', link.session_id); session.textContent = '打开会话'; legacyDetails.appendChild(session); } } catch (error) { legacyStatus.textContent = (error && error.code === 'legacy_task_not_found') ? '尚未关联旧任务' : ((error && (error.detail || error.message)) || '旧任务状态不可用'); clear(legacyDetails); } }
-  async function refreshRunEvents(runId) { if (!runId) return; clear(eventHost); cursor = 0; try { var eventData = await getRunEvents(runId, 0); var events = eventData.events || []; if (events.length) { cursor = eventData.next_cursor || events[events.length - 1].sequence || 0; renderEvents(eventHost, events); } } catch (error) { showError(eventHost, error); } }
+  async function refreshRunEvents(runId) {
+    if (!runId) return;
+    clear(eventHost); cursor = 0;
+    // Terminal runs no longer poll. Read all persisted pages here, including
+    // the final refresh of a run that just finished while this view was open.
+    while (!disposed) {
+      var eventData = await getRunEvents(runId, cursor);
+      if (disposed) return;
+      var events = eventData.events || [];
+      if (!events.length) return;
+      var next = eventData.next_cursor || events[events.length - 1].sequence;
+      if (!(next > cursor)) throw new Error('运行事件游标没有前进，请重试');
+      renderEvents(eventHost, events); cursor = next;
+    }
+  }
   async function refreshConversation() {
     if (!conversationId) return;
     var data = await getConversation(conversationId);

@@ -127,6 +127,18 @@ def test_rejected_retry_never_revokes_an_adopted_seat(tmp_path):
     assert hub.adoption.adoption_repo.get(row.session_id).status == "adopted"
 
 
+def test_recovery_drift_after_hub_restart_revokes_adopted_seat(tmp_path):
+    key = _key()
+    hub = _Hub(tmp_path, key)
+    row = hub.adoption.adopt("m1", PID, STARTED, "op-1")
+    [initial] = hub.supervisor.poll("m1")
+    hub.supervisor.receipt(initial["command_id"], "accepted", "adopted", machine="m1")
+    [recovery] = hub.adoption.recover_for_machine("m1")["commands"]
+    restarted = _Hub(tmp_path, key)
+    restarted.supervisor.receipt(recovery["command_id"], "rejected", "pid_reused", machine="m1")
+    assert restarted.adoption.adoption_repo.get(row.session_id).status == "revoked"
+
+
 def test_operator_revoke_from_pending(tmp_path):
     hub = _Hub(tmp_path, _key())
     row = hub.adoption.adopt("m1", PID, STARTED, "op-1")

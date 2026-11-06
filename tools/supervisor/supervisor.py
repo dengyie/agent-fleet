@@ -306,7 +306,8 @@ class Supervisor(HandlesMixin, NativeResumeMixin):
         if bound is not None:
             if _handle_pid(bound.handle) == pid_int:
                 return "adopted"
-            return "pid_reused"
+            if bound.handle is not None or not session_id.startswith("adopt_"):
+                return "pid_reused"
         sid = validate_opaque(
             session_id if session_id else new_opaque_id("adopt"),
             "session_id")
@@ -341,6 +342,10 @@ class Supervisor(HandlesMixin, NativeResumeMixin):
             created_at=now,
             updated_at=now,
         )
+        if bound is not None:
+            # A fresh signed Hub command and the live identity check above
+            # authorize reattachment. Keep the durable session/group identity.
+            manifest = bound.manifest
         # remember the SAME identity reader used for this attach so the guard's
         # follow-up re-check sees identical live readings; probe=None replays
         # the default reader (`self._default_attach_probe`).
@@ -432,6 +437,19 @@ class Supervisor(HandlesMixin, NativeResumeMixin):
              / f"{session_id}{self.MANIFEST_SUFFIX}").unlink()
         except OSError:
             pass
+
+    def release_adoption_binding(self, session_id: str) -> None:
+        """Undo a failed capture reconnect while keeping its durable identity."""
+        entry = self._entries.get(session_id)
+        if entry is None:
+            return
+        with entry.control_lock:
+            handle, entry.handle = entry.handle, None
+            if handle is not None:
+                try:
+                    self._ops.close(handle)
+                except Exception:
+                    pass
 
     # ---- adoption identity guard (Task 9) -------------------------------- #
 
@@ -1061,7 +1079,8 @@ class Supervisor(HandlesMixin, NativeResumeMixin):
             if m.state in TERMINAL_STATES:
                 self._entries[m.session_id] = _ManagedEntry(m, None)
             else:
-                m.state = RUNNING
+                if not m.session_id.startswith("adopt_"):
+                    m.state = RUNNING
                 self._set_reason(m, "recovered")
                 self._entries[m.session_id] = _ManagedEntry(m, None)
             out[m.session_id] = m

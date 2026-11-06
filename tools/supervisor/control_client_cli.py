@@ -277,9 +277,16 @@ class _Stop(Exception):
 
 
 def _run(client, args, interval):
+    announced = False
+
     def _tick():
+        nonlocal announced
         result = client.poll_once()
         _pump_bridges(client)
+        if (not announced and result.get("ok")
+                and getattr(client, "adoption_recovery_complete", True)):
+            client_runtime.announce(ROLE)
+            announced = True
         return result
 
     if args.once:
@@ -306,7 +313,6 @@ def _run(client, args, interval):
         signal.signal(signal.SIGTERM, _on_term)
     except ValueError:
         pass
-    client_runtime.announce(ROLE)
     backoff = MIN_BACKOFF_S
     while True:
         if state["stop"] or client_runtime.drain_requested(ROLE):

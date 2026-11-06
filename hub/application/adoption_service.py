@@ -484,6 +484,21 @@ class AdoptionService:
             self._enqueue_adopt(record, actor)
             return record
 
+    def recover_for_machine(self, machine_id: str, after: str = "") -> dict:
+        """Reissue current bindings after a client restart, before controls.
+
+        Only this authenticated machine's active seats are signed. Revocation
+        shares the admission lock, so it cannot race an active check/enqueue.
+        A failed response can be retried: node-side attach/bridge are idempotent.
+        """
+        with self._admission_lock:
+            records = self.adoption_repo.list_active(machine_id, after=after, limit=21)
+            page = records[:20]
+            commands = [self._enqueue_adopt(record, record.actor, recovery=True)
+                        for record in page]
+            return {"commands": commands,
+                    "next_cursor": page[-1].session_id if len(records) > 20 else None}
+
     # -- probe guard reconciliation (Task 9) --------------------------------------
 
     def reconcile_revoked(self, session_id: str, *, reason: str,
@@ -799,6 +814,7 @@ class AdoptionService:
             "action": action,
             "machine_id": str(command.get("machine_id") or record.machine_id),
             "actor": str(record.actor or ""),
+            "recovery": command.get("reason_code") == "adoption_recovery",
         }
 
     def _receipt_adopt(self, cid: str, session_id: str, status: str,
@@ -813,6 +829,11 @@ class AdoptionService:
         job, once a result has settled.
         """
         if reason != ADOPT_SUCCESS:
+            if (status == "rejected" and reason in ADOPT_DRIFT_CODES
+                    and (tracked or {}).get("recovery")):
+                drift = self._drift_revoke(cid, session_id, reason, tracked or {})
+                if drift.get("handled"):
+                    return drift
             # An adopt-denied / refused receipt never promotes the store; a
             # TERMINAL refusal closes the still-pending seat instead of
             # leaving it blocking re-adopt / revoke forever.
@@ -920,11 +941,12 @@ class AdoptionService:
         pgid = self._as_int(value)
         return pgid if pgid > 0 else None
 
-    def _enqueue_adopt(self, record: Adoption, actor: str) -> None:
+    def _enqueue_adopt(self, record: Adoption, actor: str, *, recovery: bool = False) -> dict:
         """Sign exactly one ``adopt`` for ``record`` and track it."""
         envelope = self.supervisor.enqueue(
             record.machine_id, record.session_id, None, "adopt",
-            "operator_adopt", nonce=secrets.token_hex(16),
+            "adoption_recovery" if recovery else "operator_adopt",
+            nonce=secrets.token_hex(16),
             candidate={
                 "pid": record.pid,
                 "started_at": record.started_at,
@@ -935,6 +957,9 @@ class AdoptionService:
         self._track(str(envelope.get("command_id") or ""),
                     session_id=record.session_id, action="adopt",
                     machine_id=record.machine_id, actor=actor)
+        if recovery:
+            self._tracked[str(envelope["command_id"])]["recovery"] = True
+        return envelope
 
 
 __all__ = ["AdoptionService", "AdoptionServiceError", "Candidate"]

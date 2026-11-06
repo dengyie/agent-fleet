@@ -84,7 +84,8 @@
         "tests/test_platform_run_worker.py::test_queued_turns_use_trigger_cutoff_and_durable_assistant_history",
         "tests/test_acceptance_flow.py::test_acceptance_http_idempotency_cannot_cross_policy",
         "tests/test_acceptance_flow.py::test_acceptance_queued_policy_survives_hub_restart",
-        "tests/test_acceptance_flow.py::test_accepted_response_timeout_recovers_unique_run_by_token"
+        "tests/test_acceptance_flow.py::test_accepted_response_timeout_recovers_unique_run_by_token",
+        "tests/test_frontend_browser.py::test_assistant_event_history_pagination"
       ]
     },
     {
@@ -507,7 +508,15 @@
         "tests/test_adoption_e2e.py::test_detach_receipt_keeps_live_session_open",
         "tests/test_root_cause_regressions.py::test_terminal_session_projection_is_transactional_and_machine_scoped",
         "tests/test_root_cause_regressions.py::test_legacy_terminal_receipts_are_backfilled_once_for_session_projection",
-        "tests/test_adoption_e2e.py::test_termination_before_session_start_recovers_without_command_replay"
+        "tests/test_adoption_e2e.py::test_termination_before_session_start_recovers_without_command_replay",
+        "tests/test_adoption_e2e.py::test_restart_restores_adoption_bridge_and_controls",
+        "tests/test_adoption_e2e.py::test_restart_does_not_restore_revoked_adoption",
+        "tests/test_adoption_e2e.py::test_restart_drift_revokes_instead_of_claiming_managed",
+        "tests/test_adoption_e2e.py::test_restart_retries_recovery_after_network_failure",
+        "tests/test_adoption_e2e.py::test_recovery_is_paged_and_machine_scoped_before_controls",
+        "tests/test_adoption_e2e.py::test_recovery_retries_bridge_failure_without_signalling",
+        "tests/test_adoption_e2e.py::test_restarted_real_bridge_continues_native_transcript_once",
+        "tests/test_review_hubapp_adoption.py::test_recovery_drift_after_hub_restart_revokes_adopted_seat"
       ]
     },
     {
@@ -658,7 +667,12 @@
         "tests/test_browser_capture_gc.py::test_gc_clears_tombstone_after_an_already_completed_removal",
         "tests/test_browser_capture_gc.py::test_gc_recovers_quarantine_after_interrupted_file_removal",
         "tests/test_browser_capture_gc.py::test_gc_verifies_manifest_content_hash_and_retention_boundary",
-        "tests/test_browser_capture_gc.py::test_gc_rejects_content_without_png_signature_even_when_hash_matches"
+        "tests/test_browser_capture_gc.py::test_gc_rejects_content_without_png_signature_even_when_hash_matches",
+        "tests/test_round7_installer.py::test_successful_probe_can_exit_before_updater_reads_receipt",
+        "tests/test_round7_installer.py::test_stale_probe_receipt_does_not_verify_new_install",
+        "tests/test_round7_installer.py::test_crash_after_link_change_recovers_both_links",
+        "tests/test_round7_installer.py::test_recovers_legacy_staged_journal_after_current_changed",
+        "tests/test_round7_installer.py::test_gc_preserves_release_of_still_draining_runner"
       ]
     },
     {

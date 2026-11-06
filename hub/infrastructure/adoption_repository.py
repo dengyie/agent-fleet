@@ -314,16 +314,23 @@ class AdoptionRepository:
             conn.close()
         return [_sql_row(row) for row in rows]
 
-    def list_active(self, machine_id: str) -> list[Adoption]:
+    def list_active(self, machine_id: str, *, after: str | None = None,
+                    limit: int = 21) -> list[Adoption]:
         """Only currently-in-force (``adopted``) records for a machine."""
         if not isinstance(machine_id, str) or not machine_id:
             raise AdoptionRepositoryError("invalid_adoption")
         conn = self._connect()
         try:
-            rows = conn.execute(
-                "SELECT * FROM adoptions WHERE machine_id=?"
-                " AND status='adopted' ORDER BY created_at DESC, session_id",
-                (machine_id,)).fetchall()
+            if after is None:
+                rows = conn.execute(
+                    "SELECT * FROM adoptions WHERE machine_id=?"
+                    " AND status='adopted' ORDER BY created_at DESC, session_id",
+                    (machine_id,)).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM adoptions WHERE machine_id=? AND status='adopted'"
+                    " AND session_id>? ORDER BY session_id LIMIT ?",
+                    (machine_id, after, max(1, min(int(limit), 21)))).fetchall()
         except sqlite3.Error:
             raise AdoptionRepositoryError("adoption_store") from None
         finally:
