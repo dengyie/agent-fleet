@@ -39,7 +39,8 @@ class TestAssistantArtifactViewContractTests:
         assert "加载中" in source
         assert "暂无产物" in source
         assert "refreshRunEvents" in source
-        assert "getRunEvents(runId, 0)" in source
+        # Pagination and completion are exercised by the real browser suite.
+        assert "getRunEvents(" in source
         assert "if (type !== 'textarea') field.type = type;" in source
         assert "getPlatformArtifactPreview" in source
         assert "el('pre'" in source

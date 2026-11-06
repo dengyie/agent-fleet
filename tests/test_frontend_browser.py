@@ -22,6 +22,49 @@ ROOT = Path(__file__).resolve().parents[1]
 OWNER = 'browser@example.test'
 
 
+@pytest.mark.parametrize('completed', [True, False])
+def test_assistant_event_history_pagination(tmp_path, completed):
+    if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
+        pytest.skip('Set FLEET_PLAYWRIGHT_MODULE to run Chromium acceptance')
+    app = create_app(FleetConfig.from_root(
+        tmp_path, frontend_dir=ROOT / 'frontend', dev_operator=OWNER, platform_enabled=True))
+    repo = app.extensions['fleet']['platform_repository']
+    repo.upsert_model(OWNER, {'profile_id': 'fixture', 'provider': 'deterministic', 'model': 'local'})
+    repo.upsert_workspace(OWNER, {'workspace_id': 'workspace', 'root_path': str(tmp_path / 'workspace')})
+    repo.update_defaults(OWNER, {'model_profile_id': 'fixture', 'workspace_id': 'workspace'}, 0)
+
+    def finish():
+        repo.append_run_event(OWNER, rid, 'run_finished', {'state': 'succeeded'}, now=time.time())
+        repo.set_run_state(OWNER, rid, 'succeeded', now=time.time(), result_text='完成分页验收')
+        return {'ok': True}
+
+    app.add_url_rule('/_fixture/finish', 'finish_history', finish, methods=['POST'])
+    client = app.test_client()
+    conv = client.post('/api/platform/v1/conversations', json={}).get_json()['conversation']
+    run = client.post(f"/api/platform/v1/conversations/{conv['conversation_id']}/turns",
+                      json={'text': '分页验收', 'client_token': 'pagination'}).get_json()['run']
+    rid = run['run_id']
+    repo.set_run_state(OWNER, rid, 'running', now=time.time())
+    for seq in range(105):
+        repo.append_run_event(OWNER, rid, 'tool_result', {
+            'command_id': f'pagination-{seq}', 'tool': 'workspace.list', 'state': 'succeeded',
+        }, now=time.time())
+
+    if completed:
+        finish()
+    server = make_server('127.0.0.1', 0, app, threaded=True)
+    serving = Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    try:
+        result = subprocess.run([
+            'node', str(ROOT / 'tests/fixtures/frontend/event_history_browser.cjs'),
+            f'http://127.0.0.1:{server.server_port}', conv['conversation_id'],
+            'completed' if completed else 'running'], capture_output=True, text=True, timeout=45)
+        assert result.returncode == 0, result.stdout + result.stderr
+    finally:
+        server.shutdown(); server.server_close(); serving.join(5)
+
+
 @pytest.mark.parametrize('scenario', ['action-errors', 'modal', 'scroll', 'model'])
 def test_assistant_workspace_regressions(tmp_path, scenario):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):

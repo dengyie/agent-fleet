@@ -177,6 +177,92 @@ def test_old_process_still_busy_counts_as_draining(env):
     assert env["layout"].link_version(env["layout"].current) == "v2"
 
 
+def test_successful_probe_can_exit_before_updater_reads_receipt(env):
+    lay = env["layout"]
+    env["fetcher"].publish("v1", 1)
+    env["make"]().update()
+    env["fetcher"].publish("v2", 2)
+    service = svc.Service("probe", "launchd", "com.test.probe", lay.home / "probe.plist",
+                          lay.current / "tools" / "agent-self-report.py")
+
+    def report_and_exit(cmd):
+        if cmd[:2] == ["launchctl", "kickstart"]:
+            runtime._write_json(runtime.receipt_path("probe", lay.home), {
+                "role": "probe", "version": "v2", "sequence": 2,
+                "pid": 99999999, "startMarker": "exited-after-success"})
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    updater = env["make"]()
+    updater.services, updater.run = [service], report_and_exit
+    result = updater.update()
+    assert result["verified"] == ["probe"]
+    assert lay.link_version(lay.current) == "v2"
+
+
+def test_stale_probe_receipt_does_not_verify_new_install(env):
+    lay = env["layout"]
+    env["fetcher"].publish("v1", 1)
+    env["make"]().update()
+    env["fetcher"].publish("v2", 2)
+    runtime._write_json(runtime.receipt_path("probe", lay.home), {
+        "role": "probe", "version": "v2", "sequence": 2,
+        "pid": 99999999, "startMarker": "old-success"})
+    updater = env["make"]()
+    updater.services = [svc.Service("probe", "launchd", "com.test.probe", lay.home / "probe.plist",
+                                    lay.current / "tools" / "agent-self-report.py")]
+    updater.run = lambda cmd: subprocess.CompletedProcess(cmd, 0, "", "")
+    with pytest.raises(UpdateError, match="verify_failed"):
+        updater.update()
+
+
+@pytest.mark.parametrize("link_name", ["previous", "current"])
+def test_crash_after_link_change_recovers_both_links(env, monkeypatch, link_name):
+    env["fetcher"].publish("v1", 1)
+    env["make"]().update()
+    lay = env["layout"]
+    env["fetcher"].publish("v2", 2)
+    original = Layout.set_link
+
+    def crash_after_write(self, link, version):
+        original(self, link, version)
+        if link == getattr(self, link_name):
+            raise KeyboardInterrupt
+
+    with monkeypatch.context() as patch, pytest.raises(KeyboardInterrupt):
+        patch.setattr(Layout, "set_link", crash_after_write)
+        env["make"]().update()
+    env["make"]().recover()
+    assert lay.link_version(lay.current) == "v1"
+    assert lay.link_version(lay.previous) is None
+
+
+def test_recovers_legacy_staged_journal_after_current_changed(env):
+    env["fetcher"].publish("v1", 1)
+    updater = env["make"]()
+    updater.update()
+    env["fetcher"].publish("v2", 2)
+    tx = updater._new_tx(env["fetcher"].signed["manifest"])
+    tx.advance("staged")
+    lay = env["layout"]
+    (lay.releases / "v2").mkdir()
+    lay.set_link(lay.previous, "v1")
+    lay.set_link(lay.current, "v2")
+    updater.recover()
+    assert lay.link_version(lay.current) == "v1"
+    assert lay.link_version(lay.previous) is None
+
+
+def test_gc_preserves_release_of_still_draining_runner(env):
+    env["fetcher"].publish("v1", 1)
+    updater = env["make"]()
+    updater.update()
+    env["run"].takes_over = False
+    for seq in range(2, 5):
+        env["fetcher"].publish(f"v{seq}", seq)
+        updater.update()
+    assert (env["layout"].releases / "v1").is_dir()
+
+
 def test_crash_after_switch_recovers_by_rollback(env, monkeypatch):
     env["fetcher"].publish("v1", 1)
     env["make"]().update()
@@ -276,6 +362,8 @@ def test_announce_writes_identity_receipt(tmp_path, monkeypatch):
     receipt = runtime.read_json(runtime.receipt_path("probe", tmp_path))
     assert receipt["version"] == "legacy" and receipt["pid"] == os.getpid()
     assert ProcessIdentity.from_dict(receipt).alive() is True
+    runtime.announce("probe")
+    assert runtime.read_json(runtime.receipt_path("probe", tmp_path))["receiptId"] != receipt["receiptId"]
 
 
 # -- services ---------------------------------------------------------------------

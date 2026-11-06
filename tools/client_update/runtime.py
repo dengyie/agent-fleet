@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import time
 from functools import cache
 from pathlib import Path
@@ -86,6 +87,7 @@ def announce(role: str) -> None:
         _write_json(receipt_path(role), {
             "role": role, "version": info["version"], "sequence": info["sequence"],
             "managed": info["managed"], "startedAt": int(time.time()),
+            "receiptId": secrets.token_hex(16),
             **ProcessIdentity.current().to_dict(),
         })
     except OSError:

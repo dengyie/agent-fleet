@@ -12,7 +12,7 @@
     state/drain/<role>.json    让旧版本进程自愿退出的请求
     state/updater.lock         同一时刻只有一个 updater
 
-状态机：``fetched → staged → switched → draining → committed``；
+状态机：``fetched → staged → switching → switched → draining → committed``；
 失败分支：切换前 ``aborted``，切换后 ``rolled_back``。
 """
 from __future__ import annotations
@@ -273,6 +273,7 @@ class Installer:
         lay = self.layout
         before = {role: runtime.read_json(runtime.receipt_path(role, lay.home))
                   for role in runtime.ROLES}
+        tx.advance("switching")
         if tx.data["fromVersion"]:
             lay.set_link(lay.previous, tx.data["fromVersion"])
         lay.set_link(lay.current, version)
@@ -310,7 +311,11 @@ class Installer:
             for role in list(pending):
                 receipt = runtime.read_json(runtime.receipt_path(role, lay.home)) or {}
                 ident = ProcessIdentity.from_dict(receipt)
-                if receipt.get("version") == version and ident and ident.alive() is not False:
+                fresh_probe = (role == "probe" and receipt != before.get(role)
+                               and receipt.get("sequence") == tx.data["sequence"])
+                verified_runtime = (fresh_probe if role == "probe"
+                                    else ident and ident.alive() is not False)
+                if receipt.get("version") == version and ident and verified_runtime:
                     verified.append(role)
                     del pending[role]
             if not pending or self.clock() >= deadline:
@@ -345,6 +350,7 @@ class Installer:
                 svc.kickstart(service, self.run)
         else:
             lay.set_link(lay.current, None)
+            lay.set_link(lay.previous, tx.data.get("previousVersion"))
         self._observe(failedSequence=tx.data["sequence"])
         tx.advance("rolled_back", reason=reason, restored=target)
 
@@ -357,7 +363,9 @@ class Installer:
                 raise UpdateError("no_previous")
             tx = Transaction(lay.transactions / f"rollback-{secrets.token_hex(4)}.json", {
                 "txid": f"rollback-{prev}", "phase": "new", "fromVersion": cur,
-                "toVersion": prev, "sequence": None, "kind": "manual-rollback"})
+                "toVersion": prev, "previousVersion": prev,
+                "sequence": None, "kind": "manual-rollback"})
+            tx.advance("switching")
             lay.set_link(lay.current, prev)
             lay.set_link(lay.previous, cur)
             tx.advance("switched")
@@ -394,7 +402,10 @@ class Installer:
         for tx in self._pending():
             phase = tx.phase
             shutil.rmtree(self.layout.staging / tx.data["txid"], ignore_errors=True)
-            if phase in ("new", "fetched", "staged"):
+            links_changed = (
+                self.layout.link_version(self.layout.current) != tx.data.get("fromVersion")
+                or self.layout.link_version(self.layout.previous) != tx.data.get("previousVersion"))
+            if phase in ("new", "fetched", "staged") and not links_changed:
                 tx.advance("aborted", error=f"interrupted_at_{phase}")
             else:
                 self._rollback_tx(tx, reason=f"interrupted_at_{phase}")
@@ -406,6 +417,12 @@ class Installer:
     def _gc(self) -> list[str]:
         lay = self.layout
         keep = {v for v in (lay.link_version(lay.current), lay.link_version(lay.previous)) if v}
+        for role in runtime.ROLES:
+            receipt = runtime.read_json(runtime.receipt_path(role, lay.home)) or {}
+            ident = ProcessIdentity.from_dict(receipt)
+            version = receipt.get("version")
+            if isinstance(version, str) and ident and ident.alive() is not False:
+                keep.add(version)
         extras = sorted((p for p in lay.releases.iterdir() if p.is_dir() and p.name not in keep),
                         key=lambda p: p.stat().st_mtime, reverse=True)
         removed = []

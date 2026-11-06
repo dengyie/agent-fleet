@@ -450,7 +450,8 @@ class SupervisorService:
                 "status": row["receipt_status"] or row["status"],
                 "reason": row["receipt_reason"] or "", "issued_at": _iso(row["issued_s"]),
                 "expires_at": _iso(row["expires_s"]), "attempt_id": row["attempt_id"],
-                "machine_id": row["machine"], "session_id": row["session_id"]}
+                "machine_id": row["machine"], "session_id": row["session_id"],
+                "reason_code": row["wire"].get("reason_code", "")}
 
     # ------------------------------------------------------------------
     # audit helpers

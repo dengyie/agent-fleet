@@ -351,6 +351,7 @@ class ControlClient:
         self._spool_key = spool_key
         self._uploader = uploader
         self._post_json = post_json
+        self._adoption_recovery_after: str | None = "" if bridge_factory is not None else None
         # nonce/回执目录的周期清理（限频，首次 poll 即执行一次）
         self._last_prune = 0.0
 
@@ -366,8 +367,10 @@ class ControlClient:
         """
         self._maybe_prune_nonces()
         try:
+            request = ({"adoption_recovery_after": self._adoption_recovery_after}
+                       if self._adoption_recovery_after is not None else None)
             status, body = self._transport(
-                "/api/supervisor/poll", None, self._headers())
+                "/api/supervisor/poll", request, self._headers())
         except Exception:
             return {"ok": False, "commands": 0, "error": "poll_transport_error"}
         if status != 200 or not isinstance(body, dict) or not body.get("ok"):
@@ -379,11 +382,31 @@ class ControlClient:
         if not isinstance(commands, list):
             return {"ok": False, "commands": 0, "error": "malformed_commands"}
         handled = 0
+        if self._adoption_recovery_after is not None:
+            recovery = body.get("adoption_recovery")
+            if isinstance(recovery, dict) and isinstance(recovery.get("commands"), list):
+                bindings = recovery["commands"]
+                for command in bindings:
+                    if isinstance(command, dict):
+                        self._handle_command(command)
+                        handled += 1
+                restored = all(isinstance(c, dict) and
+                               (c.get("target") or {}).get("session_id") in self._bridges
+                               for c in bindings)
+                if restored:
+                    self._adoption_recovery_after = recovery.get("next_cursor")
+            elif "adoption_recovery" not in body:
+                # Older Hub: retain compatibility until its next upgrade.
+                self._adoption_recovery_after = None
         for command in commands:
             if isinstance(command, dict):
                 self._handle_command(command)
                 handled += 1
         return {"ok": True, "commands": handled}
+
+    @property
+    def adoption_recovery_complete(self) -> bool:
+        return self._adoption_recovery_after is None
 
     def _maybe_prune_nonces(self) -> None:
         now = time.monotonic()
@@ -582,7 +605,11 @@ class ControlClient:
                 self._close_bridge(bridge, flush=False)
             # rollback the just-attached private entry; never a signal, never
             # a raw exception/reason on the wire.
-            self._safe_detach(session_id)
+            release = getattr(self._supervisor, "release_adoption_binding", None)
+            if previously_bound and callable(release):
+                release(session_id)
+            else:
+                self._safe_detach(session_id)
             return ("rejected", "capture_gap")
         return ("accepted", "adopted")
 

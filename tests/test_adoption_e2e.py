@@ -516,6 +516,148 @@ def app(tmp_path):
     yield _build_app(tmp_path, adoption_enabled=False)
 
 
+def _restart_probe(e2e):
+    supervisor = Supervisor(manifest_dir=e2e.tmp / "probe", machine_id=MACHINE,
+                            ops=_RecordingOps(e2e.process))
+    supervisor._default_attach_probe = e2e._probe
+    supervisor.recover()
+    client = ControlClient(
+        hub_url="https://hub.invalid", machine_id=MACHINE, credential=SUP_SECRET,
+        hub_public_key=e2e.app.extensions["fleet"]["services"]["supervisor"].public_key(),
+        public_supervisor=supervisor, transport=_flask_transport(e2e.app),
+        nonce_store=NonceStore(e2e.tmp / "used"),
+        bridge_factory=lambda cfg: _StubBridge(cfg))
+    return supervisor, client
+
+
+def test_restart_restores_adoption_bridge_and_controls(e2e):
+    row = e2e.adopted_session()
+    sid = row.session_id
+    group_id = e2e.sup.get(sid).process_group_id
+    supervisor, client = _restart_probe(e2e)
+    e2e.operator_control(sid, "pause_session")
+    for _ in range(3):
+        assert client.poll_once()["ok"]
+    assert sid in client._bridges
+    assert supervisor.get(sid).process_group_id == group_id
+    assert supervisor.get(sid).state == "paused"
+    assert len(supervisor._ops.attach_calls) == 1
+    assert e2e.repo.get(sid).status == "adopted"
+
+
+def test_restart_does_not_restore_revoked_adoption(e2e):
+    row = e2e.adopted_session()
+    e2e.operator_delete(row.session_id)
+    supervisor, client = _restart_probe(e2e)
+    for _ in range(2):
+        assert client.poll_once()["ok"]
+    assert not client._bridges
+    assert not supervisor._ops.attach_calls
+    assert e2e.process.signals == []
+
+
+def test_restart_drift_revokes_instead_of_claiming_managed(e2e):
+    row = e2e.adopted_session()
+    e2e.process.started_at = "different-process"
+    supervisor, client = _restart_probe(e2e)
+    for _ in range(3):
+        assert client.poll_once()["ok"]
+    assert e2e.repo.get(row.session_id).status == "revoked"
+    assert not client._bridges
+    assert not supervisor._ops.attach_calls
+    assert e2e.process.signals == []
+
+
+def test_restart_retries_recovery_after_network_failure(e2e):
+    row = e2e.adopted_session()
+    supervisor, client = _restart_probe(e2e)
+    transport = client._transport
+    client._transport = lambda *a: (503, {"ok": False})
+    assert not client.poll_once()["ok"]
+    client._transport = transport
+    assert client.poll_once()["ok"]
+    assert row.session_id in client._bridges
+    assert supervisor._handle_of(row.session_id) is not None
+
+
+def test_recovery_is_paged_and_machine_scoped_before_controls(e2e):
+    from dataclasses import replace
+
+    row = e2e.adopted_session()
+    stored = e2e.repo.get(row.session_id)
+    for index in range(22):
+        e2e.repo.upsert(replace(stored, session_id=f'adopt_page_{index:03}',
+                               adoption_id=f'page_{index}', pid=5000 + index))
+    e2e.repo.upsert(replace(stored, session_id='adopt_other_machine',
+                           adoption_id='other_machine', machine_id='other-machine', pid=6000))
+    e2e.operator_control(row.session_id, 'pause_session')
+    supervisor, client = _restart_probe(e2e)
+    # Every fixture pid has a distinct binding but shares the recording OS backend.
+    supervisor._default_attach_probe = lambda pid: (DEFAULT_STARTED_AT, DEFAULT_EXE)
+    assert client.poll_once()['ok']
+    assert len(client._bridges) == 20
+    assert e2e.process.signals == []
+    assert not client.adoption_recovery_complete
+    assert client.poll_once()['ok']
+    assert client.adoption_recovery_complete
+    assert len(client._bridges) == 23
+    assert 'adopt_other_machine' not in client._bridges
+    assert client.poll_once()['ok']
+    assert supervisor.get(row.session_id).state == 'paused'
+
+
+def test_recovery_retries_bridge_failure_without_signalling(e2e):
+    row = e2e.adopted_session()
+    group_id = e2e.sup.get(row.session_id).process_group_id
+    supervisor, client = _restart_probe(e2e)
+    client._bridge_factory = lambda cfg: (_ for _ in ()).throw(OSError('fixture'))
+    assert client.poll_once()['ok']
+    assert not client.adoption_recovery_complete
+    assert not client._bridges
+    client._bridge_factory = lambda cfg: _StubBridge(cfg)
+    assert client.poll_once()['ok']
+    assert client.adoption_recovery_complete
+    assert row.session_id in client._bridges
+    assert supervisor.get(row.session_id).process_group_id == group_id
+    assert e2e.process.signals == []
+
+
+def test_restarted_real_bridge_continues_native_transcript_once(e2e):
+    import json
+    from tools.supervisor.control_client_cli import _make_bridge_factory, _pump_bridges
+
+    native = e2e.tmp / 'native.jsonl'
+    def line(text):
+        return json.dumps({'type': 'event_msg', 'payload': {
+            'type': 'agent_message', 'message': text}}) + '\n'
+    native.write_text(line('before restart'), encoding='utf-8')
+    e2e.adoptions.observation_repo._current['instances'][0]['native_file_path'] = str(native)
+    e2e.client._bridge_factory = _make_bridge_factory()
+    e2e.client._spool_root = e2e.tmp / 'spool'
+    e2e.client._spool_key = bytes(range(32))
+    e2e.client._post_json = lambda body: e2e.sessions.ingest_events(body['events'])
+    row = e2e.adopted_session()
+    _pump_bridges(e2e.client)
+    for bridge in e2e.client.iter_bridges():
+        bridge.close()
+    native.write_text(line('before restart') + line('after restart'), encoding='utf-8')
+    supervisor, client = _restart_probe(e2e)
+    client._bridge_factory = _make_bridge_factory()
+    client._spool_root = e2e.tmp / 'spool'
+    client._spool_key = bytes(range(32))
+    client._post_json = e2e.client._post_json
+    try:
+        assert client.poll_once()['ok']
+        _pump_bridges(client)
+        messages = [event['payload']['text'] for event in e2e.read_redacted(row.session_id)
+                    if event['kind'] == 'assistant_message']
+        assert messages == ['before restart', 'after restart']
+        assert supervisor._handle_of(row.session_id) is not None
+    finally:
+        for bridge in client.iter_bridges():
+            bridge.close()
+
+
 # --------------------------------------------------------------------------- #
 # the four golden tests (verbatim from the brief)
 # --------------------------------------------------------------------------- #
