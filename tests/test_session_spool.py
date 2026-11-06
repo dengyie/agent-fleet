@@ -487,7 +487,9 @@ class QuotaConcurrencyTests(unittest.TestCase):
                         max_machine_bytes=1 << 20)
         self.addCleanup(first.close)
         self.addCleanup(second.close)
-        quota = first.status()["machine_bytes"] + event_cost
+        # Segments are created lazily: the first write also pays the
+        # 16-byte segment header, so the quota admits exactly one event.
+        quota = first.status()["machine_bytes"] + 16 + event_cost
         first._max_machine_bytes = quota
         second._max_machine_bytes = quota
 

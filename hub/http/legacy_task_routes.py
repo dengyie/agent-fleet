@@ -1,10 +1,11 @@
 """Bounded operator HTTP adapter for explicit legacy task links."""
 from __future__ import annotations
 
-from flask import Blueprint, current_app, g, jsonify, request
+from flask import Blueprint, current_app, g, jsonify
 
 from hub.auth import require_operator
 from hub.http.errors import ApplicationError, error_response
+from hub.http._common import request_json
 
 bp = Blueprint("platform_legacy_tasks", __name__, url_prefix="/api/platform/v1")
 
@@ -17,7 +18,7 @@ def _bridge():
 
 
 def _body():
-    body = request.get_json(silent=True)
+    body = request_json()
     if not isinstance(body, dict):
         raise ApplicationError("invalid_json", "请求体必须是 JSON 对象", 400)
     task = body.get("task", body)

@@ -42,7 +42,7 @@ from datetime import datetime
 from typing import Any, Iterator
 
 from agent_profiles import OBSERVABLE_AGENT_TYPES, PROFILES
-from fleet_core.process import local_process
+from fleet_core.process.bounded_process import run_bounded
 
 # ---------------------------------------------------------------------------
 # fixed boundaries (schema boundary for Task 1)
@@ -149,23 +149,32 @@ _last_enumerate_failed: bool = False
 # ---------------------------------------------------------------------------
 
 
+#: Retained stdout per enumeration command; excess is drained and dropped.
+MAX_ENUM_OUTPUT = 16 << 20
+
+
+def _run_local_bounded(argv: list[str], *, timeout: float, cwd: str,
+                       env=None) -> subprocess.CompletedProcess[bytes]:
+    """``run_bounded`` seam: the deadline also covers pipe drain and reap.
+
+    ``subprocess.run(capture_output=True, timeout=...)`` can hang on Windows
+    while a descendant keeps the pipe open; stdin is always DEVNULL and
+    stderr is drained and discarded.
+    """
+    return run_bounded(argv, cwd=cwd, timeout_s=timeout,
+                       stdout_limit=MAX_ENUM_OUTPUT, stderr_limit=0, env=env)
+
+
 def _run_ps(argv: list[str], timeout: float = PS_TIMEOUT_S) -> str:
     """Run one bounded local ``ps``; returns stdout, or ``""`` on any failure."""
     try:
-        result = local_process.run(
-            ["ps", *argv],
-            capture_output=True,
-            stdin=subprocess.DEVNULL,
-            text=True,
-            timeout=timeout,
-            cwd=tempfile.gettempdir(),
-            env=_PS_ENV,
-        )
+        result = _run_local_bounded(["ps", *argv], timeout=timeout,
+                                    cwd=tempfile.gettempdir(), env=_PS_ENV)
+        if result.returncode != 0:
+            return ""
+        return (result.stdout or b"").decode("utf-8", errors="replace")
     except (OSError, subprocess.SubprocessError, ValueError, UnicodeDecodeError):
         return ""
-    if result.returncode != 0:
-        return ""
-    return (result.stdout or "")
 
 
 def _run_powershell_json(script: str, timeout: float = POWERSHELL_TIMEOUT_S):
@@ -176,10 +185,8 @@ def _run_powershell_json(script: str, timeout: float = POWERSHELL_TIMEOUT_S):
                   or shutil.which("powershell") or "powershell.exe")
     encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
     try:
-        result = local_process.run(
+        result = _run_local_bounded(
             [executable, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-            capture_output=True,
-            stdin=subprocess.DEVNULL,
             timeout=timeout,
             cwd=tempfile.gettempdir(),
         )

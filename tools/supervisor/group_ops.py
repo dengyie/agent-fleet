@@ -364,8 +364,14 @@ class WindowsGroupOps(GroupOps):
     """Windows process-tree backend for runner and adopted CLI sessions.
 
     Windows has no POSIX process groups.  A supervised root is therefore
-    treated as the root of a Win32 parent/child tree.  ``taskkill /T`` handles
-    termination and the native ``NtSuspendProcess``/``NtResumeProcess`` APIs
+    treated as the root of a Win32 parent/child tree.  A spawned root starts
+    suspended inside a Job Object, so force-kill and reap reach every
+    descendant even after the root exited.  The job is NOT kill-on-close: a
+    supervised tree must survive supervisor death so a restarted supervisor
+    can re-attach from the manifest (as POSIX children do).  Without a job
+    handle (re-attached trees, hosts refusing jobs) force-kill falls back to
+    killing every enumerated descendant individually; ``taskkill /T`` handles
+    graceful termination and the native ``NtSuspendProcess``/``NtResumeProcess`` APIs
     provide the pause/resume controls needed by the supervisor.  Output is
     consumed by a daemon reader thread because ``select()`` cannot wait on a
     Windows anonymous pipe.
@@ -383,8 +389,25 @@ class WindowsGroupOps(GroupOps):
     def _attached(handle) -> bool:
         return isinstance(handle, _AttachedHandle)
 
+    @staticmethod
+    def _new_job():
+        """A Job Object that survives supervisor death, or ``None``."""
+        try:
+            from fleet_core.process.windows_job import WindowsJob
+            return WindowsJob(kill_on_close=False)
+        except (AttributeError, ImportError, OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _job_of(handle):
+        return getattr(handle, "_job", None)
+
     def create(self, argv, cwd, env):
         flags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
+        job = self._new_job()
+        if job is not None:
+            # The child cannot spawn descendants before it belongs to the job.
+            flags |= 0x00000004  # CREATE_SUSPENDED
         try:
             proc = popen_local(
                 list(argv),
@@ -398,8 +421,59 @@ class WindowsGroupOps(GroupOps):
                 bufsize=0,
             )
         except (OSError, ValueError):
+            if job is not None:
+                self._close_job_quietly(job)
             raise GroupError("spawn_failed")
-        return _Bound(proc=proc)
+        if job is not None:
+            try:
+                job.start(int(proc._handle))
+            except (AttributeError, OSError, TypeError, ValueError):
+                # Never let an unowned (or still suspended) child run on.
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+                self._close_job_quietly(job)
+                raise GroupError("spawn_failed")
+        return _Bound(proc=proc, _job=job)
+
+    @staticmethod
+    def _close_job_quietly(job) -> None:
+        try:
+            job.close()
+        except Exception:
+            pass
+
+    def _job_terminate(self, handle) -> bool:
+        job = self._job_of(handle)
+        if job is None:
+            return False
+        try:
+            return bool(job.terminate())
+        except Exception:
+            return False
+
+    def _job_active(self, handle) -> int | None:
+        job = self._job_of(handle)
+        if job is None:
+            return None
+        try:
+            return job.active_processes()
+        except Exception:
+            return None
+
+    def _job_release_if_empty(self, handle) -> None:
+        """Drop the job handle once the tree is provably gone (no kill)."""
+        if self._job_active(handle) == 0:
+            job, handle._job = handle._job, None
+            try:
+                job.release()
+            except Exception:
+                pass
 
     def attach(self, pid: int, started_at: str, exe_path: str):
         pid_i = int(pid)
@@ -440,6 +514,11 @@ class WindowsGroupOps(GroupOps):
                        for pid in pids)
         if handle.proc.poll() is None:
             return True
+        active = self._job_active(handle)
+        if active is not None:
+            # The job counts every descendant, including those orphaned when
+            # the root exited (their parent pid no longer links the tree).
+            return active > 0
         pids = self._tree_pids(getattr(handle.proc, "pid", 0))
         if pids is None:
             return True
@@ -456,7 +535,48 @@ class WindowsGroupOps(GroupOps):
     def group_kill(self, handle, sig):
         if sig in (_SIGSTOP, _SIGCONT):
             return self.group_terminate(handle, sig)
-        return self._taskkill(_handle_pid(handle), force=True)
+        # An owned tree is killed through its Job Object: unlike
+        # ``taskkill /T`` this still works after the root has exited.
+        if not self._attached(handle) and self._job_terminate(handle):
+            return True
+        return self._kill_tree(handle)
+
+    def _root_exited(self, handle) -> bool:
+        if self._attached(handle):
+            return self._pid_alive(_handle_pid(handle) or 0) is False
+        try:
+            return handle.proc.poll() is not None
+        except (OSError, ValueError):
+            return False
+
+    def _kill_tree(self, handle, rounds: int = 3) -> bool:
+        """Kill the tree pid by pid (no job handle available).
+
+        ``taskkill /PID root /T`` fails once the root exited, yet Windows
+        keeps the dead root's pid as its children's parent pid, so the
+        snapshot walk still finds them.  An exited root's pid is never
+        signalled itself (it may have been reused).  Repeats a few rounds to
+        catch descendants spawned between snapshot and kill.
+        """
+        root = _handle_pid(handle)
+        for _ in range(max(1, rounds)):
+            pids = self._tree_pids(root)
+            if pids is None:
+                return self._taskkill(root, force=True)
+            root_exited = self._root_exited(handle)
+            live = [pid for pid in pids
+                    if not (pid == root and root_exited)
+                    and self._pid_alive(pid) is not False]
+            if not live:
+                return True
+            for pid in live:
+                self._kill_pid(pid)
+        pids = self._tree_pids(root)
+        if pids is None:
+            return False
+        root_exited = self._root_exited(handle)
+        return not any(self._pid_alive(pid) is not False for pid in pids
+                       if not (pid == root and root_exited))
 
     def group_reap(self, handle, timeout=None):
         if self._attached(handle):
@@ -464,14 +584,26 @@ class WindowsGroupOps(GroupOps):
             while self.group_alive(handle) and time.monotonic() < deadline:
                 time.sleep(0.05)
             return not self.group_alive(handle)
+        budget = max(0.0, float(timeout or 0))
         try:
-            handle.proc.wait(timeout=max(0.0, float(timeout or 0)))
+            handle.proc.wait(timeout=budget)
         except (subprocess.TimeoutExpired, OSError, ValueError):
             return False
-        deadline = time.monotonic() + max(0.0, float(timeout or 0))
+        # Root reaped; leftover descendants belong to this run too and are
+        # killed like POSIX ``group_reap`` SIGKILLs the remaining group.
+        if self.group_alive(handle):
+            if self._job_of(handle) is not None:
+                self._job_terminate(handle)
+            else:
+                self._kill_tree(handle)
+            budget = max(1.0, budget)
+        deadline = time.monotonic() + budget
         while self.group_alive(handle) and time.monotonic() < deadline:
             time.sleep(0.05)
-        return not self.group_alive(handle)
+        gone = not self.group_alive(handle)
+        if gone:
+            self._job_release_if_empty(handle)
+        return gone
 
     def owner_identity(self, handle):
         if self._attached(handle) or getattr(handle, "proc", None) is None:
@@ -494,6 +626,9 @@ class WindowsGroupOps(GroupOps):
                 handle.proc.stdout.close()
         except Exception:
             pass
+        # Keep the job handle while members live so a later kill can still
+        # use TerminateJobObject; release it once the tree is gone.
+        self._job_release_if_empty(handle)
 
     # ---- Windows process tree ---------------------------------------------
 
@@ -580,6 +715,23 @@ class WindowsGroupOps(GroupOps):
     @staticmethod
     def _pid_alive(pid: int) -> bool | None:
         return windows_pid_alive(pid)
+
+    @staticmethod
+    def _kill_pid(pid: int) -> bool:
+        """Force-kill one process (no ``/T``: its tree is walked by caller)."""
+        try:
+            pid_i = int(pid)
+        except (TypeError, ValueError):
+            return False
+        if pid_i <= 0:
+            return False
+        try:
+            result = run_local(["taskkill.exe", "/PID", str(pid_i), "/F"],
+                               capture_output=True, stdin=subprocess.DEVNULL,
+                               timeout=8, check=False)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return False
+        return result.returncode == 0
 
     @staticmethod
     def _taskkill(root_pid: int | None, *, force: bool) -> bool:

@@ -845,7 +845,7 @@ export function parseAdoptionList(data) {
 }
 
 /**
- * 解析 POST /adoption/<id>/source/control 的 202 入队回执。
+ * 解析 POST /adoptions/<id>/source/control 的 202 入队回执。
  * 体字段只允许 action/status/command_id 等公开键；拒绝 pid/signal/shell。
  */
 export function parseControlEnqueue(data) {

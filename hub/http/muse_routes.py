@@ -3,6 +3,7 @@ from flask import Blueprint, current_app, g, jsonify, request
 
 from hub.auth import require_operator
 from hub.http.errors import ApplicationError, error_response
+from hub.http._common import request_json
 from hub.integrations.muse.client import MuseError
 
 bp = Blueprint('platform_muse', __name__, url_prefix='/api/platform/v1/muse')
@@ -13,7 +14,10 @@ def service():
 
 
 def body():
-    value = request.get_json(silent=True)
+    try:
+        value = request_json()
+    except ApplicationError:
+        value = None
     if not isinstance(value, dict):
         raise MuseError('invalid_json', '请求体必须是 JSON 对象。', 400)
     return value
@@ -33,17 +37,28 @@ def required_settings_revision(data):
     return revision
 
 
-def invoke(operation):
-    try:
-        response = jsonify({'ok': True, **operation()})
-    except MuseError as exc:
-        response = error_response(ApplicationError(exc.code, exc.detail, exc.status))
+def _no_store(response):
     # error_response returns a tuple; apply no-store to both successful and
     # rejected responses (including any account/card content).
     from flask import make_response
     response = make_response(response)
     response.headers['Cache-Control'] = 'no-store'
     return response
+
+
+def invoke(operation):
+    try:
+        response = jsonify({'ok': True, **operation()})
+    except MuseError as exc:
+        response = error_response(ApplicationError(exc.code, exc.detail, exc.status))
+    return _no_store(response)
+
+
+@bp.errorhandler(MuseError)
+def muse_error(exc):
+    # ``body()`` is also parsed before ``invoke`` in several routes; a bad
+    # body there must keep the bounded 4xx contract instead of a 500.
+    return _no_store(error_response(ApplicationError(exc.code, exc.detail, exc.status)))
 
 
 @bp.before_request

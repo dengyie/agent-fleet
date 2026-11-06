@@ -7,15 +7,17 @@ identity):
   GET    /api/adoptions?machine_id=<machine>    operator management view
   POST   /api/adoptions {"machine_id", "pid", "started_at"}
   DELETE /api/adoptions/<session_id>
-  POST   /api/adoption/<session_id>/source/control
+  POST   /api/adoptions/<session_id>/source/control
          {"action": pause_session|resume_session|terminate_session|
           quarantine_session|cancel_attempt|append_user_turn|
           apply_local_profile, "reason_code": str,
           "payload": optional bounded object}
-         (singular "adoption" — operator source control for an ADOPTED seat
+         (operator source control for an ADOPTED seat
          via the existing signed supervisor channel; 202 + command id +
          bounded "pending". Phase 4/5 actions are default-off. NO pid/
-         signal/shell/command/credential is ever accepted.)
+         signal/shell/command/credential is ever accepted.  The singular
+         ``/api/adoption/<session_id>/source/control`` is a deprecated alias
+         kept for one release.)
   POST   /api/adoptions/<session_id>/retry
          (plural "adoptions" — re-issue the signed adopt for a leftover
          pending seat; 200 + bounded status projection.  An already-adopted
@@ -43,7 +45,7 @@ from hub.application.adoption_service import (
     AdoptionServiceError,
 )
 from hub.application.supervisor_service import SupervisorServiceError
-from hub.auth import require_operator
+from hub.auth import MACHINE_RE, require_operator
 from hub.http.errors import ApplicationError, error_response, get_request_id
 from hub.http._common import json_object_or_error as _json_object
 from hub.infrastructure.adoption_repository import AdoptionRepositoryError
@@ -151,7 +153,13 @@ def list_records():
     if not isinstance(machine_id, str) or not machine_id.strip():
         return error_response(ApplicationError(
             "invalid_request", "machine_id 缺失", 400))
-    items = _adoptions().adoption_repo.list(machine_id)
+    if not MACHINE_RE.fullmatch(machine_id):
+        return error_response(ApplicationError(
+            "invalid_request", "machine_id 非法", 400))
+    try:
+        items = _adoptions().adoption_repo.list(machine_id)
+    except AdoptionRepositoryError as exc:
+        return error_response(ApplicationError(exc.code, "", 503))
     return jsonify({
         "ok": True,
         "machine_id": machine_id,
@@ -160,7 +168,11 @@ def list_records():
     })
 
 
-@bp.route("/api/adoption/<session_id>/source/control", methods=["POST"])
+@bp.route("/api/adoptions/<session_id>/source/control", methods=["POST"])
+# Legacy singular alias (outside the Access-protected ``/api/adoptions*``
+# prefix); kept for one release so older clients keep working.
+@bp.route("/api/adoption/<session_id>/source/control", methods=["POST"],
+          endpoint="source_control_legacy")
 @require_operator
 def source_control(session_id: str):
     """POST one fixed source-control action for an ADOPTED session.

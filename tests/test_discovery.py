@@ -48,9 +48,9 @@ def test_ps_uses_utc_at_collection_boundary(monkeypatch):
 
     def run(argv, **kwargs):
         captured.update(kwargs)
-        return type('Result', (), {'returncode': 0, 'stdout': ''})()
+        return type('Result', (), {'returncode': 0, 'stdout': b''})()
 
-    monkeypatch.setattr(discovery.local_process, 'run', run)
+    monkeypatch.setattr(discovery, '_run_local_bounded', run)
     discovery._run_ps(['-eo', 'pid=,lstart='])
     assert captured['env']['TZ'] == 'UTC'
     assert captured['env']['LC_ALL'] == 'C'
@@ -122,11 +122,10 @@ def test_powershell_json_preserves_unicode_command_and_output(monkeypatch):
         captured["kwargs"] = kwargs
         return Result()
 
-    monkeypatch.setattr(discovery.local_process, "run", run)
+    monkeypatch.setattr(discovery, "_run_local_bounded", run)
     assert discovery._run_powershell_json("Write-Output '測試'") == payload
     assert captured["argv"][-2] == "-EncodedCommand"
     assert base64.b64decode(captured["argv"][-1]).decode("utf-16le") == "Write-Output '測試'"
-    assert captured["kwargs"]["stdin"] is discovery.subprocess.DEVNULL
     assert captured["kwargs"]["timeout"] == discovery.POWERSHELL_TIMEOUT_S
 
 

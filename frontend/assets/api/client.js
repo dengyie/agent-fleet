@@ -437,7 +437,7 @@ export async function controlSession(sessionId, action, reasonCode, payload) {
     }
   }
   return parseControlEnqueue(await request(
-    '/adoption/' + encodeURIComponent(sessionId) + '/source/control', {
+    API.adoptions + '/' + encodeURIComponent(sessionId) + '/source/control', {
       method: 'POST',
       headers: JSON_HEADERS,
       body: body,

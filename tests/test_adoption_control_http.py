@@ -1,7 +1,7 @@
 """HTTP tests for the operator source-control surface (Task 10).
 
-One new operator route, ``POST /api/adoption/<session_id>/source/control``
-(note the SINGULAR ``adoption`` — exactly the plan's path), accepts ONLY the
+One new operator route, ``POST /api/adoptions/<session_id>/source/control``
+(the singular ``/api/adoption/...`` is a one-release alias), accepts ONLY the
 five existing source-control action names against an ``adopted`` record and
 returns 202 + command id + bounded ``pending``.  The operator can now
 PAUSE/RESUME/TERMINATE/QUARANTINE/CANCEL an adopted source through the
@@ -37,7 +37,7 @@ from test_adoption_http import (   # sibling import (tests/ is a non-package)
     valid_candidate,
 )
 
-PATH = "/api/adoption"   # singular "adoption", exactly the plan's path
+PATH = "/api/adoptions"  # canonical plural (Access-protected prefix)
 
 
 @pytest.fixture

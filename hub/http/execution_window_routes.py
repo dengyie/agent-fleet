@@ -5,6 +5,7 @@ from flask import Blueprint, current_app, g, jsonify, request
 
 from hub.auth import require_operator
 from hub.http.errors import ApplicationError, error_response
+from hub.http._common import request_json
 from hub.platform.artifacts import ArtifactError
 
 bp = Blueprint("execution_windows", __name__, url_prefix="/api/platform/v1/execution-windows")
@@ -18,7 +19,7 @@ def _service():
 
 
 def _body():
-    body = request.get_json(silent=True)
+    body = request_json()
     if not isinstance(body, dict):
         raise ApplicationError("invalid_json", "请求体必须是 JSON 对象", 400)
     forbidden = {"command", "commands", "argv", "executable", "shell", "path", "pid", "pty", "browser", "process"}

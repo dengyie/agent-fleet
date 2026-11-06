@@ -9,6 +9,7 @@ from hub.accounts.client_address import client_address, proxy_networks
 from hub.accounts.mail import OneMailSender, SmtpSender
 from hub.accounts.captcha import verify_hcaptcha, verify_turnstile
 from hub.http.errors import ApplicationError, error_response
+from hub.http._common import request_json
 from hub.auth import is_machine_auth_view
 
 bp = Blueprint('accounts', __name__, url_prefix='/api/accounts')
@@ -27,7 +28,7 @@ def store():
 
 
 def body():
-    data = request.get_json(silent=True)
+    data = request_json()
     if not isinstance(data, dict):
         fail('invalid_json', '请求体必须是 JSON 对象')
     return data

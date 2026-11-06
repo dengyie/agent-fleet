@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from tools.session.bridge import SessionBridge
+from tools.session.spool import OWNER_WAIT_S, SpoolBusy
 from tools.supervisor.control_client_cli import _load_or_create_spool_key
 
 log = logging.getLogger(__name__)
@@ -34,7 +35,16 @@ def session_prefix(machine):
 
 
 class RunnerCapture:
-    def __init__(self, cfg, task, post, process_group_id=None):
+    """One task/native session's capture.
+
+    The capture owns its spool root's writer lock for its lifetime (released
+    by ``bridge.close()``).  ``replay=True`` (used by :func:`replay_pending`)
+    never waits for it: a spool a live writer owns raises
+    :class:`~tools.session.spool.SpoolBusy` instead of being opened.
+    All sessions under ``cache_dir/conversations`` share one machine quota.
+    """
+
+    def __init__(self, cfg, task, post, process_group_id=None, *, replay=False):
         self.cfg = cfg
         self.root = Path(cfg.cache_dir) / 'conversations'
         self.root.mkdir(parents=True, exist_ok=True)
@@ -42,6 +52,8 @@ class RunnerCapture:
         self.session_id = session_prefix(cfg.machine) + task['attempt_id']
         self.record = self.root / (self.session_id + '.json')
         self.lock = threading.RLock()
+        # Serializes flushers; held across the POST, unlike ``lock``.
+        self.flush_lock = threading.Lock()
         # 逐行采集失败只降级：记录在 ``degraded``/``failed_lines``，不中止任务。
         self.degraded = None
         self.failed_lines = 0
@@ -52,6 +64,8 @@ class RunnerCapture:
             'attempt_id': task['attempt_id'], 'agent_family': task['agent_type'],
             'process_group_id': process_group_id, 'managed': bool(process_group_id),
             'spool_root': self.root / self.session_id, 'spool_key': key,
+            'spool_quota_root': self.root,
+            'spool_owner_lock': True, 'spool_owner_timeout': 0 if replay else OWNER_WAIT_S,
             'preserve_source': True,
             'post_json': lambda batch: self._post(post, batch),
         })
@@ -117,8 +131,10 @@ class RunnerCapture:
             self.worker.join()
 
     def flush(self):
-        with self.lock:
-            return self.bridge.flush()
+        # ``line()`` only contends for ``lock`` while the spool is read or
+        # acked; the HTTP POST runs outside it.
+        with self.flush_lock:
+            return self.bridge.flush(guard=self.lock)
 
     def finish(self, exit_code):
         self.stop_upload()
@@ -224,8 +240,12 @@ def replay_pending(cfg, post):
             data = json.loads(record.read_text())
             if _expire_tombstone(record, data):
                 continue
-            capture = RunnerCapture(cfg, data, post)
+            capture = RunnerCapture(cfg, data, post, replay=True)
             capture.flush()
+        except SpoolBusy:
+            # A live runner/sync process owns this spool; it uploads itself.
+            log.debug('Conversation replay skipped (live writer): %s', record.name)
+            continue
         except Exception:
             log.exception('Conversation replay failed: %s', record.name)
         finally:

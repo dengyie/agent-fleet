@@ -108,6 +108,7 @@ class DefaultOffTests(unittest.TestCase):
         rules = _rules(app)
         self.assertNotIn("/api/adoptions", rules)
         self.assertNotIn("/api/adoption/<session_id>/source/control", rules)
+        self.assertNotIn("/api/adoptions/<session_id>/source/control", rules)
         self.assertNotIn("/api/sessions", rules)
         self.assertNotIn("/api/session-events", rules)
         self.assertNotIn("/api/supervisor/poll", rules)
@@ -204,6 +205,7 @@ class AdoptionGateTests(unittest.TestCase):
         rules = _rules(app)
         self.assertIn("/api/adoptions", rules)
         self.assertIn("/api/adoptions/<session_id>", rules)
+        self.assertIn("/api/adoptions/<session_id>/source/control", rules)
         self.assertIn("/api/adoption/<session_id>/source/control", rules)
 
     def test_adoption_post_reaches_handler_once_enabled(self):

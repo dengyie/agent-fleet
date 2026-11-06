@@ -53,6 +53,8 @@ class _Bound:
     _reader_eof: bool = False
     _reader_closed: bool = False
     _dropped_chunks: int = 0
+    # Windows only: kill-on-close Job Object owning the whole spawned tree.
+    _job: Any = None
 
 
 @dataclass

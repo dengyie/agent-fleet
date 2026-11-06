@@ -52,7 +52,7 @@ from typing import Any, Mapping, Pattern, Sequence
 
 from agent_profiles import RESUME_VERIFIABLE_PROBE_FAMILIES
 from tools.session.probes import claude, codex, hermes, pi
-from fleet_core.process.local_process import run as run_local
+from fleet_core.process.bounded_process import run_bounded
 
 DEFAULT_TIMEOUT_S = 8.0
 MIN_TIMEOUT_S = 0.1
@@ -271,6 +271,24 @@ def _env_for(exe_path: str, path_adds: Sequence[str] = ()) -> dict[str, str]:
     return env
 
 
+def _spawn_probe(argv: Sequence[str], *, cwd: str, env: Mapping[str, str],
+                 timeout: float) -> subprocess.CompletedProcess[str]:
+    """Bounded spawn seam: one deadline that also covers pipe drain/reap.
+
+    ``subprocess.run(capture_output=True, timeout=...)`` can hang on Windows
+    after the timeout while a descendant holds the pipe open; ``run_bounded``
+    owns the whole tree (process group / Job Object) and caps retained bytes.
+    stdout keeps at most ``MAX_PROBE_READ`` characters (4 bytes per char
+    budget, so the decoded prefix is never short); stderr is drained, unused.
+    """
+    result = run_bounded(list(argv), cwd=cwd, timeout_s=timeout,
+                         stdout_limit=MAX_PROBE_READ * 4, stderr_limit=0,
+                         env=env)
+    text = (result.stdout or b"").decode("utf-8", errors="replace")
+    return subprocess.CompletedProcess(result.args, result.returncode,
+                                       text[:MAX_PROBE_READ], "")
+
+
 def _run_binary(
     argv: Sequence[str],
     timeout_s: float,
@@ -294,17 +312,8 @@ def _run_binary(
     timeout_s = _sanitize_timeout(timeout_s)
     env = _env_for(argv[0], path_adds)
     try:
-        result = run_local(
-            argv,
-            capture_output=True,
-            stdin=subprocess.DEVNULL,
-            close_fds=True,
-            cwd=_probe_cwd(),
-            env=env,
-            text=True,
-            timeout=timeout_s,
-            check=False,
-        )
+        result = _spawn_probe(argv, cwd=_probe_cwd(), env=env,
+                              timeout=timeout_s)
     except FileNotFoundError:
         return "missing", ""
     except subprocess.TimeoutExpired:
