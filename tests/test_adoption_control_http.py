@@ -1,7 +1,7 @@
 """HTTP tests for the operator source-control surface (Task 10).
 
 One new operator route, ``POST /api/adoptions/<session_id>/source/control``
-(the singular ``/api/adoption/...`` is a one-release alias), accepts ONLY the
+(the singular ``/api/adoption/...`` alias has been removed), accepts ONLY the
 five existing source-control action names against an ``adopted`` record and
 returns 202 + command id + bounded ``pending``.  The operator can now
 PAUSE/RESUME/TERMINATE/QUARANTINE/CANCEL an adopted source through the

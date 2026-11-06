@@ -210,7 +210,7 @@ Task detail
 
 Adoption 审计写入 session transcript。`make_app` **不会**在只开 adoption 时自动打开 session；该组合把 adoption 失败关闭，observe / task 仍启动。`create_app` 在 adoption-on 且无 transcript root 时仍 `RuntimeError`（直接装配契约）。控制路由需要 session **和** supervisor。
 
-Operator 表面：`/api/adoptions`、`/api/adoptions/<session_id>/retry`、`/api/adoptions/<session_id>/capture-exact`、`POST /api/adoptions/<session_id>/source/control`（五个固定动作；单数 `/api/adoption/...` 为保留一个版本的兼容别名）。ingest / runner / supervisor 凭据头不能当 operator。公开 JSON 不含 raw pid / path / cmdline。`detach` 不发信号；`terminate` 先做身份守卫。
+Operator 表面：`/api/adoptions`、`/api/adoptions/<session_id>/retry`、`/api/adoptions/<session_id>/capture-exact`、`POST /api/adoptions/<session_id>/source/control`（五个固定动作；单数 `/api/adoption/...` 兼容别名已在第六轮移除）。ingest / runner / supervisor 凭据头不能当 operator。公开 JSON 不含 raw pid / path / cmdline。`detach` 不发信号；`terminate` 先做身份守卫。
 
 ## 6.7 CoDock-inspired AI 管理扩展（2026-10）
 
