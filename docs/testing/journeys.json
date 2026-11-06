@@ -650,7 +650,7 @@
         "tests/test_browser_capture_gc.py::test_gc_removes_only_unreferenced_expired_capture",
         "tests/test_browser_capture_gc.py::test_gc_candidate_batch_skips_referenced_prefix_without_starving_later_capture",
         "tests/test_browser_capture_gc.py::test_gc_fails_closed_for_malformed_reference_without_marking_candidates",
-        "tests/test_browser_capture_gc.py::test_gc_fails_closed_when_reference_scan_exceeds_global_bound",
+        "tests/test_browser_capture_gc.py::test_gc_works_with_large_unrelated_history_and_keeps_referenced_captures",
         "tests/test_browser_capture_gc.py::test_gc_scans_run_command_and_direct_reference_surfaces",
         "tests/test_browser_capture_gc.py::test_gc_rejects_scope_mismatch_and_extra_artifact_files",
         "tests/test_browser_capture_gc.py::test_gc_treats_absent_optional_window_surface_as_empty",

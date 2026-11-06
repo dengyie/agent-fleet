@@ -7,21 +7,28 @@ from flask import Flask
 from hub.config import FleetConfig
 
 
-def _platform_retention(config, platform_repository):
+def _platform_retention(config, platform_repository, session_search=None):
     """Bounded platform-table retention, run hourly by the lease reconciler.
 
-    Also prunes ``redacted_events`` in the transcript DB when session/adoption
-    repositories are enabled (that table lives in its own SQLite file).
+    Also prunes ``redacted_events``, transcript ``audit`` and
+    ``policy_signals`` in the transcript DB when session/adoption repositories
+    are enabled (they live in their own SQLite file), the session search index
+    when search is enabled, and finished tasks plus task audit in the task DB.
+    History horizons follow ``config.history_retention_days``.
     """
     platform_db = config.platform_db if platform_repository is not None else None
     transcript_db = None
     if (getattr(config, "session_repositories_enabled", False)
             or getattr(config, "adoption_repositories_enabled", False)):
         transcript_db = getattr(config, "session_transcript_root", None)
-    if platform_db is None and transcript_db is None:
+    task_db = getattr(config, "task_db", None) if getattr(config, "tasks_enabled", False) else None
+    if platform_db is None and transcript_db is None and task_db is None and session_search is None:
         return None
-    from hub.infrastructure.platform_retention import PlatformRetention
-    return PlatformRetention(platform_db, transcript_db=transcript_db)
+    from hub.infrastructure.platform_retention import PlatformRetention, RetentionPolicy
+    policy = RetentionPolicy.with_history_days(
+        float(getattr(config, "history_retention_days", 90.0)))
+    return PlatformRetention(platform_db, policy, transcript_db=transcript_db,
+                             task_db=task_db, session_search=session_search)
 
 
 def create_app(
@@ -56,7 +63,8 @@ def create_app(
     init_task_store(app, core.task_repository)
     register_fleet_extension(
         app, config, repositories, core, platform, sessions, control,
-        retention=_platform_retention(config, platform.platform_repository),
+        retention=_platform_retention(config, platform.platform_repository,
+                                      sessions.session_search_service),
     )
     register_http(app, config, platform, sessions, control)
     return app

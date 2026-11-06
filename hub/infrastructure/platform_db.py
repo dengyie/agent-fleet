@@ -284,6 +284,12 @@ class PlatformRepository(
                          "ON runs(owner_id, conversation_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_owner_archive "
                          "ON conversations(owner_id, archived_at, conversation_id)")
+            # claim_run seeks (owner_id, state) per claimable state; retention
+            # selects terminal runs by (state, updated_at). Additive only.
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_owner_state_created "
+                         "ON runs(owner_id, state, created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_state_updated "
+                         "ON runs(state, updated_at)")
             conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
             conn.execute("COMMIT")
         except PlatformRepositoryError:

@@ -224,7 +224,15 @@ def _artifact_entry(artifact_root: Path, artifact_dir: Path) -> tuple[dict[str, 
 def _read_artifact_inventory(artifact_root: Path) -> list[tuple[dict[str, Any], Path, Path]]:
     _directory(artifact_root, missing_code="artifact_root_missing")
     try:
-        children = sorted(artifact_root.iterdir(), key=lambda item: item.name)
+        # Dot-prefixed entries are never artifacts: ArtifactStore stages writes
+        # in ``.<artifact_id>.*`` and capture GC quarantines in ``.gc-<id>``,
+        # and hosts drop files such as ``.DS_Store``. Generated artifact ids
+        # never start with a dot, so skipping them cannot hide a real artifact.
+        # Every other entry is still validated and fails the backup closed.
+        children = sorted(
+            (item for item in artifact_root.iterdir() if not item.name.startswith(".")),
+            key=lambda item: item.name,
+        )
     except OSError:
         _raise("read_failed")
     if len(children) > MAX_ARTIFACTS:
@@ -994,6 +1002,7 @@ class PlatformBackupService:
             _publish_new_directory(stage, target)
             return staged_checked
         except InvalidTag:
+            shutil.rmtree(stage, ignore_errors=True)
             _raise("encryption_invalid")
         except BackupError:
             shutil.rmtree(stage, ignore_errors=True)

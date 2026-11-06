@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 
 from hub.infrastructure.browser_capture_gc import (
-    BrowserCaptureGcError, BrowserCaptureGcRepository, REFERENCE_LIMIT,
+    BrowserCaptureGcError, BrowserCaptureGcRepository,
 )
 from hub.platform.artifacts import ArtifactStore
 
@@ -98,7 +98,9 @@ def test_gc_fails_closed_for_malformed_reference_without_marking_candidates(tmp_
     db, root, gc = _gc(tmp_path)
     artifact_id = _capture(root, db)
     conn = sqlite3.connect(db)
-    conn.execute("INSERT INTO run_events VALUES(?)", ("not-json",))
+    # A row that names the reference key but cannot be parsed may hide a
+    # reference, so GC must refuse to proceed.
+    conn.execute("INSERT INTO run_events VALUES(?)", ('{"artifact_id": "' + artifact_id,))
     conn.commit()
     conn.close()
     gc.init()
@@ -111,19 +113,123 @@ def test_gc_fails_closed_for_malformed_reference_without_marking_candidates(tmp_
     conn.close()
 
 
-def test_gc_fails_closed_when_reference_scan_exceeds_global_bound(tmp_path):
+def test_gc_ignores_unparseable_rows_that_cannot_carry_a_reference(tmp_path):
     db, root, gc = _gc(tmp_path)
     artifact_id = _capture(root, db)
     conn = sqlite3.connect(db)
-    conn.executemany("INSERT INTO direct_refs VALUES(?)",
-                     [(f"ref-{index}",) for index in range(REFERENCE_LIMIT + 1)])
+    conn.execute("INSERT INTO run_events VALUES(?)", ("not-json",))
     conn.commit()
     conn.close()
     gc.init()
 
-    with pytest.raises(BrowserCaptureGcError, match="capture_gc_reference_limit"):
+    assert gc.cleanup_expired() == 1
+    assert not (root / artifact_id).exists()
+
+
+def test_gc_rejects_non_text_reference_value(tmp_path):
+    db, root, gc = _gc(tmp_path)
+    artifact_id = _capture(root, db)
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO platform_commands VALUES(?)", (json.dumps({"artifact_id": 7}),))
+    conn.commit()
+    conn.close()
+    gc.init()
+
+    with pytest.raises(BrowserCaptureGcError, match="capture_gc_reference_invalid"):
         gc.cleanup_expired()
     assert (root / artifact_id / "content").is_file()
+
+
+def test_gc_works_with_large_unrelated_history_and_keeps_referenced_captures(tmp_path):
+    db, root, gc = _gc(tmp_path)
+    removable = _capture(root, db, created_at=1)
+    run_ref = _capture(root, db, created_at=2)
+    window_ref = _capture(root, db, created_at=3)
+    command_ref = _capture(root, db, created_at=4)
+    direct_ref = _capture(root, db, created_at=5)
+    unrelated = 4096 * 2
+    conn = sqlite3.connect(db)
+    conn.executemany(
+        "INSERT INTO run_events VALUES(?)",
+        [(json.dumps({"kind": "log", "seq": index}),) for index in range(unrelated)],
+    )
+    conn.executemany(
+        "INSERT INTO run_events VALUES(?)",
+        [(json.dumps({"artifact_id": f"other-{index}"}),) for index in range(unrelated)],
+    )
+    conn.executemany(
+        "INSERT INTO platform_commands VALUES(?)",
+        [(json.dumps({"ok": True, "n": index}),) for index in range(unrelated)],
+    )
+    conn.executemany("INSERT INTO direct_refs VALUES(?)",
+                     [(f"ref-{index}",) for index in range(unrelated)])
+    conn.execute("INSERT INTO run_events VALUES(?)",
+                 (json.dumps({"items": [{"artifact_id": run_ref}]}),))
+    conn.execute("INSERT INTO execution_window_events VALUES(?)",
+                 (json.dumps({"frame": {"artifact_id": window_ref}}),))
+    conn.execute("INSERT INTO platform_commands VALUES(?)",
+                 (json.dumps({"artifact_id": command_ref}),))
+    conn.execute("INSERT INTO direct_refs VALUES(?)", (direct_ref,))
+    conn.commit()
+    conn.close()
+    gc.init()
+
+    assert gc.cleanup_expired() == 1
+    assert not (root / removable).exists()
+    for artifact_id in (run_ref, window_ref, command_ref, direct_ref):
+        assert (root / artifact_id / "content").is_file()
+
+
+def test_gc_rechecks_references_created_after_marking(tmp_path, monkeypatch):
+    db, root, gc = _gc(tmp_path)
+    artifact_id = _capture(root, db)
+    gc.init()
+    original = gc._mark_candidates
+
+    def mark_then_reference(*args):
+        original(*args)
+        conn = sqlite3.connect(db)
+        conn.execute("INSERT INTO run_events VALUES(?)",
+                     (json.dumps({"artifact_id": artifact_id}),))
+        conn.commit()
+        conn.close()
+
+    monkeypatch.setattr(gc, "_mark_candidates", mark_then_reference)
+    assert gc.cleanup_expired() == 0
+    assert (root / artifact_id / "content").is_file()
+    conn = sqlite3.connect(db)
+    assert conn.execute("SELECT COUNT(*) FROM browser_capture_gc").fetchone()[0] == 0
+    conn.close()
+
+
+def test_gc_removed_captures_do_not_starve_later_batches(tmp_path):
+    db, root, gc = _gc(tmp_path)
+    first = [_capture(root, db, created_at=1) for _ in range(3)]
+    gc.init()
+    assert gc.cleanup_expired(limit=3) == 3
+    later = _capture(root, db, created_at=2)
+
+    # The three removed tickets are older than ``later`` but must not occupy
+    # the bounded batch again.
+    assert gc.cleanup_expired(limit=3) == 1
+    assert not (root / later).exists()
+    conn = sqlite3.connect(db)
+    done = {row[0] for row in conn.execute("SELECT artifact_id FROM browser_capture_gc_done")}
+    conn.close()
+    assert done == {*first, later}
+
+
+def test_gc_ticket_candidate_query_uses_index(tmp_path):
+    db, _root, gc = _gc(tmp_path)
+    gc.init()
+    conn = sqlite3.connect(db)
+    plan = " ".join(row[3] for row in conn.execute(
+        "EXPLAIN QUERY PLAN SELECT t.artifact_id FROM browser_artifact_tickets t "
+        "WHERE t.state='consumed' AND t.content_type='image/png' "
+        "AND t.artifact_id IS NOT NULL AND t.consumed_at<=?", (1.0,)))
+    conn.close()
+    assert "idx_browser_capture_gc_ticket_consumed" in plan
+    assert "SCAN t" not in plan
 
 
 def test_gc_scans_run_command_and_direct_reference_surfaces(tmp_path):
