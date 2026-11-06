@@ -311,6 +311,26 @@ def test_discover_and_migrate_launchd(tmp_path):
     assert all("-k" not in c for c in calls)
 
 
+def test_launchd_reload_waits_for_async_bootout(tmp_path):
+    service = svc.Service("runner", "launchd", "com.x.runner", tmp_path / "a.plist",
+                          Path("/old/tree/tools/agent-runner.py"))
+    state = {"prints": 0, "bootstraps": 0}
+    calls = []
+
+    def run(cmd):
+        calls.append(cmd[1])
+        if cmd[1] == "print":  # 旧进程还要两轮才退出
+            state["prints"] += 1
+            return subprocess.CompletedProcess(cmd, 0 if state["prints"] <= 2 else 113)
+        if cmd[1] == "bootstrap":  # 第一次仍撞 EIO
+            state["bootstraps"] += 1
+            return subprocess.CompletedProcess(cmd, 5 if state["bootstraps"] == 1 else 0)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    assert svc.reload(service, run, sleep=lambda _s: None)
+    assert calls == ["bootout", "print", "print", "print", "bootstrap", "bootstrap"]
+
+
 def test_discover_systemd_and_kickstart_never_kills(tmp_path):
     units = tmp_path / "systemd"
     units.mkdir()
