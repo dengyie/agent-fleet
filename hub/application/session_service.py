@@ -40,7 +40,7 @@ from session_schema import (
 from hub.infrastructure.session_repository import SessionError
 from hub.infrastructure.transcript_repository import TranscriptError
 from hub.domain.interaction import normalize_answer, validate_answer_ids
-from tools.session.redact import Redactor
+from fleet_core.session.redact import Redactor
 
 DEFAULT_QUERY_LIMIT = 100
 _MAX_QUERY_LIMIT = 1000

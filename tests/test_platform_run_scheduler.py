@@ -5,7 +5,7 @@ from hub.application.run_scheduler_service import RunSchedulerService
 from hub.application.run_worker_service import LocalRunWorkerService
 from hub.application.run_event_service import RunEventService
 from hub.infrastructure.platform_db import PlatformRepository
-from tools.platform.providers.base import ModelResponse
+from hub.platform.providers.base import ModelResponse
 
 
 OWNER_A = "owner-a@example.test"

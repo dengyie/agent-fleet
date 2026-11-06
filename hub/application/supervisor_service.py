@@ -41,7 +41,7 @@ from hub.infrastructure.supervisor_command_repository import (
     SupervisorCommandRepositoryError,
 )
 
-from hub.domain.control import (
+from fleet_core.control import (
     CONTROL_ACTIONS,
     PAYLOAD_ACTIONS,
     RECEIPT_STATUSES,

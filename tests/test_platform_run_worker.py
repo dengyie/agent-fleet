@@ -61,7 +61,7 @@ def test_worker_claims_and_finishes_local_run_with_events(tmp_path):
 @pytest.mark.parametrize('tool', ['workspace.list', 'workspace.write', 'workspace.artifact', 'workspace.exec'])
 def test_acceptance_policy_is_frozen_and_enforced_by_new_worker(tmp_path, remote, tool):
     from hub.application.run_worker_service import LocalRunWorkerService
-    from tools.platform.providers.base import ModelResponse
+    from hub.platform.providers.base import ModelResponse
 
     app = _app(tmp_path)
     repo = _catalog(app, tmp_path)
@@ -136,7 +136,7 @@ def test_acceptance_cannot_reuse_unrestricted_turn_token(tmp_path, monkeypatch, 
 
 
 def test_worker_injects_frozen_memory_and_journals_redacted_evidence(tmp_path):
-    from tools.platform.providers.base import ModelResponse
+    from hub.platform.providers.base import ModelResponse
 
     app = _app(tmp_path, worker=True, memory=True, memory_context=True)
     _catalog(app, tmp_path)
@@ -184,7 +184,7 @@ def test_worker_injects_frozen_memory_and_journals_redacted_evidence(tmp_path):
 
 
 def test_worker_uses_snapshot_after_live_memory_changes(tmp_path):
-    from tools.platform.providers.base import ModelResponse
+    from hub.platform.providers.base import ModelResponse
 
     app = _app(tmp_path, worker=True, memory=True, memory_context=True)
     _catalog(app, tmp_path)
@@ -223,7 +223,7 @@ def test_worker_uses_snapshot_after_live_memory_changes(tmp_path):
 
 
 def test_worker_artifact_is_listed_and_downloadable_in_conversation_workspace(tmp_path):
-    from tools.platform.providers.base import ModelResponse
+    from hub.platform.providers.base import ModelResponse
 
     app = _app(tmp_path, worker=True)
     _catalog(app, tmp_path)
@@ -380,7 +380,7 @@ def test_cancel_is_observed_before_next_model_step(tmp_path):
             self.calls += 1
             if self.calls == 1:
                 self.repository.cancel_run(OWNER, run["run_id"], now=2)
-            from tools.platform.providers.base import ModelResponse
+            from hub.platform.providers.base import ModelResponse
             return ModelResponse(kind="final", text="should be cancelled")
 
     worker.provider_factory = lambda profile: Provider(worker.repository)
@@ -391,7 +391,7 @@ def test_cancel_is_observed_before_next_model_step(tmp_path):
 
 def test_remote_browser_tools_require_node_session_capability(tmp_path):
     from hub.application.run_worker_service import LocalRunWorkerService
-    from tools.platform.providers.base import ModelResponse
+    from hub.platform.providers.base import ModelResponse
 
     app = _app(tmp_path)
     repo = app.extensions["fleet"]["platform_repository"]
@@ -441,7 +441,7 @@ def test_remote_browser_tools_require_node_session_capability(tmp_path):
 
 def test_remote_run_uses_node_delivery_without_local_filesystem(tmp_path):
     from hub.application.run_worker_service import LocalRunWorkerService
-    from tools.platform.providers.base import ModelResponse
+    from hub.platform.providers.base import ModelResponse
 
     app = _app(tmp_path)
     repo = app.extensions["fleet"]["platform_repository"]
@@ -496,7 +496,7 @@ def test_remote_run_uses_node_delivery_without_local_filesystem(tmp_path):
 
 def test_remote_unknown_receipt_finishes_run_unknown_without_replay(tmp_path):
     from hub.application.run_worker_service import LocalRunWorkerService
-    from tools.platform.providers.base import ModelResponse
+    from hub.platform.providers.base import ModelResponse
 
     app = _app(tmp_path)
     repo = app.extensions["fleet"]["platform_repository"]
@@ -534,7 +534,7 @@ def test_remote_unknown_receipt_finishes_run_unknown_without_replay(tmp_path):
 
 
 def test_default_worker_rejects_unsandboxed_host_exec(tmp_path):
-    from tools.platform.providers.base import ModelResponse
+    from hub.platform.providers.base import ModelResponse
 
     app = _app(tmp_path, worker=True)
     _catalog(app, tmp_path)
@@ -564,8 +564,8 @@ def test_default_worker_rejects_unsandboxed_host_exec(tmp_path):
 def test_expired_started_run_is_unknown_without_replaying_side_effect(tmp_path, monkeypatch, cancelled, crash_phase):
     from hub.application.run_worker_service import LocalRunWorkerService
     from hub.application.run_event_service import RunEventService
-    from tools.platform.artifacts import ArtifactStore
-    from tools.platform.providers.base import ModelResponse
+    from hub.platform.artifacts import ArtifactStore
+    from hub.platform.providers.base import ModelResponse
 
     app = _app(tmp_path, worker=True)
     repo = _catalog(app, tmp_path)
@@ -616,7 +616,7 @@ def test_expired_started_run_is_unknown_without_replaying_side_effect(tmp_path, 
 
 
 def test_queued_turns_use_trigger_cutoff_and_durable_assistant_history(tmp_path):
-    from tools.platform.providers.base import ModelResponse
+    from hub.platform.providers.base import ModelResponse
 
     app = _app(tmp_path, worker=True)
     repo = _catalog(app, tmp_path)
@@ -665,7 +665,7 @@ def test_claim_serializes_turns_in_one_conversation_without_blocking_others(tmp_
 
 
 def test_sandbox_worker_can_list_workspace_root_without_exec_launcher(tmp_path):
-    from tools.platform.providers.base import ModelResponse
+    from hub.platform.providers.base import ModelResponse
 
     app = _app(tmp_path, worker=True)
     _catalog(app, tmp_path)
@@ -702,7 +702,7 @@ def test_sandbox_launcher_is_explicitly_wired_from_environment(tmp_path, monkeyp
 def test_slow_provider_keeps_both_leases_alive_and_cleans_heartbeat(tmp_path):
     import threading
     import time
-    from tools.platform.providers.base import ModelResponse
+    from hub.platform.providers.base import ModelResponse
     app = _app(tmp_path, worker=True)
     repo = _catalog(app, tmp_path)
     run = _queued(app)

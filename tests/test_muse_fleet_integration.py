@@ -4,13 +4,14 @@ import pytest
 
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
-from hub.domain.control import generate_ed25519_keypair
-from hub.domain.platform_command import PlatformCommand
-from tools.browser_bridge.contract import WEB_AGENT_TOOLS, WebAgentExecutor
+from fleet_core.control import generate_ed25519_keypair
+from fleet_core.platform_command import PlatformCommand
+from fleet_core.web_agent_contract import WEB_AGENT_TOOLS
+from tools.browser_bridge.contract import WebAgentExecutor
 from tools.browser_bridge.muse import MuseBridge, MuseBridgeError
 from tools.platform.node_runtime import NodeRuntime, NodeRuntimeConfig
-from tools.platform.remote_tool_broker import RemoteToolBroker
-from tools.platform.tool_broker import ToolBroker
+from hub.platform.remote_tool_broker import RemoteToolBroker
+from hub.platform.tool_broker import ToolBroker
 from test_muse_browser_bridge import Transport, message
 from test_platform_node_http_e2e import FlaskTransport
 
@@ -111,7 +112,7 @@ def test_unsigned_or_tampered_commands_never_touch_browser(tmp_path):
 @pytest.mark.parametrize('enabled', [False, True])
 def test_worker_exposes_only_selected_nodes_declared_tools(tmp_path, enabled):
     from hub.application.run_worker_service import LocalRunWorkerService
-    from tools.platform.providers.base import ModelResponse
+    from hub.platform.providers.base import ModelResponse
     app = create_app(FleetConfig.from_root(tmp_path, ingest_token='i', dev_operator=OWNER, platform_enabled=True))
     repo = app.extensions['fleet']['platform_repository']
     repo.upsert_node(OWNER, {'node_id':'muse-node', 'label':'Muse',

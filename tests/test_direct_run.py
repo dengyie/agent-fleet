@@ -69,7 +69,7 @@ class DirectRunSmokeTests(unittest.TestCase):
     def test_control_client_cli_direct_run_reaches_argparse(self):
         # ControlClient has no __main__; the CLI wrapper is the LaunchAgent
         # entrypoint. Bootstrap must put the repo root on sys.path so
-        # hub.domain.control / tools.runner_config import before argparse
+        # fleet_core.control / tools.runner_config import before argparse
         # handles --help.
         interpreters = [sys.executable]
         if Path("/opt/homebrew/bin/python3").exists():

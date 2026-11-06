@@ -5,8 +5,8 @@ import os
 
 import pytest
 
-from hub.domain.task_result import TestSummaryError as SummaryError
-from tools.result_files import collect_test_summary
+from fleet_core.task_result import TestSummaryError as SummaryError
+from fleet_core.result_files import collect_test_summary
 
 LIMIT = 20 * 1024
 

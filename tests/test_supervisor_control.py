@@ -33,7 +33,7 @@ from hub.application.supervisor_service import (
     SupervisorServiceError,
 )
 from hub.bootstrap import create_app
-from hub.domain import control as ctrl
+from fleet_core import control as ctrl
 from hub.domain import supervisor as sup_dom
 from support.hub_env import HubStores
 

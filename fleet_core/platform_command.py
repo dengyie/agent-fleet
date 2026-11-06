@@ -44,12 +44,12 @@ def canonical_command_bytes(command: Mapping[str, Any]) -> bytes:
 
 
 def sign_command(command: Mapping[str, Any], private_key: bytes) -> str:
-    from hub.domain.control import sign_payload
+    from fleet_core.control import sign_payload
     return sign_payload(private_key, canonical_command_bytes(command))
 
 
 def verify_command(command: Mapping[str, Any], public_key: bytes) -> bool:
-    from hub.domain.control import verify_payload
+    from fleet_core.control import verify_payload
     signature = command.get("signature")
     if not isinstance(signature, str) or not signature:
         return False

@@ -19,7 +19,7 @@ import uuid
 from flask import g, jsonify, request
 from hub.diagnostics import log_failure
 
-from hub.application.task_service import ApplicationError
+from hub.application.errors import ApplicationError
 
 __all__ = [
     "ApplicationError",

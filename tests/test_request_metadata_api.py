@@ -7,7 +7,7 @@ import pytest
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
 from hub.infrastructure.platform_db import PlatformRepository
-from tools.platform.providers.openai_compatible import OpenAICompatibleProvider, TransportResponse
+from hub.platform.providers.openai_compatible import OpenAICompatibleProvider, TransportResponse
 
 OWNER = 'metadata@example.test'
 _MISSING = object()

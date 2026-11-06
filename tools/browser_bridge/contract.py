@@ -1,39 +1,5 @@
-"""Fixed web-agent tool contract shared by Hub and local Node."""
-from collections.abc import Mapping
-
-from .muse import MAX_PROMPT, MuseBridgeError, _identity
-
-WEB_AGENT_TOOLS = frozenset({'web_agent.status', 'web_agent.submit', 'web_agent.read'})
-WEB_AGENT_DEFINITIONS = (
-    {'name': 'web_agent.status', 'risk': 'read_only', 'scope_kind': 'workspace',
-     'description': 'Check the explicitly connected local Muse agent without reading chat history.',
-     'parameters': {'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False}},
-    {'name': 'web_agent.submit', 'risk': 'write', 'scope_kind': 'workspace',
-     'description': 'Delegate a user-authorized task to the connected Muse account. Use a unique task_id and preserve it for retries. Returns dispatch status, not task completion. Read with web_agent.read. Unknown outcomes must not be resubmitted with a new ID. Muse keeps its own approvals.',
-     'parameters': {'type': 'object', 'properties': {
-         'task_id': {'type': 'string', 'minLength': 1, 'maxLength': 128},
-         'prompt': {'type': 'string', 'minLength': 1, 'maxLength': MAX_PROMPT}},
-         'required': ['task_id', 'prompt'], 'additionalProperties': False}},
-    {'name': 'web_agent.read', 'risk': 'read_only', 'scope_kind': 'workspace',
-     'description': 'Read one delegated Muse task. completed/failed are agent-reported outcomes, not independent verification. running/unknown/waiting_input are unfinished. Ask the user to open Muse for required input; never approve on their behalf.',
-     'parameters': {'type': 'object', 'properties': {'task_id': {'type': 'string', 'minLength': 1, 'maxLength': 128}},
-                    'required': ['task_id'], 'additionalProperties': False}},
-)
-
-
-def validate_arguments(tool, arguments):
-    required = {'web_agent.status': set(), 'web_agent.submit': {'task_id', 'prompt'},
-                'web_agent.read': {'task_id'}}.get(tool)
-    if required is None or not isinstance(arguments, Mapping) or set(arguments) != required:
-        raise MuseBridgeError('invalid_arguments')
-    if 'task_id' in required:
-        _identity(arguments['task_id'])
-    if 'prompt' in required:
-        prompt = arguments['prompt']
-        if (not isinstance(prompt, str) or not prompt.strip() or len(prompt) > MAX_PROMPT
-                or any(ord(c) < 32 and c not in '\r\n\t' for c in prompt)):
-            raise MuseBridgeError('prompt_invalid')
-    return dict(arguments)
+"""Node-side web-agent executor over the shared contract in ``fleet_core``."""
+from fleet_core.web_agent_contract import MuseBridgeError, _identity, validate_arguments
 
 
 class WebAgentExecutor:

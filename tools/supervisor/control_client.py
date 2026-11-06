@@ -7,7 +7,7 @@ The Agent only ever *pulls*:
 Every pulled command passes a single local gate before execution:
 
 * session existence pre-check (opaque probe: none -> bounded ``unknown_session``);
-* ``hub.domain.control.validate_command`` — Ed25519 signature over canonical
+* ``fleet_core.control.validate_command`` — Ed25519 signature over canonical
   bytes, action in the fixed control-action set (incl. ``adopt``/``detach``
   and the default-off Phase 4/5 tokens), machine/session/attempt scope, TTL
   expiry, clock skew, nonce uniqueness, and bounded payload for
@@ -52,7 +52,7 @@ _HTTP_TIMEOUT_S = 10.0
 _HTTP_ATTEMPTS = 3
 _HTTP_RETRY_SLEEP_S = 0.4
 
-from hub.domain import control as ctrl
+from fleet_core import control as ctrl
 
 #: The only actions the client may dispatch — mirror of both the Hub's fixed
 #: set and ``tools.supervisor.supervisor.CONTROL_ACTIONS``.

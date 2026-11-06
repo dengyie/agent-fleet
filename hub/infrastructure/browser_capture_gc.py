@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from tools.platform.artifact_lock import artifact_snapshot_barrier
+from hub.platform.artifact_lock import artifact_snapshot_barrier
 from hub.infrastructure.sqlite import connect as sqlite_connect
 
 CAPTURE_RETENTION_SECONDS = 30 * 24 * 60 * 60

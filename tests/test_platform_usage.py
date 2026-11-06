@@ -3,8 +3,8 @@ import pytest
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
 from hub.infrastructure.usage_repository import UsageLimitExceeded, UsageRepository
-from tools.platform.providers.base import ModelResponse
-from tools.platform.runtime.native import NativeAssistantRuntime
+from hub.platform.providers.base import ModelResponse
+from hub.platform.runtime.native import NativeAssistantRuntime
 
 
 class NoopBroker:

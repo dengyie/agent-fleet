@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from hub.application.task_service import ApplicationError
-from tools.session.redact import Redactor
+from fleet_core.session.redact import Redactor
 from platform_schema import validate_id, validate_owner_id
 
 DEFAULT_LOG_WINDOW_S = 300.0

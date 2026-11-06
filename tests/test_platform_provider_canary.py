@@ -8,7 +8,7 @@ import pytest
 
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
-from tools.platform.providers.openai_compatible import (
+from hub.platform.providers.openai_compatible import (
     OpenAICompatibleProvider,
     ProviderError,
 )

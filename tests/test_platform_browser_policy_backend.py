@@ -6,8 +6,8 @@ from tools.platform.browser_backend import (
     BrowserExecutionError,
     LocalBrowserBackend,
 )
-from hub.domain.platform_command import PlatformCommand
-from tools.platform.browser_policy import validate_url
+from fleet_core.platform_command import PlatformCommand
+from fleet_core.browser_policy import validate_url
 from tools.platform.journal import NodeJournal
 from tools.platform.node_client import BrowserSessionSyncError, NodeClient
 from tools.platform.node_executor import BROWSER_TOOLS, NodeToolExecutor
@@ -39,7 +39,7 @@ def test_policy_matches_effective_default_https_port():
 
 
 def test_browser_policy_rejects_loopback_urls():
-    from tools.platform.browser_policy import BrowserPolicyError
+    from fleet_core.browser_policy import BrowserPolicyError
 
     with pytest.raises(BrowserPolicyError, match="network_disabled"):
         validate_url("http://localhost:3000", network_enabled=False)
@@ -49,7 +49,7 @@ def test_browser_policy_rejects_loopback_urls():
 
 
 def test_loopback_fixture_override_is_not_inferred_from_network_origin_allowlist():
-    from tools.platform.browser_policy import BrowserPolicyError
+    from fleet_core.browser_policy import BrowserPolicyError
 
     class Driver:
         def open(self, _url):
@@ -71,7 +71,7 @@ def test_loopback_fixture_override_is_not_inferred_from_network_origin_allowlist
 
 
 def test_browser_policy_bounds_dns_answers():
-    from tools.platform.browser_policy import BrowserPolicyError
+    from fleet_core.browser_policy import BrowserPolicyError
 
     answers = [
         (2, 1, 6, "", (GLOBAL, 443))
@@ -91,7 +91,7 @@ def test_browser_policy_bounds_dns_answers():
     "https://one.example../path", "https://one.example/path\n",
 ])
 def test_policy_rejects_ambiguous_authorities(value):
-    from tools.platform.browser_policy import BrowserPolicyError
+    from fleet_core.browser_policy import BrowserPolicyError
 
     with pytest.raises(BrowserPolicyError, match="invalid_url"):
         validate_url(
@@ -108,7 +108,7 @@ def test_policy_normalizes_scheme_case_and_rejects_duplicate_origins():
         resolver=_resolver,
     ) == "HTTPS://ONE.EXAMPLE/path"
 
-    from tools.platform.browser_policy import BrowserPolicyError
+    from fleet_core.browser_policy import BrowserPolicyError
 
     with pytest.raises(BrowserPolicyError, match="invalid_url"):
         validate_url(
@@ -507,7 +507,7 @@ def test_browser_session_sync_failure_retains_cleanup_failure_without_leaking_de
 
 
 def test_submit_policy_screens_selector_and_arguments():
-    from tools.platform.browser_policy import BrowserPolicyError, validate_action
+    from fleet_core.browser_policy import BrowserPolicyError, validate_action
 
     result = validate_action("browser.submit", {"session_id": "s" * 24, "selector": "#go"})
     assert result == {"session_id": "s" * 24, "selector": "#go"}

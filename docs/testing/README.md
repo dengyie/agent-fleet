@@ -112,7 +112,7 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/test_full_flow_browser.py -q
 
 - `tests/test_worktree_diff_streaming.py` 用真实 Git 和临时进程验证大补丁采集的 Python 内存上界、stdout/stderr 同时排空、UTF-8 截断、非零退出码，以及管道保持打开或提前关闭时的超时终止和回收。字节限额包含截断标记；此处验证的是采集进程内存，不代表限制 Git 子进程的内部内存。
 
-- `tests/test_workspace_output_bounds.py` 用实际文件和本地进程验证工作区 64 KiB 读取/输出限额在采集时生效，保留非零退出码、stderr、超时和截断信息，并检查无效 UTF-8 替代字符不会突破字节预算。Git、directory 和 sandbox 共用 `tools/bounded_process.py` 的非阻塞管道读取及进程组回收；配置 launcher 的测试只是临时对端，不证明生产隔离。
+- `tests/test_workspace_output_bounds.py` 用实际文件和本地进程验证工作区 64 KiB 读取/输出限额在采集时生效，保留非零退出码、stderr、超时和截断信息，并检查无效 UTF-8 替代字符不会突破字节预算。Git、directory 和 sandbox 共用 `fleet_core/process/bounded_process.py` 的非阻塞管道读取及进程组回收；配置 launcher 的测试只是临时对端，不证明生产隔离。
 
 ## 门禁判定规则
 

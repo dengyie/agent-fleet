@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-from tools.process_group import pid_alive, posix_group_alive, process_start_identity
+from fleet_core.process.process_group import pid_alive, posix_group_alive, process_start_identity
 from tools.supervisor.model import (TERMINAL_STATES, ManagedSessionManifest,
                                     validate_opaque)
 

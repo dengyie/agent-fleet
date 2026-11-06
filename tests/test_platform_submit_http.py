@@ -1,7 +1,7 @@
 import pytest
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
-from hub.domain.control import generate_ed25519_keypair
+from fleet_core.control import generate_ed25519_keypair
 
 OWNER = 'owner@example.test'
 

@@ -6,14 +6,14 @@ import tracemalloc
 
 import pytest
 
-from tools.platform.backends.directory import DirectoryBackend, MAX_READ_BYTES, MAX_OUTPUT_BYTES
-from tools.platform.backends.sandbox import SandboxBackend
+from fleet_core.backends.directory import DirectoryBackend, MAX_READ_BYTES, MAX_OUTPUT_BYTES
+from fleet_core.backends.sandbox import SandboxBackend
 from tests.support.processes import assert_process_exited
 
 
 def execution(tmp_path: Path, backend_type: type[DirectoryBackend], source: str,
               monkeypatch: pytest.MonkeyPatch) -> tuple[DirectoryBackend, list[str]]:
-    from tools.platform.backends import directory
+    from fleet_core.backends import directory
 
     script = tmp_path / "output.py"
     script.write_text(source, encoding="utf-8")

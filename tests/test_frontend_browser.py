@@ -16,7 +16,7 @@ from hub.bootstrap import create_app
 from hub.config import FleetConfig
 from support.hub_env import HubStores
 from hub.infrastructure.session_repository import SessionRepository
-from tools.platform.providers.base import ModelResponse
+from hub.platform.providers.base import ModelResponse
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNER = 'browser@example.test'
@@ -129,7 +129,7 @@ def test_console_in_real_browser(tmp_path):
     class Provider:
         def complete(self, messages, tools, *, request_observer=None):
             if messages[-1].get('content') == 'diagnostic-failure':
-                from tools.platform.providers.openai_compatible import ProviderError
+                from hub.platform.providers.openai_compatible import ProviderError
                 raise ProviderError('transient_http', status=503, retryable=True)
             return ModelResponse(kind='final', text='## 浏览器验收结果\n\n通过真实 API 持久化。\n\n- 支持刷新恢复\n- 运行与产物分离\n\n```python\nprint("hello")\n```\n<img src=x onerror=alert(1)>')
     worker = app.extensions['fleet']['services']['platform_worker']
@@ -155,7 +155,7 @@ def test_console_in_real_browser(tmp_path):
 
 def test_request_metadata_in_real_browser(tmp_path):
     import json
-    from tools.platform.providers.openai_compatible import OpenAICompatibleProvider, TransportResponse
+    from hub.platform.providers.openai_compatible import OpenAICompatibleProvider, TransportResponse
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE to run Chromium acceptance')
     app = create_app(FleetConfig.from_root(tmp_path, frontend_dir=ROOT / 'frontend', dev_operator=OWNER,

@@ -14,7 +14,7 @@ from typing import Mapping
 from agent_profiles import (NATIVE_RESUME_AGENT_TYPES, PROFILES,
                             RESUME_VERIFIABLE_AGENT_TYPES,
                             SESSION_PATH_RESUME_AGENT_TYPES)
-from tools.local_process import run as run_local
+from fleet_core.process.local_process import run as run_local
 from tools.supervisor.group_ops import validate_command
 from tools.supervisor.handles import _ManagedEntry, _stamp_private_identity
 from tools.supervisor.model import PAUSED, QUARANTINED, TERMINAL_STATES

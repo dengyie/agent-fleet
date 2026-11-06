@@ -9,7 +9,7 @@ from hub.application.task_service import ApplicationError
 from hub.domain.conversation import UserTurn
 from hub.domain.run import Run
 from hub.domain.platform import ACCEPTANCE_TOOL_POLICY
-from hub.domain.browser_submit import RunLookup, SubmitApprovalStore, SubmitApprovalRequest, SubmitApprovalResponse
+from fleet_core.browser_submit import RunLookup, SubmitApprovalStore, SubmitApprovalRequest, SubmitApprovalResponse
 from hub.application.platform_memory_context_service import (
     PlatformMemoryContextError,
 )

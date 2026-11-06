@@ -7,7 +7,7 @@ arguments into one buffer, so two parallel calls (index 0 and 1) became e.g.
 """
 import json
 
-from tools.platform.providers.openai_compatible import (OpenAICompatibleProvider,
+from hub.platform.providers.openai_compatible import (OpenAICompatibleProvider,
                                                         TransportResponse)
 
 TOOLS = [{"name": "fs.read", "description": "r", "parameters": {"type": "object"}},

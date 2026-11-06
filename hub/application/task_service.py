@@ -25,6 +25,7 @@ from collections.abc import Mapping
 from itertools import islice
 from typing import Any
 
+from hub.application.errors import ApplicationError
 from hub.application.event_emit import safe_emit
 from hub.domain.handoff import HandoffConflict
 
@@ -34,9 +35,9 @@ from hub.domain.task import (
     public_task,
     validate_task_input,
 )
-from hub.domain.task_result import PATCH_TRUNCATION_SUFFIX
+from fleet_core.task_result import PATCH_TRUNCATION_SUFFIX
 from session_schema import is_valid_session_id
-from tools.result_files import (
+from fleet_core.result_files import (
     MAX_BYTES_PER_WINDOW,
     PathRejected,
     READ_WINDOW_S,
@@ -56,20 +57,6 @@ TASK_STATES = (
 
 #: Bounded scan when projecting attempt_id → session_id (same cap as ControlRouter).
 _SESSION_SCAN = 1000
-
-
-class ApplicationError(Exception):
-    """Stable, bounded application error.
-
-    ``code`` is the public error key; ``detail`` is a user-visible bounded
-    description; ``status`` is the HTTP status mapped by the adapter layer.
-    """
-
-    def __init__(self, code: str, detail: str = "", status: int = 400) -> None:
-        self.code = code
-        self.detail = str(detail)[:200]
-        self.status = int(status)
-        super().__init__(self.detail)
 
 
 class TaskHostPolicy:

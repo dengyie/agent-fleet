@@ -18,11 +18,11 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
-from tools.local_process import popen as popen_local
-from tools.process_group import LineAssembler, signal_group
+from fleet_core.process.local_process import popen as popen_local
+from fleet_core.process.process_group import LineAssembler, signal_group
 
 if TYPE_CHECKING:
-    from tools.windows_job import WindowsJob
+    from fleet_core.process.windows_job import WindowsJob
 
 
 def decode_prefix(raw: bytes, limit: int) -> tuple[str, bool]:
@@ -279,7 +279,7 @@ def run_streamed(argv: Sequence[str], *, cwd: Path, timeout_s: float,
     # 时不会被仍在读的线程卡住。
     options = {"start_new_session": True, "preexec_fn": None, "bufsize": 0}
     if os.name == "nt":
-        from tools.windows_job import WindowsJob
+        from fleet_core.process.windows_job import WindowsJob
         job = WindowsJob()
         options = {"creationflags": 0x00000004 | 0x00000200,
                    "preexec_fn": None, "bufsize": 0}
@@ -321,7 +321,7 @@ def run_bounded(argv: Sequence[str], *, cwd: Path, timeout_s: float,
     job = None
     options = {"start_new_session": True, "preexec_fn": preexec_fn}
     if os.name == "nt":
-        from tools.windows_job import WindowsJob
+        from fleet_core.process.windows_job import WindowsJob
         job = WindowsJob()
         # The child cannot spawn descendants before it belongs to our job.
         options = {"creationflags": 0x00000004 | 0x00000200,

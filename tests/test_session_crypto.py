@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import cryptography.exceptions
 from cryptography.exceptions import InvalidTag
 
-from tools.session.crypto import AeadBox, load_encryption_key
+from fleet_core.session.crypto import AeadBox, load_encryption_key
 
 
 def _key() -> bytes:
@@ -124,7 +124,7 @@ class FailClosedTests(unittest.TestCase):
         cfg = _config()
         key = load_encryption_key(cfg)
         self.assertIsNone(key)
-        from tools.session.crypto import encrypt_bounded
+        from fleet_core.session.crypto import encrypt_bounded
         result = encrypt_bounded(key, b"unsafe payload")
         self.assertIsNone(result)
 

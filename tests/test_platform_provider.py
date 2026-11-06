@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from tools.platform.providers.openai_compatible import (
+from hub.platform.providers.openai_compatible import (
     OpenAICompatibleProvider,
     ProviderError,
     ProviderFactory,
@@ -177,7 +177,7 @@ def test_endpoint_rejects_embedded_query_credentials():
 
 
 def test_workspace_tool_contract_reaches_real_provider_request():
-    from tools.platform.tool_broker import ToolBroker
+    from hub.platform.tool_broker import ToolBroker
     transport = FakeTransport([_response({
         "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
     })])

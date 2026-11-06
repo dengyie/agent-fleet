@@ -10,7 +10,7 @@ from hub.domain.request_metadata import (
 )
 from hub.infrastructure.platform_db import PlatformRepository
 from hub.infrastructure.platform_retention import DAY_S, PlatformRetention
-from tools.platform.providers.openai_compatible import OpenAICompatibleProvider, TransportResponse
+from hub.platform.providers.openai_compatible import OpenAICompatibleProvider, TransportResponse
 
 OWNER = 'summary@example.test'
 FUTURE = 50_000 * DAY_S  # far past any wall-clock updated_at

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from tools.platform.browser_url import canonical_url, normalize_origin
+from fleet_core.browser_url import canonical_url, normalize_origin
 
 
 @pytest.mark.parametrize(("value", "expected"), [

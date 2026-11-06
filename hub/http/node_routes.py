@@ -14,7 +14,7 @@ from hub.http.errors import ApplicationError, error_response
 from hub.http._common import json_object_or_empty as _body
 from hub.infrastructure.platform_db import PlatformRepositoryError
 from hub.infrastructure.browser_repository import BrowserRepositoryError
-from tools.platform.artifacts import ArtifactError
+from hub.platform.artifacts import ArtifactError
 
 bp = Blueprint("platform_nodes", __name__, url_prefix="/api/platform/v1/nodes")
 

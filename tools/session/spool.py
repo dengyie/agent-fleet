@@ -46,7 +46,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from session_schema import validate_event
-from tools.session.crypto import AeadBox
+from fleet_core.session.crypto import AeadBox
 
 try:  # pragma: no cover - the fallback is exercised on non-POSIX hosts.
     import fcntl

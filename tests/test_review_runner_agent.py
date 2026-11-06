@@ -14,7 +14,8 @@ from unittest import mock
 
 import yaml
 
-from tools import adapters, result_files, runner_config
+from fleet_core import result_files
+from tools import adapters, runner_config
 from tests.test_runner import load_agent_runner
 
 

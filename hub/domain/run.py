@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-from tools.platform.request_metadata import RequestMetadata
+from fleet_core.request_metadata import RequestMetadata
 
 RUN_STATES = frozenset({
     "queued", "running", "waiting_node", "waiting_approval", "waiting_task",

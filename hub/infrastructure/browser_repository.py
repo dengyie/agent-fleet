@@ -14,7 +14,7 @@ from typing import Any
 
 from platform_schema import validate_id, validate_owner_id
 
-from hub.domain.browser_submit import APPROVAL_TTL_S, submit_selector, utc_timestamp, opaque_browser_id
+from fleet_core.browser_submit import APPROVAL_TTL_S, submit_selector, utc_timestamp, opaque_browser_id
 from hub.infrastructure.sqlite import connect as sqlite_connect
 
 

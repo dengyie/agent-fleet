@@ -58,8 +58,8 @@ from session_schema import (
     try_validate_event,
 )
 from hub.infrastructure.sqlite import connect as sqlite_connect
-from tools.session.crypto import AeadBox
-from tools.session.redact import Redactor, redact_event_secrets
+from fleet_core.session.crypto import AeadBox
+from fleet_core.session.redact import Redactor, redact_event_secrets
 
 SCHEMA_VERSION = 1
 
@@ -68,7 +68,7 @@ DEFAULT_RAW_RETENTION_DAYS = 14
 DEFAULT_RAW_PURGE_BATCH_SIZE = 500
 MAX_RAW_PURGE_BATCH_SIZE = 1000
 
-# AEAD key contract (aligned with tools.session.crypto.KEY_LENGTH).
+# AEAD key contract (aligned with fleet_core.session.crypto.KEY_LENGTH).
 _AEAD_KEY_LENGTH = 32
 
 # Bounded audit actions (never raw content).

@@ -2,7 +2,7 @@ from pathlib import Path
 
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
-from hub.domain.platform_command import PlatformCommand
+from fleet_core.platform_command import PlatformCommand
 from tools.platform.node_client import NodeClient
 from tools.platform.node_executor import NodeToolExecutor
 from tools.platform.journal import NodeJournal

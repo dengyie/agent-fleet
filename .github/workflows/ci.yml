@@ -38,7 +38,7 @@ jobs:
           pip install ruff==0.17.3 pip-audit==2.10.1
       - name: Lint Python (syntax errors and undefined names)
         # F401：有意的再导出用 ``# noqa: F401`` 标注原因（兼容门面/包级 API）。
-        run: ruff check --select E9,F63,F7,F82,F401 hub tools connectors
+        run: ruff check --select E9,F63,F7,F82,F401 hub tools connectors fleet_core
       - name: Lint deploy shell scripts
         run: shellcheck --shell=bash --severity=error deploy/*.sh
       - name: Audit pinned dependencies

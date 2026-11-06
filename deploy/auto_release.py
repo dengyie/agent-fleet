@@ -14,7 +14,7 @@ import tempfile
 MANAGED = (
     'agent_profiles.py', 'README.md', 'requirements.txt', 'requirements-test.txt',
     'report_schema.py', 'session_schema.py', 'platform_schema.py', 'RELEASE_ORIGIN',
-    'connectors', 'hub', 'tools', 'deploy', 'docs', 'tests',
+    'connectors', 'fleet_core', 'hub', 'tools', 'deploy', 'docs', 'tests',
 )
 # Live operator config kept by every deploy. Older bundles may still carry
 # these at the backend root; they are tolerated but never copied.

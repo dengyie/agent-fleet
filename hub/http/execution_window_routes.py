@@ -5,7 +5,7 @@ from flask import Blueprint, current_app, g, jsonify, request
 
 from hub.auth import require_operator
 from hub.http.errors import ApplicationError, error_response
-from tools.platform.artifacts import ArtifactError
+from hub.platform.artifacts import ArtifactError
 
 bp = Blueprint("execution_windows", __name__, url_prefix="/api/platform/v1/execution-windows")
 

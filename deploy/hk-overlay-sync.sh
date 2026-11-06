@@ -7,7 +7,7 @@
 # fleet-gates.conf is live operator config: never shipped, never overwritten.
 FLEET_RELEASE_MANAGED_PATHS=(
     agent_profiles.py README.md requirements.txt requirements-test.txt report_schema.py
-    session_schema.py platform_schema.py RELEASE_ORIGIN frontend connectors hub tools deploy
+    session_schema.py platform_schema.py RELEASE_ORIGIN frontend connectors fleet_core hub tools deploy
     docs tests
 )
 FLEET_RUNTIME_PATHS=(credentials state var)

@@ -8,7 +8,7 @@ import pytest
 
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
-from tools.platform.providers.openai_compatible import OpenAICompatibleProvider, TransportResponse, ProviderError
+from hub.platform.providers.openai_compatible import OpenAICompatibleProvider, TransportResponse, ProviderError
 
 OWNER = 'diagnostics@example.test'
 SECRET = 'never-log-provider-secret'
@@ -128,7 +128,7 @@ def test_unhandled_http_exception_logs_location_and_request_id_without_message(t
 @pytest.mark.parametrize('provider_fails', [True, False])
 def test_accounting_failure_preserves_original_boundary(provider_fails, caplog):
     from types import SimpleNamespace
-    from tools.platform.runtime.native import NativeAssistantRuntime, ProviderBoundaryUnknown
+    from hub.platform.runtime.native import NativeAssistantRuntime, ProviderBoundaryUnknown
     class Provider:
         def complete(self, *_, request_observer=None):
             if provider_fails:

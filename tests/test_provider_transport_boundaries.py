@@ -13,7 +13,7 @@ from typing import Any, Iterator
 
 import pytest
 
-from tools.platform.providers.openai_compatible import OpenAICompatibleProvider, ProviderError, ProviderFactory
+from hub.platform.providers.openai_compatible import OpenAICompatibleProvider, ProviderError, ProviderFactory
 
 
 REPLY = b'{"choices":[{"message":{"content":"done"}}]}'

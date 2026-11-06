@@ -1,6 +1,6 @@
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
-from hub.domain.platform_command import PlatformCommand
+from fleet_core.platform_command import PlatformCommand
 
 
 def _app(tmp_path, owner="owner-a@example.test"):

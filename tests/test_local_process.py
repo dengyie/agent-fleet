@@ -1,7 +1,7 @@
 """Regression guard for the centralised child-process launch policy.
 
 Every console child the fleet spawns must go through
-:mod:`tools.local_process`. A raw ``subprocess`` spawn is how the Windows
+:mod:`fleet_core.process.local_process`. A raw ``subprocess`` spawn is how the Windows
 ``pythonw`` flash-window and the silent ``UnicodeDecodeError`` regressions
 crept back in, so this scans the runtime packages with an AST rather than
 relying on review — including spawns spelled through an alias, imported
@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 from unittest import mock
 
-from tools import local_process
+from fleet_core.process import local_process
 
 ROOT = Path(__file__).resolve().parents[1]
 SCANNED_PACKAGES = ("connectors", "hub", "tools")
@@ -86,7 +86,7 @@ def test_every_runtime_spawn_goes_through_the_policy():
             offenders[path.relative_to(ROOT).as_posix()] = lines
     assert not offenders, (
         f"raw subprocess spawns bypass the launch policy: {offenders}. "
-        "Use tools.local_process.run / tools.local_process.popen instead."
+        "Use fleet_core.process.local_process.run / fleet_core.process.local_process.popen instead."
     )
 
 

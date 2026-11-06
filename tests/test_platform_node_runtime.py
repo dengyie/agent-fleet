@@ -5,7 +5,7 @@ import pytest
 
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
-from hub.domain.platform_command import PlatformCommand
+from fleet_core.platform_command import PlatformCommand
 from tools.platform.node_executor import (
     BROWSER_TOOLS,
     SERVICE_LOGS_POSTCHECK_ACTION,
@@ -19,7 +19,7 @@ from tools.platform.node_runtime import (
 )
 
 
-from hub.domain.control import generate_ed25519_keypair
+from fleet_core.control import generate_ed25519_keypair
 
 PRIVATE_KEY, PUBLIC_KEY = generate_ed25519_keypair()
 OWNER = "owner@example.test"

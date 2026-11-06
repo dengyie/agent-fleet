@@ -44,7 +44,7 @@ def test_account_assistant_permissions_and_core_flows(tmp_path, role):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE for browser acceptance')
     from flask import request
-    from tools.platform.providers.base import ModelResponse
+    from hub.platform.providers.base import ModelResponse
 
     app = create_app(FleetConfig.from_root(
         tmp_path, frontend_dir=ROOT / 'frontend', ingest_token='browser-machine-token',

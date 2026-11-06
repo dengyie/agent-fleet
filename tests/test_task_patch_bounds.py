@@ -8,7 +8,7 @@ import pytest
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
 from hub.infrastructure.task_repository import SqliteTaskRepository
-from tools.result_files import MAX_DIFF_PATCH, redact_patch
+from fleet_core.result_files import MAX_DIFF_PATCH, redact_patch
 
 
 @pytest.mark.parametrize("text", ["x" * (MAX_DIFF_PATCH + 1), "文🌲" * 20000], ids=["ascii", "multibyte"])

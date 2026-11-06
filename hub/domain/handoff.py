@@ -7,8 +7,8 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from session_schema import AGENT_STATES, CAPTURE_QUALITIES
-from tools.result_files import PathRejected, normalize_path
-from tools.session.redact import Redactor
+from fleet_core.result_files import PathRejected, normalize_path
+from fleet_core.session.redact import Redactor
 
 MAX_EVENTS = 1000
 MAX_SNAPSHOT_CHARS = 12000

@@ -1,7 +1,7 @@
-from hub.domain.workspace import WorkspaceError, normalize_relative_path
-from tools.platform.backends.directory import DirectoryBackend
-from tools.platform.resource_lease import ResourceLeaseManager
-from tools.platform.tool_broker import ToolBroker
+from fleet_core.workspace import WorkspaceError, normalize_relative_path
+from fleet_core.backends.directory import DirectoryBackend
+from hub.platform.resource_lease import ResourceLeaseManager
+from hub.platform.tool_broker import ToolBroker
 
 
 def test_directory_backend_rejects_traversal_and_symlink_escape(tmp_path):

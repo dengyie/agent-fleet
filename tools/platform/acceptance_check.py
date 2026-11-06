@@ -14,7 +14,7 @@ from urllib.parse import urlsplit, quote
 from urllib.error import URLError
 from urllib.request import Request
 
-from tools.platform.http_transport import open_http
+from fleet_core.http_transport import open_http
 
 MAX_BYTES = 2 * 1024 * 1024
 

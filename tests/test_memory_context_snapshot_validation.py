@@ -17,7 +17,7 @@ from hub.application.run_worker_service import LocalRunWorkerService
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
 from hub.infrastructure.platform_memory_repository import PlatformMemoryRepository
-from tools.platform.providers.base import ModelResponse
+from hub.platform.providers.base import ModelResponse
 
 OWNER = "owner@example.test"
 

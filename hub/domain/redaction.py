@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from tools.session.redact import RedactionReport
+from fleet_core.session.redact import RedactionReport
 
 MAX_PUBLIC_CATEGORIES = 32
 

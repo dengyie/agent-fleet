@@ -17,10 +17,10 @@ import time
 from collections import deque
 from typing import Any, Mapping, Sequence
 
-from tools.local_process import popen as popen_local
-from tools.local_process import run as run_local
-from tools.process_group import (posix_group_alive, posix_group_only_zombies,
-                                 process_start_identity)
+from fleet_core.process.local_process import popen as popen_local
+from fleet_core.process.local_process import run as run_local
+from fleet_core.process.process_group import (posix_group_alive, posix_group_only_zombies,
+                                              process_start_identity, windows_pid_alive)
 from tools.supervisor.handles import _AttachedHandle, _Bound
 from tools.supervisor.model import GROUP_CAPABILITY_CGROUP, GROUP_CAPABILITY_PGROUP
 
@@ -579,42 +579,7 @@ class WindowsGroupOps(GroupOps):
 
     @staticmethod
     def _pid_alive(pid: int) -> bool | None:
-        if os.name != "nt":
-            return False
-        try:
-            import ctypes
-            from ctypes import wintypes
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel32.OpenProcess.argtypes = [
-                wintypes.DWORD,
-                wintypes.BOOL,
-                wintypes.DWORD,
-            ]
-            kernel32.OpenProcess.restype = wintypes.HANDLE
-            kernel32.WaitForSingleObject.argtypes = [
-                wintypes.HANDLE,
-                wintypes.DWORD,
-            ]
-            kernel32.WaitForSingleObject.restype = wintypes.DWORD
-            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-            kernel32.CloseHandle.restype = wintypes.BOOL
-            handle = kernel32.OpenProcess(0x00100000, False, int(pid))  # SYNCHRONIZE
-            if not handle:
-                error = ctypes.get_last_error()
-                if error == 87:  # ERROR_INVALID_PARAMETER: PID no longer exists
-                    return False
-                return None
-            try:
-                result = kernel32.WaitForSingleObject(handle, 0)
-                if int(result) == 0x00000102:  # WAIT_TIMEOUT
-                    return True
-                if int(result) == 0x00000000:  # WAIT_OBJECT_0
-                    return False
-                return None
-            finally:
-                kernel32.CloseHandle(handle)
-        except (AttributeError, OSError, TypeError, ValueError):
-            return None
+        return windows_pid_alive(pid)
 
     @staticmethod
     def _taskkill(root_pid: int | None, *, force: bool) -> bool:

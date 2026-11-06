@@ -33,7 +33,7 @@ class FleetConfig:
     session_search_enabled: bool = False
     session_search_db: Path | None = None
     # Optional restricted transcript encryption source (additive). Exactly one
-    # of these is consulted by ``tools.session.crypto.load_encryption_key`` at
+    # of these is consulted by ``fleet_core.session.crypto.load_encryption_key`` at
     # bootstrap time and passed to the transcript repository constructor.  Key
     # material never appears in logs/errors/reports.  ``None`` = fail closed:
     # raw transcript is never written and never returned.

@@ -7,7 +7,7 @@
 import subprocess
 from dataclasses import dataclass
 
-from tools.bounded_process import ProcessAborted, run_streamed
+from fleet_core.process.bounded_process import ProcessAborted, run_streamed
 from tools.spawn_policy import (UnsafeInstruction, build_child_env,
                                 place_instruction, refuse_windows_batch)
 

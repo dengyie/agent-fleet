@@ -1,4 +1,4 @@
-"""hub/domain/control.py — control-command domain protocol (Task 9).
+"""fleet_core/control.py — control-command domain protocol (Task 9).
 
 Pure domain values — no HTTP, persistence, or process concerns.  Everything a
 Hub command issuer and an Agent-side verifier/executor agree on lives here:

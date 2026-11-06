@@ -5,9 +5,9 @@ import getpass
 from pathlib import Path
 import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from hub.accounts.store import AccountStore
-from hub.http.errors import ApplicationError
+from hub.application.errors import ApplicationError
 
 
 def main():

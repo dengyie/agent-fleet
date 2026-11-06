@@ -24,11 +24,11 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterable
 
-from hub.domain.task_result import (
+from fleet_core.task_result import (
     MAX_DIFF_PATCH, MAX_TEST_SUMMARY, PatchError, TestSummaryError,
     bound_patch, normalize_test_summary,
 )
-from tools.session.redact import RedactionReport, Redactor
+from fleet_core.session.redact import RedactionReport, Redactor
 
 MAX_FILES = 16
 MAX_FILE_BYTES = 16384

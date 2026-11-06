@@ -10,7 +10,7 @@ import time
 from urllib.parse import urlsplit
 
 from tools.platform.node_runtime import NodeRuntime, NodeRuntimeConfig
-from .contract import WEB_AGENT_TOOLS
+from fleet_core.web_agent_contract import WEB_AGENT_TOOLS
 
 
 def load_runtime(path):

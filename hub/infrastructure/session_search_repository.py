@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from tools.session.redact import Redactor
+from fleet_core.session.redact import Redactor
 from hub.infrastructure.sqlite import connect as sqlite_connect
 
 SCHEMA_VERSION = 2

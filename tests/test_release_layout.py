@@ -131,7 +131,7 @@ class DeploymentSafetyTests(unittest.TestCase):
     def test_e2e_smoke_copies_report_schema_dependency(self):
         source = (REPO_ROOT / "deploy" / "e2e-smoke.sh").read_text()
         self.assertIn(
-            "cp -r hub tools connectors frontend agent_profiles.py report_schema.py session_schema.py platform_schema.py requirements.txt",
+            "cp -r fleet_core hub tools connectors frontend agent_profiles.py report_schema.py session_schema.py platform_schema.py requirements.txt",
             source,
         )
 
@@ -551,8 +551,15 @@ class RuntimeStoreHygieneTests(unittest.TestCase):
             "hub/web.py",
             "deploy/hk-web-process-control.py",
             "tools/__init__.py",
-            "tools/local_process.py",
-            "tools/result_files.py",
+            "fleet_core/__init__.py",
+            "fleet_core/process/__init__.py",
+            "fleet_core/process/local_process.py",
+            "fleet_core/result_files.py",
+            "fleet_core/session/__init__.py",
+            "fleet_core/control.py",
+            "hub/platform/__init__.py",
+            "hub/platform/tool_broker.py",
+            "hub/cli/account_admin.py",
             "tools/session/__init__.py",
             "tools/supervisor/supervisor.py",
             "tools/supervisor/group_ops.py",

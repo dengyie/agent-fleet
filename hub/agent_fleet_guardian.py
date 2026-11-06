@@ -24,7 +24,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from tools.local_process import popen as popen_local
+from fleet_core.process.local_process import popen as popen_local
 
 # Use gateway.run logger for visibility in gateway logs
 logger = logging.getLogger("gateway.run")

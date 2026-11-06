@@ -34,7 +34,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization as _ser
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from hub.domain import control as ctrl
+from fleet_core import control as ctrl
 from tools.supervisor import supervisor as sup_mod
 from tools.supervisor.control_client import ControlClient, NonceStore
 

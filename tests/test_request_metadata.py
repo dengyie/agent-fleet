@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from tools.platform.providers.openai_compatible import OpenAICompatibleProvider, ProviderError, TransportResponse
+from hub.platform.providers.openai_compatible import OpenAICompatibleProvider, ProviderError, TransportResponse
 
 
 def payload(**extra):
@@ -73,7 +73,7 @@ def test_invalid_tokens_remain_unknown(bad):
 
 
 def test_decimal_pricing_and_missing_detail_are_explicit():
-    from tools.platform.request_metadata import normalized_tokens, request_cost, validate_pricing
+    from fleet_core.request_metadata import normalized_tokens, request_cost, validate_pricing
     rates = {'currency': 'USD', 'input': '1', 'output': '6', 'cache_read': '.1', 'cache_write': '1.25'}
     usage = normalized_tokens({'input_tokens': 147, 'output_tokens': 14,
         'cache_read_tokens': 100, 'cache_write_tokens': 0, 'reasoning_tokens': 0})
@@ -139,7 +139,7 @@ def test_request_observer_failure_does_not_dispatch_or_replay():
 
 
 def test_request_timing_uses_monotonic_clock():
-    from tools.platform.providers.observation import RequestObservation
+    from hub.platform.providers.observation import RequestObservation
     ticks = iter([10, 12.988])
     events = []
     trace = RequestObservation(lambda kind,data: events.append(data), model='m', provider='test', clock=lambda: 123,
@@ -174,7 +174,7 @@ def test_sse_truncated_partial_answer_is_not_success():
 
 
 def test_equal_cache_rates_allow_cost_without_inventing_token_counts():
-    from tools.platform.request_metadata import normalized_tokens, request_cost
+    from fleet_core.request_metadata import normalized_tokens, request_cost
     usage = normalized_tokens({'input_tokens':100, 'output_tokens':10, 'cache_read_tokens':50})
     result = request_cost(usage, pricing={'currency':'USD','input':'2','output':'10','cache_read':'.2','cache_write':'2'})
     assert result['amount'] == '0.00021'
@@ -204,7 +204,7 @@ def test_unsupported_cache_tier_does_not_get_uniform_estimate():
 
 @pytest.mark.parametrize('failure', [TimeoutError, OSError])
 def test_accepted_nonstream_read_failure_is_closed_and_never_retried(monkeypatch, failure):
-    from tools.platform.providers import openai_compatible as adapter
+    from hub.platform.providers import openai_compatible as adapter
     sent, closed, events = [], [], []
     class Accepted:
         status, headers = 200, {}

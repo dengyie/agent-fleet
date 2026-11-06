@@ -1,12 +1,12 @@
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
-from tools.platform.assistant_worker import AssistantWorker, PersistentAssistantWorker
-from tools.platform.backends.directory import DirectoryBackend
-from tools.platform.providers.compatible import DeterministicProvider
-from tools.platform.runtime.base import RuntimeLimits
-from tools.platform.runtime.native import NativeAssistantRuntime
-from tools.platform.resource_lease import ResourceLeaseManager
-from tools.platform.tool_broker import ToolBroker
+from hub.platform.assistant_worker import AssistantWorker, PersistentAssistantWorker
+from fleet_core.backends.directory import DirectoryBackend
+from hub.platform.providers.compatible import DeterministicProvider
+from hub.platform.runtime.base import RuntimeLimits
+from hub.platform.runtime.native import NativeAssistantRuntime
+from hub.platform.resource_lease import ResourceLeaseManager
+from hub.platform.tool_broker import ToolBroker
 
 
 def test_native_runtime_performs_one_tool_then_final_response(tmp_path):
@@ -24,7 +24,7 @@ def test_native_runtime_performs_one_tool_then_final_response(tmp_path):
 def test_runtime_enforces_step_budget(tmp_path):
     class EndlessProvider:
         def complete(self, messages, tools, *, request_observer=None):
-            from tools.platform.providers.base import ModelResponse
+            from hub.platform.providers.base import ModelResponse
             return ModelResponse(kind="tool_call", tool="workspace.list", arguments={})
     backend = DirectoryBackend(tmp_path / "workspace")
     leases = ResourceLeaseManager()
@@ -42,7 +42,7 @@ def test_runtime_preserves_structured_tool_call_context_for_next_model_step(tmp_
 
         def complete(self, messages, tools, *, request_observer=None):
             self.calls.append(messages)
-            from tools.platform.providers.base import ModelResponse
+            from hub.platform.providers.base import ModelResponse
             if len(self.calls) == 1:
                 return ModelResponse(
                     kind="tool_call", tool="workspace.list", arguments={},

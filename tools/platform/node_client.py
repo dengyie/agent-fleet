@@ -5,8 +5,8 @@ from collections.abc import Mapping
 import time
 from typing import Any
 
-from hub.domain.platform_command import args_hash, verify_command
-from tools.browser_bridge.contract import WEB_AGENT_TOOLS
+from fleet_core.platform_command import args_hash, verify_command
+from fleet_core.web_agent_contract import WEB_AGENT_TOOLS
 
 
 class BrowserSessionSyncError(RuntimeError):

@@ -43,7 +43,8 @@ def _bootstrap_direct_imports():
 
 _bootstrap_direct_imports()
 
-from tools import adapters, result_files, runner_config, worktree
+from fleet_core import result_files
+from tools import adapters, runner_config, worktree
 from tools.adapters.base import EXIT_UNSAFE_INSTRUCTION
 from tools.spawn_policy import UnsafeInstruction, refuse_windows_batch
 from tools.transport import Transport

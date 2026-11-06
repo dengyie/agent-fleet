@@ -1,14 +1,13 @@
 """Fixed tool allowlist in front of execution backends."""
 from __future__ import annotations
 
-from hub.domain.workspace import WorkspaceError
-from hub.application.task_service import ApplicationError
+from fleet_core.backends.base import ToolReceipt
+from fleet_core.browser_policy import BROWSER_TOOLS, BrowserBackendError
+from fleet_core.web_agent_contract import WEB_AGENT_TOOLS, WEB_AGENT_DEFINITIONS
+from fleet_core.workspace import WorkspaceError
+from hub.application.errors import ApplicationError
 from .artifacts import ArtifactError
-from .backends.base import ToolReceipt
-from .browser_backend import BrowserBackendError
 from .resource_lease import ResourceLeaseError
-from .node_executor import BROWSER_TOOLS
-from tools.browser_bridge.contract import WEB_AGENT_TOOLS, WEB_AGENT_DEFINITIONS
 
 
 class ToolBroker:

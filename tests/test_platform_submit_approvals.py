@@ -110,7 +110,7 @@ def test_grant_idempotency_and_selector_mismatch(approval_store):
 
 
 def submit_command(command_id='run-a:step:1'):
-    from hub.domain.platform_command import PlatformCommand
+    from fleet_core.platform_command import PlatformCommand
     return PlatformCommand.create(command_id=command_id, owner_id=OWNER, target_node='node-a',
         resource_id='workspace-a', action='tool.browser.submit',
         arguments={'session_id': 'session-aaaaaaaaaa', 'selector': '#go'},
@@ -120,7 +120,7 @@ def submit_command(command_id='run-a:step:1'):
 def delivery_for(repo):
     from hub.application.command_delivery_service import CommandDeliveryService
     from hub.infrastructure.command_repository import CommandRepository
-    from hub.domain.control import generate_ed25519_keypair
+    from fleet_core.control import generate_ed25519_keypair
     private, public = generate_ed25519_keypair()
     commands = CommandRepository(repo.db_path, clock=repo.clock)
     commands.init()
@@ -144,7 +144,7 @@ def test_approval_command_and_outbox_roll_back_together(approval_store):
 
 
 def test_atomic_admission_signs_final_arguments_and_is_command_idempotent(approval_store):
-    from hub.domain.platform_command import verify_command
+    from fleet_core.platform_command import verify_command
     repo, _, _ = approval_store
     approval = grant(repo)
     delivery, public = delivery_for(repo)
@@ -175,7 +175,7 @@ def test_concurrent_commands_cannot_consume_same_approval(approval_store):
 @pytest.mark.parametrize('cross_run', [False, True])
 def test_signed_submit_reaches_driver_and_records_approval(approval_store, tmp_path, cross_run):
     from dataclasses import replace
-    from hub.domain.platform_command import args_hash, sign_command, verify_command
+    from fleet_core.platform_command import args_hash, sign_command, verify_command
     from tools.platform.node_executor import NodeToolExecutor
     from tools.platform.node_client import NodeClient
     from tools.platform.journal import NodeJournal
@@ -219,7 +219,7 @@ def test_signed_submit_reaches_driver_and_records_approval(approval_store, tmp_p
 
 
 def test_local_tool_broker_cannot_bypass_owner_approval():
-    from tools.platform.tool_broker import ToolBroker
+    from hub.platform.tool_broker import ToolBroker
     calls = []
     class Leases:
         def validate(self, *args):

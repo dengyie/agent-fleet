@@ -9,7 +9,7 @@ import re
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from tools.platform.request_metadata import validate_pricing
+from fleet_core.request_metadata import validate_pricing
 
 MAX_ID = 128
 MAX_NAME = 120

@@ -10,7 +10,7 @@ from hub.infrastructure.platform_backup import (
     PlatformBackupService,
 )
 from hub.infrastructure.platform_db import PlatformRepository
-from tools.platform.artifacts import ArtifactStore
+from hub.platform.artifacts import ArtifactStore
 
 
 OWNER = "owner@example.test"

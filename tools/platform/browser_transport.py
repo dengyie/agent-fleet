@@ -15,8 +15,8 @@ from contextvars import ContextVar
 from collections.abc import Iterator
 from urllib.parse import quote_plus, urldefrag, urljoin, urlsplit
 
-from tools.platform.browser_url import canonical_url, normalize_origin
-from hub.domain.browser_submit import SENSITIVE_MARKERS
+from fleet_core.browser_url import canonical_url, normalize_origin
+from fleet_core.browser_submit import SENSITIVE_MARKERS
 
 
 class BrowserTransportError(RuntimeError):

@@ -5,7 +5,7 @@ from threading import Event, enumerate as threads
 import pytest
 
 from hub.application.run_lease_heartbeat import LeaseHeartbeat, RunLeaseLost
-from tools.platform.resource_lease import ResourceLeaseError
+from hub.platform.resource_lease import ResourceLeaseError
 
 
 def test_transient_error_is_retried_and_ownership_kept():

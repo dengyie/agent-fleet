@@ -187,8 +187,8 @@ def test_operator_api_uses_authenticated_owner_and_fixed_errors(tmp_path):
 
 
 def test_runtime_preserves_missing_tokens_and_provider_cost(tmp_path):
-    from tools.platform.providers.base import ModelResponse
-    from tools.platform.runtime.native import NativeAssistantRuntime
+    from hub.platform.providers.base import ModelResponse
+    from hub.platform.runtime.native import NativeAssistantRuntime
 
     repo, _ = ledger(tmp_path)
     class Provider:

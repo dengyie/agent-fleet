@@ -21,7 +21,7 @@ import zlib
 from hub.application.task_service import ApplicationError
 from hub.infrastructure.browser_repository import BrowserRepositoryError
 from hub.infrastructure.execution_window_repository import ExecutionWindowRepositoryError
-from tools.platform.artifacts import ArtifactError
+from hub.platform.artifacts import ArtifactError
 
 __all__ = [
     "MAX_SCREENSHOT_BYTES",
