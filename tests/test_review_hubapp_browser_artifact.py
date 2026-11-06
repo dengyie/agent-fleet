@@ -14,7 +14,7 @@ from hub.application.browser_artifact_service import (
 )
 from hub.application.task_service import ApplicationError
 from hub.infrastructure.browser_repository import BrowserRepositoryError
-from tools.platform.artifacts import ArtifactError
+from hub.platform.artifacts import ArtifactError
 
 
 def _png(width=2, height=1):

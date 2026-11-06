@@ -1,5 +1,5 @@
-from hub.domain.platform_command import PlatformCommand, sign_command, verify_command
-from hub.domain.control import generate_ed25519_keypair
+from fleet_core.platform_command import PlatformCommand, sign_command, verify_command
+from fleet_core.control import generate_ed25519_keypair
 from hub.infrastructure.command_repository import CommandRepository
 from hub.application.command_delivery_service import CommandDeliveryService
 from tools.platform.journal import NodeJournal

@@ -1509,7 +1509,7 @@ class RealProcessGroupTests(unittest.TestCase):
         self.assertIn(outcome, ("terminated", "terminated_forced"))
 
     def test_control_client_default_grace_allows_real_cleanup(self):
-        from hub.domain.control import generate_ed25519_keypair
+        from fleet_core.control import generate_ed25519_keypair
         from tools.supervisor.control_client import ControlClient
 
         ready = self.dir / "grace-ready"

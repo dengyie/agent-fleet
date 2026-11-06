@@ -63,7 +63,7 @@ PY
 )"
   [ -n "$PORT" ] || fail "无法分配本地 hub 端口"
   mkdir -p "$WORK/state" "$WORK/credentials"
-  cp -r hub tools connectors frontend agent_profiles.py report_schema.py session_schema.py platform_schema.py requirements.txt "$WORK/"
+  cp -r fleet_core hub tools connectors frontend agent_profiles.py report_schema.py session_schema.py platform_schema.py requirements.txt "$WORK/"
   # 隔离的白名单 hosts.yaml：仅冒烟机器 + projects: [demo]
   cat > "$WORK/hosts.yaml" <<EOF
 hosts:

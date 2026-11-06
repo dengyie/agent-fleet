@@ -12,7 +12,7 @@ from connectors.probe import ProbeContext
 from report_schema import sanitize_agent_state, sanitize_instances, sanitize_local_profiles
 from agent_profiles import OBSERVABLE_AGENT_TYPES
 from tools.probe.discovery import discover_instances
-from tools.local_process import run as run_local
+from fleet_core.process.local_process import run as run_local
 
 DEFAULT_AGENT_TYPES = OBSERVABLE_AGENT_TYPES
 

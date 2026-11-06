@@ -6,7 +6,7 @@ import time
 from collections.abc import Mapping
 
 from hub.application.task_service import ApplicationError
-from hub.domain.platform_command import PlatformCommand
+from fleet_core.platform_command import PlatformCommand
 from platform_schema import validate_id, validate_owner_id
 
 

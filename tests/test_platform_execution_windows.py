@@ -9,7 +9,7 @@ from hub.infrastructure.execution_window_repository import (
 )
 from hub.infrastructure.browser_repository import BrowserRepository
 from hub.infrastructure.command_repository import CommandRepository
-from hub.domain.platform_command import PlatformCommand
+from fleet_core.platform_command import PlatformCommand
 from hub.application.task_service import ApplicationError
 from hub.infrastructure.platform_db import PlatformRepository
 from hub.bootstrap import create_app

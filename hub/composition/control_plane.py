@@ -111,7 +111,7 @@ def build_control_plane(config, repositories: dict[str, Any], core,
             from hub.infrastructure.transcript_repository import (
                 TranscriptRepository,
             )
-            from tools.session.crypto import load_encryption_key
+            from fleet_core.session.crypto import load_encryption_key
 
             sessions.transcript_repo = TranscriptRepository(
                 config.session_transcript_root,

@@ -1,14 +1,14 @@
 """Fail-closed URL and argument policy for browser commands."""
 from __future__ import annotations
 
-from hub.domain.browser_submit import SENSITIVE_MARKERS, submit_selector
+from fleet_core.browser_submit import SENSITIVE_MARKERS, submit_selector
 
 import ipaddress
 import re
 import socket
 from urllib.parse import urlsplit
 
-from tools.platform.browser_url import normalize_origin
+from fleet_core.browser_url import normalize_origin
 
 
 MAX_URL = 2048
@@ -16,15 +16,25 @@ MAX_TEXT = 4096
 MAX_SELECTOR = 512
 MAX_SCROLL = 2000
 _MAX_DNS_ANSWERS = 16
-_ALLOWED_TOOLS = frozenset({
+# The fixed browser tool surface, shared by the Hub brokers and Node executor.
+BROWSER_TOOLS = frozenset({
     "browser.open", "browser.navigate", "browser.snapshot", "browser.screenshot",
     "browser.click", "browser.type", "browser.scroll", "browser.back", "browser.close",
     "browser.submit",
 })
+_ALLOWED_TOOLS = BROWSER_TOOLS
 _SENSITIVE_MARKERS = SENSITIVE_MARKERS
 
 
 class BrowserPolicyError(ValueError):
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
+class BrowserBackendError(RuntimeError):
+    """Bounded browser backend failure; raised node-side, caught by Hub brokers."""
+
     def __init__(self, code: str):
         self.code = code
         super().__init__(code)

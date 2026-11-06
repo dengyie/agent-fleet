@@ -22,12 +22,12 @@ from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import Request
 
-from tools.platform.http_transport import DeadlineResponse, open_http
+from fleet_core.http_transport import DeadlineResponse, open_http
 
 from .base import ModelResponse
 from .compatible import DeterministicProvider
 from .observation import RequestObservation
-from tools.platform.request_metadata import (
+from fleet_core.request_metadata import (
     RequestMetadata, RequestObserver, normalized_tokens, request_cost, token_count,
 )
 

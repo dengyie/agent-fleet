@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from hub.domain.control import generate_ed25519_keypair
-from hub.domain.platform_command import PlatformCommand
+from fleet_core.control import generate_ed25519_keypair
+from fleet_core.platform_command import PlatformCommand
 from tools.platform.browser_backend import BrowserBackendError
 from tools.platform.journal import NodeJournal
 from tools.platform.node_client import NodeClient

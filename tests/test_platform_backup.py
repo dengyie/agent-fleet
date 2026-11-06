@@ -12,7 +12,7 @@ from hub.infrastructure.platform_backup import (
     _publish_new_directory,
 )
 from hub.infrastructure.platform_db import PlatformRepository
-from tools.platform.artifacts import ArtifactStore
+from hub.platform.artifacts import ArtifactStore
 
 
 OWNER = "owner@example.test"
@@ -270,7 +270,7 @@ def _publish_in_process(root, source, attempted, published):
 
 def test_artifact_backup_barrier_excludes_separate_process_publication(tmp_path):
     import multiprocessing
-    from tools.platform.artifact_lock import artifact_snapshot_barrier
+    from hub.platform.artifact_lock import artifact_snapshot_barrier
 
     context = multiprocessing.get_context('spawn')
     attempted, published = context.Event(), context.Event()

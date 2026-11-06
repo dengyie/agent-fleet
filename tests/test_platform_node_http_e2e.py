@@ -8,15 +8,15 @@ from flask import Request
 from hub.application.run_worker_service import LocalRunWorkerService
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
-from hub.domain.platform_command import PlatformCommand
+from fleet_core.platform_command import PlatformCommand
 from hub.infrastructure.browser_repository import BrowserRepository
-from hub.domain.control import generate_ed25519_keypair
+from fleet_core.control import generate_ed25519_keypair
 from hub.application.browser_artifact_service import png_dimensions as _png_dimensions
-from tools.platform.backends.directory import DirectoryBackend
+from fleet_core.backends.directory import DirectoryBackend
 from tools.platform.node_client import NodeClient
 from tools.platform.node_executor import BROWSER_TOOLS, NodeToolExecutor
 from tools.platform.journal import NodeJournal
-from tools.platform.providers.base import ModelResponse
+from hub.platform.providers.base import ModelResponse
 from support.browser import ORIGIN, URL, browser_backend, resolve_origin
 
 

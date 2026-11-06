@@ -14,7 +14,7 @@ from pathlib import Path
 from hub.application.runner_service import RunnerService
 from hub.infrastructure.transcript_repository import TranscriptRepository
 from tools.session.bridge import SessionBridge
-from tools.session.redact import redact_secrets_text
+from fleet_core.session.redact import redact_secrets_text
 
 SK = "sk-proj-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
 GHP = "ghp_" + "abcdEFGHijklMNOPqrstUVWXyz0123456789"

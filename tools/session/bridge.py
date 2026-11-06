@@ -54,7 +54,7 @@ from session_schema import (
 from tools.session.capture import pty as _pty
 from tools.session.capture.native_jsonl import tailer as _tailer
 from tools.session.capture.structured_stream import iter_json as _iter_json
-from tools.session.redact import Redactor, redact_event_secrets, redact_secrets_text
+from fleet_core.session.redact import Redactor, redact_event_secrets, redact_secrets_text
 from tools.session.spool import LocalSpool, SpoolError
 from tools.session.uploader import SessionUploader
 

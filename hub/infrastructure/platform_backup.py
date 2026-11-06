@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from tools.platform.artifact_lock import artifact_snapshot_barrier
+from hub.platform.artifact_lock import artifact_snapshot_barrier
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes

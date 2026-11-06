@@ -24,7 +24,7 @@ contract is ``session_schema.py`` only.
 import unittest
 
 from session_schema import validate_event
-from tools.session.redact import RedactionReport, Redactor
+from fleet_core.session.redact import RedactionReport, Redactor
 
 
 def _event(kind="user_message", payload=None, **extra):
@@ -443,14 +443,14 @@ class ReviewFixRegressionTests(unittest.TestCase):
     # -- Finding 4: unbounded replaced count -----------------------------
 
     def test_replaced_count_is_bounded(self):
-        from tools.session.redact import MAX_REDACT_COUNT
+        from fleet_core.session.redact import MAX_REDACT_COUNT
         text = ("token=sk-%s " % ("a" * 8)) * 4000
         event = _event(payload={"text": text, "is_complete": True})
         _, report = self.redactor.redact_event(event)
         self.assertLessEqual(report.replaced, MAX_REDACT_COUNT)
 
     def test_replaced_count_single_huge_token_bounded(self):
-        from tools.session.redact import MAX_REDACT_COUNT
+        from fleet_core.session.redact import MAX_REDACT_COUNT
         text = "sk-" + ("ABCDefgh" * 100000)
         event = _event(payload={"text": text, "is_complete": True})
         _, report = self.redactor.redact_event(event)

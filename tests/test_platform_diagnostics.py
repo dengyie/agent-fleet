@@ -8,9 +8,9 @@ from hub.infrastructure.incident_repository import IncidentRepository
 from hub.infrastructure.platform_db import PlatformRepository
 from hub.infrastructure.service_repository import ServiceRepository
 from hub.application.service_health_service import ServiceHealthService
-from tools.platform.backends.directory import DirectoryBackend
-from tools.platform.resource_lease import ResourceLeaseManager
-from tools.platform.tool_broker import ToolBroker
+from fleet_core.backends.directory import DirectoryBackend
+from hub.platform.resource_lease import ResourceLeaseManager
+from hub.platform.tool_broker import ToolBroker
 
 
 def _services(tmp_path: Path):

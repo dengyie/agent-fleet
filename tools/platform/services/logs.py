@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from tools.local_process import run as run_local
+from fleet_core.process.local_process import run as run_local
 
 
 class ServiceLogReaderError(RuntimeError):

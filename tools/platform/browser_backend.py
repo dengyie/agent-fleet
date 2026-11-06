@@ -8,8 +8,8 @@ import secrets
 import time
 from typing import Any
 
-from .browser_policy import BrowserPolicyError, validate_action
-from hub.domain.browser_submit import opaque_browser_id
+from fleet_core.browser_policy import BrowserBackendError, BrowserPolicyError, validate_action
+from fleet_core.browser_submit import opaque_browser_id
 from .browser_transport import _submit_scope
 
 
@@ -17,12 +17,6 @@ from .browser_transport import _submit_scope
 class BrowserSessionRef:
     session_id: str
     backend: str
-
-
-class BrowserBackendError(RuntimeError):
-    def __init__(self, code: str):
-        self.code = code
-        super().__init__(code)
 
 
 class BrowserExecutionError(RuntimeError):

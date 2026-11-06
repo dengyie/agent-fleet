@@ -11,8 +11,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .backends.sandbox import SandboxBackend
-from tools.browser_bridge.contract import WEB_AGENT_TOOLS, WebAgentExecutor
+from fleet_core.backends.sandbox import SandboxBackend
+from fleet_core.web_agent_contract import WEB_AGENT_TOOLS
+from tools.browser_bridge.contract import WebAgentExecutor
 from tools.browser_bridge.muse import MuseBridge
 from .journal import NodeJournal
 from .node_client import NodeClient

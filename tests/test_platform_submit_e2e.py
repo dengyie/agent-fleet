@@ -12,7 +12,7 @@ from tools.platform.browser_transport import BrowserTransportError
 from tools.platform.journal import NodeJournal
 from tools.platform.node_client import NodeClient
 from tools.platform.node_executor import NodeToolExecutor
-from tools.platform.providers.base import ModelResponse
+from hub.platform.providers.base import ModelResponse
 from test_platform_node_http_e2e import FlaskTransport
 from test_platform_submit_http import build_app, seed, OWNER
 from test_platform_browser_transport import transport_factory, _Response

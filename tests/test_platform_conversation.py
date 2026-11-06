@@ -411,7 +411,7 @@ def test_conversation_lifecycle_renames_archives_restores_and_deletes_atomically
 
 
 def test_conversation_delete_waits_for_remote_commands_then_cleans_command_records(tmp_path):
-    from hub.domain.platform_command import PlatformCommand
+    from fleet_core.platform_command import PlatformCommand
 
     app = _app(tmp_path)
     client = app.test_client()
@@ -473,7 +473,7 @@ def test_conversation_delete_waits_for_remote_commands_then_cleans_command_recor
             assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
 
 def test_conversation_delete_uses_run_scope_for_legacy_commands_without_owner_id(tmp_path):
-    from hub.domain.platform_command import PlatformCommand
+    from fleet_core.platform_command import PlatformCommand
 
     app = _app(tmp_path)
     client = app.test_client()

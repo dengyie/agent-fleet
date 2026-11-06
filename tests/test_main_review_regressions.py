@@ -15,7 +15,7 @@ from werkzeug.serving import make_server
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
 from tools.adapters.base import BaseAdapter
-from tools.bounded_process import run_streamed
+from fleet_core.process.bounded_process import run_streamed
 from tools.probe import discovery
 from tests.support.processes import assert_process_exited
 

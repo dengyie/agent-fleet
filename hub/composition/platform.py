@@ -115,7 +115,7 @@ def _build_conversations(p, config, repositories):
     """Conversations/runs, the optional browser store and the artifact store."""
     from hub.application.conversation_service import ConversationService, RunService
     from hub.application.run_event_service import RunEventService
-    from tools.platform.artifacts import ArtifactStore
+    from hub.platform.artifacts import ArtifactStore
     if getattr(config, "platform_browser_enabled", False):
         from hub.infrastructure.browser_repository import BrowserRepository
         p.browser_repository = repositories.get("browser")

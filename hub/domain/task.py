@@ -12,7 +12,7 @@ from typing import Any, Mapping
 
 from agent_profiles import EXECUTABLE_AGENT_TYPES
 from session_schema import is_valid_session_id
-from hub.domain.task_result import bound_patch, normalize_test_summary
+from fleet_core.task_result import bound_patch, normalize_test_summary
 
 
 MACHINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")

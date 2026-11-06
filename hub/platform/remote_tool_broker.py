@@ -5,13 +5,11 @@ import json
 import time
 from collections.abc import Mapping
 
-from hub.domain.platform_command import PlatformCommand
-from .backends.base import ToolReceipt
-from .browser_policy import BrowserPolicyError, validate_action
-from .node_executor import BROWSER_TOOLS
+from fleet_core.backends.base import ToolReceipt
+from fleet_core.browser_policy import BROWSER_TOOLS, BrowserPolicyError, validate_action
+from fleet_core.platform_command import PlatformCommand
+from fleet_core.web_agent_contract import WEB_AGENT_TOOLS, MuseBridgeError, validate_arguments
 from .tool_broker import ToolBroker
-from tools.browser_bridge.contract import WEB_AGENT_TOOLS, validate_arguments
-from tools.browser_bridge.muse import MuseBridgeError
 
 
 class RemoteToolBroker:

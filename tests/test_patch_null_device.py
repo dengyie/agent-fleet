@@ -2,7 +2,7 @@ import subprocess
 
 import pytest
 
-from tools.result_files import redact_patch
+from fleet_core.result_files import redact_patch
 
 
 @pytest.mark.parametrize('deleting', [False, True])

@@ -61,8 +61,8 @@ def test_release_cli_rejects_unexpected_writing_tools(release_target, capsys):
 ])
 def test_acceptance_denies_tools_before_side_effects(release_target, capsys, monkeypatch, tool, arguments):
     from support.full_flow import Client
-    from tools.platform.providers.base import ModelResponse
-    from tools.platform.backends.sandbox import SandboxBackend
+    from hub.platform.providers.base import ModelResponse
+    from fleet_core.backends.sandbox import SandboxBackend
 
     hub, _, args = release_target
     original = b'original workspace bytes\x00\xff'

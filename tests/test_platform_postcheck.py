@@ -2,12 +2,12 @@ from pathlib import Path
 
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
-from hub.domain.platform_command import PlatformCommand
-from tools.platform.backends.directory import DirectoryBackend
+from fleet_core.platform_command import PlatformCommand
+from fleet_core.backends.directory import DirectoryBackend
 from tools.platform.node_client import NodeClient
 from tools.platform.node_executor import NodeToolExecutor
 from tools.platform.journal import NodeJournal
-from tools.platform.backends.directory import MAX_DIGEST_BYTES
+from fleet_core.backends.directory import MAX_DIGEST_BYTES
 
 
 OWNER = "owner@example.test"

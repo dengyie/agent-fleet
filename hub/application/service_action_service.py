@@ -7,7 +7,7 @@ import time
 from collections.abc import Mapping
 
 from hub.application.task_service import ApplicationError
-from hub.domain.platform_command import PlatformCommand, args_hash
+from fleet_core.platform_command import PlatformCommand, args_hash
 from hub.infrastructure.approval_repository import ApprovalRepository, ApprovalRepositoryError
 from hub.infrastructure.service_repository import ServiceRepositoryError
 from platform_schema import validate_id, validate_owner_id

@@ -52,7 +52,7 @@ from typing import Any, Mapping, Pattern, Sequence
 
 from agent_profiles import RESUME_VERIFIABLE_PROBE_FAMILIES
 from tools.session.probes import claude, codex, hermes, pi
-from tools.local_process import run as run_local
+from fleet_core.process.local_process import run as run_local
 
 DEFAULT_TIMEOUT_S = 8.0
 MIN_TIMEOUT_S = 0.1

@@ -9,9 +9,9 @@ import subprocess
 import threading
 from pathlib import Path
 
-from hub.domain.task_result import MAX_DIFF_PATCH, bound_patch
-from tools.bounded_process import run_bounded
-from tools.local_process import run as run_local
+from fleet_core.task_result import MAX_DIFF_PATCH, bound_patch
+from fleet_core.process.bounded_process import run_bounded
+from fleet_core.process.local_process import run as run_local
 from tools.spawn_policy import build_child_env
 
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")

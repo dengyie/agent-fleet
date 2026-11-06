@@ -4,13 +4,13 @@ from dataclasses import replace
 import pytest
 
 from hub.infrastructure.command_repository import CommandRepository, CommandRepositoryError
-from hub.domain.platform_command import PlatformCommand, args_hash
-from tools.platform.backends.base import ToolReceipt
+from fleet_core.platform_command import PlatformCommand, args_hash
+from fleet_core.backends.base import ToolReceipt
 from tools.platform.node_executor import NodeToolExecutor
 from tools.platform.node_client import NodeClient
 from tools.platform.journal import NodeJournal
-from tools.platform.remote_tool_broker import RemoteToolBroker
-from tools.platform.browser_policy import BrowserPolicyError
+from hub.platform.remote_tool_broker import RemoteToolBroker
+from fleet_core.browser_policy import BrowserPolicyError
 
 
 def _command(command_id="cmd-remote", node="node-remote", owner="owner@example.test"):
@@ -278,7 +278,7 @@ def _submit_broker(approvals, *, submit_enabled=True):
     class Delivery:
         def enqueue_submit(self, command, *, approvals, idempotency_key=None):
             from dataclasses import replace
-            from hub.domain.platform_command import args_hash
+            from fleet_core.platform_command import args_hash
             approval_id = approvals.consume_submit_approval(
                 command.owner_id, command.run_id, session_id=command.arguments["session_id"],
                 selector=command.arguments["selector"], command_id=command.command_id, now=100.0)

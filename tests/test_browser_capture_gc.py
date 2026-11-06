@@ -7,7 +7,7 @@ import pytest
 from hub.infrastructure.browser_capture_gc import (
     BrowserCaptureGcError, BrowserCaptureGcRepository, REFERENCE_LIMIT,
 )
-from tools.platform.artifacts import ArtifactStore
+from hub.platform.artifacts import ArtifactStore
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"bounded-test-png"
 NOW = 40 * 24 * 60 * 60

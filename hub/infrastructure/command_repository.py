@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 from contextlib import closing
 
-from hub.domain.platform_command import RECEIPT_STATES, PlatformCommand, TERMINAL_COMMAND_STATES, args_hash
+from fleet_core.platform_command import RECEIPT_STATES, PlatformCommand, TERMINAL_COMMAND_STATES, args_hash
 from hub.infrastructure.sqlite import connect as sqlite_connect
 
 

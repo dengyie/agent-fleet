@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from report_schema import INSTANCE_FAMILIES
-from tools.process_group import process_start_identity
+from fleet_core.process.process_group import process_start_identity
 
 from tools.supervisor.model import (
     GROUP_CAPABILITY_CGROUP,

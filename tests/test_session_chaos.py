@@ -75,7 +75,7 @@ from session_schema import validate_event
 from hub.application.supervisor_service import SupervisorService
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
-from hub.domain import control as ctrl
+from fleet_core import control as ctrl
 from hub.infrastructure.session_repository import SessionRepository
 from tools.session.bridge import SessionBridge
 from tools.session.capture.native_jsonl import tailer

@@ -17,7 +17,7 @@ from urllib.request import Request
 import pytest
 
 from test_provider_transport_boundaries import QuietHandler, REPLY, serve
-from tools.platform.http_transport import open_http
+from fleet_core.http_transport import open_http
 
 
 @contextmanager
@@ -67,7 +67,7 @@ def test_tls_verification_and_shutdown(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 def test_https_downgrade_redirect_is_not_followed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from tools.platform.providers.openai_compatible import OpenAICompatibleProvider, ProviderError
+    from hub.platform.providers.openai_compatible import OpenAICompatibleProvider, ProviderError
     seen: list[bool] = []
     class Target(QuietHandler):
         def do_GET(self) -> None:
@@ -160,7 +160,7 @@ def test_unread_response_close_reclaims_socket_and_timer() -> None:
 
 
 def test_dns_saturation_is_bounded_and_late_resolution_cannot_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
-    from tools.platform import http_transport
+    from fleet_core import http_transport
     release = Event()
     calls: list[tuple[Any, ...]] = []
     original = socket.getaddrinfo

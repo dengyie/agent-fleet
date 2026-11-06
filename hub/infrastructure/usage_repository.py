@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Generator, Mapping
 
 from platform_schema import validate_id, validate_owner_id
-from tools.platform.request_metadata import decimal_amount, normalized_tokens, request_cost
+from fleet_core.request_metadata import decimal_amount, normalized_tokens, request_cost
 from hub.infrastructure.sqlite import connect as sqlite_connect
 
 

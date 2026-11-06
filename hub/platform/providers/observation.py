@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from typing import Callable, TYPE_CHECKING
 
-from tools.platform.request_metadata import RequestMetadata, RequestObserver, RequestParameters, normalized_tokens
+from fleet_core.request_metadata import RequestMetadata, RequestObserver, RequestParameters, normalized_tokens
 
 if TYPE_CHECKING:
     from .openai_compatible import ProviderError

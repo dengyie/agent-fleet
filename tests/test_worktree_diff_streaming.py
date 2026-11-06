@@ -99,7 +99,7 @@ def test_invalid_utf8_diff_is_bounded_valid_text(tmp_path: Path, monkeypatch: py
 
 def test_threaded_drain_keeps_a_bounded_prefix_and_real_exit(tmp_path, monkeypatch) -> None:
     """The Windows drain branch must bound output without losing the exit code."""
-    from tools import bounded_process
+    from fleet_core.process import bounded_process
 
     monkeypatch.setattr(bounded_process, "_drain", bounded_process._drain_threaded)
     proc = bounded_process.run_bounded(
@@ -113,7 +113,7 @@ def test_threaded_drain_keeps_a_bounded_prefix_and_real_exit(tmp_path, monkeypat
 
 
 def test_threaded_drain_times_out_when_a_writer_holds_the_pipe(tmp_path, monkeypatch) -> None:
-    from tools import bounded_process
+    from fleet_core.process import bounded_process
 
     monkeypatch.setattr(bounded_process, "_drain", bounded_process._drain_threaded)
     script = "import os,pathlib,time;pathlib.Path('child.pid').write_text(str(os.getpid()));time.sleep(30)"
@@ -126,7 +126,7 @@ def test_threaded_drain_times_out_when_a_writer_holds_the_pipe(tmp_path, monkeyp
 
 
 def test_reap_never_masks_the_original_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    from tools import bounded_process
+    from fleet_core.process import bounded_process
 
     def boom(*_args, **_kwargs):
         raise RuntimeError("boom")

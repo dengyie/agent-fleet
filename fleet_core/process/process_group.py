@@ -1,4 +1,4 @@
-"""tools/process_group.py — bounded_process 与 supervisor 共用的进程组原语。
+"""fleet_core/process/process_group.py — bounded_process 与 supervisor 共用的进程组原语。
 
 * ``posix_group_alive`` / ``signal_group`` / ``posix_group_only_zombies``：以
   ``os.killpg`` 判断/信号整组（不是只看 leader），并识别只剩僵尸的组；
@@ -74,7 +74,7 @@ def posix_group_only_zombies(pgid: int) -> bool:
         if ps is None:
             return False
         try:
-            from tools.local_process import run as run_local
+            from fleet_core.process.local_process import run as run_local
             done = run_local([ps, "-A", "-o", "pgid=,stat="],
                              capture_output=True, text=True, timeout=3,
                              stdin=subprocess.DEVNULL, check=False,
@@ -99,8 +99,7 @@ def pid_alive(pid: int) -> bool | None:
     if pid <= 0:
         return False
     if os.name == "nt":
-        from tools.supervisor.supervisor import WindowsGroupOps
-        return WindowsGroupOps._pid_alive(pid)
+        return windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -132,7 +131,7 @@ def process_start_identity(pid: int) -> str | None:
     if ps is None:
         return None
     try:
-        from tools.local_process import run as run_local
+        from fleet_core.process.local_process import run as run_local
         done = run_local([ps, "-o", "lstart=", "-p", str(pid)],
                          capture_output=True, text=True, timeout=3,
                          stdin=subprocess.DEVNULL, check=False,
@@ -166,6 +165,46 @@ def _windows_creation_time(pid: int) -> str | None:
                 return None
             created = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
             return f"win:{created}"
+        finally:
+            kernel32.CloseHandle(handle)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def windows_pid_alive(pid: int) -> bool | None:
+    """Windows-only liveness: True/False, None = unknown (e.g. access denied)."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        ]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+        ]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x00100000, False, int(pid))  # SYNCHRONIZE
+        if not handle:
+            error = ctypes.get_last_error()
+            if error == 87:  # ERROR_INVALID_PARAMETER: PID no longer exists
+                return False
+            return None
+        try:
+            result = kernel32.WaitForSingleObject(handle, 0)
+            if int(result) == 0x00000102:  # WAIT_TIMEOUT
+                return True
+            if int(result) == 0x00000000:  # WAIT_OBJECT_0
+                return False
+            return None
         finally:
             kernel32.CloseHandle(handle)
     except (AttributeError, OSError, TypeError, ValueError):
@@ -224,4 +263,5 @@ __all__ = [
     "process_start_identity",
     "signal_group",
     "posix_group_only_zombies",
+    "windows_pid_alive",
 ]

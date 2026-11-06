@@ -27,7 +27,7 @@ def build_sessions(config, repositories: dict[str, Any]) -> SessionComponents:
     from hub.application.session_service import SessionService
     from hub.infrastructure.session_repository import SessionRepository
     from hub.infrastructure.transcript_repository import TranscriptRepository
-    from tools.session.crypto import load_encryption_key
+    from fleet_core.session.crypto import load_encryption_key
 
     s.session_repo = repositories.get("sessions")
     if s.session_repo is None:

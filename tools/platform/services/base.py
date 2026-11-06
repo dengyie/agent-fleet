@@ -8,7 +8,7 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Sequence
 
-from tools.local_process import run as run_local
+from fleet_core.process.local_process import run as run_local
 
 
 class CollectorError(RuntimeError):

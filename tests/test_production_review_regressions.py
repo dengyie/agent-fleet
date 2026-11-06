@@ -13,10 +13,10 @@ import pytest
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
 from hub.infrastructure.platform_db import PlatformRepository
-from hub.domain.control import generate_ed25519_keypair
-from hub.domain.platform_command import PlatformCommand
+from fleet_core.control import generate_ed25519_keypair
+from fleet_core.platform_command import PlatformCommand
 from tools.platform.node_runtime import NodeRuntime, NodeRuntimeConfig
-from tools.platform.providers.base import ModelResponse
+from hub.platform.providers.base import ModelResponse
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNER = 'review@example.test'
@@ -120,7 +120,7 @@ def test_cancellation_does_not_hide_unknown_remote_write(tmp_path):
 @pytest.mark.parametrize('answer', ['界' * 22000, '😀' * 18000, '"\\\n\x01' * 8000], ids=['cjk', 'emoji', 'escaped'])
 @pytest.mark.parametrize('leased', [True, False])
 def test_successful_multibyte_completion_is_persisted(tmp_path, answer, leased):
-    from tools.platform.providers.openai_compatible import OpenAICompatibleProvider, TransportResponse
+    from hub.platform.providers.openai_compatible import OpenAICompatibleProvider, TransportResponse
     app = create_app(FleetConfig.from_root(tmp_path, dev_operator=OWNER, platform_enabled=True, platform_worker_enabled=True))
     fleet = app.extensions['fleet']
     repo = fleet['platform_repository']
@@ -137,8 +137,8 @@ def test_successful_multibyte_completion_is_persisted(tmp_path, answer, leased):
         result = worker.run_once(OWNER)
         assert result['state'] == 'succeeded'
     else:
-        from tools.platform.assistant_worker import PersistentAssistantWorker
-        from tools.platform.runtime.native import NativeAssistantRuntime
+        from hub.platform.assistant_worker import PersistentAssistantWorker
+        from hub.platform.runtime.native import NativeAssistantRuntime
         result = PersistentAssistantWorker(NativeAssistantRuntime(provider, None), fleet['services']['run_events']).execute(
             run_id='run-review', owner_id=OWNER, epoch=1, messages=[], tools=[])
         assert result.state == 'succeeded'

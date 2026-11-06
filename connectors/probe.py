@@ -8,8 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from tools.local_process import resolve_bash
-from tools.local_process import run as run_local
+from fleet_core.process.local_process import resolve_bash
+from fleet_core.process.local_process import run as run_local
 
 FLEET_HOME = Path(__file__).resolve().parent.parent
 

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.platform.artifacts import ArtifactError, ArtifactStore
+from hub.platform.artifacts import ArtifactError, ArtifactStore
 
 
 def _staging(root: Path, artifact_id: str, suffix: str, *, mtime: float) -> Path:

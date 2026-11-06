@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.processes import assert_process_exited
-from tools.bounded_process import run_bounded
+from fleet_core.process.bounded_process import run_bounded
 
 
 def test_timeout_reaps_descendant_after_leader_exits(tmp_path: Path) -> None:
@@ -67,7 +67,7 @@ def test_output_exit_and_owned_handle_cleanup(tmp_path: Path) -> None:
 
 
 def test_ownership_failure_never_runs_the_command(tmp_path: Path, monkeypatch) -> None:
-    from tools import bounded_process
+    from fleet_core.process import bounded_process
 
     marker = tmp_path / "must-not-run"
     if os.name != "nt":
@@ -77,7 +77,7 @@ def test_ownership_failure_never_runs_the_command(tmp_path: Path, monkeypatch) -
 
         monkeypatch.setattr(bounded_process, "popen_local", reject)
     else:
-        from tools.windows_job import WindowsJob
+        from fleet_core.process.windows_job import WindowsJob
 
         def reject(self, process_handle):
             raise OSError("ownership_denied")
@@ -91,7 +91,7 @@ def test_ownership_failure_never_runs_the_command(tmp_path: Path, monkeypatch) -
 
 
 def test_job_cleanup_failure_still_reaps_child_and_retains_timeout(tmp_path: Path, monkeypatch) -> None:
-    from tools import bounded_process
+    from fleet_core.process import bounded_process
 
     launch = bounded_process.popen_local
     children = []

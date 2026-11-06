@@ -17,7 +17,7 @@ from hub.domain.task import (
     TASK_STATES, can_cancel, can_continue, can_pause, can_retry, holds_lease,
 )
 from hub.infrastructure.sqlite import connect as sqlite_connect
-from hub.domain.task_result import (
+from fleet_core.task_result import (
     bound_patch,
     normalize_test_summary as _normalize_test_summary,
 )

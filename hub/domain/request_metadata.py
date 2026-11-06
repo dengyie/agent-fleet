@@ -3,7 +3,7 @@ import json
 import math
 from typing import Any, Iterable, Mapping, cast
 
-from tools.platform.request_metadata import RequestMetadata, normalized_tokens
+from fleet_core.request_metadata import RequestMetadata, normalized_tokens
 
 
 REQUEST_EVENT_KINDS = ('provider_request_started', 'provider_request_finished')

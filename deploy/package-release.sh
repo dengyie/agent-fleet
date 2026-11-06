@@ -22,7 +22,7 @@ archive_tar=$staging_dir/release.tar
 git archive --format=tar HEAD \
     agent_profiles.py \
     README.md requirements.txt requirements-test.txt report_schema.py session_schema.py platform_schema.py \
-    connectors hub tools deploy docs tests \
+    connectors fleet_core hub tools deploy docs tests \
     > "$archive_tar"
 
 # Provenance stamp (optional 2nd arg, "commit|run|url"): appended as

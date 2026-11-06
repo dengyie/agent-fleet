@@ -9,7 +9,7 @@ from urllib.error import URLError
 import pytest
 
 from hub.diagnostics import log_failure
-from tools.platform.providers.openai_compatible import (
+from hub.platform.providers.openai_compatible import (
     OpenAICompatibleProvider, ProviderError, TransportResponse,
 )
 
@@ -75,7 +75,7 @@ def test_provider_failure_keeps_safe_root_cause(caplog: pytest.LogCaptureFixture
 def test_urllib_connection_and_body_causes_are_preserved(
     monkeypatch: pytest.MonkeyPatch, during_read: bool, failure: Exception,
 ) -> None:
-    from tools.platform.providers import openai_compatible as adapter
+    from hub.platform.providers import openai_compatible as adapter
     closed: list[bool] = []
     events: list[dict[str, Any]] = []
     class Accepted:

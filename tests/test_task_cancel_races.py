@@ -25,7 +25,7 @@ from hub.application import control_router as cr
 from hub.application.runner_service import ApplicationError, RunnerService
 from hub.application.supervisor_service import SupervisorService
 from hub.application.task_service import TaskService
-from hub.domain import control as ctrl
+from fleet_core import control as ctrl
 from hub.infrastructure.session_repository import SessionRepository
 from hub.infrastructure.task_repository import SqliteTaskRepository
 

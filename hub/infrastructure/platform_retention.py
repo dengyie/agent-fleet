@@ -37,7 +37,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from hub.domain.platform_command import TERMINAL_COMMAND_STATES
+from fleet_core.platform_command import TERMINAL_COMMAND_STATES
 from hub.domain.run import TERMINAL_RUN_STATES
 from hub.infrastructure.platform_db import freeze_run_request_summary
 from hub.infrastructure.platform_schedule_repository import TERMINAL_TRIGGER_STATES

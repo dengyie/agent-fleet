@@ -19,9 +19,9 @@ runner-controlled JSON can never widen which machine's tasks it services.
 import logging
 
 from hub.application.task_service import ApplicationError
-from tools.result_files import redact_patch, sanitize_files
-from tools.session.redact import redact_secrets_text
-from hub.domain.task_result import PatchError, TestSummaryError, normalize_test_summary
+from fleet_core.result_files import redact_patch, sanitize_files
+from fleet_core.session.redact import redact_secrets_text
+from fleet_core.task_result import PatchError, TestSummaryError, normalize_test_summary
 
 logger = logging.getLogger(__name__)
 

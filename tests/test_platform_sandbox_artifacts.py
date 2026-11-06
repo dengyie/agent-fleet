@@ -3,11 +3,11 @@ import sys
 
 import pytest
 
-from tools.platform.artifacts import ArtifactError, ArtifactStore
-from tools.platform.backends.sandbox import SandboxBackend, SandboxPolicy
-from tools.platform.backends.directory import DirectoryBackend
-from tools.platform.resource_lease import ResourceLeaseManager
-from tools.platform.tool_broker import ToolBroker
+from hub.platform.artifacts import ArtifactError, ArtifactStore
+from fleet_core.backends.sandbox import SandboxBackend, SandboxPolicy
+from fleet_core.backends.directory import DirectoryBackend
+from hub.platform.resource_lease import ResourceLeaseManager
+from hub.platform.tool_broker import ToolBroker
 
 
 def test_artifact_store_manifest_is_bounded_and_owner_scoped(tmp_path):

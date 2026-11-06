@@ -1,7 +1,7 @@
 """Real socket poll/receipt fixture; only node placement is simulated."""
 from threading import Event, Thread
 
-from tools.platform.backends.directory import DirectoryBackend
+from fleet_core.backends.directory import DirectoryBackend
 from tools.platform.journal import NodeJournal
 from tools.platform.node_client import NodeClient
 from tools.platform.node_executor import NodeToolExecutor

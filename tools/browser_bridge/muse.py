@@ -12,21 +12,14 @@ import sqlite3
 import subprocess
 from typing import Any, Mapping, Protocol
 
-from tools.local_process import run as run_local
+from fleet_core.process.local_process import run as run_local
+from fleet_core.web_agent_contract import MAX_PROMPT, MuseBridgeError, _identity
 
-MAX_PROMPT = 8192
 MAX_MESSAGES = 100
 MAX_MESSAGE_TEXT = 12288
 MAX_OUTPUT = 2 * 1024 * 1024
 TERMINAL = frozenset({'completed', 'failed'})
 DEFAULT_STATE = Path.home() / '.local/share/agent-fleet/muse-bridge/tasks.db'
-_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$')
-
-
-class MuseBridgeError(RuntimeError):
-    def __init__(self, code: str):
-        self.code = code
-        super().__init__(code)
 
 
 class MuseTransport(Protocol):
@@ -61,12 +54,6 @@ class SubprocessMuseTransport:
         if not isinstance(response.get('result'), dict):
             raise MuseBridgeError('bridge_invalid_response')
         return response['result']
-
-
-def _identity(value, code='task_invalid'):
-    if not isinstance(value, str) or not _ID.fullmatch(value):
-        raise MuseBridgeError(code)
-    return value
 
 
 def _digest(value):

@@ -8,7 +8,7 @@ from platform_schema import validate_id
 
 from hub.auth import require_operator
 from hub.http.errors import ApplicationError, error_response
-from tools.platform.artifacts import ArtifactError
+from hub.platform.artifacts import ArtifactError
 
 bp = Blueprint("platform_artifacts", __name__, url_prefix="/api/platform/v1")
 

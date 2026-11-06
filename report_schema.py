@@ -225,7 +225,7 @@ def redact_cmdline(cmdline: str) -> str:
     text = _SETTINGS_ARG_RE.sub(r"\1 [REDACTED:settings]", cmdline)
     text = _FLAG_ARG_RE.sub(_redact_flag, text)
     try:
-        from tools.session.redact import redact_secrets_text
+        from fleet_core.session.redact import redact_secrets_text
     except ImportError:  # 极简部署缺少 tools 包时仍保留上面的 flag 级脱敏
         return text
     return redact_secrets_text(text)[0]

@@ -42,7 +42,7 @@ from datetime import datetime
 from typing import Any, Iterator
 
 from agent_profiles import OBSERVABLE_AGENT_TYPES, PROFILES
-from tools import local_process
+from fleet_core.process import local_process
 
 # ---------------------------------------------------------------------------
 # fixed boundaries (schema boundary for Task 1)

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from .base import ModelResponse
 from .observation import RequestObservation
-from tools.platform.request_metadata import normalized_tokens
+from fleet_core.request_metadata import normalized_tokens
 
 
 class DeterministicProvider:

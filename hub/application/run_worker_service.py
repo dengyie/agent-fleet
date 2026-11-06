@@ -13,19 +13,19 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from tools.platform.assistant_worker import PersistentAssistantWorker
-from tools.platform.backends.sandbox import SandboxBackend
-from tools.platform.providers.openai_compatible import ProviderFactory, ProviderUnavailable
-from tools.platform.resource_lease import ResourceLeaseError, ResourceLeaseManager
-from tools.platform.runtime.base import RuntimeLimits
-from tools.platform.runtime.native import NativeAssistantRuntime, ProviderBoundaryUnknown
+from hub.platform.assistant_worker import PersistentAssistantWorker
+from fleet_core.backends.sandbox import SandboxBackend
+from hub.platform.providers.openai_compatible import ProviderFactory, ProviderUnavailable
+from hub.platform.resource_lease import ResourceLeaseError, ResourceLeaseManager
+from hub.platform.runtime.base import RuntimeLimits
+from hub.platform.runtime.native import NativeAssistantRuntime, ProviderBoundaryUnknown
 from hub.application.platform_memory_context_service import (
     PlatformMemoryContextError,
     build_context_message,
 )
-from tools.platform.tool_broker import ToolBroker
-from tools.platform.remote_tool_broker import RemoteToolBroker
-from tools.browser_bridge.contract import WEB_AGENT_TOOLS
+from hub.platform.tool_broker import ToolBroker
+from hub.platform.remote_tool_broker import RemoteToolBroker
+from fleet_core.web_agent_contract import WEB_AGENT_TOOLS
 from hub.domain.platform import ACCEPTANCE_TOOL_POLICY
 
 

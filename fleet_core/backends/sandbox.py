@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .directory import DirectoryBackend, ALLOWED_EXECUTABLES, MAX_OUTPUT_BYTES
-from tools.bounded_process import decode_prefix, run_bounded
+from fleet_core.process.bounded_process import decode_prefix, run_bounded
 
 
 @dataclass(frozen=True)

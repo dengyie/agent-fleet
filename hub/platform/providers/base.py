@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Protocol
-from tools.platform.request_metadata import RequestMetadata, RequestObserver
+from fleet_core.request_metadata import RequestMetadata, RequestObserver
 
 
 @dataclass(frozen=True)

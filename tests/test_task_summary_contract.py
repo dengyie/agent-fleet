@@ -9,7 +9,7 @@ from hub.domain.task import public_result
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
 from hub.infrastructure.task_repository import SqliteTaskRepository, _normalize_test_summary
-from tools.result_files import normalize_test_summary
+from fleet_core.result_files import normalize_test_summary
 
 
 @pytest.mark.parametrize("normalize", [normalize_test_summary, _normalize_test_summary], ids=["runner", "hub"])

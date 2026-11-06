@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 
-from tools.platform.providers.openai_compatible import ProviderFactory, ProviderUnavailable
+from hub.platform.providers.openai_compatible import ProviderFactory, ProviderUnavailable
 
 
 def check_platform_readiness(fleet, owner_id):

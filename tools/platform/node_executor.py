@@ -4,17 +4,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .backends.base import ToolReceipt
-from tools.browser_bridge.contract import WEB_AGENT_TOOLS
-from tools.browser_bridge.muse import MuseBridgeError
-from .browser_backend import BrowserBackendError, BrowserExecutionError
+from fleet_core.backends.base import ToolReceipt
+from fleet_core.browser_policy import BROWSER_TOOLS, BrowserBackendError
+from fleet_core.web_agent_contract import WEB_AGENT_TOOLS, MuseBridgeError
+from .browser_backend import BrowserExecutionError
 
 
-BROWSER_TOOLS = frozenset({
-    "browser.open", "browser.navigate", "browser.snapshot", "browser.screenshot",
-    "browser.click", "browser.type", "browser.scroll", "browser.back", "browser.close",
-    "browser.submit",
-})
 BROWSER_SESSION_CAPABILITY = "browser.session"
 NODE_TOOLS = frozenset({
     "workspace.list", "workspace.read", "workspace.write",
@@ -143,7 +138,7 @@ class NodeToolExecutor:
                     text = text.decode("utf-8", errors="replace")
                 if not isinstance(text, str):
                     return {"state": "failed", "result": {}, "error_code": "invalid_log_result", "command_id": command_id}
-                from tools.session.redact import Redactor
+                from fleet_core.session.redact import Redactor
                 sanitized, report = Redactor(passthrough=False).redact_event({"payload": {"text": text}})
                 safe_text = str(((sanitized.get("payload") or {}).get("text")) or "")
                 encoded = safe_text.encode("utf-8", errors="replace")
