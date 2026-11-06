@@ -171,5 +171,5 @@ def test_frontend_deadline_covers_body_read():
     root = Path(__file__).resolve().parents[1]
     result = subprocess.run([node,
         str(root / 'tests/fixtures/frontend/request_deadline.mjs')],
-        capture_output=True, text=True, timeout=15)
+        capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr

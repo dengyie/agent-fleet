@@ -7,6 +7,9 @@ a request body goes through ``hub.http._common.request_json`` which maps that
 """
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
 from hub.bootstrap import create_app
@@ -92,3 +95,17 @@ def test_muse_body_error_outside_invoke_is_bounded_not_500(tmp_path):
     assert resp.status_code == 400
     assert resp.get_json()["error"] == "invalid_json"
     assert resp.headers["Cache-Control"] == "no-store"
+
+
+def test_hub_parses_request_bodies_only_through_request_json():
+    # Architecture guard: a raw ``get_json`` in a new route would bring back the
+    # RecursionError -> 500 path; all body parsing goes through request_json.
+    hub = Path(__file__).resolve().parents[1] / "hub"
+    offenders = [
+        f"{path.relative_to(hub.parent)}:{number}"
+        for path in sorted(hub.rglob("*.py"))
+        if path.name != "_common.py" or path.parent.name != "http"
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if re.search(r"\bget_json\s*\(|\brequest\.json\b|\brequest\.data\b", line)
+    ]
+    assert offenders == []

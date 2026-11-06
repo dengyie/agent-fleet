@@ -130,6 +130,33 @@ function makeClientToken() {
 }
 
 /**
+ * 读取 JSON 响应体，并保证 abort 后一定结束：部分运行时（如 Windows 上的
+ * Node/undici）在 body 读取阶段不会可靠地响应 signal，单靠 fetch 的 signal
+ * 无法兑现 deadline。落败的 json() promise 被吞掉，避免 unhandled rejection。
+ */
+function readJsonBeforeAbort(response, signal) {
+  var body = response.json();
+  if (signal.aborted) {
+    body.catch(function () {});
+    return Promise.reject(new DOMException('Aborted', 'AbortError'));
+  }
+  return new Promise(function (resolve, reject) {
+    function onAbort() {
+      body.catch(function () {});
+      reject(new DOMException('Aborted', 'AbortError'));
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+    body.then(function (value) {
+      signal.removeEventListener('abort', onAbort);
+      resolve(value);
+    }, function (err) {
+      signal.removeEventListener('abort', onAbort);
+      reject(err);
+    });
+  });
+}
+
+/**
  * 唯一 request 通道：解析 apiBaseUrl、编码路径、no-store、JSON 解析一次、
  * 非 2xx / 网络 / 超时统一 ApiError。options.body 会被 JSON.stringify；
  * options.method 缺省为 GET；mutation 调用方应传 JSON_HEADERS。
@@ -173,7 +200,7 @@ async function request(path, options) {
   }
   var data = null;
   try {
-    data = await response.json();
+    data = await readJsonBeforeAbort(response, controller.signal);
   } catch (e) {
     if (controller.signal.aborted || (e && (e.name === 'AbortError' || e.code === 20))) {
       throw new ApiError('timeout', 0, 'request_timeout',

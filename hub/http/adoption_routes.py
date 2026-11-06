@@ -15,9 +15,8 @@ identity):
          (operator source control for an ADOPTED seat
          via the existing signed supervisor channel; 202 + command id +
          bounded "pending". Phase 4/5 actions are default-off. NO pid/
-         signal/shell/command/credential is ever accepted.  The singular
-         ``/api/adoption/<session_id>/source/control`` is a deprecated alias
-         kept for one release.)
+         signal/shell/command/credential is ever accepted.  The former
+         singular ``/api/adoption/...`` alias was removed after one release.)
   POST   /api/adoptions/<session_id>/retry
          (plural "adoptions" — re-issue the signed adopt for a leftover
          pending seat; 200 + bounded status projection.  An already-adopted
@@ -169,10 +168,6 @@ def list_records():
 
 
 @bp.route("/api/adoptions/<session_id>/source/control", methods=["POST"])
-# Legacy singular alias (outside the Access-protected ``/api/adoptions*``
-# prefix); kept for one release so older clients keep working.
-@bp.route("/api/adoption/<session_id>/source/control", methods=["POST"],
-          endpoint="source_control_legacy")
 @require_operator
 def source_control(session_id: str):
     """POST one fixed source-control action for an ADOPTED session.

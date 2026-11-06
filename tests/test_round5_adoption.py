@@ -198,30 +198,30 @@ def test_list_store_failure_is_bounded_503(tmp_path):
 # -- A5 ----------------------------------------------------------------------
 
 
-def test_source_control_canonical_and_legacy_alias(tmp_path):
+def test_source_control_canonical_route_only(tmp_path):
     app = build_app(tmp_path)
     client = app.test_client()
     sid = _create(client)
     _svc(app).adoption_repo.update_status(sid, "adopted")
     rules = {rule.rule for rule in app.url_map.iter_rules()}
     assert "/api/adoptions/<session_id>/source/control" in rules
-    assert "/api/adoption/<session_id>/source/control" in rules
-    for prefix in ("/api/adoptions", "/api/adoption"):
-        resp = client.post(f"{prefix}/{sid}/source/control",
-                           json={"action": "pause_session",
-                                 "reason_code": "operator_requested"},
-                           headers=operator_headers())
-        assert resp.status_code == 202, prefix
-        body = resp.get_json()
-        assert body["ok"] is True
-        assert body["action"] == "pause_session"
-        assert body["status"] == "pending"
-        # Both paths stay operator-only (an ingest token is not an operator).
-        unauth = client.post(f"{prefix}/{sid}/source/control",
-                             json={"action": "pause_session",
-                                   "reason_code": "operator_requested"},
-                             headers=ingest_token_headers())
-        assert unauth.status_code == 401, prefix
+    # The one-release singular alias sat outside the Access-protected
+    # ``/api/adoptions*`` prefix; it is gone and must not come back.
+    assert "/api/adoption/<session_id>/source/control" not in rules
+    body = {"action": "pause_session", "reason_code": "operator_requested"}
+    resp = client.post(f"/api/adoptions/{sid}/source/control",
+                       json=body, headers=operator_headers())
+    assert resp.status_code == 202
+    payload = resp.get_json()
+    assert payload["ok"] is True
+    assert payload["action"] == "pause_session"
+    assert payload["status"] == "pending"
+    unauth = client.post(f"/api/adoptions/{sid}/source/control",
+                         json=body, headers=ingest_token_headers())
+    assert unauth.status_code == 401
+    legacy = client.post(f"/api/adoption/{sid}/source/control",
+                         json=body, headers=operator_headers())
+    assert legacy.status_code in (404, 405)
 
 
 def test_admission_lock_is_held_during_retry(tmp_path):

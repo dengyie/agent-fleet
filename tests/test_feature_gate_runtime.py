@@ -206,7 +206,7 @@ class AdoptionGateTests(unittest.TestCase):
         self.assertIn("/api/adoptions", rules)
         self.assertIn("/api/adoptions/<session_id>", rules)
         self.assertIn("/api/adoptions/<session_id>/source/control", rules)
-        self.assertIn("/api/adoption/<session_id>/source/control", rules)
+        self.assertNotIn("/api/adoption/<session_id>/source/control", rules)
 
     def test_adoption_post_reaches_handler_once_enabled(self):
         # The disabled surface answers 405 from the page catch-all; enabled it
