@@ -8,15 +8,25 @@ const [origin, conversation, state] = process.argv.slice(2);
     page.setDefaultTimeout(6000);
     const errors = [];
     page.on('pageerror', e => errors.push(e.message));
+    const finalPage = () => page.waitForResponse(response => {
+      const url = new URL(response.url());
+      return url.pathname.endsWith('/events') && url.searchParams.get('after') === '106' && response.status() === 200;
+    });
+    const loaded = finalPage();
     await page.goto(origin + '/conversation/' + conversation, {waitUntil: 'domcontentloaded'});
     await page.locator('[data-command-id="pagination-104"]').waitFor({state: 'attached'});
     if (state === 'running') {
       assert.equal((await page.request.post(origin + '/_fixture/finish')).status(), 200);
     }
+    // The live poll can render run_finished before the full history refresh
+    // clears and rebuilds the list. Wait for its final empty page as well.
+    await loaded;
     await page.waitForFunction(() => document.querySelector('.assistant-run-status')?.textContent === '已完成');
     await page.waitForFunction(() => document.querySelector('.assistant-events')?.textContent.includes('运行结束'));
     assert.equal(await page.locator('.assistant-events tool-call-badge').count(), 105);
+    const reloaded = finalPage();
     await page.reload({waitUntil: 'domcontentloaded'});
+    await reloaded;
     await page.locator('[data-command-id="pagination-104"]').waitFor({state: 'attached'});
     assert.equal(await page.locator('.assistant-events tool-call-badge').count(), 105);
     assert.deepEqual(errors, []);
