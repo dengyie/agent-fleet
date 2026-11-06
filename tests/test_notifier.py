@@ -99,10 +99,3 @@ def test_setup_alert_notify_subscribes_to_given_publisher(thresholds, capsys):
                               'extra': {'snapshot': {'system': {'disk_used_pct': 99}}}})
     assert 'm 磁盘使用率 99.0% > 90%' in capsys.readouterr().out
 
-
-def test_setup_alert_notify_defaults_to_global_event_bus(thresholds, monkeypatch):
-    from hub import events
-    subscribed = []
-    monkeypatch.setattr(events, 'subscribe', subscribed.append)
-    notifier.setup_alert_notify()
-    assert len(subscribed) == 1 and callable(subscribed[0])

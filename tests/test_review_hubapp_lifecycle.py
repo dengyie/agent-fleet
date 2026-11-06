@@ -5,9 +5,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hub import events
-from hub import state as store
-from hub import task_store
 from hub.bootstrap import create_app, start_background_jobs
 from hub.config import FleetConfig
 
@@ -15,15 +12,6 @@ from hub.config import FleetConfig
 class CreateAppSpawnsNoThreadsTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.old = (store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH)
-        store.STATE_DIR = self.tmp / "state"
-        store.STATE_DIR.mkdir()
-        events.EVENT_LOG = self.tmp / "events.jsonl"
-        task_store.DB_PATH = self.tmp / "fleet.db"
-        task_store.init_db()
-
-    def tearDown(self):
-        store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH = self.old
 
     def config(self):
         return FleetConfig.from_root(

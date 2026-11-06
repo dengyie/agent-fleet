@@ -10,8 +10,10 @@ refactor:
   Flask-independent: none of them may import Flask.
 - The legacy entrypoint ``hub.web.make_app`` still delegates to
   ``hub.bootstrap.create_app``.
-- The compatibility facades (``state.save_snapshot``, ``events.emit``,
-  ``task_store.create_task``, ``web.make_app``) remain callable.
+- The legacy module-level storage facades (``hub.state`` / ``hub.events`` /
+  ``hub.task_store``) are gone: stores are built from explicit paths by the
+  composition root (``hub.bootstrap``) or the ``hub/scan.py`` CLI, and no
+  ``hub`` module reassigns another module's path globals.
 
 Unknown 404/405/500 error conversion is deliberately out of scope here
 (Task 11); this file only pins the boundary introduced by Phase 1.
@@ -43,13 +45,26 @@ class BoundaryTests(unittest.TestCase):
                 self.assertNotIn("import flask", source, path.name)
                 self.assertNotIn("from flask", source, path.name)
 
-    def test_legacy_facades_remain_callable(self):
-        from hub import events, state, task_store, web
+    def test_legacy_storage_facades_removed(self):
+        import importlib
+        import inspect
 
-        self.assertTrue(callable(web.make_app))
-        self.assertTrue(callable(state.save_snapshot))
-        self.assertTrue(callable(events.emit))
-        self.assertTrue(callable(task_store.create_task))
+        from hub import web
+
+        for name in ("hub.state", "hub.events", "hub.task_store"):
+            with self.assertRaises(ModuleNotFoundError, msg=name):
+                importlib.import_module(name)
+        params = inspect.signature(web.make_app).parameters
+        for name in ("state_dir", "event_log", "task_db", "publisher"):
+            self.assertIn(name, params)
+        for path in sorted((REPO_ROOT / "hub").rglob("*.py")):
+            source = path.read_text()
+            for name in ("STATE_DIR", "EVENT_LOG", "DB_PATH"):
+                self.assertNotRegex(
+                    source, r"\.\s*" + name + r"\s*=(?!=)",
+                    f"{path.relative_to(REPO_ROOT)} reassigns a module global")
+            self.assertNotIn("set_publisher", source, path.name)
+            self.assertNotIn("_wire_legacy_paths", source, path.name)
 
 
 if __name__ == "__main__":

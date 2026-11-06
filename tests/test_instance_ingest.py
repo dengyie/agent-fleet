@@ -14,42 +14,27 @@ These tests drive the real HTTP ingest endpoint through a sandboxed state dir
 and assert on the persisted repository row, matching the Task 3 brief.
 """
 
-import tempfile
-from pathlib import Path
-
 import pytest
-
-from hub import events
-from hub import state as store
-from hub import task_store
 
 
 @pytest.fixture()
-def client():
-    temp_dir = Path(tempfile.mkdtemp())
-    old_state = store.STATE_DIR
-    old_events = events.EVENT_LOG
-    old_db = task_store.DB_PATH
-    store.STATE_DIR = temp_dir
-    events.EVENT_LOG = temp_dir / "events.jsonl"
-    task_store.DB_PATH = temp_dir / "fleet.db"
-    task_store.init_db()
-    store.save_snapshot("m1", {
+def store(hub_stores):
+    hub_stores.store.save_snapshot("m1", {
         "machine": "m1", "source": "ingest", "reachable": True,
         "agents": {"codex": {"installed": True}}, "system": {},
     })
-    from hub import web
-    app = web.make_app(
+    return hub_stores.store
+
+
+@pytest.fixture()
+def client(hub_stores, store):
+    app = hub_stores.make_app(
         ingest_token="test-only",
         dev_operator="op@example.com",
         runner_credentials={"m1": "test-only"},
         project_whitelist={"m1": ["agent-fleet"]},
     )
-    test_client = app.test_client()
-    yield test_client
-    store.STATE_DIR = old_state
-    events.EVENT_LOG = old_events
-    task_store.DB_PATH = old_db
+    return app.test_client()
 
 
 def ingest_header():
@@ -67,17 +52,13 @@ def valid_payload(**extra):
     return payload
 
 
-def read_current(machine="m1"):
-    return store.read_current(machine)
-
-
 INSTANCE_KEYS = {
     "pid", "pgid", "exe_path", "cmdline", "agent_family",
     "native_file_path", "started_at", "attachable",
 }
 
 
-def test_ingest_keeps_only_sanitized_instance_fields(client):
+def test_ingest_keeps_only_sanitized_instance_fields(client, store):
     response = client.post("/api/ingest", json=valid_payload(instances=[{
         "pid": 7, "pgid": 6, "exe_path": "/bin/codex", "cmdline": "codex",
         "agent_family": "codex", "native_file_path": None,
@@ -85,13 +66,13 @@ def test_ingest_keeps_only_sanitized_instance_fields(client):
         "conversation": "drop",
     }]), headers=ingest_header())
     assert response.status_code == 200
-    row = read_current("m1")["instances"][0]
+    row = store.read_current("m1")["instances"][0]
     assert row["pid"] == 7
     assert row["pgid"] == 6
     assert "conversation" not in row
 
 
-def test_ingest_persists_exact_instance_allowlist(client):
+def test_ingest_persists_exact_instance_allowlist(client, store):
     response = client.post("/api/ingest", json=valid_payload(instances=[{
         "pid": "11", "pgid": "10", "exe_path": "/bin/codex", "cmdline": "codex",
         "agent_family": "claude_code", "native_file_path": "/tmp/native.jsonl",
@@ -99,7 +80,7 @@ def test_ingest_persists_exact_instance_allowlist(client):
         "process_token": 99, "secret_key": True,
     }]), headers=ingest_header())
     assert response.status_code == 200
-    rows = read_current("m1")["instances"]
+    rows = store.read_current("m1")["instances"]
     assert len(rows) == 1
     assert set(rows[0]) == INSTANCE_KEYS
     assert rows[0]["pid"] == 11
@@ -107,15 +88,15 @@ def test_ingest_persists_exact_instance_allowlist(client):
     assert "process_token" not in rows[0]
 
 
-def test_ingest_defaults_missing_instances_to_empty_list(client):
+def test_ingest_defaults_missing_instances_to_empty_list(client, store):
     payload = valid_payload()
     payload.pop("instances", None)
     response = client.post("/api/ingest", json=payload, headers=ingest_header())
     assert response.status_code == 200
-    assert read_current("m1")["instances"] == []
+    assert store.read_current("m1")["instances"] == []
 
 
-def test_replayed_report_id_does_not_append_history_or_publish_duplicate(client):
+def test_replayed_report_id_does_not_append_history_or_publish_duplicate(client, store):
     payload = valid_payload(report_id="replayed-report-1", agent={"codex": {"installed": False}})
     publisher = client.application.extensions["fleet"]["publisher"]
 
@@ -128,8 +109,8 @@ def test_replayed_report_id_does_not_append_history_or_publish_duplicate(client)
     assert first.status_code == second.status_code == 200
     assert len(after_second) == len(after_first)
     assert second.get_json()["duplicate"] is True
-    assert "report_id" not in read_current("m1")
-    assert "_ingest_report_id" not in read_current("m1")
+    assert "report_id" not in store.read_current("m1")
+    assert "_ingest_report_id" not in store.read_current("m1")
     assert first.get_json()["changes"] == ["agents"]
     assert len(events_after_first) == 1
     assert publisher.read_recent(20) == events_after_first
@@ -142,7 +123,7 @@ def test_missing_report_id_keeps_legacy_ingest_behavior(client):
     assert "duplicate" not in response.get_json()
 
 
-def test_invalid_report_id_is_rejected_without_writing_history(client):
+def test_invalid_report_id_is_rejected_without_writing_history(client, store):
     before = len(store.read_history("m1", 20))
     response = client.post(
         "/api/ingest", json=valid_payload(report_id=None), headers=ingest_header())
@@ -152,7 +133,7 @@ def test_invalid_report_id_is_rejected_without_writing_history(client):
     assert len(store.read_history("m1", 20)) == before
 
 
-def test_ingest_drops_malformed_instance_rows_individually(client):
+def test_ingest_drops_malformed_instance_rows_individually(client, store):
     response = client.post("/api/ingest", json=valid_payload(instances=[
         {
             "pid": 1, "pgid": 1, "exe_path": "/bin/ok", "cmdline": "",
@@ -181,7 +162,7 @@ def test_ingest_drops_malformed_instance_rows_individually(client):
         },  # negative pgid (string) -> dropped
     ]), headers=ingest_header())
     assert response.status_code == 200
-    rows = read_current("m1")["instances"]
+    rows = store.read_current("m1")["instances"]
     assert len(rows) == 1
     assert rows[0]["pid"] == 1
     assert rows[0]["agent_family"] == "hermes"

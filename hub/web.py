@@ -44,7 +44,6 @@ if __package__ in (None, ""):
     schema_spec.loader.exec_module(schema_module)
 else:
     FLEET_HOME = Path(__file__).resolve().parent.parent
-STATE_DIR = FLEET_HOME / "state"
 HOSTS_FILE = FLEET_HOME / "hosts.yaml"
 INGEST_TOKEN_FILE = FLEET_HOME / "credentials" / "ingest-token"
 INGEST_TOKEN_ENV = "AGENT_FLEET_INGEST_TOKEN"
@@ -219,8 +218,15 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
              platform_browser_enabled=None, platform_browser_network_enabled=None,
              platform_browser_allowed_origins=None, platform_browser_submit_enabled=None,
              platform_memory_enabled=None,
-             platform_memory_context_enabled=None):
+             platform_memory_context_enabled=None,
+             state_dir=None, event_log=None, task_db=None, publisher=None):
     """Compatibility wrapper around ``hub.bootstrap.create_app``.
+
+    ``state_dir`` / ``event_log`` / ``task_db`` select the observation,
+    event and task stores explicitly; omitted they default (via
+    ``FleetConfig.from_root``) to ``<FLEET_HOME>/state``,
+    ``<state_dir>/events.jsonl`` and ``<state_dir>/fleet.db``. ``publisher``
+    optionally injects the event publisher shared with the caller.
 
     ``session_repositories_enabled`` / ``supervisor_enabled`` /
     ``adoption_repositories_enabled`` are the runtime feature gates, each
@@ -228,7 +234,6 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
     an explicit bool overrides the env; omitting keeps today's surface.
     """
     from hub.bootstrap import create_app
-    from hub import events, state, task_store
     from hub.auth import resolve_ingest_token as resolve_token
     from hub.config import FleetConfig
 
@@ -347,10 +352,10 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         adoption_on = False
     config = FleetConfig.from_root(
         FLEET_HOME,
-        state_dir=state.STATE_DIR,
+        state_dir=state_dir,
         hosts_file=HOSTS_FILE,
-        event_log=events.EVENT_LOG,
-        task_db=task_store.DB_PATH,
+        event_log=event_log,
+        task_db=task_db,
         ingest_token=resolved_token,
         dev_operator=dev_operator,
         runner_credentials=runner_credentials,
@@ -401,7 +406,7 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
     )
     # 门控只经 FleetConfig 传入；create_app 写入的是"实际生效"的门控（例如
     # 依赖未接线时降级为 False），这里绝不回写请求值覆盖它。
-    app = create_app(config)
+    app = create_app(config, publisher=publisher)
     return app
 
 

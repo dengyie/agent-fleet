@@ -6,10 +6,6 @@ from pathlib import Path
 from flask import Flask
 from werkzeug.exceptions import BadRequest
 
-from hub import events
-from hub import state as store
-from hub import task_store
-from hub import web
 from hub.http import _common
 from hub.http import (
     adoption_routes, conversation_routes, memory_routes, node_routes,
@@ -17,6 +13,7 @@ from hub.http import (
     supervisor_routes,
 )
 from hub.http.errors import ApplicationError
+from support.hub_env import HubStores
 
 TOKEN = "ingest-secret"
 
@@ -67,15 +64,8 @@ class CommonHelperTests(unittest.TestCase):
 class ApiErrorContractTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
-        self.old = (store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH)
-        store.STATE_DIR = self.temp_dir
-        events.EVENT_LOG = self.temp_dir / "events.jsonl"
-        task_store.DB_PATH = self.temp_dir / "fleet.db"
-        task_store.init_db()
-        self.app = web.make_app(ingest_token=TOKEN, dev_operator="op@example.com")
-
-    def tearDown(self):
-        store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH = self.old
+        self.app = HubStores(self.temp_dir).make_app(
+            ingest_token=TOKEN, dev_operator="op@example.com")
 
     def test_oversized_api_body_is_json_413(self):
         resp = self.app.test_client().post(

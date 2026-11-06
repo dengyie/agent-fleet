@@ -21,9 +21,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hub import events
-from hub import state as store
-from hub import task_store
 from hub.application import control_router as cr
 from hub.application.runner_service import ApplicationError, RunnerService
 from hub.application.supervisor_service import SupervisorService
@@ -71,15 +68,8 @@ def _bind_managed(session_repo, machine, attempt_id, session_id="sess_race"):
 class CancelRaceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="fleet-race-"))
-        self.old_state = store.STATE_DIR
-        self.old_events = events.EVENT_LOG
-        self.old_db = task_store.DB_PATH
-        store.STATE_DIR = self.tmp
-        events.EVENT_LOG = self.tmp / "events.jsonl"
-        task_store.DB_PATH = self.tmp / "fleet.db"
-        task_store.init_db()
-
         self.task_repo = SqliteTaskRepository(self.tmp / "fleet.db")
+        self.task_repo.init()
         self.session_repo = _session_repo(self.tmp / "sessions" / "meta.db")
         self.priv, _pub = _keypair()
         self.supervisor = SupervisorService(signing_key=self.priv)
@@ -93,11 +83,6 @@ class CancelRaceTests(unittest.TestCase):
             event_publisher=_Publisher(), host_policy=_Hosts())
         self.svc.cancel_router = self.router
         self.runner = RunnerService(self.task_repo, _Publisher())
-
-    def tearDown(self):
-        store.STATE_DIR = self.old_state
-        events.EVENT_LOG = self.old_events
-        task_store.DB_PATH = self.old_db
 
     # ---------------------------------------------------------------- #
     # helpers

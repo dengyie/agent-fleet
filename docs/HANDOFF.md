@@ -10,11 +10,11 @@ AI agent 舰队观测系统：每台机器运行本地 probe，向 hub `/api/ing
 
 | 部件 | 位置 | 职责 |
 |---|---|---|
-| hub/web.py | hub 进程 | app 工厂、页面路由（fleet/machine 视图）、启动入口 |
-| hub/routes_observe.py | hub 进程 | `/api/ingest`、`/api/status`、`/api/machines/<name>`、`/api/events`、SSE `/api/stream` |
+| hub/web.py + hub/bootstrap.py（编排 hub/composition/*） | hub 进程 | 启动入口与 app 工厂；`create_app` 按步骤组装仓库、服务、路由 |
+| hub/http/observe_routes.py | hub 进程 | `/api/ingest`、`/api/status`、`/api/machines/<name>`、`/api/events`、SSE `/api/stream` |
 | hub/auth.py | hub 进程 | 认证域装饰器（ingest token） |
-| hub/state.py | hub 进程 | JSONL 历史（>5MB 轮转）+ 原子 current 快照 |
-| hub/events.py | hub 进程 | 事件总线 + SSE 队列桥 |
+| hub/infrastructure/state_repository.py | hub 进程 | `JsonlObservationRepository`：JSONL 历史（>5MB 轮转）+ 原子 current 快照 + ingest 回执索引 |
+| hub/infrastructure/event_repository.py + hub/application/event_publisher.py | hub 进程 | `JsonlEventRepository` 事件持久化 + `EventPublisher` 事件总线 / SSE 队列桥 |
 | agent-self-report.py | 每台 agent 机器 | 本地采集并主动 POST |
 | probe_collectors.py | 每台 agent 机器 | Hermes/Claude/Codex/generic 本地采集 |
 | state/ | hub 数据目录 | JSONL 历史 + 原子 current 快照 + ingest 回执索引 + events.jsonl |

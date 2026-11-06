@@ -28,17 +28,14 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization as _ser
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from hub import events
-from hub import state as store
-from hub import task_store
 from hub.application.supervisor_service import (
     SupervisorService,
     SupervisorServiceError,
 )
 from hub.bootstrap import create_app
-from hub.config import FleetConfig
 from hub.domain import control as ctrl
 from hub.domain import supervisor as sup_dom
+from support.hub_env import HubStores
 
 # --------------------------------------------------------------------------- #
 # crypto / ids / helpers
@@ -728,16 +725,12 @@ def test_durable_idempotent_enqueue_does_not_duplicate_audit_event(tmp_path):
 
 def _make_client(signing=None, *, supervisor_enabled=True):
     tmp = Path(tempfile.mkdtemp(prefix="fleet-http-"))
-    old = (store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH)
-    store.STATE_DIR = tmp
-    events.EVENT_LOG = tmp / "events.jsonl"
-    task_store.DB_PATH = tmp / "fleet.db"
-    task_store.init_db()
-    store.save_snapshot("mac-local", {
+    hub = HubStores(tmp)
+    hub.store.save_snapshot("mac-local", {
         "machine": "mac-local", "source": "ingest", "reachable": True,
         "agents": {}, "system": {},
     })
-    cfg = FleetConfig.from_root(
+    cfg = hub.config(
         tmp,
         ingest_token="test-only",
         dev_operator="op@example.com",
@@ -748,7 +741,6 @@ def _make_client(signing=None, *, supervisor_enabled=True):
         supervisor_signing_raw=signing,
     )
     app = create_app(cfg)
-    app._fleet_test_cleanup = old
     return app.test_client(), app
 
 
@@ -760,11 +752,6 @@ class SupervisorRoutesTests(unittest.TestCase):
     def setUp(self):
         self._apps = []
         self.priv, self.pub = _keypair()
-
-    def tearDown(self):
-        for app in self._apps:
-            store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH = \
-                app._fleet_test_cleanup
 
     def _client(self, **kwargs):
         client, app = _make_client(self.priv, **kwargs)

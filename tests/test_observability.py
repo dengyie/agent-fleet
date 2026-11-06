@@ -5,29 +5,22 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from hub import state as store
 import time
-from hub import scan, events
+from hub import scan
+from hub.infrastructure.state_repository import JsonlObservationRepository
+from support.hub_env import HubStores
 
 
 class JsonlRotationTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
-        self.old_state_dir = store.STATE_DIR
-        self.old_max = store.MAX_JSONL_BYTES
-        self.old_keep = store.ROTATE_KEEP_LINES
-        store.STATE_DIR = self.temp_dir
-        store.MAX_JSONL_BYTES = 4096  # 缩小阈值避免写 5MB
-        store.ROTATE_KEEP_LINES = 40
-
-    def tearDown(self):
-        store.STATE_DIR = self.old_state_dir
-        store.MAX_JSONL_BYTES = self.old_max
-        store.ROTATE_KEEP_LINES = self.old_keep
+        # 缩小阈值避免写 5MB
+        self.store = JsonlObservationRepository(
+            self.temp_dir, max_jsonl_bytes=4096, keep_lines=40)
 
     def test_oversized_jsonl_rotates_and_keeps_tail(self):
         for i in range(200):
-            store.save_snapshot("hk", {"machine": "hk", "seq": i, "pad": "x" * 100})
+            self.store.save_snapshot("hk", {"machine": "hk", "seq": i, "pad": "x" * 100})
         path = self.temp_dir / "hk.jsonl"
         self.assertLessEqual(path.stat().st_size, 4096 * 2)
         lines = path.read_text().splitlines()
@@ -38,46 +31,41 @@ class JsonlRotationTests(unittest.TestCase):
             json.loads(line)
 
     def test_small_jsonl_is_untouched(self):
-        store.save_snapshot("hk", {"machine": "hk", "seq": 0})
-        store.save_snapshot("hk", {"machine": "hk", "seq": 1})
+        self.store.save_snapshot("hk", {"machine": "hk", "seq": 0})
+        self.store.save_snapshot("hk", {"machine": "hk", "seq": 1})
         self.assertEqual(len((self.temp_dir / "hk.jsonl").read_text().splitlines()), 2)
 
 
 class ScanFilterTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
-        self.old_state_dir = store.STATE_DIR
-        self.old_event_log = events.EVENT_LOG
-        store.STATE_DIR = self.temp_dir
-        events.EVENT_LOG = self.temp_dir / "events.jsonl"
-
-    def tearDown(self):
-        store.STATE_DIR = self.old_state_dir
-        events.EVENT_LOG = self.old_event_log
+        self.hub = HubStores(self.temp_dir)
+        self.store = self.hub.store
+        self.service = scan.build_reconciliation_service(self.hub.config())
 
     def _write_stale(self, machine):
-        store.save_snapshot(machine, {
+        self.store.save_snapshot(machine, {
             "machine": machine, "source": "ingest", "reachable": True, "agents": {},
         })
-        current = store.read_current(machine)
+        current = self.store.read_current(machine)
         current["_ts"] = time.time() - 301
         (self.temp_dir / f"{machine}.json").write_text(json.dumps(current))
 
     def test_machine_scoped_reconcile_leaves_other_machines_alone(self):
         self._write_stale("hk")
         self._write_stale("tebi")
-        results = scan.reconcile_ingest(now=time.time(), machine="hk")
+        results = self.service.reconcile_observation(machine="hk", now=time.time())
         self.assertEqual([r["machine"] for r in results], ["hk"])
-        self.assertFalse(store.read_current("hk")["reachable"])
-        self.assertTrue(store.read_current("tebi")["reachable"])
+        self.assertFalse(self.store.read_current("hk")["reachable"])
+        self.assertTrue(self.store.read_current("tebi")["reachable"])
 
-    def test_scan_all_filter_host_only_reconciles_that_host(self):
+    def test_reconcile_filter_host_only_reconciles_that_host(self):
         self._write_stale("hk")
         self._write_stale("tebi")
-        results = scan.scan_all(filter_host="tebi")
+        results = self.service.reconcile_observation(machine="tebi")
         self.assertEqual([r["machine"] for r in results], ["tebi"])
-        self.assertTrue(store.read_current("hk")["reachable"])
-        self.assertFalse(store.read_current("tebi")["reachable"])
+        self.assertTrue(self.store.read_current("hk")["reachable"])
+        self.assertFalse(self.store.read_current("tebi")["reachable"])
 
 
 class AuthIngestTokenTests(unittest.TestCase):
@@ -126,16 +114,8 @@ class AuthIngestTokenTests(unittest.TestCase):
 class ObserveBlueprintTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
-        self.old_state_dir = store.STATE_DIR
-        self.old_event_log = events.EVENT_LOG
-        store.STATE_DIR = self.temp_dir
-        events.EVENT_LOG = self.temp_dir / "events.jsonl"
-        from hub import web
-        self.client = web.make_app(ingest_token="secret").test_client()
-
-    def tearDown(self):
-        store.STATE_DIR = self.old_state_dir
-        events.EVENT_LOG = self.old_event_log
+        self.hub = HubStores(self.temp_dir)
+        self.client = self.hub.make_app(ingest_token="secret").test_client()
 
     def _ingest(self, machine="mac-local"):
         return self.client.post("/api/ingest", json={
@@ -184,36 +164,29 @@ class ObserveBlueprintTests(unittest.TestCase):
 class SseStreamTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
-        self.old_state_dir = store.STATE_DIR
-        self.old_event_log = events.EVENT_LOG
-        store.STATE_DIR = self.temp_dir
-        events.EVENT_LOG = self.temp_dir / "events.jsonl"
-        from hub import web
-        self.app = web.make_app(ingest_token="secret")
-
-    def tearDown(self):
-        store.STATE_DIR = self.old_state_dir
-        events.EVENT_LOG = self.old_event_log
+        self.hub = HubStores(self.temp_dir)
+        self.app = self.hub.make_app(ingest_token="secret")
+        self.publisher = self.app.extensions["fleet"]["publisher"]
 
     def test_sse_bridge_receives_emitted_events(self):
-        q = events.sse_subscribe()
+        q, unsubscribe = self.publisher.subscribe_sse(queue_size=200)
         try:
-            events.emit("state_changed", machine="hk", changes=["agents"],
-                        snapshot={"reachable": True, "agents": {}, "system": {}})
+            self.publisher.emit("state_changed", machine="hk", changes=["agents"],
+                                snapshot={"reachable": True, "agents": {}, "system": {}})
             got = q.get(timeout=2)
             self.assertEqual(got["event"], "state_changed")
             self.assertEqual(got["machine"], "hk")
         finally:
-            events.sse_unsubscribe(q)
+            unsubscribe()
 
     def test_stream_endpoint_delivers_machine_update(self):
         q_client = self.app.test_client()
         resp = q_client.get("/api/stream", buffered=False)
         self.assertEqual(resp.status_code, 200)
         self.assertIn("text/event-stream", resp.content_type)
-        events.emit("state_changed", machine="hk", changes=["agents"],
-                    snapshot={"reachable": True, "agents": {"codex": {"installed": True}},
-                              "system": {"load": "1.0"}})
+        self.publisher.emit("state_changed", machine="hk", changes=["agents"],
+                            snapshot={"reachable": True, "agents": {"codex": {"installed": True}},
+                                      "system": {"load": "1.0"}})
         body = b""
         for chunk in resp.response:
             body += chunk
@@ -240,12 +213,13 @@ class SseStreamTests(unittest.TestCase):
         q_client = self.app.test_client()
         resp = q_client.get("/api/stream", buffered=False)
         self.assertEqual(resp.status_code, 200)
-        events.emit("task_queued", machine="mac-local", task_id="t-1", state="queued")
-        events.emit("task_log", machine="mac-local", task_id="t-1",
-                    line="echo 中文日志")
-        events.emit("task_finished", machine="mac-local", task_id="t-1", state="succeeded")
-        events.emit("state_changed", machine="hk", changes=["agents"],
-                    snapshot={"reachable": True, "agents": {}, "system": {}})
+        self.publisher.emit("task_queued", machine="mac-local", task_id="t-1", state="queued")
+        self.publisher.emit("task_log", machine="mac-local", task_id="t-1",
+                            line="echo 中文日志")
+        self.publisher.emit("task_finished", machine="mac-local", task_id="t-1",
+                            state="succeeded")
+        self.publisher.emit("state_changed", machine="hk", changes=["agents"],
+                            snapshot={"reachable": True, "agents": {}, "system": {}})
         body = b""
         for chunk in resp.response:
             body += chunk
@@ -308,10 +282,6 @@ class EventPersistFailureIsolationTests(unittest.TestCase):
         from hub.infrastructure.state_repository import JsonlObservationRepository
 
         temp_dir = Path(tempfile.mkdtemp())
-        old_state = store.STATE_DIR
-        old_events = events.EVENT_LOG
-        store.STATE_DIR = temp_dir
-        events.EVENT_LOG = temp_dir / "events.jsonl"
         root = Path(__file__).resolve().parents[1]
 
         class FailingRepo:
@@ -339,15 +309,10 @@ class EventPersistFailureIsolationTests(unittest.TestCase):
         )
         from hub.bootstrap import create_app
         app = create_app(config, publisher=publisher)
-        app._event_repo_cleanup = (old_state, old_events)
         return app, publisher, firm
-
-    def tearDown(self):
-        store.STATE_DIR, events.EVENT_LOG = self._cleanup
 
     def test_emit_to_failing_repo_still_reaches_subscriber(self):
         app, publisher, firm = self._app_with_failing_event_repo()
-        self._cleanup = (store.STATE_DIR, events.EVENT_LOG)
         seen = []
         unsub = publisher.subscribe(seen.append)
         try:
@@ -359,7 +324,6 @@ class EventPersistFailureIsolationTests(unittest.TestCase):
 
     def test_event_persistence_failure_does_not_fail_ingest(self):
         app, publisher, firm = self._app_with_failing_event_repo()
-        self._cleanup = (store.STATE_DIR, events.EVENT_LOG)
         from hub.bootstrap import create_app
 
         FailingObservationRepo = None  # not needed; default observation repo used
@@ -373,12 +337,11 @@ class EventPersistFailureIsolationTests(unittest.TestCase):
 
     def test_sse_subscriber_receives_event_despite_persist_failure(self):
         app, publisher, firm = self._app_with_failing_event_repo()
-        self._cleanup = (store.STATE_DIR, events.EVENT_LOG)
         q_client = app.test_client()
         resp = q_client.get("/api/stream", buffered=False)
         self.assertEqual(resp.status_code, 200)
-        events.emit("state_changed", machine="hk", changes=["agents"],
-                    snapshot={"reachable": True, "agents": {}, "system": {}})
+        publisher.emit("state_changed", machine="hk", changes=["agents"],
+                       snapshot={"reachable": True, "agents": {}, "system": {}})
         body = b""
         for chunk in resp.response:
             body += chunk
@@ -393,22 +356,12 @@ class EventPersistFailureIsolationTests(unittest.TestCase):
 class EventReadFailureIsolationTests(unittest.TestCase):
     """Event repository reads degrade without breaking API or live delivery."""
 
-    def setUp(self):
-        self._cleanup = None
-
-    def tearDown(self):
-        if self._cleanup is not None:
-            store.STATE_DIR, events.EVENT_LOG = self._cleanup
-
     def _build_app(self, repository):
         from hub.application.event_publisher import EventPublisher
         from hub.bootstrap import create_app
         from hub.config import FleetConfig
 
         temp_dir = Path(tempfile.mkdtemp())
-        self._cleanup = (store.STATE_DIR, events.EVENT_LOG)
-        store.STATE_DIR = temp_dir
-        events.EVENT_LOG = temp_dir / "events.jsonl"
         root = Path(__file__).resolve().parents[1]
         config = FleetConfig.from_root(
             root,
@@ -446,7 +399,7 @@ class EventReadFailureIsolationTests(unittest.TestCase):
             "/api/stream?since=999999", buffered=False)
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/event-stream", response.content_type)
-        events.emit(
+        app.extensions["fleet"]["publisher"].emit(
             "state_changed",
             machine="hk",
             changes=["agents"],
@@ -489,24 +442,16 @@ class MachineDetailDisclosureTests(unittest.TestCase):
 
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
-        self.old_state_dir = store.STATE_DIR
-        self.old_event_log = events.EVENT_LOG
-        store.STATE_DIR = self.temp_dir
-        events.EVENT_LOG = self.temp_dir / "events.jsonl"
-        store.save_snapshot("mac-local", {
+        self.hub = HubStores(self.temp_dir)
+        self.hub.store.save_snapshot("mac-local", {
             "machine": "mac-local", "source": "ingest", "reachable": True,
             "agents": {"codex": {"installed": True, "active_count": 1}},
             "system": {"platform": "darwin"},
             "instances": [dict(self.INSTANCE)],
         })
 
-    def tearDown(self):
-        store.STATE_DIR = self.old_state_dir
-        events.EVENT_LOG = self.old_event_log
-
     def _client(self, **kw):
-        from hub import web
-        return web.make_app(ingest_token="secret", **kw).test_client()
+        return self.hub.make_app(ingest_token="secret", **kw).test_client()
 
     def test_anonymous_machine_detail_reduces_instances_to_metadata(self):
         client = self._client(dev_operator=None)

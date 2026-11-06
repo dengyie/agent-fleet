@@ -555,6 +555,9 @@ class RuntimeStoreHygieneTests(unittest.TestCase):
             "tools/result_files.py",
             "tools/session/__init__.py",
             "tools/supervisor/supervisor.py",
+            "tools/supervisor/group_ops.py",
+            "tools/supervisor/handles.py",
+            "tools/supervisor/native_resume.py",
         )
         for name in required:
             self.assertTrue(

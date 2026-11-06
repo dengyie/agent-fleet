@@ -7,7 +7,7 @@ from unittest import mock
 
 import pytest
 
-from hub.infrastructure import platform_db
+from hub.infrastructure import platform_db_node_auth
 from hub.infrastructure.platform_db import PlatformRepository
 
 OWNER = "owner-a@example.test"
@@ -30,7 +30,7 @@ def _cred(repo):
 
 
 def test_authentication_does_not_run_pbkdf2(repo):
-    with mock.patch.object(platform_db.hashlib, "pbkdf2_hmac",
+    with mock.patch.object(platform_db_node_auth.hashlib, "pbkdf2_hmac",
                            side_effect=AssertionError("slow KDF on hot path")):
         assert repo.authenticate_node_credential("node-a", SECRET)["owner_id"] == OWNER
         assert repo.authenticate_node_credential("node-a", "x" * 40) is None
@@ -47,7 +47,7 @@ def test_legacy_pbkdf2_credential_is_verified_once_then_rehashed(repo):
         calls.append(1)
         return real(*args, **kwargs)
 
-    with mock.patch.object(platform_db.hashlib, "pbkdf2_hmac", side_effect=counting):
+    with mock.patch.object(platform_db_node_auth.hashlib, "pbkdf2_hmac", side_effect=counting):
         assert repo.authenticate_node_credential("node-a", SECRET) is not None
         assert repo.authenticate_node_credential("node-a", SECRET) is not None
     assert len(calls) == 1
@@ -60,7 +60,7 @@ def test_legacy_pbkdf2_credential_is_verified_once_then_rehashed(repo):
 
 def test_last_used_writes_are_throttled(repo):
     clock = [1_000_000.0]
-    with mock.patch.object(platform_db.time, "time", side_effect=lambda: clock[0]):
+    with mock.patch.object(platform_db_node_auth.time, "time", side_effect=lambda: clock[0]):
         repo.authenticate_node_credential("node-a", SECRET)
         first = _cred(repo)["last_used_at"]
         clock[0] += 30
@@ -81,16 +81,16 @@ def test_last_used_writes_are_throttled(repo):
 
 def test_failed_attempts_are_rate_limited_per_node_and_ip(repo):
     mono = [500.0]
-    with mock.patch.object(platform_db.time, "monotonic", side_effect=lambda: mono[0]):
-        for _ in range(platform_db.NODE_AUTH_MAX_FAILURES):
+    with mock.patch.object(platform_db_node_auth.time, "monotonic", side_effect=lambda: mono[0]):
+        for _ in range(platform_db_node_auth.NODE_AUTH_MAX_FAILURES):
             assert repo.authenticate_node_credential("node-a", "bad" * 12, remote_addr="203.0.113.9") is None
         # 达到上限后即便密钥正确也拒绝，且不触库
         with mock.patch.object(repo, "_connect", side_effect=AssertionError("db hit")):
             assert repo.authenticate_node_credential("node-a", SECRET) is None
-        mono[0] += platform_db.NODE_AUTH_FAILURE_WINDOW_S + 1
+        mono[0] += platform_db_node_auth.NODE_AUTH_FAILURE_WINDOW_S + 1
         assert repo.authenticate_node_credential("node-a", SECRET) is not None
         # IP 维度：同一来源对其他 node 也被限流
-        for _ in range(platform_db.NODE_AUTH_MAX_FAILURES):
+        for _ in range(platform_db_node_auth.NODE_AUTH_MAX_FAILURES):
             repo.authenticate_node_credential("node-z", "bad" * 12, remote_addr="198.51.100.7")
         with mock.patch.object(repo, "_connect", side_effect=AssertionError("db hit")):
             assert repo.authenticate_node_credential("node-a", SECRET, remote_addr="198.51.100.7") is None
@@ -98,7 +98,7 @@ def test_failed_attempts_are_rate_limited_per_node_and_ip(repo):
 
 
 def test_limiter_memory_is_bounded(repo):
-    with mock.patch.object(platform_db, "NODE_AUTH_LIMITER_MAX_KEYS", 8):
+    with mock.patch.object(platform_db_node_auth, "NODE_AUTH_LIMITER_MAX_KEYS", 8):
         for i in range(50):
             repo._record_auth_failure([("node", f"n{i}")], 1.0)
         assert len(repo._auth_failures) <= 8

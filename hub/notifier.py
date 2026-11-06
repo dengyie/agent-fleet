@@ -88,10 +88,6 @@ def make_notify_cb():
     return on_event
 
 
-def setup_alert_notify(publisher=None):
-    """注册告警通知订阅者（在 scan 前调用）。"""
-    if publisher is None:
-        from hub import events as evmod
-        evmod.subscribe(make_notify_cb())
-    else:
-        publisher.subscribe(make_notify_cb())
+def setup_alert_notify(publisher):
+    """在显式注入的 publisher 上注册告警通知订阅者（在 scan 前调用）。"""
+    publisher.subscribe(make_notify_cb())

@@ -25,10 +25,6 @@ from __future__ import annotations
 
 import pytest
 
-from hub import events as events_mod
-from hub import state as store
-from hub import task_store
-
 from test_adoption_http import (   # sibling import (tests/ is a non-package)
     build_app,
     ingest_token_headers,
@@ -44,8 +40,6 @@ PATH = "/api/adoptions"   # plural ``adoptions``, exactly this task's route
 def client(tmp_path):
     app = build_app(tmp_path)
     yield app.test_client()
-    store.STATE_DIR, events_mod.EVENT_LOG, task_store.DB_PATH = \
-        app._fleet_test_cleanup
 
 
 def _upgrade(client, session_id):

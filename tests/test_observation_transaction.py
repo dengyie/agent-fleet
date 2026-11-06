@@ -15,7 +15,6 @@ import time
 import unittest
 from pathlib import Path
 
-from hub import state as store
 from hub.application.observe_service import HostConfig, ObserveService
 from hub.infrastructure.state_repository import JsonlObservationRepository
 
@@ -127,16 +126,12 @@ class MachineTransactionReentrancyTests(unittest.TestCase):
         self.assertTrue(saved.is_set())
         self.assertEqual(repo.read_current("hk")["writer"], "thread")
 
-    def test_legacy_state_facade_exposes_reentrant_transaction(self):
-        old_dir = store.STATE_DIR
-        store.STATE_DIR = Path(tempfile.mkdtemp())
-        try:
-            with store.machine_transaction("hk"):
-                with store.machine_transaction("hk"):
-                    store.save_snapshot("hk", {"machine": "hk", "seq": 7})
-            self.assertEqual(store.read_current("hk")["seq"], 7)
-        finally:
-            store.STATE_DIR = old_dir
+    def test_repository_transaction_is_reentrant_around_save(self):
+        repo = JsonlObservationRepository(Path(tempfile.mkdtemp()))
+        with repo.machine_transaction("hk"):
+            with repo.machine_transaction("hk"):
+                repo.save_snapshot("hk", {"machine": "hk", "seq": 7})
+        self.assertEqual(repo.read_current("hk")["seq"], 7)
 
 
 class MachineTransactionCrossProcessTests(unittest.TestCase):

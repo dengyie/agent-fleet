@@ -13,9 +13,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hub import events
-from hub import state as store
-from hub import task_store
+from support.hub_env import HubStores
+
 from hub.domain.task import public_result
 from tools import result_files
 from tools import worktree
@@ -111,30 +110,18 @@ class TaskFileApiTests(unittest.TestCase):
 
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
-        self.old_state_dir = store.STATE_DIR
-        self.old_event_log = events.EVENT_LOG
-        self.old_db = task_store.DB_PATH
-        store.STATE_DIR = self.temp_dir
-        events.EVENT_LOG = self.temp_dir / "events.jsonl"
-        task_store.DB_PATH = self.temp_dir / "fleet.db"
-        task_store.init_db()
-        store.save_snapshot("mac-local", {
+        self.hub = HubStores(self.temp_dir)
+        self.hub.store.save_snapshot("mac-local", {
             "machine": "mac-local", "source": "ingest", "reachable": True,
             "agents": {}, "system": {},
         })
-        from hub import web
-        self.app = web.make_app(
+        self.app = self.hub.make_app(
             ingest_token="ingest-secret",
             dev_operator="op@example.com",
             runner_credentials={"mac-local": "runner-secret"},
             project_whitelist={"mac-local": ["agent-fleet"]},
         )
         self.client = self.app.test_client()
-
-    def tearDown(self):
-        store.STATE_DIR = self.old_state_dir
-        events.EVENT_LOG = self.old_event_log
-        task_store.DB_PATH = self.old_db
 
     def _create_and_lease(self):
         task = self.client.post("/api/tasks", json={
@@ -307,7 +294,7 @@ class TaskFileApiTests(unittest.TestCase):
                 if resp.status_code == 429:
                     self.assertEqual(resp.get_json()["error"], "rate_limited")
                     # Verify audit trail
-                    conn = task_store._connect()
+                    conn = self.hub.tasks._connect()
                     try:
                         rows = conn.execute(
                             "SELECT action FROM audit WHERE task_id=? AND action=?",

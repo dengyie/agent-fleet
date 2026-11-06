@@ -7,9 +7,6 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization as _ser
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from hub import events
-from hub import state as store
-from hub import task_store
 from hub.application.supervisor_service import SupervisorService, SupervisorServiceError
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
@@ -57,14 +54,6 @@ class SingleRepositoryPathTests(unittest.TestCase):
 class BootstrapGateTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.old = (store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH)
-        store.STATE_DIR = self.tmp
-        events.EVENT_LOG = self.tmp / "events.jsonl"
-        task_store.DB_PATH = self.tmp / "fleet.db"
-        task_store.init_db()
-
-    def tearDown(self):
-        store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH = self.old
 
     def app(self, enabled):
         cfg = FleetConfig.from_root(

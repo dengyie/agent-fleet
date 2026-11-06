@@ -50,6 +50,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Pattern, Sequence
 
+from agent_profiles import RESUME_VERIFIABLE_PROBE_FAMILIES
 from tools.session.probes import claude, codex, hermes, pi
 from tools.local_process import run as run_local
 
@@ -82,7 +83,9 @@ DIAG_HELP_FAILED = "probe_help_failed"
 DIAG_RUNTIME_UNAVAILABLE = "probe_runtime_unavailable"
 DIAG_RESUME_UNVERIFIED = "resume_unverified"
 
-_RESUME_VERIFIABLE_FAMILIES = frozenset({"claude", "codex"})
+# Families whose resume claim needs an explicit resume probe, derived from
+# agent_profiles (``resume_verifiable``, mapped to probe family keys).
+_RESUME_VERIFIABLE_FAMILIES = frozenset(RESUME_VERIFIABLE_PROBE_FAMILIES)
 
 
 def _family_defs() -> dict[str, dict[str, Any]]:

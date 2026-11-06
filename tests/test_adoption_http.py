@@ -17,11 +17,8 @@ from __future__ import annotations
 
 import pytest
 
-from hub import events as events_mod
-from hub import state as store
-from hub import task_store
 from hub.bootstrap import create_app
-from hub.config import FleetConfig
+from support.hub_env import HubStores
 
 MACHINE = "mac-local"
 OPERATOR = "op@example.com"
@@ -90,12 +87,8 @@ def supervisor_headers():
 def build_app(tmp_path, *, adoption_enabled=True,
               append_user_turn_enabled=False,
               apply_local_profile_enabled=False):
-    old_state = (store.STATE_DIR, events_mod.EVENT_LOG, task_store.DB_PATH)
-    store.STATE_DIR = tmp_path / "state"
-    events_mod.EVENT_LOG = tmp_path / "state" / "events.jsonl"
-    task_store.DB_PATH = tmp_path / "state" / "fleet.db"
-    task_store.init_db()
-    cfg = FleetConfig.from_root(
+    hub = HubStores(tmp_path / "state")
+    cfg = hub.config(
         tmp_path,
         ingest_token=INGEST,
         dev_operator=OPERATOR,
@@ -112,17 +105,13 @@ def build_app(tmp_path, *, adoption_enabled=True,
     )
     observation = FakeObservationRepo(
         {**snapshot([instance_row()]), "machine": MACHINE})
-    app = create_app(cfg, repositories={"observation": observation})
-    app._fleet_test_cleanup = old_state
-    return app
+    return create_app(cfg, repositories={"observation": observation})
 
 
 @pytest.fixture
 def client(tmp_path):
     app = build_app(tmp_path)
     yield app.test_client()
-    store.STATE_DIR, events_mod.EVENT_LOG, task_store.DB_PATH = \
-        app._fleet_test_cleanup
 
 
 # ---------------------------------------------------------------------------
@@ -386,14 +375,10 @@ def test_retry_revoked_is_409(client):
 
 def test_adoptions_not_registered_when_disabled(tmp_path):
     app = build_app(tmp_path, adoption_enabled=False)
-    try:
-        rules = {r.rule for r in app.url_map.iter_rules()}
-        assert "/api/adoptions" not in rules
-        resp = app.test_client().get("/api/adoptions",
-                                     headers=operator_headers())
-        assert resp.status_code in (404, 405)
-        body = resp.get_json()
-        assert body["error"] in ("not_found", "method_not_allowed")
-    finally:
-        store.STATE_DIR, events_mod.EVENT_LOG, task_store.DB_PATH = \
-            app._fleet_test_cleanup
+    rules = {r.rule for r in app.url_map.iter_rules()}
+    assert "/api/adoptions" not in rules
+    resp = app.test_client().get("/api/adoptions",
+                                 headers=operator_headers())
+    assert resp.status_code in (404, 405)
+    body = resp.get_json()
+    assert body["error"] in ("not_found", "method_not_allowed")

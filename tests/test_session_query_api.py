@@ -15,11 +15,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hub import events
-from hub import state as store
-from hub import task_store
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
+from support.hub_env import HubStores
 
 
 def _event(seq, session_id="sess_q_1", kind="user_message",
@@ -56,7 +54,7 @@ def _key():
            b"\x01\x12\x23\x34\x45\x56\x67\x78\x89\x9a\xab\xbc\xcd\xde\xef\x01"
 
 
-def _config(root, dev_operator="op@example.com"):
+def _config(root, dev_operator="op@example.com", **paths):
     return FleetConfig.from_root(
         root,
         ingest_token="ingest-secret",
@@ -67,6 +65,7 @@ def _config(root, dev_operator="op@example.com"):
         session_db=root / "var" / "sessions" / "meta.db",
         session_transcript_root=root / "var" / "sessions" / "transcripts",
         session_encryption_raw=_key(),
+        **paths,
     )
 
 
@@ -75,18 +74,12 @@ class SessionQueryTestBase(unittest.TestCase):
 
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
-        self.old_state = store.STATE_DIR
-        self.old_events = events.EVENT_LOG
-        self.old_db = task_store.DB_PATH
-        store.STATE_DIR = self.temp_dir
-        events.EVENT_LOG = self.temp_dir / "events.jsonl"
-        task_store.DB_PATH = self.temp_dir / "fleet.db"
-        task_store.init_db()
-        store.save_snapshot("mac-q-1", {
+        self.hub = HubStores(self.temp_dir)
+        self.hub.store.save_snapshot("mac-q-1", {
             "machine": "mac-q-1", "source": "ingest", "reachable": True,
             "agents": {}, "system": {},
         })
-        self.app = create_app(_config(self.temp_dir, self.dev_operator))
+        self.app = create_app(_config(self.temp_dir, self.dev_operator, **self.hub.paths()))
         self.client = self.app.test_client()
         self._seed()
 
@@ -107,12 +100,6 @@ class SessionQueryTestBase(unittest.TestCase):
             self.temp_dir / "var" / "sessions" / "transcripts", key=_key())
         tr.append_policy_signal("sess_q_2", "warn", "llm_uncertain")
         tr.append_policy_signal("sess_q_2", "info", "supervisor_orphan")
-
-    def tearDown(self):
-        store.STATE_DIR = self.old_state
-        events.EVENT_LOG = self.old_events
-        task_store.DB_PATH = self.old_db
-
 
 class SessionQueryAuthTests(SessionQueryTestBase):
     dev_operator = None  # no DEV fallback: all session queries require identity

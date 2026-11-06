@@ -14,7 +14,7 @@ from werkzeug.serving import make_server
 
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
-from hub import state, events, task_store
+from support.hub_env import HubStores
 from hub.infrastructure.session_repository import SessionRepository
 from tools.platform.providers.base import ModelResponse
 
@@ -83,7 +83,8 @@ def test_console_in_real_browser(tmp_path):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE to run Chromium acceptance')
     session_db = tmp_path / 'sessions/meta.db'
-    app = create_app(FleetConfig.from_root(
+    hub = HubStores(tmp_path / 'state')
+    app = create_app(hub.config(
         tmp_path, frontend_dir=ROOT / 'frontend', dev_operator=OWNER,
         platform_enabled=True, platform_worker_enabled=True,
         service_monitoring_enabled=True, session_repositories_enabled=True,
@@ -92,16 +93,16 @@ def test_console_in_real_browser(tmp_path):
     ))
     repo = app.extensions['fleet']['platform_repository']
     for name in ('studio-mac', 'compute-01', 'gateway-01'):
-        state.save_snapshot(name, {'machine': name, 'source': 'ingest', 'ts': time.time(), 'timestamp': '2026-09-30T00:00:00Z',
+        hub.store.save_snapshot(name, {'machine': name, 'source': 'ingest', 'ts': time.time(), 'timestamp': '2026-09-30T00:00:00Z',
             'reachable': True, 'system': {'platform': 'Linux', 'load': '0.42', 'uptime': '8 days'},
             'agents': {'codex': {'installed': True, 'active_count': 1}}})
-        events.emit('state_changed', machine=name, summary='本地浏览器验收节点已同步')
+        app.extensions['fleet']['publisher'].emit('state_changed', machine=name, summary='本地浏览器验收节点已同步')
         repo.upsert_node(OWNER, {'node_id': name})
         app.extensions['fleet']['services']['service_health'].register(OWNER, {
             'service_id': name + '-api', 'node_id': name, 'adapter': 'systemd',
             'target_alias': 'fixture.service', 'allowed_actions': ['inspect']})
     for _ in range(150):
-        state.save_snapshot('studio-mac', {'machine': 'studio-mac', 'source': 'ingest', 'ts': time.time(), 'timestamp': '2026-09-30T00:00:00Z',
+        hub.store.save_snapshot('studio-mac', {'machine': 'studio-mac', 'source': 'ingest', 'ts': time.time(), 'timestamp': '2026-09-30T00:00:00Z',
             'reachable': True, 'system': {'platform': 'Linux'}, 'agents': {}})
     SessionRepository(session_db).upsert_session({'session_id': 'browser-session',
         'machine_id': 'studio-mac', 'managed': False, 'capture_quality': 'best_effort'})
@@ -117,7 +118,7 @@ def test_console_in_real_browser(tmp_path):
         } for seq in range(1, 206)]
     for start in range(0, len(transcript_events), 100):
         session_service.ingest_events(transcript_events[start:start + 100])
-    task, _ = task_store.create_task(machine='studio-mac', agent_type='codex', project='demo',
+    task, _ = hub.tasks.create_task(machine='studio-mac', agent_type='codex', project='demo',
         instruction='浏览器验收任务', requested_by=OWNER, client_token='browser-task')
     repo.upsert_model(OWNER, {'profile_id': 'fixture', 'provider': 'deterministic', 'model': '本地验收模型'})
     repo.upsert_workspace(OWNER, {'workspace_id': 'workspace', 'name': '我的工作区', 'root_path': str(tmp_path / 'workspace')})

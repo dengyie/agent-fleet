@@ -197,20 +197,14 @@ class SelfReportContractTests(unittest.TestCase):
 
 class ReconciliationTests(unittest.TestCase):
     def test_reconcile_never_executes_subprocess(self):
-        from hub import events, scan, state
+        from hub import scan
+        from support.hub_env import HubStores
 
-        temp = Path(tempfile.mkdtemp())
-        old_state_dir = state.STATE_DIR
-        old_event_log = events.EVENT_LOG
-        state.STATE_DIR = temp
-        events.EVENT_LOG = temp / "events.jsonl"
-        try:
-            with mock.patch("subprocess.run", side_effect=AssertionError("no subprocess")):
-                result = scan.reconcile_ingest(now=0)
-            self.assertEqual(result, [])
-        finally:
-            state.STATE_DIR = old_state_dir
-            events.EVENT_LOG = old_event_log
+        hub = HubStores(Path(tempfile.mkdtemp()))
+        service = scan.build_reconciliation_service(hub.config())
+        with mock.patch("subprocess.run", side_effect=AssertionError("no subprocess")):
+            result = service.reconcile_observation(now=0)
+        self.assertEqual(result, [])
 
     def test_hub_production_mode_fails_closed_without_token(self):
         from hub import web

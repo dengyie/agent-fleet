@@ -255,14 +255,11 @@ class SessionSearchServiceTests(unittest.TestCase):
 
 class SessionSearchApiTests(unittest.TestCase):
     def setUp(self) -> None:
-        from hub import events, state, task_store
         from hub.bootstrap import create_app
         from hub.config import FleetConfig
 
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
-        self.previous = (events.EVENT_LOG, state.STATE_DIR, task_store.DB_PATH)
-        self.addCleanup(self.restore_globals)
         root = Path(self.tempdir.name)
         self.app = create_app(FleetConfig.from_root(
             root, ingest_token="ingest-test", dev_operator="operator@example.com",
@@ -270,10 +267,6 @@ class SessionSearchApiTests(unittest.TestCase):
             session_encryption_raw=b"k" * 32,
         ))
         self.client = self.app.test_client()
-
-    def restore_globals(self) -> None:
-        from hub import events, state, task_store
-        events.EVENT_LOG, state.STATE_DIR, task_store.DB_PATH = self.previous
 
     def ingest(self, text: str = "上线登录完成", seq: int = 1) -> dict:
         row = event(event_id=f"evt-{seq}", sequence=seq, text=text)

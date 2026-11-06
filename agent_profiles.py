@@ -38,6 +38,9 @@ class Profile:
     native_resume: bool = False
     resume_verifiable: bool = False
     resume_by_session_path: bool = False
+    # tools.session.probe keys families by CLI name; set only where that key
+    # differs from ``family`` (claude_code is probed as ``claude``).
+    probe_family: str | None = None
 
 
 PROFILES: dict[str, Profile] = {
@@ -50,7 +53,7 @@ PROFILES: dict[str, Profile] = {
         native_resume=True, resume_verifiable=True),
     "claude_code": Profile("claude_code", ("claude", "-p", "{instruction}"),
         basenames=("claude",),
-        native_resume=True, resume_verifiable=True),
+        native_resume=True, resume_verifiable=True, probe_family="claude"),
     "hermes": Profile("hermes", None, basenames=("hermes",)),
     "pi": Profile("pi", ("pi", "-p", "{instruction}"),
         basenames=("pi",),
@@ -80,6 +83,9 @@ RESUME_VERIFIABLE_AGENT_TYPES = tuple(
     k for k, p in PROFILES.items() if p.resume_verifiable)
 SESSION_PATH_RESUME_AGENT_TYPES = tuple(
     k for k, p in PROFILES.items() if p.resume_by_session_path)
+# RESUME_VERIFIABLE_AGENT_TYPES under tools.session.probe family keys.
+RESUME_VERIFIABLE_PROBE_FAMILIES = tuple(
+    p.probe_family or k for k, p in PROFILES.items() if p.resume_verifiable)
 
 
 def is_executable(agent_type: str) -> bool:
@@ -106,6 +112,7 @@ __all__ = [
     "PROFILES",
     "Profile",
     "RESUME_VERIFIABLE_AGENT_TYPES",
+    "RESUME_VERIFIABLE_PROBE_FAMILIES",
     "SESSION_PATH_RESUME_AGENT_TYPES",
     "default_command",
     "is_executable",
