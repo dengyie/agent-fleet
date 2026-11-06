@@ -8,14 +8,21 @@ import sqlite3
 import stat
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from hub.platform.artifact_lock import artifact_snapshot_barrier
 from hub.infrastructure.sqlite import connect as sqlite_connect
 
 CAPTURE_RETENTION_SECONDS = 30 * 24 * 60 * 60
 GC_BATCH_LIMIT = 128
-REFERENCE_LIMIT = 4096
+# JSON columns that can embed {"artifact_id": ...} references. Rows are only
+# parsed when they contain the literal key, which every writer emits verbatim.
+JSON_REFERENCE_SURFACES = {
+    "execution_window_events": "payload",
+    "run_events": "payload",
+    "platform_commands": "result",
+}
+_GC_OWN_TABLES = frozenset({"browser_artifact_tickets", "browser_capture_gc", "browser_capture_gc_done"})
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
@@ -25,17 +32,8 @@ class BrowserCaptureGcError(RuntimeError):
         super().__init__(code)
 
 
-def _artifact_ids(value: Any, out: set[str]) -> None:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if key == "artifact_id":
-                if not isinstance(child, str) or not child or len(child) > 128:
-                    raise BrowserCaptureGcError("capture_gc_reference_invalid")
-                out.add(child)
-            _artifact_ids(child, out)
-    elif isinstance(value, list):
-        for child in value:
-            _artifact_ids(child, out)
+def _quote(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
 
 
 class BrowserCaptureGcRepository:
@@ -55,6 +53,16 @@ class BrowserCaptureGcRepository:
         try:
             conn = self._connect()
             conn.execute("CREATE TABLE IF NOT EXISTS browser_capture_gc (artifact_id TEXT PRIMARY KEY, marked_at REAL NOT NULL)")
+            # Additive tombstones for captures whose files are already gone, so
+            # finished removals never re-enter (and starve) the candidate batch.
+            conn.execute("CREATE TABLE IF NOT EXISTS browser_capture_gc_done (artifact_id TEXT PRIMARY KEY, removed_at REAL NOT NULL)")
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_artifact_tickets'"
+            ).fetchone() is not None:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_browser_capture_gc_ticket_consumed "
+                    "ON browser_artifact_tickets(state, content_type, consumed_at)"
+                )
         except sqlite3.Error as exc:
             raise BrowserCaptureGcError("capture_gc_store") from exc
         finally:
@@ -80,7 +88,7 @@ class BrowserCaptureGcRepository:
         try:
             with artifact_snapshot_barrier(self.artifact_root):
                 self._mark_candidates(cutoff, timestamp, limit)
-                return self._finish_marked(cutoff, limit)
+                return self._finish_marked(cutoff, limit, timestamp)
         except BrowserCaptureGcError:
             raise
         except (OSError, sqlite3.Error) as exc:
@@ -89,26 +97,43 @@ class BrowserCaptureGcRepository:
     def _mark_candidates(self, cutoff: float, now: float, limit: int) -> None:
         conn = self._connect()
         try:
-            conn.execute("BEGIN IMMEDIATE")
-            references = self._collect_references(conn)
+            surfaces = self._reference_surfaces(conn)
             conn.execute(
-                "CREATE TEMP TABLE gc_references (artifact_id TEXT PRIMARY KEY) WITHOUT ROWID"
+                "CREATE TEMP TABLE gc_candidates (artifact_id TEXT PRIMARY KEY) WITHOUT ROWID"
             )
-            conn.executemany(
-                "INSERT INTO gc_references(artifact_id) VALUES(?)",
-                ((artifact_id,) for artifact_id in references),
-            )
-            rows = conn.execute(
-                "SELECT t.artifact_id,t.owner_id,t.workspace_id FROM browser_artifact_tickets t "
-                "LEFT JOIN browser_capture_gc g ON g.artifact_id=t.artifact_id "
-                "LEFT JOIN gc_references r ON r.artifact_id=t.artifact_id "
+            # Reference checks run against a read snapshot outside the write
+            # lock and only for eligible candidates; the authoritative recheck
+            # of the bounded marked set happens under BEGIN IMMEDIATE below.
+            conn.execute("BEGIN")
+            conn.execute(
+                "INSERT OR IGNORE INTO temp.gc_candidates(artifact_id) "
+                "SELECT t.artifact_id FROM browser_artifact_tickets t "
                 "WHERE t.state='consumed' AND t.content_type='image/png' "
                 "AND t.artifact_id IS NOT NULL AND t.consumed_at<=? "
-                "AND g.artifact_id IS NULL AND r.artifact_id IS NULL"
-                " ORDER BY t.consumed_at,t.artifact_id LIMIT ?",
-                (cutoff, limit),
-            ).fetchall()
+                "AND NOT EXISTS (SELECT 1 FROM browser_capture_gc g WHERE g.artifact_id=t.artifact_id) "
+                "AND NOT EXISTS (SELECT 1 FROM browser_capture_gc_done d WHERE d.artifact_id=t.artifact_id)",
+                (cutoff,),
+            )
+            referenced = self._referenced(conn, surfaces, "gc_candidates")
+            rows = conn.execute(
+                "SELECT t.artifact_id,t.owner_id,t.workspace_id FROM browser_artifact_tickets t "
+                "JOIN temp.gc_candidates c ON c.artifact_id=t.artifact_id "
+                "WHERE t.state='consumed' AND t.content_type='image/png' AND t.consumed_at<=? "
+                "ORDER BY t.consumed_at,t.artifact_id",
+                (cutoff,),
+            )
+            selected: list[sqlite3.Row] = []
+            seen: set[str] = set()
             for row in rows:
+                artifact_id = row["artifact_id"]
+                if artifact_id in referenced or artifact_id in seen:
+                    continue
+                seen.add(artifact_id)
+                selected.append(row)
+                if len(selected) >= limit:
+                    break
+            conn.execute("COMMIT")
+            for row in selected:
                 artifact_id = row["artifact_id"]
                 if not isinstance(artifact_id, str) or not artifact_id or len(artifact_id) > 128:
                     raise BrowserCaptureGcError("capture_gc_candidate_invalid")
@@ -116,10 +141,13 @@ class BrowserCaptureGcRepository:
                     artifact_id, cutoff, owner_id=row["owner_id"],
                     workspace_id=row["workspace_id"],
                 )
-                conn.execute(
-                    "INSERT OR IGNORE INTO browser_capture_gc(artifact_id,marked_at) VALUES(?,?)",
-                    (artifact_id, now),
-                )
+            if not selected:
+                return
+            conn.execute("BEGIN IMMEDIATE")
+            conn.executemany(
+                "INSERT OR IGNORE INTO browser_capture_gc(artifact_id,marked_at) VALUES(?,?)",
+                ((row["artifact_id"], now) for row in selected),
+            )
             conn.execute("COMMIT")
         except BrowserCaptureGcError:
             if conn.in_transaction:
@@ -135,16 +163,26 @@ class BrowserCaptureGcRepository:
         finally:
             conn.close()
 
-    def _finish_marked(self, cutoff: float, limit: int) -> int:
+    def _finish_marked(self, cutoff: float, limit: int, now: float) -> int:
         conn = self._connect()
         deleted = 0
         try:
+            conn.execute(
+                "CREATE TEMP TABLE gc_marked (artifact_id TEXT PRIMARY KEY) WITHOUT ROWID"
+            )
             conn.execute("BEGIN IMMEDIATE")
-            references = self._collect_references(conn)
-            rows = conn.execute(
-                "SELECT artifact_id FROM browser_capture_gc ORDER BY marked_at,artifact_id LIMIT ?",
+            surfaces = self._reference_surfaces(conn)
+            conn.execute(
+                "INSERT INTO temp.gc_marked(artifact_id) SELECT artifact_id FROM browser_capture_gc "
+                "ORDER BY marked_at,artifact_id LIMIT ?",
                 (limit,),
+            )
+            rows = conn.execute(
+                "SELECT g.artifact_id FROM browser_capture_gc g "
+                "JOIN temp.gc_marked m ON m.artifact_id=g.artifact_id "
+                "ORDER BY g.marked_at,g.artifact_id"
             ).fetchall()
+            references = self._referenced(conn, surfaces, "gc_marked") if rows else set()
             for row in rows:
                 artifact_id = row["artifact_id"]
                 artifact_path = self.artifact_root / artifact_id
@@ -152,6 +190,7 @@ class BrowserCaptureGcRepository:
                 if (not artifact_path.exists() and not artifact_path.is_symlink()
                         and not quarantine_path.exists() and not quarantine_path.is_symlink()):
                     conn.execute("DELETE FROM browser_capture_gc WHERE artifact_id=?", (artifact_id,))
+                    self._record_done(conn, artifact_id, now)
                     continue
                 ticket = conn.execute(
                     "SELECT consumed_at,owner_id,workspace_id FROM browser_artifact_tickets WHERE artifact_id=? AND state='consumed' AND content_type='image/png' LIMIT 1",
@@ -169,6 +208,7 @@ class BrowserCaptureGcRepository:
                 )
                 self._quarantine_and_remove(artifact_id)
                 conn.execute("DELETE FROM browser_capture_gc WHERE artifact_id=?", (artifact_id,))
+                self._record_done(conn, artifact_id, now)
                 deleted += 1
             conn.execute("COMMIT")
             return deleted
@@ -186,65 +226,75 @@ class BrowserCaptureGcRepository:
         finally:
             conn.close()
 
-    def _collect_references(self, conn: sqlite3.Connection) -> set[str]:
-        references: set[str] = set()
-        scanned_rows = 0
+    @staticmethod
+    def _record_done(conn: sqlite3.Connection, artifact_id: str, now: float) -> None:
+        conn.execute(
+            "INSERT OR REPLACE INTO browser_capture_gc_done(artifact_id,removed_at) VALUES(?,?)",
+            (artifact_id, now),
+        )
+
+    def _reference_surfaces(self, conn: sqlite3.Connection) -> tuple[list[str], list[tuple[str, str]]]:
+        """Return (direct artifact_id tables, JSON surfaces) after fail-closed checks."""
         tables = [row["name"] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()]
-        if len(tables) > REFERENCE_LIMIT:
-            raise BrowserCaptureGcError("capture_gc_reference_surface_unknown")
         if not {"run_events", "platform_commands"} <= set(tables):
             raise BrowserCaptureGcError("capture_gc_reference_surface_unknown")
-        json_surfaces = {
-            "execution_window_events": "payload",
-            "run_events": "payload",
-            "platform_commands": "result",
-        }
+        direct: list[str] = []
+        json_surfaces: list[tuple[str, str]] = []
         for table in tables:
-            quoted_table = '"' + table.replace('"', '""') + '"'
+            quoted_table = _quote(table)
             columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({quoted_table})")}
-            if "artifact_id" not in columns or table in {"browser_artifact_tickets", "browser_capture_gc"}:
-                direct_rows = []
-            else:
-                direct_rows = conn.execute(
-                    f"SELECT artifact_id FROM {quoted_table} WHERE artifact_id IS NOT NULL LIMIT ?",
-                    (REFERENCE_LIMIT - scanned_rows + 1,),
-                ).fetchall()
-                scanned_rows += len(direct_rows)
-                if scanned_rows > REFERENCE_LIMIT:
-                    raise BrowserCaptureGcError("capture_gc_reference_limit")
-                for row in direct_rows:
-                    value = row["artifact_id"]
-                    if not isinstance(value, str) or not value or len(value) > 128:
-                        raise BrowserCaptureGcError("capture_gc_reference_malformed")
-                    references.add(value)
-                    if len(references) > REFERENCE_LIMIT:
-                        raise BrowserCaptureGcError("capture_gc_reference_limit")
-
-            column = json_surfaces.get(table)
+            if "artifact_id" in columns and table not in _GC_OWN_TABLES:
+                direct.append(table)
+            column = JSON_REFERENCE_SURFACES.get(table)
             if column is None:
                 continue
             if column not in columns:
                 raise BrowserCaptureGcError("capture_gc_reference_surface_unknown")
-            rows = conn.execute(
-                f"SELECT {column} FROM {quoted_table} WHERE {column} IS NOT NULL LIMIT ?",
-                (REFERENCE_LIMIT - scanned_rows + 1,),
-            ).fetchall()
-            scanned_rows += len(rows)
-            if scanned_rows > REFERENCE_LIMIT:
-                raise BrowserCaptureGcError("capture_gc_reference_limit")
-            for row in rows:
-                try:
-                    payload = json.loads(row[column])
-                except (TypeError, ValueError) as exc:
+            json_surfaces.append((table, column))
+        return direct, json_surfaces
+
+    @staticmethod
+    def _referenced(conn: sqlite3.Connection,
+                    surfaces: tuple[list[str], list[tuple[str, str]]],
+                    id_table: str) -> set[str]:
+        """Return which ids in ``temp.<id_table>`` are referenced anywhere.
+
+        Work is driven by the id set: direct columns use ``artifact_id IN``
+        lookups, and JSON surfaces are streamed in SQLite so that only rows
+        containing an ``"artifact_id"`` key are parsed and only matches for the
+        given ids are materialized. No history-sized result reaches Python.
+        """
+        direct, json_surfaces = surfaces
+        quoted_ids = f"temp.{_quote(id_table)}"
+        referenced: set[str] = set()
+        for table in direct:
+            for row in conn.execute(
+                f"SELECT DISTINCT artifact_id FROM {_quote(table)} "
+                f"WHERE artifact_id IN (SELECT artifact_id FROM {quoted_ids})"
+            ):
+                referenced.add(row["artifact_id"])
+        for table, column in json_surfaces:
+            quoted_column = _quote(column)
+            try:
+                for row in conn.execute(
+                    f"SELECT j.type AS type, j.value AS value FROM {_quote(table)} e, "
+                    f"json_tree(e.{quoted_column}) j "
+                    f"WHERE e.{quoted_column} IS NOT NULL "
+                    f"AND instr(e.{quoted_column}, '\"artifact_id\"')>0 "
+                    "AND j.key='artifact_id' "
+                    f"AND (j.type!='text' OR j.value IN (SELECT artifact_id FROM {quoted_ids}))"
+                ):
+                    value = row["value"]
+                    if row["type"] != "text" or not value or len(value) > 128:
+                        raise BrowserCaptureGcError("capture_gc_reference_invalid")
+                    referenced.add(value)
+            except sqlite3.OperationalError as exc:
+                if "malformed JSON" in str(exc):
                     raise BrowserCaptureGcError("capture_gc_reference_malformed") from exc
-                if not isinstance(payload, dict):
-                    raise BrowserCaptureGcError("capture_gc_reference_malformed")
-                _artifact_ids(payload, references)
-                if len(references) > REFERENCE_LIMIT:
-                    raise BrowserCaptureGcError("capture_gc_reference_limit")
-        return references
+                raise
+        return referenced
 
     def _validate_capture(self, artifact_id: str, cutoff: float, *,
                           owner_id: str, workspace_id: str) -> None:

@@ -104,6 +104,7 @@ _PLATFORM_BROWSER_ENABLE_ENV = "AGENT_FLEET_PLATFORM_BROWSER_ENABLED"
 _PLATFORM_BROWSER_NETWORK_ENABLE_ENV = "AGENT_FLEET_PLATFORM_BROWSER_NETWORK_ENABLED"
 _PLATFORM_BROWSER_SUBMIT_ENABLE_ENV = "AGENT_FLEET_PLATFORM_BROWSER_SUBMIT_ENABLED"
 _PLATFORM_BROWSER_ORIGINS_ENV = "AGENT_FLEET_PLATFORM_BROWSER_ALLOWED_ORIGINS"
+_HISTORY_RETENTION_DAYS_ENV = "AGENT_FLEET_HISTORY_RETENTION_DAYS"
 
 #: Optional per-release gate file, ``<FLEET_HOME>/fleet-gates.conf``, with
 #: ``AGENT_FLEET_*_ENABLED=1`` lines.  It is ONLY consulted when the matching
@@ -219,6 +220,7 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
              platform_browser_allowed_origins=None, platform_browser_submit_enabled=None,
              platform_memory_enabled=None,
              platform_memory_context_enabled=None,
+             history_retention_days=None,
              state_dir=None, event_log=None, task_db=None, publisher=None):
     """Compatibility wrapper around ``hub.bootstrap.create_app``.
 
@@ -342,6 +344,9 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
     platform_memory_context_on = _feature_on(
         platform_memory_context_enabled,
         env=_PLATFORM_MEMORY_CONTEXT_ENABLE_ENV)
+    history_retention = _bounded_float(
+        _optional_setting(history_retention_days, env=_HISTORY_RETENTION_DAYS_ENV),
+        default=90.0, lower=7.0, upper=3650.0)
     # Adoption audits to the session transcript store. ``from_root`` only
     # derives that path when the session gate is on; ``create_app`` then
     # raises if adoption is on without it. Do not auto-enable session
@@ -403,6 +408,7 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         platform_browser_submit_enabled=platform_browser_submit_on,
         platform_memory_enabled=platform_memory_on,
         platform_memory_context_enabled=platform_memory_context_on,
+        history_retention_days=history_retention,
     )
     # 门控只经 FleetConfig 传入；create_app 写入的是"实际生效"的门控（例如
     # 依赖未接线时降级为 False），这里绝不回写请求值覆盖它。

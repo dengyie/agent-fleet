@@ -14,7 +14,8 @@ import time
 import uuid
 from pathlib import Path
 from hub.domain.task import (
-    TASK_STATES, can_cancel, can_continue, can_pause, can_retry, holds_lease,
+    LEASE_HOLDING_STATES, TASK_STATES, can_cancel, can_continue, can_pause, can_retry,
+    holds_lease,
 )
 from hub.infrastructure.sqlite import connect as sqlite_connect
 from fleet_core.task_result import (
@@ -38,6 +39,7 @@ def _sql_in(states) -> str:
 
 
 _TASK_STATES_SQL = _sql_in(TASK_STATES)
+_LEASE_HOLDING_STATES_SQL = _sql_in(LEASE_HOLDING_STATES)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -259,6 +261,18 @@ class SqliteTaskRepository:
                 raise sqlite3.IntegrityError("task schema migration violates foreign keys")
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_attempt ON tasks(attempt_id)")
+        # 附加式索引（回滚安全）：lease_task 按机器取最早 queued；expire_* 与保留
+        # 任务按 state+expires_at 定位；保留清理按 task_id/ts 删除子表与审计。
+        for ddl in (
+            "CREATE INDEX IF NOT EXISTS idx_tasks_machine_state_created"
+            " ON tasks(machine, state, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_tasks_state_expires ON tasks(state, expires_at)",
+            "CREATE INDEX IF NOT EXISTS idx_results_task ON results(task_id, finished_at)",
+            "CREATE INDEX IF NOT EXISTS idx_handoff_receipts_task ON handoff_receipts(task_id)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_task ON audit(task_id, ts)",
+        ):
+            conn.execute(ddl)
 
     def create_task(self, *, machine, agent_type, project, instruction, requested_by,
                     client_token=None, ttl_s=TASK_TTL_S, now=None, confirm=False,
@@ -414,7 +428,9 @@ class SqliteTaskRepository:
                 row = conn.execute(
                     "SELECT t.* FROM tasks t"
                     " LEFT JOIN task_gates g ON g.task_id=t.task_id"
-                    " WHERE t.machine=? AND t.state='queued' AND t.expires_at>?"
+                    # ``+`` keeps expires_at off the index choice so the planner seeks
+                    # idx_tasks_machine_state_created (machine, state) in created_at order.
+                    " WHERE t.machine=? AND t.state='queued' AND +t.expires_at>?"
                     " AND (g.task_id IS NULL OR g.state='confirmed')"
                     " ORDER BY t.created_at LIMIT 1", (machine, now_iso)).fetchone()
                 if row is None:
@@ -615,16 +631,19 @@ class SqliteTaskRepository:
         conn = self._connect()
         try:
             with _tx(conn):
-                rows = conn.execute("SELECT * FROM leases WHERE expires_at<=?",
-                                    (now_iso,)).fetchall()
+                # 从活跃任务出发（idx_tasks_state_expires 定位 leased/running），按
+                # attempt_id 主键探测其当前 lease：历史 lease 行不再被逐行扫描。
+                # 仅处理「当前 attempt」：lease 的 attempt_id 必须仍是任务的最新
+                # attempt_id，否则说明该 lease 已被重派/完成取代，不能把新运行打回 queued。
+                rows = conn.execute(
+                    "SELECT l.task_id, l.attempt_id, t.state FROM tasks t"
+                    " JOIN leases l ON l.attempt_id=t.attempt_id AND l.task_id=t.task_id"
+                    f" WHERE t.state IN {_LEASE_HOLDING_STATES_SQL} AND l.expires_at<=?"
+                    " ORDER BY l.expires_at, l.task_id",
+                    (now_iso,)).fetchall()
                 requeued = []
                 for lease in rows:
-                    # 仅处理「当前 attempt」：过期 lease 的 attempt_id 必须仍是任务的最新
-                    # attempt_id，否则说明该 lease 已被重派/完成取代，不能把新运行打回 queued。
-                    task = conn.execute(
-                        "SELECT state FROM tasks WHERE task_id=? AND attempt_id=?",
-                        (lease["task_id"], lease["attempt_id"])).fetchone()
-                    if task and holds_lease(task["state"]):
+                    if holds_lease(lease["state"]):
                         conn.execute("UPDATE tasks SET state='queued' WHERE task_id=?",
                                      (lease["task_id"],))
                         _audit(conn, "hub", "lease_expired", lease["task_id"],

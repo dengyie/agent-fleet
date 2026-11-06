@@ -290,3 +290,44 @@ def test_artifact_backup_barrier_excludes_separate_process_publication(tmp_path)
         if child.is_alive():
             child.terminate()
             child.join(5)
+
+
+def test_backup_skips_dot_prefixed_staging_quarantine_and_host_entries(tmp_path):
+    db_path, artifact_root, artifact = _source_pair(tmp_path)
+    quarantine = artifact_root / ".gc-leftover"
+    quarantine.mkdir()
+    (quarantine / "content").write_bytes(b"partial")
+    staging = artifact_root / f".{artifact['artifact_id']}.tmp1234"
+    staging.mkdir()
+    (staging / "content").write_bytes(b"half written")
+    (artifact_root / ".DS_Store").write_bytes(b"")
+    (artifact_root / ".dangling").symlink_to(tmp_path / "missing")
+
+    summary = PlatformBackupService().create_backup(db_path, artifact_root, tmp_path / "backup")
+
+    assert summary["artifact_count"] == 1
+    assert sorted(p.name for p in (tmp_path / "backup" / "artifacts").iterdir()) == [
+        artifact["artifact_id"]
+    ]
+    assert PlatformBackupService().restore_backup(tmp_path / "backup", tmp_path / "restored")[
+        "artifact_count"
+    ] == 1
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "symlink"])
+def test_backup_still_fails_closed_on_unsafe_non_dot_entries(tmp_path, kind):
+    # Non-dot names share the artifact id namespace. Skipping them could drop
+    # a damaged real artifact from the backup, so they keep failing hard.
+    db_path, artifact_root, _artifact = _source_pair(tmp_path)
+    stray = artifact_root / "stray"
+    if kind == "file":
+        stray.write_bytes(b"")
+    elif kind == "directory":
+        stray.mkdir()
+        (stray / "content").write_bytes(b"x")
+    else:
+        stray.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(BackupError) as exc:
+        PlatformBackupService().create_backup(db_path, artifact_root, tmp_path / "backup")
+    assert exc.value.code in {"unsafe_path", "invalid_artifact_path"}
+    assert not (tmp_path / "backup").exists()

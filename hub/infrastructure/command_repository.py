@@ -95,6 +95,14 @@ class CommandRepository:
                 "CREATE INDEX IF NOT EXISTS idx_platform_commands_owner_run "
                 "ON platform_commands(owner_id,run_id)"
             )
+            # Retention deletes child rows by command_id (and FK checks on a
+            # parent delete probe them); the PKs lead with owner_id/other keys.
+            for table, index in (
+                ("platform_command_reconciliations", "idx_platform_reconcile_command"),
+                ("platform_command_postchecks", "idx_platform_postcheck_command"),
+                ("platform_service_postchecks", "idx_platform_service_postcheck_command"),
+            ):
+                conn.execute(f"CREATE INDEX IF NOT EXISTS {index} ON {table}(command_id)")
             # Early M1 databases may contain commands written before the
             # transactional outbox existed. Backfill only the bounded routing
             # event; the command row remains the source of truth.

@@ -173,6 +173,8 @@ class ExecutionWindowRepository:
               ON execution_windows(owner_id, updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_execution_windows_run
               ON execution_windows(owner_id, run_id, window_id);
+            CREATE INDEX IF NOT EXISTS idx_execution_windows_state_updated
+              ON execution_windows(state, updated_at);
             CREATE TABLE IF NOT EXISTS execution_window_tickets (
               ticket_id TEXT PRIMARY KEY, window_id TEXT NOT NULL, owner_id TEXT NOT NULL,
               token_hash TEXT NOT NULL UNIQUE, expires_at REAL NOT NULL,
@@ -210,6 +212,8 @@ class ExecutionWindowRepository:
             );
             CREATE INDEX IF NOT EXISTS idx_execution_window_frames_artifact
               ON execution_window_frames(owner_id, window_id, artifact_id);
+            CREATE INDEX IF NOT EXISTS idx_execution_window_frames_artifact_id
+              ON execution_window_frames(artifact_id);
             CREATE TABLE IF NOT EXISTS execution_window_frame_reads (
               window_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
               last_read_at REAL NOT NULL,

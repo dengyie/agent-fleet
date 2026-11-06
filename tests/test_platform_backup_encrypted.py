@@ -243,3 +243,25 @@ def test_retention_rejects_unbounded_policy_values(tmp_path):
     with pytest.raises(BackupError) as age:
         BackupRetentionPolicy(keep_last=1, max_age_s=-1, max_total_bytes=None)
     assert age.value.code == "invalid_retention_policy"
+
+
+def test_encrypted_restore_invalid_tag_branch_removes_publish_stage(tmp_path, monkeypatch):
+    from cryptography.exceptions import InvalidTag
+
+    import hub.infrastructure.platform_backup as platform_backup
+
+    db_path, artifact_root, _artifact = _source_pair(tmp_path)
+    service = PlatformBackupService()
+    encrypted = tmp_path / "encrypted-backup"
+    service.create_encrypted_backup(db_path, artifact_root, encrypted, KEY_V1, "key-v1")
+    restore_parent = tmp_path / "restore-parent"
+    restore_parent.mkdir()
+
+    def _raise_invalid_tag(*_args, **_kwargs):
+        raise InvalidTag()
+
+    monkeypatch.setattr(platform_backup, "_decrypt_to_plain", _raise_invalid_tag)
+    with pytest.raises(BackupError) as failed:
+        service.restore_encrypted_backup(encrypted, restore_parent / "restored", KEY_V1)
+    assert failed.value.code == "encryption_invalid"
+    assert list(restore_parent.iterdir()) == []

@@ -217,6 +217,12 @@ class TranscriptRepository:
                     ON policy_signals(session_id);
                 CREATE INDEX IF NOT EXISTS idx_policy_session_time
                     ON policy_signals(session_id, emitted_at);
+                CREATE INDEX IF NOT EXISTS idx_redacted_session_emitted
+                    ON redacted_events(session_id, emitted_at);
+                CREATE INDEX IF NOT EXISTS idx_transcript_audit_ts
+                    ON audit(ts);
+                CREATE INDEX IF NOT EXISTS idx_policy_emitted
+                    ON policy_signals(emitted_at);
                 """
             )
             # Enforce the stream ordering identity when legacy data is clean.
@@ -834,7 +840,9 @@ class TranscriptRepository:
         """Delete raw rows past ``retention_until``; never redacted rows.
 
         Removes at most ``limit`` rows in one atomic batch. Returns the removed
-        event ids and audits each deletion with the batch count, no content.
+        event ids and writes ONE aggregate audit row per batch: ``target`` is
+        the ``retention_until`` range covered, ``detail`` the removed count; no
+        event ids or content.
         """
         if type(limit) is not int or not 1 <= limit <= MAX_RAW_PURGE_BATCH_SIZE:
             raise TranscriptError("invalid_purge_limit")
@@ -844,7 +852,7 @@ class TranscriptRepository:
             conn = self._connect()
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
-                "SELECT session_id, event_id FROM raw_events"
+                "SELECT session_id, event_id, retention_until FROM raw_events"
                 " WHERE retention_until <= ?"
                 " ORDER BY retention_until ASC, rowid ASC LIMIT ?",
                 (now, limit)).fetchall()
@@ -856,9 +864,11 @@ class TranscriptRepository:
                         "DELETE FROM raw_events WHERE session_id=? AND event_id=?"
                         " AND retention_until <= ?",
                         (row["session_id"], row["event_id"], now))
-                    self._append_audit(
-                        conn, ts, "retention", _AUDIT_RAW_PURGE,
-                        target=row["event_id"], detail=str(len(removed_ids)))
+                # Rows are ordered by retention_until, so first/last bound the batch.
+                self._append_audit(
+                    conn, ts, "retention", _AUDIT_RAW_PURGE,
+                    target=f"{rows[0]['retention_until']}..{rows[-1]['retention_until']}",
+                    detail=str(len(removed_ids)))
             conn.commit()
             return removed_ids
         except Exception as exc:

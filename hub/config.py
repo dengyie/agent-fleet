@@ -130,6 +130,9 @@ class FleetConfig:
     # Memory context injection is a second, independent default-off gate. CRUD
     # access never implies that a model Run may receive MemoryItems.
     platform_memory_context_enabled: bool = False
+    # Retention horizon (days) for operational history: finished tasks and
+    # their audit, execution windows, transcript audit and policy signals.
+    history_retention_days: float = 90.0
     extra: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
@@ -205,6 +208,7 @@ class FleetConfig:
         platform_usage_limits_enabled: bool = False,
         platform_memory_enabled: bool = False,
         platform_memory_context_enabled: bool = False,
+        history_retention_days: float = 90.0,
         **extra: Any,
     ) -> "FleetConfig":
         root = Path(root).expanduser()
@@ -309,6 +313,13 @@ class FleetConfig:
                 1, min(64, int(platform_worker_max_workspace_concurrency)))
         except (TypeError, ValueError):
             worker_max_workspace_concurrency = 1
+        try:
+            history_days = float(90.0 if history_retention_days is None else history_retention_days)
+        except (TypeError, ValueError):
+            history_days = 90.0
+        if not math.isfinite(history_days):
+            history_days = 90.0
+        history_days = max(7.0, min(3650.0, history_days))
         if (not isinstance(platform_sandbox_launcher, (tuple, list))
                 or any(not isinstance(arg, str) or not arg or len(arg) > 4096 or "\x00" in arg
                        for arg in platform_sandbox_launcher)):
@@ -414,5 +425,6 @@ class FleetConfig:
             platform_memory_context_enabled=bool(
                 platform_memory_context_enabled and platform_enabled
                 and platform_memory_enabled),
+            history_retention_days=history_days,
             extra=dict(extra),
         )

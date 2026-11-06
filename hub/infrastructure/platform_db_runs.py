@@ -148,7 +148,10 @@ class PlatformRunMixin:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT r.* FROM runs r JOIN messages trigger ON trigger.message_id=r.trigger_message_id "
-                "WHERE r.owner_id=? AND ((r.state='queued' AND"
+                # The redundant state IN (...) lets the planner seek
+                # idx_runs_owner_state_created instead of scanning the owner's runs.
+                "WHERE r.owner_id=? AND r.state IN ('queued','cancelling','running')"
+                " AND ((r.state='queued' AND"
                 " (r.lease_id IS NULL OR r.lease_expires_at IS NULL OR r.lease_expires_at<=?)) OR"
                 " (r.state='cancelling' AND (r.lease_expires_at IS NULL OR r.lease_expires_at<=?)) OR"
                 " (r.state='running' AND r.lease_expires_at IS NOT NULL AND r.lease_expires_at<=?))"
