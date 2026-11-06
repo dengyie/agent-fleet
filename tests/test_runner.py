@@ -1197,62 +1197,55 @@ class EndToEndRunnerTests(unittest.TestCase):
 
     def test_hub_runner_full_cycle(self):
         from werkzeug.serving import make_server
-        from hub import web, events, state as store, task_store
+        from support.hub_env import HubStores
 
         temp = Path(tempfile.mkdtemp())
-        old = (store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH)
-        store.STATE_DIR = temp
-        events.EVENT_LOG = temp / "events.jsonl"
-        task_store.DB_PATH = temp / "fleet.db"
-        task_store.init_db()
-        try:
-            store.save_snapshot("mac-local", {"machine": "mac-local", "source": "ingest",
+        hub = HubStores(temp)
+        hub.store.save_snapshot("mac-local", {"machine": "mac-local", "source": "ingest",
                                               "reachable": True, "agents": {}, "system": {}})
-            app = web.make_app(
-                ingest_token="it", dev_operator="op@example.com",
-                runner_credentials={"mac-local": "rs"},
-                project_whitelist={"mac-local": ["proj"]})
-            server = make_server("127.0.0.1", 0, app)
-            port = server.server_address[1]
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            try:
-                # operator 建任务
-                import urllib.request as ur
-                req = ur.Request(f"http://127.0.0.1:{port}/api/tasks",
-                                 data=json.dumps({"machine": "mac-local",
-                                                  "agent_type": "codex", "project": "proj",
-                                                  "instruction": "写个文件"}).encode(),
-                                 headers={"Content-Type": "application/json",
-                                          "Cf-Access-Authenticated-User-Email": "op@e.com"},
-                                 method="POST")
-                created = json.loads(ur.urlopen(req, timeout=10).read())
-                task_id = created["task"]["task_id"]
+        app = hub.make_app(
+            ingest_token="it", dev_operator="op@example.com",
+            runner_credentials={"mac-local": "rs"},
+            project_whitelist={"mac-local": ["proj"]})
+        server = make_server("127.0.0.1", 0, app)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            # operator 建任务
+            import urllib.request as ur
+            req = ur.Request(f"http://127.0.0.1:{port}/api/tasks",
+                             data=json.dumps({"machine": "mac-local",
+                                              "agent_type": "codex", "project": "proj",
+                                              "instruction": "写个文件"}).encode(),
+                             headers={"Content-Type": "application/json",
+                                      "Cf-Access-Authenticated-User-Email": "op@e.com"},
+                             method="POST")
+            created = json.loads(ur.urlopen(req, timeout=10).read())
+            task_id = created["task"]["task_id"]
 
-                # runner 单轮（假 codex 命令：真实子进程写文件到 worktree）
-                runner = load_agent_runner()
-                project = temp / "proj"
-                project.mkdir()
-                subprocess.run(["git", "init"], cwd=project, capture_output=True)
-                subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
-                                "commit", "--allow-empty", "-m", "init"],
-                               cwd=project, capture_output=True)
-                cfg = runner_config.RunnerConfig(
-                    hub=f"http://127.0.0.1:{port}", machine="mac-local",
-                    credential="rs", runner_id="r1", projects={"proj": project},
-                    agents={"codex": {"command": [
-                        sys.executable, "-c",
-                        "import pathlib; pathlib.Path('out.txt').write_text('hi');"
-                        " print('wrote out.txt')"], "timeout_s": 30}},
-                    poll_interval_s=1, heartbeat_interval_s=1,
-                    cache_dir=temp / "cache")
-                self.assertTrue(runner.poll_once(cfg))
+            # runner 单轮（假 codex 命令：真实子进程写文件到 worktree）
+            runner = load_agent_runner()
+            project = temp / "proj"
+            project.mkdir()
+            subprocess.run(["git", "init"], cwd=project, capture_output=True)
+            subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                            "commit", "--allow-empty", "-m", "init"],
+                           cwd=project, capture_output=True)
+            cfg = runner_config.RunnerConfig(
+                hub=f"http://127.0.0.1:{port}", machine="mac-local",
+                credential="rs", runner_id="r1", projects={"proj": project},
+                agents={"codex": {"command": [
+                    sys.executable, "-c",
+                    "import pathlib; pathlib.Path('out.txt').write_text('hi');"
+                    " print('wrote out.txt')"], "timeout_s": 30}},
+                poll_interval_s=1, heartbeat_interval_s=1,
+                cache_dir=temp / "cache")
+            self.assertTrue(runner.poll_once(cfg))
 
-                task = task_store.get_task(task_id)
-                self.assertEqual(task["state"], "succeeded")
-                self.assertIn("wrote out.txt", task["result"]["log_summary"])
-                self.assertIn("out.txt", task["result"]["diff_stat"])
-            finally:
-                server.shutdown()
+            task = hub.tasks.get_task(task_id)
+            self.assertEqual(task["state"], "succeeded")
+            self.assertIn("wrote out.txt", task["result"]["log_summary"])
+            self.assertIn("out.txt", task["result"]["diff_stat"])
         finally:
-            store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH = old
+            server.shutdown()

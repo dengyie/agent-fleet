@@ -12,29 +12,21 @@ from pathlib import Path
 
 from flask import Flask, g, jsonify
 
+from support.hub_env import HubStores
+
 from hub import auth
-from hub import events
-from hub import state as store
-from hub import task_store
 
 
 class TaskApiTestBase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
-        self.old_state_dir = store.STATE_DIR
-        self.old_event_log = events.EVENT_LOG
-        self.old_db = task_store.DB_PATH
-        store.STATE_DIR = self.temp_dir
-        events.EVENT_LOG = self.temp_dir / "events.jsonl"
-        task_store.DB_PATH = self.temp_dir / "fleet.db"
-        task_store.init_db()
+        self.hub = HubStores(self.temp_dir)
         # 让 mac-local 在线
-        store.save_snapshot("mac-local", {
+        self.hub.store.save_snapshot("mac-local", {
             "machine": "mac-local", "source": "ingest", "reachable": True,
             "agents": {}, "system": {},
         })
-        from hub import web
-        self.app = web.make_app(
+        self.app = self.hub.make_app(
             ingest_token="ingest-secret",
             dev_operator="op@example.com",
             runner_credentials={"mac-local": "runner-secret"},
@@ -42,10 +34,8 @@ class TaskApiTestBase(unittest.TestCase):
         )
         self.client = self.app.test_client()
 
-    def tearDown(self):
-        store.STATE_DIR = self.old_state_dir
-        events.EVENT_LOG = self.old_event_log
-        task_store.DB_PATH = self.old_db
+    def read_recent_events(self, limit=50):
+        return self.app.extensions["fleet"]["publisher"].read_recent(limit)
 
 
 class AuthIsolationTests(TaskApiTestBase):
@@ -95,25 +85,15 @@ class TaskStoreDegradationTests(unittest.TestCase):
 
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
-        self.old_state_dir = store.STATE_DIR
-        self.old_event_log = events.EVENT_LOG
-        self.old_db = task_store.DB_PATH
-        store.STATE_DIR = self.temp_dir
-        events.EVENT_LOG = self.temp_dir / "events.jsonl"
-        task_store.DB_PATH = self.temp_dir / "fleet.db"
-
-    def tearDown(self):
-        store.STATE_DIR = self.old_state_dir
-        events.EVENT_LOG = self.old_event_log
-        task_store.DB_PATH = self.old_db
+        self.hub = HubStores(self.temp_dir, init_tasks=False)
 
     def test_task_api_503_and_observe_still_works(self):
         from hub import web
         # 记录仓库真实 DB 指纹：本测试不得触碰 state/fleet.db（缺失时视为不存在）
-        repo_db = store.FLEET_HOME / "state" / "fleet.db"
+        repo_db = web.FLEET_HOME / "state" / "fleet.db"
         before = (repo_db.exists(), repo_db.stat().st_mtime_ns, repo_db.stat().st_size) \
             if repo_db.exists() else (False, None, None)
-        app = web.make_app(ingest_token="secret", dev_operator="op@example.com")
+        app = self.hub.make_app(ingest_token="secret", dev_operator="op@example.com")
         client = app.test_client()
         # init_db 只在临时路径落库，仓库 state/fleet.db 不受影响
         self.assertTrue((self.temp_dir / "fleet.db").exists())
@@ -261,7 +241,7 @@ class TaskCrudApiTests(TaskApiTestBase):
         self.assertFalse(repeated_data["changed"])
         self.assertEqual(repeated_data["task"], first_data["task"])
         emit.assert_called_once_with("task_paused", "mac-local", tid, "paused")
-        conn = task_store._connect()
+        conn = self.hub.tasks._connect()
         try:
             pauses = conn.execute(
                 "SELECT COUNT(*) FROM audit WHERE task_id=? AND action='pause_task'", (tid,),
@@ -333,7 +313,7 @@ class TaskCrudApiTests(TaskApiTestBase):
     def test_detail_includes_result_when_available(self):
         tid = self._create().get_json()["task"]["task_id"]
         # 直接写一条结果，模拟 runner 已完成（不经完整 lease 流）
-        conn = task_store._connect()
+        conn = self.hub.tasks._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
@@ -418,7 +398,7 @@ class CommandFlowApiTests(TaskApiTestBase):
         task = self._create_task()
         leased = self.client.post("/api/commands/poll", json={},
                                   headers=self.RUNNER).get_json()["task"]
-        task_store.expire_leases(now=__import__("time").time() + 301)
+        self.hub.tasks.expire_leases(now=__import__("time").time() + 301)
         resp = self.client.post(f"/api/commands/{leased['attempt_id']}/heartbeat",
                                 json={"nonce": leased["nonce"]}, headers=self.RUNNER)
         self.assertEqual(resp.status_code, 409)
@@ -476,7 +456,7 @@ class CommandFlowApiTests(TaskApiTestBase):
             json={"nonce": leased["nonce"], "log_lines": lines}, headers=self.RUNNER)
         self.assertEqual(resp.status_code, 200)
         # cap 50 条、每条截断 500：最后一条是第 50 条且长度 500
-        recent = events.read_recent(99999)
+        recent = self.read_recent_events(99999)
         logs = [e for e in recent if e["event"] == "task_log"]
         self.assertLessEqual(len(logs), 50)
         self.assertEqual(len(logs[0]["extra"]["line"]), 500)
@@ -560,7 +540,7 @@ class LeaseReconcilerTests(TaskApiTestBase):
                                   headers={"X-Runner-Credential": "mac-local:runner-secret"}
                                   ).get_json()["task"]
         # 人为过期
-        conn = task_store._connect()
+        conn = self.hub.tasks._connect()
         conn.execute("UPDATE leases SET expires_at=? WHERE attempt_id=?",
                      ("2000-01-01T00:00:00Z", leased["attempt_id"]))
         conn.close()
@@ -570,13 +550,13 @@ class LeaseReconcilerTests(TaskApiTestBase):
         task = self.client.get(f"/api/tasks/{leased['task_id']}").get_json()["task"]
         self.assertEqual(task["state"], "queued")
         # 审计可查
-        conn = task_store._connect()
+        conn = self.hub.tasks._connect()
         actions = [r[0] for r in conn.execute(
             "SELECT action FROM audit WHERE task_id=?", (leased["task_id"],)).fetchall()]
         conn.close()
         self.assertIn("lease_expired", actions)
-        # 回归: 每个被重派任务恰好 emit 一次 task_update(事件写入了已 patch 的临时 EVENT_LOG)
-        updates = [e for e in events.read_recent()
+        # 回归: 每个被重派任务恰好 emit 一次 task_update(事件写入了临时 event_log)
+        updates = [e for e in self.read_recent_events()
                    if e.get("event") == "task_update"
                    and e.get("extra", {}).get("task_id") == leased["task_id"]]
         self.assertEqual(len(updates), 1)
@@ -588,8 +568,7 @@ class LeaseReconcilerTests(TaskApiTestBase):
 class LifecycleIsolationTests(TaskApiTestBase):
     def test_make_app_does_not_spawn_lifecycle_daemon_threads(self):
         import threading
-        from hub import web
-        web.make_app(
+        self.hub.make_app(
             ingest_token="ingest-secret",
             dev_operator="op@example.com",
             runner_credentials={"mac-local": "runner-secret"},
@@ -748,12 +727,7 @@ def make_app_with_failing_event_repository():
 
 def _app_with_repo(repositories, **extra):
     temp_dir = Path(tempfile.mkdtemp())
-    old_state = store.STATE_DIR
-    old_events = events.EVENT_LOG
-    old_db = task_store.DB_PATH
-    store.STATE_DIR = temp_dir
-    events.EVENT_LOG = temp_dir / "events.jsonl"
-    task_store.DB_PATH = temp_dir / "fleet.db"
+    stores = HubStores(temp_dir, init_tasks=False)
     from hub.config import FleetConfig
     from hub.bootstrap import create_app
     root = Path(__file__).resolve().parents[1]
@@ -772,13 +746,11 @@ def _app_with_repo(repositories, **extra):
                                     {"mac-local": ["agent-fleet"]}),
     )
     # 让 mac-local 在线（任务创建需要它可达；观察链路也因此在临时快照上工作）
-    store.save_snapshot("mac-local", {
+    stores.store.save_snapshot("mac-local", {
         "machine": "mac-local", "source": "ingest", "reachable": True,
         "agents": {}, "system": {},
     })
-    app = create_app(config, repositories=repositories)
-    app._fleet_test_cleanup = (old_state, old_events, old_db, temp_dir)
-    return app
+    return create_app(config, repositories=repositories)
 
 
 class FailureIsolationTests(unittest.TestCase):
@@ -787,14 +759,7 @@ class FailureIsolationTests(unittest.TestCase):
     def make_task_repo_app(self, mode):
         app = make_app_with_failing_task_repository() if mode == "init" \
             else make_app_with_broken_task_repository()
-        self.addCleanup(self._restore, app)
         return app.test_client(), app
-
-    def _restore(self, app):
-        old_state, old_events, old_db, temp_dir = app._fleet_test_cleanup
-        store.STATE_DIR = old_state
-        events.EVENT_LOG = old_events
-        task_store.DB_PATH = old_db
 
     def test_task_repository_failure_keeps_status_endpoint_available(self):
         client, app = self.make_task_repo_app("init")
@@ -831,7 +796,6 @@ class FailureIsolationTests(unittest.TestCase):
 
     def test_event_repository_failure_does_not_fail_ingest(self):
         app = make_app_with_failing_event_repository()
-        self.addCleanup(self._restore, app)
         client = app.test_client()
         response = client.post(
             "/api/ingest", json={"machine": "hk", "agents": {}},
@@ -842,7 +806,6 @@ class FailureIsolationTests(unittest.TestCase):
     def test_failing_task_repo_uses_valid_credentials(self):
         # auth matrix isolation must hold even when the task store is down.
         app = make_app_with_broken_task_repository()
-        self.addCleanup(self._restore, app)
         client = app.test_client()
         app.config["INGEST_TOKEN"] = "ingest-secret"
         app.config["RUNNER_CREDENTIALS"] = {"mac-local": "runner-secret"}
@@ -857,7 +820,7 @@ class TaskSessionDeepLinkApiTests(TaskCrudApiTests):
     def test_public_task_projects_session_id_when_attempt_is_bound(self):
         created = self._create().get_json()["task"]
         tid = created["task_id"]
-        conn = task_store._connect()
+        conn = self.hub.tasks._connect()
         try:
             row = conn.execute("SELECT attempt_id FROM tasks WHERE task_id=?",
                                (tid,)).fetchone()

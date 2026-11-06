@@ -34,10 +34,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hub import events
-from hub import state as store
-from hub import task_store
 from hub import web
+from support.hub_env import HubStores
 
 INGEST = "test-feature-gate-ingest"
 OPERATOR = "feature@example.com"
@@ -54,15 +52,11 @@ _GATE_ENVS = (
 
 def _make_app(env=None, conf=None, **make_kwargs):
     temp_dir = Path(tempfile.mkdtemp())
-    old = (store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH,
-           web.FLEET_HOME)
-    store.STATE_DIR = temp_dir
-    events.EVENT_LOG = temp_dir / "events.jsonl"
-    task_store.DB_PATH = temp_dir / "fleet.db"
+    old_home = web.FLEET_HOME
+    hub = HubStores(temp_dir)
     # Session/adoption stores derive under ``<FLEET_HOME>/var``; redirecting
     # the module root keeps the whole run inside the temp sandbox.
     web.FLEET_HOME = temp_dir
-    task_store.init_db()
 
     if conf is not None:
         (temp_dir / web._FEATURE_GATE_FILE).write_text(conf)
@@ -73,7 +67,7 @@ def _make_app(env=None, conf=None, **make_kwargs):
 
     app = None
     try:
-        app = web.make_app(
+        app = hub.make_app(
             ingest_token=INGEST,
             dev_operator=OPERATOR,
             runner_credentials={"agent-e2e": "runner-secret"},
@@ -86,7 +80,7 @@ def _make_app(env=None, conf=None, **make_kwargs):
         for key, value in saved.items():
             if value is not None:
                 os.environ[key] = value
-        store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH, web.FLEET_HOME = old
+        web.FLEET_HOME = old_home
     return app
 
 

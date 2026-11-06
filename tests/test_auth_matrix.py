@@ -15,46 +15,26 @@ from pathlib import Path
 
 from flask import g, request
 from hub import auth
-from hub import events
-from hub import state as store
-from hub import task_store
+from support.hub_env import HubStores
 
 
 def _make_app():
-    temp_dir = Path(tempfile.mkdtemp())
-    old = (store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH)
-    store.STATE_DIR = temp_dir
-    events.EVENT_LOG = temp_dir / "events.jsonl"
-    task_store.DB_PATH = temp_dir / "fleet.db"
-    task_store.init_db()
-    store.save_snapshot("mac-local", {
+    hub = HubStores(Path(tempfile.mkdtemp()))
+    hub.store.save_snapshot("mac-local", {
         "machine": "mac-local", "source": "ingest", "reachable": True,
         "agents": {}, "system": {},
     })
-    from hub import web
-    app = web.make_app(
+    return hub.make_app(
         ingest_token="test-only",
         dev_operator="dev@example.com",
         runner_credentials={"mac-local": "test-only"},
         project_whitelist={"mac-local": ["agent-fleet"]},
     )
-    app._fleet_test_cleanup = old
-    return app
 
 
 class ExtractIdentityTests(unittest.TestCase):
-    def setUp(self):
-        self._apps = []
-
-    def tearDown(self):
-        for app in self._apps:
-            store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH = \
-                app._fleet_test_cleanup
-
     def _app(self):
-        app = _make_app()
-        self._apps.append(app)
-        return app
+        return _make_app()
 
     def test_extract_operator_from_cf_header(self):
         app = self._app()
@@ -119,15 +99,8 @@ class SupervisorIdentityBoundaryTests(unittest.TestCase):
     CREDENTIALS = {"mac-local": "sup-secret"}
 
     def setUp(self):
-        self._apps = []
         self.app = _make_app()
         self.app.config["SUPERVISOR_CREDENTIALS"] = dict(self.CREDENTIALS)
-        self._apps.append(self.app)
-
-    def tearDown(self):
-        for app in self._apps:
-            store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH = \
-                app._fleet_test_cleanup
 
     def test_valid_supervisor_credential_extracts_identity(self):
         with self.app.test_request_context(

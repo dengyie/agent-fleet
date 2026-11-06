@@ -7,6 +7,7 @@ See Task 3 brief:
 """
 import json
 import queue
+import tempfile
 import threading
 import time
 import types
@@ -246,28 +247,6 @@ class EventPublisherTests(unittest.TestCase):
         p2.emit("state_changed", machine="hk")
         self.assertEqual(seen, [])
 
-    def test_legacy_facade_uses_injected_publisher_per_app_context(self):
-        from hub import events
-        from hub.bootstrap import create_app
-        from hub.config import FleetConfig
-
-        first = self._cls(FakeEventRepository())
-        second = self._cls(FakeEventRepository())
-        root = Path(__file__).resolve().parent / "__tmp_app_context"
-        config = FleetConfig.from_root(root, ingest_token="secret")
-        app1 = create_app(config, publisher=first)
-        app2 = create_app(config, publisher=second)
-        seen1 = []
-        seen2 = []
-        first.subscribe(seen1.append)
-        second.subscribe(seen2.append)
-        with app1.app_context():
-            events.emit("state_changed", machine="one")
-        with app2.app_context():
-            events.emit("state_changed", machine="two")
-        self.assertEqual([event["machine"] for event in seen1], ["one"])
-        self.assertEqual([event["machine"] for event in seen2], ["two"])
-
 
 # ---------------------------------------------------------------------------
 # JsonlEventRepository tests
@@ -461,60 +440,53 @@ class JsonlEventRepositoryTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Compatibility facade tests
+# Publisher over a real JSONL repository
 # ---------------------------------------------------------------------------
-class LegacyFacadeTests(unittest.TestCase):
-    """hub.events module-level API still works after refactoring."""
+class JsonlBackedPublisherTests(unittest.TestCase):
+    """EventPublisher wired to JsonlEventRepository end to end."""
 
     def setUp(self):
-        self.temp_dir = Path(__file__).resolve().parent / "__tmp_legacy"
-        self.temp_dir.mkdir(parents=True, exist_ok=True)
-        self.path = self.temp_dir / "events.jsonl"
-        import hub.events as evmod
-        self._old_log = evmod.EVENT_LOG
-        evmod.EVENT_LOG = self.path
+        from hub.application.event_publisher import EventPublisher
+        from hub.infrastructure.event_repository import JsonlEventRepository
+
+        self.temp_dir = Path(tempfile.mkdtemp())
+        self.publisher = EventPublisher(
+            JsonlEventRepository(self.temp_dir / "events.jsonl"))
 
     def tearDown(self):
-        import hub.events as evmod
-        evmod.EVENT_LOG = self._old_log
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_module_level_emit_and_read_recent_work(self):
-        from hub import events as evmod
-        evmod.emit("state_changed", machine="hk", changes=["agents"])
-        recent = evmod.read_recent(10)
+    def test_emit_and_read_recent_work(self):
+        self.publisher.emit("state_changed", machine="hk", changes=["agents"])
+        recent = self.publisher.read_recent(10)
         self.assertEqual(len(recent), 1)
         self.assertEqual(recent[0]["event"], "state_changed")
         self.assertEqual(recent[0]["machine"], "hk")
 
-    def test_module_level_subscribe_and_emit(self):
-        from hub import events as evmod
+    def test_subscribe_and_emit(self):
         seen = []
-        evmod.subscribe(seen.append)
-        evmod.emit("state_changed", machine="hk")
+        self.publisher.subscribe(seen.append)
+        self.publisher.emit("state_changed", machine="hk")
         self.assertEqual(seen[0]["machine"], "hk")
 
     def test_sse_subscribe_and_unsubscribe(self):
-        from hub import events as evmod
-        q = evmod.sse_subscribe()
+        q, unsubscribe = self.publisher.subscribe_sse(queue_size=200)
         try:
-            evmod.emit("state_changed", machine="hk")
+            self.publisher.emit("state_changed", machine="hk")
             self.assertEqual(q.get(timeout=1)["machine"], "hk")
         finally:
-            evmod.sse_unsubscribe(q)
+            unsubscribe()
 
     def test_sse_unsubscribe_stops_delivery(self):
-        from hub import events as evmod
-        q = evmod.sse_subscribe()
-        evmod.sse_unsubscribe(q)
-        evmod.emit("state_changed", machine="hk")
+        q, unsubscribe = self.publisher.subscribe_sse(queue_size=200)
+        unsubscribe()
+        self.publisher.emit("state_changed", machine="hk")
         with self.assertRaises(queue.Empty):
             q.get(timeout=0.3)
 
     def test_empty_log_returns_empty_list(self):
-        from hub import events as evmod
-        self.assertEqual(evmod.read_recent(10), [])
+        self.assertEqual(self.publisher.read_recent(10), [])
 
 
 if __name__ == "__main__":

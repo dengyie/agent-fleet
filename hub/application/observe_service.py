@@ -60,8 +60,8 @@ def normalize_agents(agents):
 def diff_snapshots(old, new):
     """Return the field-level change list between two push snapshots.
 
-    Mirrors the legacy ``scan._diff`` contract so the service, the compatibility
-    facade, and old callers keep identical change semantics.
+    Mirrors the legacy ``scan._diff`` contract so the service and its callers
+    keep identical change semantics.
     """
     if not old:
         return ["initial"]

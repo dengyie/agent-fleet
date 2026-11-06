@@ -13,47 +13,29 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hub import events
-from hub import state as store
-from hub import task_store
 from hub.bootstrap import create_app
+from support.hub_env import HubStores
 
 
 def make_test_client(dev_operator="op@example.com"):
     """Build a test app/client against a temporary sandbox."""
-    temp_dir = Path(tempfile.mkdtemp())
-    old_state = store.STATE_DIR
-    old_events = events.EVENT_LOG
-    old_db = task_store.DB_PATH
-    store.STATE_DIR = temp_dir
-    events.EVENT_LOG = temp_dir / "events.jsonl"
-    task_store.DB_PATH = temp_dir / "fleet.db"
-    task_store.init_db()
-    store.save_snapshot("mac-local", {
+    hub = HubStores(Path(tempfile.mkdtemp()))
+    hub.store.save_snapshot("mac-local", {
         "machine": "mac-local", "source": "ingest", "reachable": True,
         "agents": {}, "system": {},
     })
-    from hub import web
-    app = web.make_app(
+    app = hub.make_app(
         ingest_token="test-only",
         dev_operator=dev_operator,
         runner_credentials={"mac-local": "test-only"},
         project_whitelist={"mac-local": ["agent-fleet"]},
     )
-    client = app.test_client()
-    client._fleet_test_cleanup = (old_state, old_events, old_db)
-    return client
+    return app.test_client()
 
 
 class HttpContractTestBase(unittest.TestCase):
     def setUp(self):
         self.client = make_test_client()
-
-    def tearDown(self):
-        old_state, old_events, old_db = self.client._fleet_test_cleanup
-        store.STATE_DIR = old_state
-        events.EVENT_LOG = old_events
-        task_store.DB_PATH = old_db
 
 
 class ErrorContractTests(HttpContractTestBase):
@@ -234,23 +216,13 @@ class SessionV1AliasAndAuthMatrixTests(unittest.TestCase):
         import tempfile
         from pathlib import Path as _P
 
-        from hub import web
-        from hub.config import FleetConfig
-
         self._tmp = _P(tempfile.mkdtemp())
-        self._old_state = store.STATE_DIR
-        self._old_events = events.EVENT_LOG
-        self._old_db = task_store.DB_PATH
-        store.STATE_DIR = self._tmp
-        events.EVENT_LOG = self._tmp / "events.jsonl"
-        task_store.DB_PATH = self._tmp / "fleet.db"
-        task_store.init_db()
-        store.save_snapshot("mac-local", {
+        hub = HubStores(self._tmp)
+        hub.store.save_snapshot("mac-local", {
             "machine": "mac-local", "source": "ingest", "reachable": True,
             "agents": {}, "system": {},
         })
-        cfg = FleetConfig.from_root(
-            self._tmp,
+        cfg = hub.config(
             ingest_token="test-only",
             dev_operator="op@example.com",
             runner_credentials={"mac-local": "test-only"},
@@ -262,11 +234,6 @@ class SessionV1AliasAndAuthMatrixTests(unittest.TestCase):
         )
         self.app = create_app(cfg)
         self.client = self.app.test_client()
-
-    def tearDown(self):
-        store.STATE_DIR = self._old_state
-        events.EVENT_LOG = self._old_events
-        task_store.DB_PATH = self._old_db
 
     def _evt(self, seq):
         return {
@@ -324,20 +291,8 @@ class SessionV1AliasAndAuthMatrixTests(unittest.TestCase):
 
 
 class AuthMatrixTests(unittest.TestCase):
-    def setUp(self):
-        self._clients = []
-
-    def tearDown(self):
-        for client in self._clients:
-            old_state, old_events, old_db = client._fleet_test_cleanup
-            store.STATE_DIR = old_state
-            events.EVENT_LOG = old_events
-            task_store.DB_PATH = old_db
-
     def _make(self, dev_operator="op@example.com"):
-        client = make_test_client(dev_operator)
-        self._clients.append(client)
-        return client
+        return make_test_client(dev_operator)
 
     def test_ingest_header_cannot_fallback_to_dev_operator(self):
         client = self._make(dev_operator="dev@example.com")
@@ -465,21 +420,15 @@ class VersionedApiTests(HttpContractTestBase):
 
     def test_v1_task_requires_operator_identity(self):
         client = make_test_client(dev_operator=None)
-        try:
-            resp = client.post("/api/v1/tasks", json={})
-            self.assertEqual(resp.status_code, 401)
-            body = resp.get_json()
-            self.assertEqual(set(body), {"ok", "error", "detail", "request_id"})
-            self.assertFalse(body["ok"])
-            # runner credential header cannot impersonate operator on v1
-            resp = client.post("/api/v1/tasks", json={},
-                               headers={"X-Runner-Credential": "mac-local:test-only"})
-            self.assertEqual(resp.status_code, 401)
-        finally:
-            old_state, old_events, old_db = client._fleet_test_cleanup
-            store.STATE_DIR = old_state
-            events.EVENT_LOG = old_events
-            task_store.DB_PATH = old_db
+        resp = client.post("/api/v1/tasks", json={})
+        self.assertEqual(resp.status_code, 401)
+        body = resp.get_json()
+        self.assertEqual(set(body), {"ok", "error", "detail", "request_id"})
+        self.assertFalse(body["ok"])
+        # runner credential header cannot impersonate operator on v1
+        resp = client.post("/api/v1/tasks", json={},
+                           headers={"X-Runner-Credential": "mac-local:test-only"})
+        self.assertEqual(resp.status_code, 401)
 
     def test_v1_foreign_identity_header_blocks_dev_operator(self):
         # DEV_OPERATOR is set; a foreign ingest token must still not grant

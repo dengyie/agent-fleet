@@ -29,11 +29,8 @@ from pathlib import Path
 
 import pytest
 
-from hub import events as events_mod
-from hub import state as store
-from hub import task_store
 from hub.bootstrap import create_app
-from hub.config import FleetConfig
+from support.hub_env import HubStores
 from tools.supervisor.control_client import ControlClient, NonceStore
 from tools.supervisor.supervisor import GroupOps, Supervisor, _AttachedHandle
 
@@ -207,13 +204,9 @@ class _StubBridge:
 
 
 def _build_app(root: Path, *, adoption_enabled: bool):
-    old_state = (store.STATE_DIR, events_mod.EVENT_LOG, task_store.DB_PATH)
-    store.STATE_DIR = root / "state"
-    events_mod.EVENT_LOG = root / "state" / "events.jsonl"
-    task_store.DB_PATH = root / "state" / "fleet.db"
-    task_store.init_db()
+    hub = HubStores(root / "state")
     signing_priv, signing_pub = _keypair()
-    cfg = FleetConfig.from_root(
+    cfg = hub.config(
         root,
         ingest_token=INGEST,
         dev_operator=OPERATOR,
@@ -238,7 +231,6 @@ def _build_app(root: Path, *, adoption_enabled: bool):
     for _method in ("get", "post", "delete", "put", "patch"):
         setattr(app, _method, getattr(_tester, _method))
     _drop_pages_catchall(app)
-    app._fleet_e2e_cleanup = old_state
     return app
 
 
@@ -273,11 +265,6 @@ def _drop_pages_catchall(app):
                 matcher.add(rule)
     url_m._matcher = matcher
     return app
-
-
-def _restore(app):
-    store.STATE_DIR, events_mod.EVENT_LOG, task_store.DB_PATH = \
-        app._fleet_e2e_cleanup
 
 
 # --------------------------------------------------------------------------- #
@@ -521,20 +508,12 @@ def test_non_termination_receipts_never_close_session(e2e, action, status, reaso
 def e2e(tmp_path):
     _root = tmp_path
     app = _build_app(_root, adoption_enabled=True)
-    harness = _E2E(app, _root)
-    try:
-        yield harness
-    finally:
-        _restore(app)
+    yield _E2E(app, _root)
 
 
 @pytest.fixture
 def app(tmp_path):
-    built = _build_app(tmp_path, adoption_enabled=False)
-    try:
-        yield built
-    finally:
-        _restore(built)
+    yield _build_app(tmp_path, adoption_enabled=False)
 
 
 # --------------------------------------------------------------------------- #

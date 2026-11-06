@@ -3,10 +3,12 @@
 The hub never executes commands on agent machines. It only marks stale
 push snapshots offline and emits state-change events.
 
-Business rules live in :mod:`hub.application.observe_service`; this module is
-a thin compatibility layer for CLI, web, and legacy callers that still use
-``reconcile_ingest`` / ``scan_all`` / ``collect_all`` and the private diff
-helpers.
+Business rules live in :mod:`hub.application.observe_service` and
+:mod:`hub.application.reconciliation_service`; this module is the cron/CLI
+entrypoint. It assembles its dependencies explicitly from a
+:class:`hub.config.FleetConfig` (default: ``FleetConfig.from_root`` at the
+release root, i.e. ``state/``, ``state/events.jsonl``, ``state/fleet.db`` and
+``hosts.yaml``) instead of module-level path globals.
 """
 
 import argparse
@@ -26,83 +28,54 @@ if __package__ in (None, ""):
     if _root not in sys.path:
         sys.path.insert(0, _root)
 
-import yaml
-
-from hub.application.observe_service import (
-    HostConfig,
-    ObserveService,
-    diff_snapshots as _diff,  # noqa: F401 — 兼容旧调用方的私有 diff helper（见模块文档）
-    normalize_agents as _normalize_agents,  # noqa: F401 — 同上
-)
+from hub.application.event_publisher import EventPublisher
+from hub.application.observe_service import HostConfig, ObserveService
+from hub.application.reconciliation_service import ReconciliationService
+from hub.config import FleetConfig
+from hub.infrastructure.event_repository import JsonlEventRepository
+from hub.infrastructure.state_repository import JsonlObservationRepository
+from hub.infrastructure.task_repository import SqliteTaskRepository
 
 FLEET_HOME = Path(__file__).resolve().parent.parent
-DEFAULT_STALE_AFTER_S = 300
 
 
-def load_config():
-    with open(FLEET_HOME / "hosts.yaml") as stream:
-        return yaml.safe_load(stream) or {}
+def build_publisher(config: FleetConfig) -> EventPublisher:
+    """Event publisher appending to ``config.event_log``."""
+    return EventPublisher(JsonlEventRepository(config.event_log))
 
 
-def _legacy_service():
-    """ObserveService bound to the current module-level state/event facades.
-
-    New code should inject an explicit repository, publisher, and host config
-    instead of importing this module. This path keeps legacy callers (web
-    startup, CLI, regression tests) working untouched.
-    """
-    from hub import events as events_facade
-    from hub import state as state_facade
-
-    return ObserveService(
-        observation_repo=state_facade,
-        event_publisher=events_facade,
-        host_config=HostConfig.load(FLEET_HOME / "hosts.yaml"),
+def build_reconciliation_service(config: FleetConfig, *, publisher=None):
+    """Push-only ReconciliationService over the stores named by ``config``."""
+    if publisher is None:
+        publisher = build_publisher(config)
+    observe_service = ObserveService(
+        observation_repo=JsonlObservationRepository(config.state_dir),
+        event_publisher=publisher,
+        host_config=HostConfig.load(config.hosts_file),
     )
-
-
-def _reconciliation_service():
-    """ReconciliationService bound to the module-level observation/task facades.
-
-    New code should inject explicit services via ``hub.bootstrap``. This path
-    keeps legacy callers (web startup wrappers, CLI, regression tests) working
-    while routing every reconciliation entry point through the push-only
-    application service.
-    """
-    from hub import events as events_facade
-    from hub import task_store as task_facade
-    from hub.application.reconciliation_service import ReconciliationService
-
     return ReconciliationService(
-        observe_service=_legacy_service(),
-        task_repository=task_facade,
-        event_publisher=events_facade,
+        observe_service=observe_service,
+        task_repository=SqliteTaskRepository(config.task_db),
+        event_publisher=publisher,
     )
 
 
-def reconcile_ingest(now=None, machine=None):
-    """Mark expired push reports offline without executing anything.
-
-    machine: 只 reconcile 指定机器（None = 全部）。
-    """
-    return _reconciliation_service().reconcile_observation(machine=machine, now=now)
-
-
-def scan_all(filter_host=None):
-    return _reconciliation_service().reconcile_observation(machine=filter_host)
-
-
-def collect_all(filter_host=None):
-    return scan_all(filter_host)
-
-
-if __name__ == "__main__":
+def main(argv=None, *, config: FleetConfig | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host")
     parser.add_argument("--scan-notify", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if config is None:
+        config = FleetConfig.from_root(FLEET_HOME)
+    publisher = build_publisher(config)
     if args.scan_notify:
         from hub.notifier import setup_alert_notify
-        setup_alert_notify()
-    for result in scan_all(args.host):
+        setup_alert_notify(publisher)
+    service = build_reconciliation_service(config, publisher=publisher)
+    for result in service.reconcile_observation(machine=args.host):
         print(result)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

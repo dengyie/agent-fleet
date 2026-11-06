@@ -19,7 +19,8 @@ agent machine
 - `tools/agent-self-report.py`：定时执行采集、dry-run、HTTPS 上报。
 - `hub/web.py`：认证 ingest、状态 API、面板、reconciliation API。
 - `hub/scan.py`：只做 stale reconciliation；没有远程执行能力。
-- `hub/state.py`：JSONL 历史、原子 current 快照和 ingest 回执索引。
+- `hub/infrastructure/state_repository.py`（`JsonlObservationRepository`）：JSONL 历史、原子 current 快照和 ingest 回执索引。
+- `hub/infrastructure/event_repository.py`（`JsonlEventRepository`）+ `hub/application/event_publisher.py`（`EventPublisher`）：事件持久化、事件分发与 SSE 队列桥。
 - `connectors/`：被本地 probe 复用的 agent 适配器。
 
 ## Transport

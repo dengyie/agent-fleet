@@ -23,9 +23,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hub import events
-from hub import state as store
-from hub import task_store
 from hub.application import control_router as cr
 from hub.application.supervisor_service import SupervisorService
 from hub.application.task_service import TaskService
@@ -77,15 +74,8 @@ def _start_managed_session(session_repo, machine, attempt_id, session_id=None):
 class ManagedCancelTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="fleet-cancel-"))
-        self.old_state = store.STATE_DIR
-        self.old_events = events.EVENT_LOG
-        self.old_db = task_store.DB_PATH
-        store.STATE_DIR = self.tmp
-        events.EVENT_LOG = self.tmp / "events.jsonl"
-        task_store.DB_PATH = self.tmp / "fleet.db"
-        task_store.init_db()
-
         self.task_repo = SqliteTaskRepository(self.tmp / "fleet.db")
+        self.task_repo.init()
         self.session_repo = _session_repo(self.tmp / "sessions" / "meta.db")
         self.priv, _pub = _keypair()
         self.supervisor = SupervisorService(signing_key=self.priv)
@@ -101,11 +91,6 @@ class ManagedCancelTests(unittest.TestCase):
             host_policy=_Hosts(),
         )
         self.service.cancel_router = self.router
-
-    def tearDown(self):
-        store.STATE_DIR = self.old_state
-        events.EVENT_LOG = self.old_events
-        task_store.DB_PATH = self.old_db
 
     # ---------------------------------------------------------------- #
     # helpers
@@ -189,7 +174,7 @@ class ManagedCancelTests(unittest.TestCase):
 
     def test_terminal_task_cancel_is_noop_no_command(self):
         task = self._create()
-        conn = task_store._connect()
+        conn = self.task_repo._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("UPDATE tasks SET state='succeeded' WHERE task_id=?",

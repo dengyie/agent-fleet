@@ -11,11 +11,8 @@ from unittest import mock
 from flask import Flask, jsonify
 
 from hub import auth
-from hub import events
-from hub import state as store
-from hub import task_store
 from hub.bootstrap import create_app
-from hub.config import FleetConfig
+from support.hub_env import HubStores
 from tests.test_session_ingest_api import _event, _key
 
 TOKEN = "ingest-secret"
@@ -31,13 +28,9 @@ class _AppBase(unittest.TestCase):
 
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
-        self.old = (store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH)
-        store.STATE_DIR = self.temp_dir
-        events.EVENT_LOG = self.temp_dir / "events.jsonl"
-        task_store.DB_PATH = self.temp_dir / "fleet.db"
-        task_store.init_db()
-        config = FleetConfig.from_root(
-            self.temp_dir, ingest_token=self.ingest_token,
+        self.hub = HubStores(self.temp_dir)
+        config = self.hub.config(
+            ingest_token=self.ingest_token,
             dev_operator="op@example.com", runner_credentials=dict(RUNNER),
             project_whitelist={"mac-a": ["agent-fleet"]},
             session_repositories_enabled=True,
@@ -47,9 +40,6 @@ class _AppBase(unittest.TestCase):
         with mock.patch.object(auth, "resolve_ingest_token", return_value=None):
             self.app = create_app(config)
         self.client = self.app.test_client()
-
-    def tearDown(self):
-        store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH = self.old
 
     def ingest(self, body, runner=None, token=TOKEN):
         headers = {"X-Agent-Fleet-Token": token}
@@ -85,7 +75,7 @@ class IngestMachineBindingTests(_AppBase):
         resp = self.ingest(_report("mac-b"), runner="mac-a:secret-a")
         self.assertEqual(resp.status_code, 403)
         self.assertEqual(resp.get_json()["error"], "machine_mismatch")
-        self.assertIsNone(store.read_current("mac-b"))
+        self.assertIsNone(self.hub.store.read_current("mac-b"))
 
     def test_invalid_credential_is_403_even_with_valid_token(self):
         resp = self.ingest(_report("mac-a"), runner="mac-a:wrong")
@@ -105,7 +95,7 @@ class IngestMachineBindingTests(_AppBase):
 
     def test_shared_token_stays_compatible_and_is_recorded(self):
         self.assertEqual(self.ingest(_report("mac-b")).status_code, 200)
-        self.assertEqual(store.read_current("mac-b")["ingest_auth"], "shared_token")
+        self.assertEqual(self.hub.store.read_current("mac-b")["ingest_auth"], "shared_token")
         # never exposed on the public read model
         status = self.client.get("/api/status").get_json()
         self.assertNotIn("ingest_auth", json.dumps(status))
@@ -212,9 +202,10 @@ class MachineAuthMarkerTests(unittest.TestCase):
         self.assertFalse(auth.is_machine_auth_view(None))
 
     def test_every_registered_machine_view_is_explicitly_marked(self):
-        from hub import web
-        app = web.make_app(ingest_token="t", dev_operator="op@example.com",
-                           runner_credentials={"mac-a": "x"})
+        with tempfile.TemporaryDirectory() as tmp:
+            app = HubStores(tmp).make_app(
+                ingest_token="t", dev_operator="op@example.com",
+                runner_credentials={"mac-a": "x"})
         marked = {name for name, view in app.view_functions.items()
                   if auth.is_machine_auth_view(view)}
         self.assertIn("observe.api_ingest", marked)

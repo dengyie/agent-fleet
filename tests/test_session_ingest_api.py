@@ -20,11 +20,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hub import events
-from hub import state as store
-from hub import task_store
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
+from support.hub_env import HubStores
 from hub.infrastructure.transcript_repository import TranscriptError
 
 
@@ -59,7 +57,7 @@ def _key() -> bytes:
            b"\x01\x12\x23\x34\x45\x56\x67\x78\x89\x9a\xab\xbc\xcd\xde\xef\x01"
 
 
-def _config(root):
+def _config(root, **paths):
     return FleetConfig.from_root(
         root,
         ingest_token="ingest-secret",
@@ -70,31 +68,20 @@ def _config(root):
         session_db=root / "var" / "sessions" / "meta.db",
         session_transcript_root=root / "var" / "sessions" / "transcripts",
         session_encryption_raw=_key(),
+        **paths,
     )
 
 
 class SessionHttpTestBase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
-        self.old_state = store.STATE_DIR
-        self.old_events = events.EVENT_LOG
-        self.old_db = task_store.DB_PATH
-        store.STATE_DIR = self.temp_dir
-        events.EVENT_LOG = self.temp_dir / "events.jsonl"
-        task_store.DB_PATH = self.temp_dir / "fleet.db"
-        task_store.init_db()
-        store.save_snapshot("mac-api-1", {
+        self.hub = HubStores(self.temp_dir)
+        self.hub.store.save_snapshot("mac-api-1", {
             "machine": "mac-api-1", "source": "ingest", "reachable": True,
             "agents": {}, "system": {},
         })
-        self.app = create_app(_config(self.temp_dir))
+        self.app = create_app(_config(self.temp_dir, **self.hub.paths()))
         self.client = self.app.test_client()
-
-    def tearDown(self):
-        store.STATE_DIR = self.old_state
-        events.EVENT_LOG = self.old_events
-        task_store.DB_PATH = self.old_db
-
     def _ingest(self, events, token="ingest-secret"):
         return self.client.post(
             "/api/session-events",

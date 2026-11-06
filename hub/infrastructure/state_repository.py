@@ -1,4 +1,4 @@
-"""JSONL observation repository extracted from the legacy ``hub.state`` module.
+"""JSONL observation repository (per-machine snapshot history).
 
 Owns observation persistence and idempotent ingest receipts:
 
@@ -19,9 +19,8 @@ Owns observation persistence and idempotent ingest receipts:
 * machine names must match the auth machine-name contract so repository paths
   never escape the repository directory
 
-``hub.state`` is a thin compatibility facade over a default instance of this
-class constructed from the legacy ``STATE_DIR``; new services inject a
-repository built on an explicit ``Path``.
+Callers (``hub.bootstrap`` and the ``hub/scan.py`` CLI) construct it on an
+explicit ``Path`` and inject it into the application services.
 """
 
 import json
@@ -353,49 +352,3 @@ class JsonlObservationRepository:
             }
         except OSError:
             return set()
-
-
-class LegacyStateStoreAdapter:
-    """Compatibility face for legacy ``hub.state`` callers over a repository.
-
-    Keeps the old module-level function contract (including ``diff_previous``)
-    working against an injected :class:`ObservationRepository` without
-    duplicating persistence logic.
-    """
-
-    def __init__(self, repository) -> None:
-        self.repository = repository
-
-    def save_snapshot(self, machine: str, snapshot: dict) -> None:
-        self.repository.save_snapshot(machine, snapshot)
-
-    def save_snapshot_once(
-        self, machine: str, snapshot: dict, report_id: str
-    ) -> bool:
-        return self.repository.save_snapshot_once(machine, snapshot, report_id)
-
-    def machine_transaction(self, machine: str):
-        return self.repository.machine_transaction(machine)
-
-    def read_current(self, machine: str) -> dict | None:
-        return self.repository.read_current(machine)
-
-    def read_history(self, machine: str, limit: int = 50) -> list[dict]:
-        return self.repository.read_history(machine, limit=limit)
-
-    def machines(self) -> set[str]:
-        return self.repository.machines()
-
-    def diff_previous(self, machine: str, snapshot: dict) -> list[str]:
-        """Return the field names whose payload changed versus the last snapshot."""
-        prev = self.read_current(machine)
-        if prev is None:
-            return list(snapshot.keys())
-        changes = []
-        for key in ("hermes", "agents", "system"):
-            if key in snapshot and key in prev and (
-                json.dumps(snapshot[key], sort_keys=True)
-                != json.dumps(prev[key], sort_keys=True)
-            ):
-                changes.append(key)
-        return changes

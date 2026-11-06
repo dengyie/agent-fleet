@@ -78,9 +78,10 @@ import connectors
 import tools.adapters as adapters
 from agent_profiles import (
     NATIVE_RESUME_AGENT_TYPES, RESUME_VERIFIABLE_AGENT_TYPES,
-    SESSION_PATH_RESUME_AGENT_TYPES,
+    RESUME_VERIFIABLE_PROBE_FAMILIES, SESSION_PATH_RESUME_AGENT_TYPES,
 )
 from tools.probe import discovery
+from tools.session import probe as session_probe
 from tools.supervisor import supervisor as sup_mod
 
 
@@ -112,6 +113,34 @@ def test_supervisor_capability_sets_equal_profile_derived_sets():
         SESSION_PATH_RESUME_AGENT_TYPES)
 
 
+def test_session_probe_resume_verifiable_families_derived_from_profiles():
+    # probe 按 CLI 名作 family key（claude_code → claude），集合须与注册表一致
+    assert RESUME_VERIFIABLE_PROBE_FAMILIES == ("codex", "claude")
+    assert session_probe._RESUME_VERIFIABLE_FAMILIES == frozenset(
+        RESUME_VERIFIABLE_PROBE_FAMILIES)
+    assert session_probe._RESUME_VERIFIABLE_FAMILIES <= session_probe.KNOWN_AGENTS
+    assert {PROFILES[f].probe_family or f
+            for f in RESUME_VERIFIABLE_AGENT_TYPES} == set(
+        session_probe._RESUME_VERIFIABLE_FAMILIES)
+    # 显式 probe_family 映射必须指向 probe 已知的 family
+    for profile in PROFILES.values():
+        if profile.probe_family is not None:
+            assert profile.probe_family in session_probe.KNOWN_AGENTS
+
+
+def test_supervisor_split_modules_reexported_from_supervisor():
+    # 拆分后的符号仍从 tools.supervisor.supervisor 导出且是同一对象
+    from tools.supervisor import group_ops, handles, native_resume
+    assert sup_mod.GroupOps is group_ops.GroupOps
+    assert sup_mod.WindowsGroupOps is group_ops.WindowsGroupOps
+    assert sup_mod._AttachedHandle is handles._AttachedHandle
+    assert sup_mod.UnknownSessionError is handles.UnknownSessionError
+    assert sup_mod._native_resume_argv is native_resume._native_resume_argv
+    assert sup_mod._live_process_cwd is native_resume._live_process_cwd
+    assert issubclass(sup_mod.Supervisor, handles.HandlesMixin)
+    assert issubclass(sup_mod.Supervisor, native_resume.NativeResumeMixin)
+
+
 def test_supervisor_resume_argv_exists_exactly_for_native_resume_families():
     built = {
         family for family in OBSERVABLE_AGENT_TYPES
@@ -122,3 +151,26 @@ def test_supervisor_resume_argv_exists_exactly_for_native_resume_families():
 
 def test_discovery_native_resolver_keys_subset_of_profiles():
     assert set(discovery._PROFILE_NATIVE_RESOLVERS) <= set(PROFILES)
+
+
+def test_supervisor_resume_probe_uses_probe_known_family(monkeypatch):
+    # claude_code must be probed as "claude"; an unknown family raised and
+    # was swallowed, so the resume capability could never be verified.
+    from types import SimpleNamespace
+    from tools.supervisor import native_resume
+
+    seen = []
+
+    def fake_probe(agent, command, verify_resume=True):
+        assert agent in session_probe.KNOWN_AGENTS
+        seen.append(agent)
+        return SimpleNamespace(resume=True)
+
+    monkeypatch.setattr(session_probe, "probe_agent", fake_probe)
+    stub = SimpleNamespace(_handle_of=lambda sid: SimpleNamespace(exe_path="/bin/agent"),
+                           _entries={}, _persist=lambda m: None)
+    for family in RESUME_VERIFIABLE_AGENT_TYPES:
+        m = SimpleNamespace(agent=family, capability_manifest={})
+        assert native_resume.NativeResumeMixin._resume_allowed(stub, m, "s1") is True
+        assert m.capability_manifest["resume"] is True
+    assert sorted(seen) == sorted(RESUME_VERIFIABLE_PROBE_FAMILIES)

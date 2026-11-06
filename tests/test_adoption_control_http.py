@@ -25,10 +25,6 @@ import re
 
 import pytest
 
-from hub import events as events_mod
-from hub import state as store
-from hub import task_store
-
 from test_adoption_http import (   # sibling import (tests/ is a non-package)
     DEFAULT_PID,
     DEFAULT_STARTED_AT,
@@ -48,8 +44,6 @@ PATH = "/api/adoption"   # singular "adoption", exactly the plan's path
 def client(tmp_path):
     app = build_app(tmp_path)
     yield app.test_client()
-    store.STATE_DIR, events_mod.EVENT_LOG, task_store.DB_PATH = \
-        app._fleet_test_cleanup
 
 
 def _control(client, session_id, action="pause_session",
@@ -326,63 +320,55 @@ def test_phase45_actions_enqueue_when_enabled(tmp_path):
     app = build_app(tmp_path, append_user_turn_enabled=True,
                     apply_local_profile_enabled=True)
     client = app.test_client()
-    try:
-        session_id = _make_adopted(client)
-        turn = client.post(
-            f"{PATH}/{session_id}/source/control",
-            json={"action": "append_user_turn",
-                  "reason_code": "operator_requested",
-                  "payload": {"text": "hello"},
-                  "pid": DEFAULT_PID, "signal": "SIGKILL"},
-            headers=operator_headers())
-        assert turn.status_code == 202
-        body = turn.get_json()
-        assert body["action"] == "append_user_turn"
-        assert body["status"] == "pending"
-        assert "pid" not in body
-        assert "signal" not in body
-        assert set(body) == {
-            "ok", "command_id", "session_id", "action", "status",
-            "request_id",
-        }
+    session_id = _make_adopted(client)
+    turn = client.post(
+        f"{PATH}/{session_id}/source/control",
+        json={"action": "append_user_turn",
+              "reason_code": "operator_requested",
+              "payload": {"text": "hello"},
+              "pid": DEFAULT_PID, "signal": "SIGKILL"},
+        headers=operator_headers())
+    assert turn.status_code == 202
+    body = turn.get_json()
+    assert body["action"] == "append_user_turn"
+    assert body["status"] == "pending"
+    assert "pid" not in body
+    assert "signal" not in body
+    assert set(body) == {
+        "ok", "command_id", "session_id", "action", "status",
+        "request_id",
+    }
 
-        profile = client.post(
-            f"{PATH}/{session_id}/source/control",
-            json={"action": "apply_local_profile",
-                  "reason_code": "operator_requested",
-                  "payload": {"profile_id": "local-1"}},
-            headers=operator_headers())
-        assert profile.status_code == 202
-        assert profile.get_json()["action"] == "apply_local_profile"
+    profile = client.post(
+        f"{PATH}/{session_id}/source/control",
+        json={"action": "apply_local_profile",
+              "reason_code": "operator_requested",
+              "payload": {"profile_id": "local-1"}},
+        headers=operator_headers())
+    assert profile.status_code == 202
+    assert profile.get_json()["action"] == "apply_local_profile"
 
-        supervisor = client.application.extensions["fleet"]["services"]["supervisor"]
-        queued = supervisor.poll(MACHINE)
-        turn_cmd = next(c for c in queued if c["action"] == "append_user_turn")
-        assert turn_cmd["payload"] == {"text": "hello"}
-        assert "pid" not in turn_cmd["payload"]
-        profile_cmd = next(
-            c for c in queued if c["action"] == "apply_local_profile")
-        assert profile_cmd["payload"] == {"profile_id": "local-1"}
-    finally:
-        store.STATE_DIR, events_mod.EVENT_LOG, task_store.DB_PATH = \
-            app._fleet_test_cleanup
+    supervisor = client.application.extensions["fleet"]["services"]["supervisor"]
+    queued = supervisor.poll(MACHINE)
+    turn_cmd = next(c for c in queued if c["action"] == "append_user_turn")
+    assert turn_cmd["payload"] == {"text": "hello"}
+    assert "pid" not in turn_cmd["payload"]
+    profile_cmd = next(
+        c for c in queued if c["action"] == "apply_local_profile")
+    assert profile_cmd["payload"] == {"profile_id": "local-1"}
 
 
 def test_phase45_payload_rejects_secrets(tmp_path):
     app = build_app(tmp_path, append_user_turn_enabled=True,
                     apply_local_profile_enabled=True)
     client = app.test_client()
-    try:
-        session_id = _make_adopted(client)
-        resp = client.post(
-            f"{PATH}/{session_id}/source/control",
-            json={"action": "append_user_turn",
-                  "reason_code": "operator_requested",
-                  "payload": {"text": "hi", "api_key": "secret"}},
-            headers=operator_headers())
-        assert resp.status_code == 400
-        assert resp.get_json()["error"] == "invalid_payload"
-        assert "secret" not in str(resp.get_json())
-    finally:
-        store.STATE_DIR, events_mod.EVENT_LOG, task_store.DB_PATH = \
-            app._fleet_test_cleanup
+    session_id = _make_adopted(client)
+    resp = client.post(
+        f"{PATH}/{session_id}/source/control",
+        json={"action": "append_user_turn",
+              "reason_code": "operator_requested",
+              "payload": {"text": "hi", "api_key": "secret"}},
+        headers=operator_headers())
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "invalid_payload"
+    assert "secret" not in str(resp.get_json())

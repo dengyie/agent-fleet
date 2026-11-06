@@ -1,4 +1,4 @@
-"""JSONL event repository extracted from the legacy ``hub.events`` module.
+"""JSONL event repository behind the hub's ``EventPublisher``.
 
 Owns only persistence semantics, injected with an explicit ``Path``:
 
@@ -18,9 +18,8 @@ Owns only persistence semantics, injected with an explicit ``Path``:
 * events keep the legacy shape and gain a durable, monotonic ``event_seq``
   cursor used by SSE replay; timestamp replay remains available for old clients
 
-``hub.events`` becomes a thin compatibility facade over a default instance of
-this repository; new services inject a repository built on an explicit
-``Path``.
+Callers (``hub.bootstrap`` and the ``hub/scan.py`` CLI) construct it on an
+explicit ``Path`` and inject it into an ``EventPublisher``.
 """
 
 import json

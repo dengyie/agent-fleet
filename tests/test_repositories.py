@@ -1,8 +1,7 @@
-"""Repository protocol contract and legacy-facade regression tests.
+"""Repository protocol contract and regression tests.
 
-New persistence code is injected with an explicit ``Path`` and is free of the
-Flask stack; the legacy ``hub.state`` module stays interoperable through the
-compatibility facade.
+Persistence code is injected with an explicit ``Path`` and is free of the
+Flask stack.
 """
 
 import json
@@ -15,13 +14,11 @@ import time
 import unittest
 from pathlib import Path
 
-from hub import events, scan, state as store
-from hub.infrastructure.state_repository import (
-    JsonlObservationRepository,
-    LegacyStateStoreAdapter,
-)
+from hub import scan
+from hub.infrastructure.state_repository import JsonlObservationRepository
 from hub.infrastructure.task_repository import SqliteTaskRepository
 from hub.repositories import MACHINE_NAME_RE, ObservationRepository, TaskRepository
+from support.hub_env import HubStores
 
 
 class TaskRepositoryIsolationTests(unittest.TestCase):
@@ -352,21 +349,6 @@ class ObservationRepositoryRegressionTests(unittest.TestCase):
         self.assertFalse(MACHINE_NAME_RE.fullmatch("-lead-dash"))
         self.assertFalse(MACHINE_NAME_RE.fullmatch("x" * 65))
 
-    def test_legacy_adapter_wraps_injected_repository(self):
-        root = Path(tempfile.mkdtemp())
-        repo = JsonlObservationRepository(root)
-        adapter = LegacyStateStoreAdapter(repo)
-        adapter.save_snapshot("mac-local", {
-            "machine": "mac-local", "reachable": True, "agents": {},
-        })
-        self.assertTrue(adapter.read_current("mac-local")["reachable"])
-        self.assertEqual(len(adapter.read_history("mac-local", 5)), 1)
-        changes = adapter.diff_previous("mac-local", {
-            "machine": "mac-local", "reachable": True,
-            "agents": {"codex": {"installed": True}},
-        })
-        self.assertEqual(changes, ["agents"])
-        self.assertEqual(adapter.machines(), {"mac-local"})
 
 
 class ScanSkipsInvalidMachineArtifactsTests(unittest.TestCase):
@@ -374,21 +356,15 @@ class ScanSkipsInvalidMachineArtifactsTests(unittest.TestCase):
 
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
-        self.old_state_dir = store.STATE_DIR
-        self.old_event_log = events.EVENT_LOG
-        store.STATE_DIR = self.temp_dir
-        events.EVENT_LOG = self.temp_dir / "events.jsonl"
-
-    def tearDown(self):
-        store.STATE_DIR = self.old_state_dir
-        events.EVENT_LOG = self.old_event_log
+        self.hub = HubStores(self.temp_dir)
+        self.store = self.hub.store
 
     def _write_stale(self, machine):
-        store.save_snapshot(machine, {
+        self.store.save_snapshot(machine, {
             "machine": machine, "source": "ingest", "reachable": True,
             "agents": {},
         })
-        current = store.read_current(machine)
+        current = self.store.read_current(machine)
         current["_ts"] = time.time() - 301
         (self.temp_dir / f"{machine}.json").write_text(json.dumps(current))
 
@@ -398,105 +374,50 @@ class ScanSkipsInvalidMachineArtifactsTests(unittest.TestCase):
         (self.temp_dir / "-lead-dash.json").write_text('{"machine": "-lead-dash"}')
         self._write_stale("hk")
 
-        results = scan.reconcile_ingest(now=time.time())
+        service = scan.build_reconciliation_service(self.hub.config())
+        results = service.reconcile_observation(now=time.time())
 
         machines_seen = [r["machine"] for r in results]
         self.assertIn("hk", machines_seen)
         self.assertNotIn("-lead-dash", machines_seen)
         # The stale machine is reconciled.
-        self.assertFalse(store.read_current("hk")["reachable"])
+        self.assertFalse(self.store.read_current("hk")["reachable"])
         # The invalid artifact is untouched and still on disk.
         self.assertTrue((self.temp_dir / "-lead-dash.json").exists())
 
     def test_machines_enumeration_skips_invalid_stems(self):
         (self.temp_dir / "valid.json").write_text("{}")
         (self.temp_dir / "-lead-dash.json").write_text("{}")
-        self.assertEqual(store.machines(), {"valid"})
+        self.assertEqual(self.store.machines(), {"valid"})
 
 
-class ObserveRotationAliasTests(unittest.TestCase):
+class ObservationRepositoryRotationTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
-        self.old_state_dir = store.STATE_DIR
-        self.old_max = store.MAX_JSONL_BYTES
-        self.old_keep = store.ROTATE_KEEP_LINES
-        store.STATE_DIR = self.temp_dir
-        store.MAX_JSONL_BYTES = 512
-        store.ROTATE_KEEP_LINES = 3
+        self.store = JsonlObservationRepository(
+            self.temp_dir, max_jsonl_bytes=512, keep_lines=3)
 
-    def tearDown(self):
-        store.STATE_DIR = self.old_state_dir
-        store.MAX_JSONL_BYTES = self.old_max
-        store.ROTATE_KEEP_LINES = self.old_keep
-
-    def test_rotate_if_needed_public_alias_is_invokable(self):
-        self.assertTrue(callable(store.rotate_if_needed))
-        # No JSONL yet: rotation is a no-op returning False.
-        self.assertFalse(store.rotate_if_needed("hk"))
-        # Both the public alias and the legacy private name delegate the same
-        # implementation.
-        self.assertTrue(callable(store._rotate_if_needed))
-        self.assertIs(store.rotate_if_needed, store._rotate_if_needed)
-
-
-class LegacyFacadeTests(unittest.TestCase):
-    def setUp(self):
-        self.temp_dir = Path(tempfile.mkdtemp())
-        self.old_state_dir = store.STATE_DIR
-        self.old_max = store.MAX_JSONL_BYTES
-        self.old_keep = store.ROTATE_KEEP_LINES
-        store.STATE_DIR = self.temp_dir
-        store.MAX_JSONL_BYTES = 512
-        store.ROTATE_KEEP_LINES = 3
-
-    def tearDown(self):
-        store.STATE_DIR = self.old_state_dir
-        store.MAX_JSONL_BYTES = self.old_max
-        store.ROTATE_KEEP_LINES = self.old_keep
-
-    def test_module_facade_still_works(self):
-        store.save_snapshot("hk", {"machine": "hk", "ok": True})
-        current = store.read_current("hk")
-        self.assertTrue(current["ok"])
-        self.assertEqual(len(store.read_history("hk")), 1)
-        self.assertEqual(store.machines(), {"hk"})
-
-    def test_module_facade_uses_updated_state_dir(self):
-        store.save_snapshot("tebi", {"machine": "tebi", "source": "ingest"})
-        self.assertTrue((self.temp_dir / "tebi.json").exists())
-        self.assertTrue((self.temp_dir / "tebi.jsonl").exists())
-
-    def test_module_facade_rotate_respects_updated_constants(self):
+    def test_rotate_respects_configured_limits(self):
         for seq in range(20):
-            store.save_snapshot("hk", {
+            self.store.save_snapshot("hk", {
                 "machine": "hk", "seq": seq, "pad": "x" * 100,
             })
-        current = store.read_current("hk")
+        current = self.store.read_current("hk")
         self.assertEqual(current["seq"], 19)
         path = self.temp_dir / "hk.jsonl"
         # File size is bounded; the newest snapshot survives the truncation.
         self.assertLessEqual(path.stat().st_size, 512 * 2)
-        history = store.read_history("hk", 100)
+        history = self.store.read_history("hk", 100)
         self.assertLess(len(history), 20)
         self.assertEqual(history[-1]["seq"], 19)
-        store.save_snapshot("hk", {
+        self.store.save_snapshot("hk", {
             "machine": "hk", "seq": 20, "pad": "x" * 100,
         })
-        self.assertEqual(store.read_current("hk")["seq"], 20)
+        self.assertEqual(self.store.read_current("hk")["seq"], 20)
 
-    def test_module_facade_diff_previous(self):
-        store.save_snapshot("hk", {
-            "machine": "hk", "reachable": True, "agents": {},
-        })
-        changes = store.diff_previous("hk", {
-            "machine": "hk", "reachable": True,
-            "agents": {"codex": {"installed": True}},
-        })
-        self.assertEqual(changes, ["agents"])
-
-    def test_module_facade_rejects_unsafe_machine_name(self):
+    def test_rejects_unsafe_machine_name(self):
         with self.assertRaises(ValueError):
-            store.save_snapshot("../escaped", {"machine": "../escaped"})
+            self.store.save_snapshot("../escaped", {"machine": "../escaped"})
         self.assertFalse((self.temp_dir.parent / "escaped.json").exists())
 
 

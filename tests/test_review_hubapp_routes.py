@@ -5,10 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hub import events
-from hub import state as store
-from hub import task_store
-from hub import web
+from support.hub_env import HubStores
 
 TOKEN = "ingest-secret"
 
@@ -16,19 +13,12 @@ TOKEN = "ingest-secret"
 class _Base(unittest.TestCase):
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
-        self.old = (store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH)
-        store.STATE_DIR = self.temp_dir
-        events.EVENT_LOG = self.temp_dir / "events.jsonl"
-        task_store.DB_PATH = self.temp_dir / "fleet.db"
-        task_store.init_db()
-
-    def tearDown(self):
-        store.STATE_DIR, events.EVENT_LOG, task_store.DB_PATH = self.old
+        self.hub = HubStores(self.temp_dir)
 
     def app(self, **kw):
         kw.setdefault("ingest_token", TOKEN)
         kw.setdefault("dev_operator", "op@example.com")
-        return web.make_app(**kw)
+        return self.hub.make_app(**kw)
 
 
 class SseLifecycleTests(_Base):
