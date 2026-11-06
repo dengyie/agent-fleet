@@ -55,7 +55,9 @@ var REJECTED_TASK_FIELDS = ['attempt_id', 'nonce', 'client_token'];
 // hub/domain/machine.py public_machine_summary / public_machine_detail
 var MACHINE_SUMMARY_FIELDS = ['machine', 'desc', 'online', 'error', 'timestamp',
                               'system', 'agents', 'agent_summaries',
-                              'agent_count', 'has_hermes', 'hermes_state'];
+                              'agent_count', 'has_hermes', 'hermes_state', 'client'];
+// 节点客户端版本（hub report_schema.sanitize_client 白名单）
+var CLIENT_FIELDS = ['version', 'sequence', 'channel'];
 var MACHINE_DETAIL_FIELDS = ['machine', 'current', 'history'];
 // 实例 metadata 只允许这八个脱敏字段（与后端 report_schema.INSTANCE_FIELDS
 // 对齐）；conversation / 进程内部状态 / 未知键绝不进入公开模型。
@@ -72,7 +74,7 @@ var HISTORY_ROW_FIELDS = ['ts', 'reachable'];
 var EVENT_FIELDS = ['event', 'machine', 'ts', 'event_seq', 'changes'];
 
 // /api/status 外层（features 是默认关闭的 Phase 4/5 发行旗标，缺省视为关）
-var STATUS_FIELDS = ['updated_at', 'machines', 'features'];
+var STATUS_FIELDS = ['updated_at', 'machines', 'features', 'client_release'];
 var STATUS_FEATURE_FIELDS = ['append_user_turn', 'apply_local_profile'];
 
 // hub/http/observe_routes._sse_payload() 的四种 public event 形状
@@ -324,7 +326,24 @@ export function parseStatus(data) {
     out.machines = out.machines.map(parseMachineSummary);
   }
   out.features = parseStatusFeatures(data.features);
+  out.client_release = parseClient(data.client_release);
   return out;
+}
+
+// {version, sequence, channel} 或 null；字段缺失/类型不符一律视为无版本信息
+function parseClient(raw) {
+  if (!isObject(raw)) {
+    return null;
+  }
+  var src = pick(raw, CLIENT_FIELDS);
+  if (typeof src.version !== 'string' || src.version === '') {
+    return null;
+  }
+  return {
+    version: src.version,
+    sequence: typeof src.sequence === 'number' ? src.sequence : 0,
+    channel: typeof src.channel === 'string' ? src.channel : 'stable',
+  };
 }
 
 function parseStatusFeatures(raw) {
@@ -341,6 +360,7 @@ function parseMachineSummary(row) {
   if (typeof out.online !== 'boolean') {
     out.online = false;
   }
+  out.client = parseClient(row.client);
   if (typeof out.machine !== 'string' || out.machine === '') {
     throw new ContractError('invalid_machine_summary', '机器摘要缺少 machine');
   }

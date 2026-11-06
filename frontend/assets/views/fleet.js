@@ -45,7 +45,22 @@ function removeAllChildren(el) {
 
 /* -- 机器卡片渲染 ------------------------------------------------------------ */
 
-function renderMachineCard(grid, machine) {
+// 节点客户端版本徽标：序号落后于 hub 当前发布时标黄
+function renderClientBadge(client, release) {
+  if (!client || typeof client.version !== 'string') {
+    return null;
+  }
+  var behind = !!release && typeof release.sequence === 'number'
+    && client.sequence < release.sequence;
+  var badge = h('span', 'badge-client' + (behind ? ' behind' : ''),
+    client.version + (client.sequence ? ' #' + client.sequence : ''));
+  badge.setAttribute('title', behind
+    ? '客户端落后：hub 当前 ' + release.version + ' #' + release.sequence
+    : '客户端版本');
+  return badge;
+}
+
+function renderMachineCard(grid, machine, release) {
   var card = h('div', 'card');
   var name = (typeof machine.machine === 'string' && machine.machine)
     ? machine.machine : 'unknown';
@@ -61,6 +76,10 @@ function renderMachineCard(grid, machine) {
   if (machine.has_hermes) {
     var hermesBadge = h('span', 'badge-hermes', 'Hermes ' + fmtValue(machine.hermes_state));
     h2.appendChild(hermesBadge);
+  }
+  var clientBadge = renderClientBadge(machine.client, release);
+  if (clientBadge) {
+    h2.appendChild(clientBadge);
   }
   card.appendChild(h2);
 
@@ -426,7 +445,7 @@ export function mountFleet(root, store, client) {
     } else {
       var grid = h('div', 'grid');
       rows.forEach(function (machine) {
-        renderMachineCard(grid, machine);
+        renderMachineCard(grid, machine, status && status.client_release);
       });
       mainColumn.appendChild(grid);
     }

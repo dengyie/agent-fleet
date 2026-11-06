@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -44,7 +45,8 @@ def _bootstrap_direct_imports():
 _bootstrap_direct_imports()
 
 from tools import runner_config  # noqa: E402
-from tools.transport import Transport as _OutboundTransport
+from tools.client_update import runtime as client_runtime  # noqa: E402
+from tools.transport import Transport as _OutboundTransport  # noqa: E402
 
 
 DEFAULT_INTERVAL_S = 15
@@ -53,7 +55,10 @@ MAX_BACKOFF_S = 60
 DEFAULT_INGEST_TOKEN = Path.home() / ".config" / "agent-fleet" / "ingest-token"
 DEFAULT_SPOOL_KEY = Path.home() / ".config" / "agent-fleet" / "session-spool.key"
 DEFAULT_SPOOL_ROOT = Path.home() / ".cache" / "agent-fleet" / "session-spool"
-USER_AGENT = "agent-fleet-control-client/1.0"
+ROLE = "control-client"
+USER_AGENT = client_runtime.client_headers(ROLE)["User-Agent"]
+#: 另一个 control-client 已持有单实例锁
+EXIT_ALREADY_RUNNING = 75
 
 
 class CliError(Exception):
@@ -110,7 +115,7 @@ def _make_session_events_post(hub_url: str, ingest_token: str):
             {
                 "Content-Type": "application/json",
                 "X-Agent-Fleet-Token": ingest_token,
-                "User-Agent": USER_AGENT,
+                **client_runtime.client_headers(ROLE),
             },
             timeout=30,
         )
@@ -245,7 +250,33 @@ def main(argv=None):
         return 2
 
     interval = args.interval or DEFAULT_INTERVAL_S
+    lock = _acquire_instance_lock(cfg)
+    if lock is None:
+        return EXIT_ALREADY_RUNNING
+    try:
+        return _run(client, args, interval)
+    finally:
+        lock.release()
 
+
+def _acquire_instance_lock(cfg):
+    from fleet_core.locking import LockBusy, OwnedLock
+
+    lock = OwnedLock(cfg.cache_dir / "control-client.lock", "control-client",
+                     {"version": client_runtime.client_info()["version"]})
+    try:
+        return lock.acquire()
+    except LockBusy as exc:
+        print(f"[control-client] 已有实例在运行 pid={(exc.owner or {}).get('pid')}",
+              file=sys.stderr)
+        return None
+
+
+class _Stop(Exception):
+    pass
+
+
+def _run(client, args, interval):
     def _tick():
         result = client.poll_once()
         _pump_bridges(client)
@@ -263,10 +294,30 @@ def main(argv=None):
                   file=sys.stderr)
         return 0 if ok else 1
 
+    # SIGTERM 在睡眠期间到达才立即退出；poll/pump 中只置标志，本轮结束再退。
+    state = {"stop": False, "busy": False}
+
+    def _on_term(signum, frame):
+        state["stop"] = True
+        if not state["busy"]:
+            raise _Stop()
+
+    try:
+        signal.signal(signal.SIGTERM, _on_term)
+    except ValueError:
+        pass
+    client_runtime.announce(ROLE)
     backoff = MIN_BACKOFF_S
     while True:
+        if state["stop"] or client_runtime.drain_requested(ROLE):
+            print("[control-client] 退出（SIGTERM 或客户端已切换新版本）", file=sys.stderr)
+            return 0
         try:
-            result = _tick()
+            state["busy"] = True
+            try:
+                result = _tick()
+            finally:
+                state["busy"] = False
             if result.get("ok"):
                 backoff = MIN_BACKOFF_S
             else:
@@ -274,11 +325,14 @@ def main(argv=None):
                       file=sys.stderr)
                 backoff = min(max(backoff, MIN_BACKOFF_S) * 2, MAX_BACKOFF_S)
             time.sleep(interval if result.get("ok") else backoff)
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, _Stop):
             return 0
         except Exception as exc:
             print(f"[control-client] {type(exc).__name__}", file=sys.stderr)
-            time.sleep(backoff)
+            try:
+                time.sleep(backoff)
+            except _Stop:
+                return 0
             backoff = min(backoff * 2, MAX_BACKOFF_S)
 
 

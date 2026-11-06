@@ -90,14 +90,14 @@ class MuseBridge:
 
     @contextmanager
     def _store(self):
-        import fcntl  # local bridge runs on macOS/Linux; Hub imports stay portable
+        from fleet_core.locking import LockBusy, OwnedLock
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        lock_fd = os.open(str(self.path) + '.lock', os.O_CREAT | os.O_RDWR, 0o600)
+        lock = OwnedLock(Path(str(self.path) + '.lock'), 'muse-bridge')
         try:
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise MuseBridgeError('bridge_busy') from exc
+            lock.acquire()
+        except LockBusy as exc:
+            raise MuseBridgeError('bridge_busy') from exc
+        try:
             fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
             os.close(fd)
             connection = sqlite3.connect(self.path, timeout=2)
@@ -113,7 +113,7 @@ class MuseBridge:
             finally:
                 connection.close()
         finally:
-            os.close(lock_fd)
+            lock.release()
 
     def _snapshot(self, target_id=None):
         return _snapshot(self.transport.request('snapshot', **(

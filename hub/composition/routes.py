@@ -68,6 +68,11 @@ def _register_blueprints(app, config, platform, sessions, control):
 
         app.register_blueprint(adoption_bp)
 
+    # Round 7: 节点客户端发布（runner 凭据 + 清单签名）。总是注册；无签名 key 时 503。
+    from hub.http.client_release_routes import bp as client_release_bp
+
+    app.register_blueprint(client_release_bp)
+
 
 def _register_platform_blueprints(app, config, platform):
     from hub.http.platform_routes import bp as platform_bp

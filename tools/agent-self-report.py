@@ -46,6 +46,7 @@ from tools.probe_collectors import (
     collect_all,  # noqa: F401 — 契约：probe 模块须暴露 collect_all（tests/test_push_only）
     redacted_json,
 )
+from tools.client_update import runtime as client_runtime
 from tools.transport import Transport, require_secure_url
 
 
@@ -74,7 +75,7 @@ def send_payload(endpoint, token, payload, *, allow_insecure=False):
         {
             "Content-Type": "application/json",
             "X-Agent-Fleet-Token": token,
-            "User-Agent": "agent-fleet-probe/1.0",
+            **client_runtime.client_headers("probe"),
         },
         timeout=15,
     )
@@ -172,6 +173,7 @@ def main(argv=None):
     except ValueError as exc:
         parser.error(str(exc))
     payload = build_payload(machine, agent_types)
+    payload["client"] = client_runtime.report_fields()
 
     if args.dry_run:
         print(redacted_json(payload))
@@ -185,6 +187,8 @@ def main(argv=None):
     try:
         status, body = send_payload_with_retry(args.endpoint, token, payload)
         print(f"[self-report] {machine} -> {status} {body}")
+        # probe 是定时任务：上报成功即视为本版本已接管（updater 的确认依据）
+        client_runtime.announce("probe")
         return 0
     except Exception as exc:
         print(f"[self-report] {machine} report failed: {exc}", file=sys.stderr)

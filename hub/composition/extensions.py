@@ -19,6 +19,7 @@ def register_fleet_extension(app, config, repositories, core, platform, sessions
             "tasks": core.task_service,
             "runner": core.runner_service,
             "supervisor": control.supervisor_service,
+            "client_releases": control.client_release_service,
             "reconciliation": ReconciliationService(
                 observe_service=core.observe_service,
                 task_repository=core.task_repository,
