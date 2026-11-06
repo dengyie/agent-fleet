@@ -9,6 +9,7 @@ class ControlPlane:
     supervisor_service: Any
     control_router: Any = None
     adoption_service: Any = None
+    client_release_service: Any = None
 
 
 def build_control_plane(config, repositories: dict[str, Any], core,
@@ -139,4 +140,28 @@ def build_control_plane(config, repositories: dict[str, Any], core,
         supervisor_service=supervisor_service,
         control_router=control_router,
         adoption_service=adoption_service,
+        client_release_service=_build_client_releases(config, supervisor_key),
+    )
+
+
+def _build_client_releases(config, supervisor_key):
+    """节点客户端发布：hub 自身代码树打包，复用 supervisor key 签名清单。
+
+    supervisor 平面关闭时仍尝试加载同一把 key（节点更新不依赖控制面开关）；
+    没有 key 时服务照常构建，清单接口 fail-closed 返回 503。
+    """
+    from pathlib import Path
+
+    from hub.application.client_release_service import ClientReleaseService
+    from hub.auth import load_supervisor_signing_key
+
+    key = supervisor_key
+    if key is None:
+        key = (config.supervisor_signing_raw
+               if config.supervisor_signing_raw is not None
+               else load_supervisor_signing_key())
+    return ClientReleaseService(
+        source_root=Path(__file__).resolve().parents[2],
+        state_path=config.root / "var" / "client-releases" / "state.json",
+        signing_key=key,
     )

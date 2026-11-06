@@ -43,7 +43,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-USER_AGENT = "agent-fleet-control-client/1.0"
+from tools.client_update.runtime import client_headers
+
+ROLE = "control-client"
+USER_AGENT = client_headers(ROLE)["User-Agent"]
 
 #: KeepAlive loops used to surface ``poll_transport_error`` on a single
 #: TLS handshake timeout (same class as the task-runner SSL timeout).
@@ -778,7 +781,7 @@ class ControlClient:
         return {
             "X-Supervisor-Credential": f"{self._machine_id}:{self._credential}",
             "Content-Type": "application/json",
-            "User-Agent": USER_AGENT,
+            **client_headers(ROLE),
         }
 
     # ------------------------------------------------------------------

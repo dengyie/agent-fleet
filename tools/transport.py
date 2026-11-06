@@ -143,11 +143,20 @@ class Transport:
         return opener.open(req, timeout=timeout)
 
     def _one(self, req: urllib.request.Request, use_proxy: bool,
-             timeout: float):
-        """单路径一次尝试。返回 (status, payload)；CF 拦截外型抛 _CFBlock。"""
+             timeout: float, raw_limit: int | None = None):
+        """单路径一次尝试。返回 (status, payload)；CF 拦截外型抛 _CFBlock。
+
+        ``raw_limit`` 非 None 时 2xx 响应体按原始 bytes 返回（超限抛
+        ``ValueError``，不重试）；错误响应仍解析为 JSON dict。
+        """
         opener = self._opener(use_proxy)
         try:
             with self._open(opener, req, timeout) as resp:
+                if raw_limit is not None:
+                    body = resp.read(raw_limit + 1) if hasattr(resp, "read") else b""
+                    if len(body) > raw_limit:
+                        raise ValueError("response_too_large")
+                    return int(getattr(resp, "status", 200)), body
                 body = resp.read() if hasattr(resp, "read") else b""
                 raw = body.decode("utf-8", errors="replace") if body else ""
                 payload = json.loads(raw) if raw else {}
@@ -171,7 +180,8 @@ class Transport:
 
     # -- 多跳调度 -----------------------------------------------------------
 
-    def _post(self, req: urllib.request.Request, timeout: float):
+    def _post(self, req: urllib.request.Request, timeout: float,
+              raw_limit: int | None = None):
         """按模式调度路径；auto 模式下 CF 拦截/传输失败可在两路径间切换。
 
         返回 (status, payload, last_error_str)。status=0 表示两路径均传输失败。
@@ -192,7 +202,7 @@ class Transport:
             use_proxy = path == "proxy"
             for attempt in range(self._attempts):
                 try:
-                    status, payload = self._one(req, use_proxy, timeout)
+                    status, payload = self._one(req, use_proxy, timeout, raw_limit)
                     if self._mode == "auto" and 200 <= status < 500:
                         self._preferred = path
                     return status, payload, ""
@@ -262,6 +272,33 @@ class Transport:
             eff_timeout = self._timeout
         status, payload, _ = self._post(req, eff_timeout)
         return status, payload
+
+
+    def get_bytes(self, url: str, headers: dict[str, str],
+                  timeout: float | None = None, *, max_bytes: int):
+        """GET 原始响应体。2xx 返回 (status, bytes)，其它返回 (status, dict)。
+
+        超过 ``max_bytes`` 视为失败 (0, {"error": ...})；不跟随重定向。
+        """
+        refused = self._refuse_insecure(url)
+        if refused is not None:
+            return refused
+        req = urllib.request.Request(url, headers=dict(headers or {}), method="GET")
+        eff_timeout = self._timeout if timeout is None or timeout <= 0 else float(timeout)
+        status, payload, _ = self._post(req, eff_timeout, raw_limit=int(max_bytes))
+        return status, payload
+
+    def get_json(self, url: str, headers: dict[str, str],
+                 timeout: float | None = None, *, max_bytes: int = 1 << 20):
+        """GET JSON 对象。返回 (status, dict)；非对象 / 解析失败归为 invalid_json。"""
+        status, body = self.get_bytes(url, headers, timeout, max_bytes=max_bytes)
+        if not isinstance(body, bytes):
+            return status, body
+        try:
+            payload = json.loads(body.decode("utf-8") or "{}")
+        except (ValueError, UnicodeDecodeError):
+            return status, {"error": "invalid_json"}
+        return status, payload if isinstance(payload, dict) else {"error": "invalid_json"}
 
 
 class _CFBlock(Exception):

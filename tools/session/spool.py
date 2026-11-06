@@ -41,24 +41,19 @@ import os
 import re
 import struct
 import threading
-import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from session_schema import validate_event
+from fleet_core.locking import LockBusy, OwnedLock
 from fleet_core.session.crypto import AeadBox
 
 try:  # pragma: no cover - the fallback is exercised on non-POSIX hosts.
     import fcntl
 except ImportError:  # pragma: no cover
     fcntl = None
-
-try:  # pragma: no cover - Windows-only owner lock primitive.
-    import msvcrt
-except ImportError:  # pragma: no cover
-    msvcrt = None
 
 # Stable diagnostic codes (never raw paths / exception text / payloads).
 CODE_SEGMENT_BAD = "segment_corrupt"
@@ -84,7 +79,6 @@ MAX_EVENT_BYTES = 65536         # shared single-event bound (post-redaction)
 
 _IS_WINDOWS = os.name == "nt"
 _OWNER_LOCK_NAME = ".owner.lock"
-_OWNER_POLL_S = 0.05
 #: Default bound on waiting for another holder of a spool's owner lock.
 OWNER_WAIT_S = 60.0
 _QUOTA_LOCKS: dict[str, threading.RLock] = {}
@@ -115,40 +109,6 @@ def _segment_pattern(session_id: str):
     return re.compile(rf"^{re.escape(session_id)}_(\d{{6,}})\.(active|sealed)$")
 
 
-def _try_lock(handle) -> bool:
-    """Non-blocking exclusive lock on ``handle``; False when contended."""
-    try:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        elif msvcrt is not None:
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        return True
-    except (BlockingIOError, PermissionError):
-        return False
-    except OSError as exc:
-        # EACCES/EAGAIN/EDEADLK are contention on every supported platform.
-        if exc.errno in (11, 13, 35, 36):
-            return False
-        raise
-
-
-def _unlock(handle) -> None:
-    try:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        elif msvcrt is not None:
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-    except OSError:
-        pass
-    finally:
-        try:
-            handle.close()
-        except OSError:
-            pass
-
-
 def acquire_owner_lock(root, *, timeout: float = OWNER_WAIT_S):
     """Take the per-spool-root writer ownership lock.
 
@@ -156,32 +116,23 @@ def acquire_owner_lock(root, *, timeout: float = OWNER_WAIT_S):
     spool's lifetime so a concurrent replay never opens, appends to, seals or
     compacts a spool another process is writing.  Waits at most ``timeout``
     seconds (``0`` = try once) and then raises :class:`SpoolBusy`.  Returns
-    an opaque handle for :func:`release_owner_lock`.
+    an opaque handle for :func:`release_owner_lock`.  The holder is recorded
+    next to the lock (``.owner.lock.owner.json``) so ``fleet-client locks``
+    can name it.
     """
     root = Path(root)
     try:
         root.mkdir(parents=True, exist_ok=True)
-        handle = open(root / _OWNER_LOCK_NAME, "a+b")
+        return OwnedLock(root / _OWNER_LOCK_NAME, "spool-writer").acquire(timeout)
+    except LockBusy:
+        raise SpoolBusy() from None
     except OSError as exc:
         raise SpoolError(CODE_SETUP) from exc
-    deadline = time.monotonic() + max(0.0, float(timeout))
-    try:
-        while not _try_lock(handle):
-            if time.monotonic() >= deadline:
-                raise SpoolBusy()
-            time.sleep(_OWNER_POLL_S)
-    except SpoolBusy:
-        handle.close()
-        raise
-    except OSError as exc:
-        handle.close()
-        raise SpoolError(CODE_SETUP) from exc
-    return handle
 
 
 def release_owner_lock(handle) -> None:
     if handle is not None:
-        _unlock(handle)
+        handle.release()
 
 
 def owner_lock_held(root) -> bool:

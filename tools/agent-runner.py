@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -46,10 +47,14 @@ _bootstrap_direct_imports()
 from fleet_core import result_files
 from tools import adapters, runner_config, worktree
 from tools.adapters.base import EXIT_UNSAFE_INSTRUCTION
+from tools.client_update import runtime as client_runtime
 from tools.spawn_policy import UnsafeInstruction, refuse_windows_batch
 from tools.transport import Transport
 
-USER_AGENT = "agent-fleet-runner/1.0"
+ROLE = "runner"
+USER_AGENT = client_runtime.client_headers(ROLE)["User-Agent"]
+#: 另一个 runner 已持有单实例锁（launchd 会节流重试，不算崩溃）
+EXIT_ALREADY_RUNNING = 75
 MAX_BACKOFF_S = 60
 MIN_BACKOFF_S = 5
 # heartbeat 日志上传约束：≤MAX_LOG_LINES 行 × ≤MAX_LOG_LINE_CHARS 字符（与 hub 一致）
@@ -145,7 +150,7 @@ def post_json(cfg, path, body, timeout=15):
     headers = {
         "Content-Type": "application/json",
         "X-Runner-Credential": f"{cfg.machine}:{cfg.credential}",
-        "User-Agent": USER_AGENT,
+        **client_runtime.client_headers(ROLE),
     }
     return cfg.transport.post_json(cfg.hub + path, body, headers, timeout=timeout)
 
@@ -603,6 +608,48 @@ def poll_once(cfg):
     return True
 
 
+class _StopRequested(Exception):
+    """SIGTERM 在空闲（睡眠）期间到达：立即结束主循环。"""
+
+
+class _GracefulStop:
+    """SIGTERM：空闲时立即退出；执行任务/轮询中只置标志，本轮结束后退出。
+
+    launchd/systemd 停服务、updater drain 都走这条路径，正在执行的任务能把
+    结果交回 hub，而不是被半路杀掉等 lease 过期重派。
+    """
+
+    def __init__(self):
+        self.requested = False
+        self.busy = False
+
+    def install(self):
+        try:
+            signal.signal(signal.SIGTERM, self._handle)
+        except ValueError:  # 非主线程（测试内嵌调用）
+            pass
+
+    def _handle(self, signum, frame):
+        self.requested = True
+        if not self.busy:
+            raise _StopRequested()
+
+
+def _acquire_instance_lock(cfg):
+    from fleet_core.locking import LockBusy, OwnedLock
+
+    lock = OwnedLock(cfg.cache_dir / "runner.lock", "agent-runner",
+                     {"version": client_runtime.client_info()["version"]})
+    try:
+        return lock.acquire()
+    except LockBusy as exc:
+        owner = exc.owner or {}
+        log.error("另一个 runner 正在运行（pid=%s 版本=%s），本实例退出",
+                  owner.get("pid"), (owner.get("extra") or {}).get("version"))
+        print(f"[runner] 已有实例在运行 pid={owner.get('pid')}", file=sys.stderr)
+        return None
+
+
 def main(argv=None):
     import argparse
     parser = argparse.ArgumentParser(description="agent-fleet runner（pull-only 任务执行器）")
@@ -616,33 +663,56 @@ def main(argv=None):
 
     resident = not args.once
     _setup_logging(cfg, resident=resident)
-
-    if args.once:
-        try:
-            poll_once(cfg)
-        except RunnerPollError as exc:
-            log.error("hub 不可达: %s", exc)
-        return 0
-
-    backoff = MIN_BACKOFF_S
-    while True:
-        try:
-            did_work = poll_once(cfg)
-            backoff = MIN_BACKOFF_S  # poll 成功（含空任务）→ 重置退避
-            if not did_work:
-                time.sleep(interval)
-        except RunnerPollError as exc:
-            # 网络失败：保留/递增 backoff，5s→60s 上限
-            log.warning("hub 不可达，%ds 后重试: %s", backoff, exc)
-            time.sleep(backoff)
-            backoff = min(backoff * 2, MAX_BACKOFF_S)
-        except KeyboardInterrupt:
+    lock = _acquire_instance_lock(cfg)
+    if lock is None:
+        return EXIT_ALREADY_RUNNING
+    try:
+        if args.once:
+            try:
+                poll_once(cfg)
+            except RunnerPollError as exc:
+                log.error("hub 不可达: %s", exc)
             return 0
-        except Exception:
-            log.exception("轮询异常")
-            time.sleep(backoff)
-            backoff = min(backoff * 2, MAX_BACKOFF_S)
+        return _resident_loop(cfg, interval)
+    finally:
+        lock.release()
 
+
+def _resident_loop(cfg, interval):
+    stop = _GracefulStop()
+    stop.install()
+    client_runtime.announce(ROLE)
+    backoff = MIN_BACKOFF_S
+    try:
+        while True:
+            if stop.requested:
+                log.info("收到 SIGTERM，当前轮已结束，退出")
+                return 0
+            if client_runtime.drain_requested(ROLE):
+                log.info("客户端已切换到新版本，退出让位（KeepAlive 将以新代码拉起）")
+                return 0
+            try:
+                stop.busy = True
+                try:
+                    did_work = poll_once(cfg)
+                finally:
+                    stop.busy = False
+                backoff = MIN_BACKOFF_S  # poll 成功（含空任务）→ 重置退避
+                if not did_work and not stop.requested:
+                    time.sleep(interval)
+            except RunnerPollError as exc:
+                # 网络失败：保留/递增 backoff，5s→60s 上限
+                log.warning("hub 不可达，%ds 后重试: %s", backoff, exc)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, MAX_BACKOFF_S)
+            except (KeyboardInterrupt, _StopRequested):
+                return 0
+            except Exception:
+                log.exception("轮询异常")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, MAX_BACKOFF_S)
+    except _StopRequested:
+        return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())

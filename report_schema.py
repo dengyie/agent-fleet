@@ -155,6 +155,24 @@ def sanitize_local_profiles(value) -> list[dict]:
     return out
 
 
+_CLIENT_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_CLIENT_CHANNEL_RE = re.compile(r"^[a-z][a-z0-9-]{0,15}$")
+
+
+def sanitize_client(value) -> dict | None:
+    """probe 自报的客户端版本：仅 version/sequence/channel 白名单。"""
+    if not isinstance(value, dict):
+        return None
+    version, sequence, channel = value.get("version"), value.get("sequence"), value.get("channel")
+    if not isinstance(version, str) or not _CLIENT_VERSION_RE.fullmatch(version):
+        return None
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or not 0 <= sequence < 2**31:
+        sequence = 0
+    if not isinstance(channel, str) or not _CLIENT_CHANNEL_RE.fullmatch(channel):
+        channel = "stable"
+    return {"version": version, "sequence": sequence, "channel": channel}
+
+
 def _to_int(value):
     """Coerce an integer field, or return ``None`` for malformed values."""
     if isinstance(value, bool):

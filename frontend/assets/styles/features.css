@@ -122,6 +122,22 @@
   50% { opacity: 0.8; transform: scale(1.08); }
 }
 
+.badge-client {
+  font-size: 10.5px;
+  font-family: var(--mono, ui-monospace, monospace);
+  color: var(--muted, inherit);
+  border: 1px solid currentColor;
+  padding: 1px 6px;
+  border-radius: 6px;
+  margin-left: 6px;
+  opacity: 0.75;
+}
+.badge-client.behind {
+  color: var(--warn);
+  background: var(--warn-bg);
+  opacity: 1;
+}
+
 .badge-hermes {
   font-size: 10.5px;
   font-weight: 600;

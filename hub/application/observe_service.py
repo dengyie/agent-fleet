@@ -22,7 +22,13 @@ from pathlib import Path
 from hub.application.event_emit import safe_emit
 from hub.domain.machine import public_machine_detail, public_machine_summary
 from hub.repositories import MACHINE_NAME_RE
-from report_schema import sanitize_agents, sanitize_instances, sanitize_system, sanitize_local_profiles
+from report_schema import (
+    sanitize_agents,
+    sanitize_client,
+    sanitize_instances,
+    sanitize_local_profiles,
+    sanitize_system,
+)
 
 DEFAULT_STALE_AFTER_S = 300
 _HISTORY_LIMIT = 720
@@ -215,6 +221,7 @@ class ObserveService:
             "system": sanitize_system(payload.get("system", {})),
             "instances": sanitize_instances(payload.get("instances")),
             "local_profiles": sanitize_local_profiles(payload.get("local_profiles")),
+            "client": sanitize_client(payload.get("client")),
             "reachable": True,
             "remote_error": remote_error,
             INGEST_AUTH_FIELD: (INGEST_AUTH_MACHINE if bound_machine is not None

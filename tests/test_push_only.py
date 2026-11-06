@@ -61,7 +61,7 @@ class SelfReportContractTests(unittest.TestCase):
         with mock.patch.object(module.Transport, "_open", fake_open):
             module.send_payload("https://example.test", "secret", {"machine": "test"})
 
-        self.assertEqual(captured["request"].headers["User-agent"], "agent-fleet-probe/1.0")
+        self.assertEqual(captured["request"].headers["User-agent"], "agent-fleet-probe/legacy")
         self.assertEqual(captured["timeout"], 15)
 
     def test_retry_reuses_report_id_for_transient_failure(self):

@@ -169,6 +169,7 @@ class CliMainTests(unittest.TestCase):
             "hub": "https://hub.example.com",
             "machine": "mac-local",
             "credential_file": str(self.tmp / "runner-token"),
+            "cache_dir": str(self.tmp / "cache"),
             "projects": {"agent-fleet": {"path": str(self.project)}},
             "agents": {"codex": {"command": ["codex", "{instruction}"]}},
         }
@@ -239,6 +240,7 @@ class CliMainTests(unittest.TestCase):
                 "--once",
                 "--ingest-token-file", str(ingest),
                 "--spool-key-file", str(self.tmp / "spool.key"),
+                "--spool-root", str(self.tmp / "spool"),
             ])
         self.assertEqual(rc, 0)
         self.assertTrue(captured["path"].endswith("/api/supervisor/poll"))

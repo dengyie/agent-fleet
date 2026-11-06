@@ -514,13 +514,16 @@ class AgentRunnerTests(unittest.TestCase):
         def fake_urlopen(req, timeout):
             captured["cred"] = req.headers.get("X-runner-credential")
             captured["ua"] = req.headers.get("User-agent")
+            captured["client"] = req.headers.get("X-fleet-client")
             return FakeResponse(200, {"ok": True})
 
         with _patch_open(fake_urlopen):
             status, data = self.runner.post_json(self.cfg, "/api/commands/poll", {})
         self.assertEqual(status, 200)
         self.assertEqual(captured["cred"], "mac-local:s3")
-        self.assertEqual(captured["ua"], "agent-fleet-runner/1.0")
+        # Round 7: UA 携带客户端版本（未经 updater 安装的源码树为 legacy）
+        self.assertEqual(captured["ua"], "agent-fleet-runner/legacy")
+        self.assertEqual(captured["client"], "version=legacy; seq=0; channel=stable")
 
     def test_post_json_network_error_returns_zero_status(self):
         self.cfg.transport = transport_mod.Transport(

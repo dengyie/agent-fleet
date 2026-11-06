@@ -206,6 +206,9 @@ def api_status():
         "apply_local_profile": bool(
             current_app.config.get("APPLY_LOCAL_PROFILE_ENABLED")),
     }
+    # Round 7: 最新客户端发布（前端据 sequence 标出落后的节点）
+    releases = current_app.extensions.get("fleet", {}).get("services", {}).get("client_releases")
+    payload["client_release"] = releases.summary() if releases is not None else None
     return jsonify(payload)
 
 

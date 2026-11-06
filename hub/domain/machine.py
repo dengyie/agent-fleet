@@ -8,7 +8,13 @@ in this module.
 from collections.abc import Mapping
 from typing import Any
 
-from report_schema import sanitize_agents, sanitize_instances, sanitize_system, sanitize_local_profiles
+from report_schema import (
+    sanitize_agents,
+    sanitize_client,
+    sanitize_instances,
+    sanitize_local_profiles,
+    sanitize_system,
+)
 
 
 _HISTORY_LIMIT = 720
@@ -73,6 +79,7 @@ def public_machine_summary(
         "agent_count": len(_agent_summaries(agents)),
         "has_hermes": is_hermes,
         "hermes_state": (hermes or {}).get("gateway_state", "n/a") if is_hermes else None,
+        "client": sanitize_client(snapshot.get("client")),
     }
 
 
@@ -99,6 +106,7 @@ def public_machine_detail(
             "system": sanitize_system(current.get("system", {})),
             "instances": sanitize_instances(current.get("instances", [])),
             "local_profiles": sanitize_local_profiles(current.get("local_profiles", [])),
+            "client": sanitize_client(current.get("client")),
         },
         "history": rows,
     }
