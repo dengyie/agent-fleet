@@ -39,6 +39,7 @@ def _file(relative: str, *, asset: bool = False):
 @bp.route('/assistant')
 @bp.route('/muse')
 @bp.route('/monitoring')
+@bp.route('/plugins')
 @bp.route('/session-search')
 @bp.route('/usage')
 @bp.route('/machine/<entity>')

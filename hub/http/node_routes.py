@@ -142,11 +142,24 @@ def receipt():
             command_id, status, result=result or {}, worker_id=worker_id,
             owner_id=g.platform_node_owner, node_id=g.platform_node_id,
         )
+        current_app.extensions['fleet']['services']['plugins'].record_receipt(
+            g.platform_node_owner, g.platform_node_id, row)
         return jsonify({"ok": True, "receipt": {
             "command_id": row["command_id"], "status": row["status"],
             "result": row.get("result"),
         }})
     return _call(_receipt)
+
+
+@bp.post('/plugins')
+@require_platform_node
+def report_plugins():
+    from hub.http.plugin_routes import invoke, service
+    def call():
+        body = _body()
+        service().report(g.platform_node_owner, g.platform_node_id, body.get('plugins'))
+        return jsonify(ok=True)
+    return invoke(call)
 
 
 def _browser_session_command(command_id, worker_id, action, session_id=None):

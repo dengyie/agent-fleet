@@ -45,6 +45,8 @@ FORBIDDEN_IMPORTS = {
 }
 # Node-side entrypoints launched by launchd / Windows tasks / operators.
 NODE_ENTRY_MODULES = (
+    "tools.plugins.node",
+    "tools.plugins.login_worker",
     "tools.browser_bridge.node",
     "tools.browser_bridge.muse_cli",
     "tools.session.sync",

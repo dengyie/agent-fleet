@@ -10,7 +10,7 @@ from collections import deque
 from typing import Any
 
 from hub.infrastructure.platform_db_base import PlatformRepositoryError
-from platform_schema import PlatformValidationError, validate_id, validate_owner_id
+from platform_schema import PlatformValidationError, validate_id, validate_node, validate_owner_id
 
 # Node credential auth runs on every node request: keep it cheap and bounded.
 NODE_LAST_USED_WRITE_INTERVAL_S = 60.0
@@ -20,6 +20,28 @@ NODE_AUTH_LIMITER_MAX_KEYS = 4096
 
 
 class PlatformNodeAuthMixin:
+    def enroll_node(self, owner_id: str, data: dict) -> dict[str, Any]:
+        """Create a node and its initial credential atomically; never rotate an existing node."""
+        from contextlib import closing
+        from hub.infrastructure.platform_db_base import _json
+        owner_id = validate_owner_id(owner_id)
+        node = validate_node(data)
+        secret, salt, now = secrets.token_urlsafe(32), secrets.token_bytes(16), time.time()
+        try:
+            with closing(self._connect()) as conn, conn:
+                conn.execute('BEGIN IMMEDIATE')
+                if conn.execute('SELECT 1 FROM nodes WHERE owner_id=? AND node_id=?',
+                                (owner_id, node['node_id'])).fetchone():
+                    raise PlatformRepositoryError('node_already_exists')
+                conn.execute('INSERT INTO nodes(owner_id,node_id,label,capabilities,enabled) VALUES(?,?,?,?,?)',
+                             (owner_id, node['node_id'], node['label'], _json(node['capabilities']), 1))
+                conn.execute('INSERT INTO node_credentials(owner_id,node_id,salt,secret_digest,fast_digest,enabled,issued_at) '
+                             'VALUES(?,?,?,?,?,1,?)', (owner_id, node['node_id'], salt,
+                             self._derive_node_digest(secret, salt), self._fast_node_digest(secret, salt), now))
+            return {'node_id': node['node_id'], 'credential': f"{node['node_id']}:{secret}"}
+        except sqlite3.Error:
+            raise PlatformRepositoryError('platform_store') from None
+
     @staticmethod
     def _derive_node_digest(secret: str, salt: bytes) -> bytes:
         """Legacy PBKDF2 digest (``secret_digest``); kept so a rollback to an

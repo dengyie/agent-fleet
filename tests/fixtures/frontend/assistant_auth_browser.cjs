@@ -181,7 +181,8 @@ const [origin] = process.argv.slice(2);
     assert.equal(afterDrag.footer.top, beforeDrag.footer.top, 'resizing the lists keeps the self-hosted footer anchored: ' +
       JSON.stringify({beforeDrag, afterDrag}));
     assert.equal(afterDrag.footer.height, beforeDrag.footer.height, 'resizing the lists leaves the self-hosted footer size unchanged');
-    assert.ok(afterDrag.nodes.height > beforeDrag.nodes.height, 'dragging upward expands the node list');
+    assert.ok(afterDrag.nodes.height > beforeDrag.nodes.height, 'dragging upward expands the node list: ' +
+      JSON.stringify({initialNodeHeight, beforeDrag, afterDrag, max: await divider.getAttribute('aria-valuemax')}));
     assert.ok(afterDrag.history.height < beforeDrag.history.height, 'the conversation list gives space to the node list');
     assert.equal(await page.evaluate(() => localStorage.getItem('fleet-sidebar-nodes-height')),
       await divider.getAttribute('aria-valuenow'), 'dragged height persists for the next visit');

@@ -10,7 +10,7 @@
 .new-conversation:hover { text-decoration: none; filter: brightness(.97); }
 .nav-shortcut { margin-left: auto; font-size: 10px; font-weight: 450; opacity: .65; }
 .nav-group-label { color: var(--text-3); font-size: 10px; font-weight: 600; letter-spacing: 1px; margin: 0 12px 9px; }
-.console-nav { display: grid; gap: 5px; }
+.console-nav { display: grid; gap: 5px; flex: 0 0 auto; max-height: 30vh; overflow-y: auto; }
 .console-nav a, .console-nodes a { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 7px; color: var(--text-2); font-size: 13px; }
 .console-nav a:hover, .console-nodes a:hover { text-decoration: none; background: var(--panel-hover); }
 .console-nav a[aria-current=page], .console-nodes a[aria-current=page] { background: var(--panel-hover); color: var(--text); font-weight: 600; }

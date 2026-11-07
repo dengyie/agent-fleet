@@ -38,6 +38,9 @@
 [可视化架构](docs/visual-architecture.md)。最新浏览器截图覆盖见
 [UI 视觉证据](docs/testing/visual-evidence.md)。
 
+官方插件中心与首个 GitHub CLI 登录管理插件的接入、节点配置和扩展合同见
+[官方插件开发与使用](docs/platform/official-plugins.md)。
+
 ---
 
 ## 🌟 核心优势

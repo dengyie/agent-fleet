@@ -44,6 +44,12 @@ REQUIRED_PATHS=(
   assets/views/muse/model.js
   assets/api/muse.js
   assets/styles/muse.css
+  assets/api/plugins.js
+  assets/views/plugins.js
+  assets/plugins/registry.js
+  assets/plugins/dom.js
+  assets/plugins/github-cli.js
+  assets/styles/plugins.css
   assets/styles/app.css
   assets/shell/navigation.js
   assets/shell/theme.js

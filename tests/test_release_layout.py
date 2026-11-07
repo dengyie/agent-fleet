@@ -50,7 +50,9 @@ class ReleaseLayoutTests(unittest.TestCase):
         # Task 17: static-shell smoke depends on exactly this module set being
         # servable by a plain static server.
         required = ('index.html', 'config.js', 'assets/api/client.js', 'assets/api/contracts.js',
-                    'assets/api/platform.js', 'assets/api/accounts.js',
+                    'assets/api/platform.js', 'assets/api/accounts.js', 'assets/api/plugins.js',
+                    'assets/views/plugins.js', 'assets/plugins/registry.js', 'assets/plugins/dom.js',
+                    'assets/plugins/github-cli.js', 'assets/styles/plugins.css',
                     'assets/realtime/sse.js', 'assets/state/store.js', 'assets/views/fleet.js',
                     'assets/views/machine.js', 'assets/views/task.js', 'assets/views/session.js',
                     'assets/views/assistant.js', 'assets/views/monitoring.js', 'assets/views/account.js',
@@ -86,6 +88,8 @@ class ReleaseLayoutTests(unittest.TestCase):
         allowed.update({'assets/views/session-handoff.js', 'assets/views/session-questions.js',
                         'assets/views/session-search.js', 'assets/views/usage.js'})
         allowed.update({'assets/views/muse.js', 'assets/views/muse/cards.js', 'assets/views/muse/model.js', 'assets/api/muse.js'})
+        allowed.update({'assets/api/plugins.js', 'assets/views/plugins.js', 'assets/plugins/registry.js',
+                        'assets/plugins/dom.js', 'assets/plugins/github-cli.js'})
         for folder in ('assets/ui', 'assets/vendor', 'assets/shell', 'assets/styles', 'assets/views/assistant'):
             allowed.update(p.relative_to(FRONTEND_DIR).as_posix() for p in (FRONTEND_DIR / folder).rglob('*') if p.is_file())
         unexpected = present - allowed
@@ -98,7 +102,9 @@ class ReleaseLayoutTests(unittest.TestCase):
                         'private_key', 'BEGIN PRIVATE KEY', 'SELECT ')
         for relative in ('index.html', 'config.js', 'assets/routes.js',
                          'assets/styles/app.css', 'assets/api/client.js', 'assets/api/contracts.js',
-                         'assets/api/platform.js', 'assets/api/accounts.js',
+                         'assets/api/platform.js', 'assets/api/accounts.js', 'assets/api/plugins.js',
+                         'assets/views/plugins.js', 'assets/plugins/registry.js', 'assets/plugins/dom.js',
+                         'assets/plugins/github-cli.js', 'assets/styles/plugins.css',
                          'assets/realtime/sse.js', 'assets/state/store.js',
                          'assets/views/fleet.js', 'assets/views/machine.js',
                          'assets/views/task.js', 'assets/views/session.js',

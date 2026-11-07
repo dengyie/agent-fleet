@@ -4,6 +4,7 @@ import {
   restoreConversation, deleteConversation,
 } from '../api/platform.js';
 const labels = {
+  plugins: ['插件中心', '插件中心', '管理官方插件及其在各节点上的运行状态。', 'PLUGINS'],
   account: ['账号设置', '账号设置', '管理个人资料、密码与登录会话。', 'ACCOUNT'],
   fleet: ['总览', '集群总览', '节点、任务与服务状态，一处掌握。', 'WORKSPACE OVERVIEW'],
   assistant: ['主助手', '主助手', '从一个想法开始，让助手把工作推进到完成。', 'ASSISTANT'],
