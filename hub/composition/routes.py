@@ -95,6 +95,8 @@ def _register_platform_blueprints(app, config, platform):
     app.register_blueprint(muse_bp)
     app.register_blueprint(conversation_bp)
     app.register_blueprint(node_bp)
+    from hub.http.plugin_routes import bp as plugins_bp
+    app.register_blueprint(plugins_bp)
     app.register_blueprint(artifact_bp)
     app.register_blueprint(legacy_task_bp)
     # Keep a stable 404 transport while the execution-window gate is

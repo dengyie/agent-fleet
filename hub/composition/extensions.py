@@ -61,6 +61,7 @@ def register_fleet_extension(app, config, repositories, core, platform, sessions
         if core.legacy_task_bridge is not None:
             services["legacy_task_bridge"] = core.legacy_task_bridge
         services["platform_delivery"] = p.platform_delivery
+        services["plugins"] = p.plugin_service
         services["command_inspection"] = p.command_inspection
         services["command_postcheck"] = p.command_postcheck
         services["platform_artifacts"] = p.artifact_store

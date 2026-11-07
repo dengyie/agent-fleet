@@ -1,5 +1,7 @@
 # 全流程测试与质量门禁
 
+官方插件及 GitHub CLI 的节点接入、设备码任务与验收边界见[官方插件文档](../platform/official-plugins.md)。
+
 请求级模型、五项 Token、耗时、费用来源、重试与交互验收详见[请求元数据测试矩阵](request-metadata.md)。
 
 尚未完成的真实浏览器、接管、凭据、Browserbase 与通知工作见[待确认实施决策](browser-notification-proposal.md)；该提案不是已批准规格或通过证明。

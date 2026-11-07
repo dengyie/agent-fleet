@@ -15,6 +15,7 @@ import { mountUsage } from './views/usage.js';
 import { mountAssistant } from './views/assistant.js';
 import { mountMuse } from './views/muse.js';
 import { mountMonitoring } from './views/monitoring.js';
+import { mountPlugins } from './views/plugins.js';
 import { mountLogin, redirectToLogin } from './shell/operator.js';
 import './ui/ChatPromptInput.js';
 import './ui/StreamMarkdown.js';
@@ -87,6 +88,7 @@ function protectConsole() {
     else if (route.page === 'assistant') view.teardown = mountAssistant(target, {conversationId: route.id, account});
     else if (route.page === 'muse') view.teardown = mountMuse(target);
     else if (route.page === 'monitoring') view.teardown = mountMonitoring(target, client);
+    else if (route.page === 'plugins') view.teardown = mountPlugins(target);
     else if (route.page === 'session-search') view.teardown = mountSessionSearch(target, client);
     else if (route.page === 'usage') view.teardown = mountUsage(target, client);
     else if (route.page === 'session' && route.id) {

@@ -880,6 +880,36 @@
         "tests/test_muse_workspace.py::test_resource_total_limit_stops_upstream_reads",
         "tests/test_muse_workspace.py::test_muse_workspace_in_browser"
       ]
+    },
+    {
+      "id": "PLUGIN-01",
+      "title": "官方插件注册、节点接入及命令投递",
+      "layer": "integration",
+      "acceptance": "独立插件启停、节点offer与依赖状态；签名命令、重复去重、节点重启和一次性接入文件",
+      "boundary": "real SQLite + signed node protocol; temporary gh subprocess fixture",
+      "tests": [
+        "tests/test_plugins.py::test_settings_persist_and_revision_conflict",
+        "tests/test_plugins.py::test_commands_are_signed_idempotent_and_owner_scoped",
+        "tests/test_plugins.py::test_enrollment_is_one_time_atomic_and_does_not_rotate_existing_node",
+        "tests/test_plugin_node.py::test_signed_hub_node_roundtrip_observation_and_duplicate",
+        "tests/test_plugin_node.py::test_runtime_requires_single_owner_and_recovers_command_receipts",
+        "tests/test_plugin_node.py::test_downloaded_enrollment_installs_private_files_and_runs_node",
+        "tests/test_plugin_node.py::test_login_recovery_survives_history_limit_and_other_scopes",
+        "tests/test_github_cli_plugin.py::test_context_mutations_wait_for_previous_worker_cleanup",
+        "tests/test_github_cli_plugin.py::test_json_exit_zero_with_auth_errors_is_not_success",
+        "tests/test_github_cli_plugin.py::test_cli_failure_modes_are_distinct",
+        "tests/test_github_cli_plugin.py::test_login_cancel_and_parent_loss_reap_owned_process"
+      ]
+    },
+    {
+      "id": "PLUGIN-02",
+      "title": "GitHub CLI 插件浏览器贯穿",
+      "layer": "browser",
+      "acceptance": "下载接入文件、启用节点、检查账号、设备码登录、刷新恢复、停用后取消、登录完成、切换和仓库权限",
+      "boundary": "real browser + Hub + signed node + SQLite + subprocess; external GitHub simulated by temporary gh executable",
+      "tests": [
+        "tests/test_plugins_browser.py::test_plugin_center_device_login_recovery_and_accounts"
+      ]
     }
   ],
   "external_checks": [

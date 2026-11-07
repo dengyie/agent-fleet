@@ -42,6 +42,7 @@ class PlatformComponents:
     platform_memory_context_service: Any = None
     platform_worker_service: Any = None
     platform_run_scheduler: Any = None
+    plugin_service: Any = None
 
 
 def build_platform(config, repositories: dict[str, Any]) -> PlatformComponents:
@@ -55,6 +56,7 @@ def build_platform(config, repositories: dict[str, Any]) -> PlatformComponents:
     )
 
     _build_command_plane(p, config, repositories)
+    _build_plugins(p, config)
     _build_conversations(p, config, repositories)
     _build_execution_windows(p, config, repositories)
     if config.service_monitoring_enabled:
@@ -64,6 +66,14 @@ def build_platform(config, repositories: dict[str, Any]) -> PlatformComponents:
     _build_memory(p, config, repositories)
     _build_worker(p, config)
     return p
+
+
+def _build_plugins(p, config):
+    from hub.infrastructure.plugin_repository import PluginRepository
+    from hub.application.plugin_service import PluginService
+    repository = PluginRepository(config.platform_db)
+    repository.init()
+    p.plugin_service = PluginService(repository, p.platform_repository, p.platform_delivery)
 
 
 def _build_command_plane(p, config, repositories):

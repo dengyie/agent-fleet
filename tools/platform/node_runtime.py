@@ -62,8 +62,11 @@ class NodeRuntimeConfig:
     browser_submit_enabled: bool = False
     browser_allowed_origins: tuple[str, ...] = ()
     browser_driver_factory: Any | None = field(default=None, repr=False, compare=False)
+    plugins: dict | None = None
 
     def __post_init__(self):
+        if self.plugins is not None and not isinstance(self.plugins, dict):
+            raise ValueError('plugins must be an object')
         if not isinstance(self.sandbox_launcher, (tuple, list)) or any(
                 not isinstance(arg, str) or not arg or len(arg) > 4096 or "\x00" in arg
                 for arg in self.sandbox_launcher):
@@ -140,6 +143,10 @@ class NodeRuntime:
             config.workspace_root, launcher=config.sandbox_launcher)
         self.journal = NodeJournal(config.journal_path)
         self.journal.init()
+        self.plugin_executor = None
+        if config.plugins is not None:
+            from tools.plugins.runtime import PluginExecutor
+            self.plugin_executor = PluginExecutor(config.journal_path.parent / 'plugins', config.plugins)
         self.log_reader = FixedServiceLogReader(path_prefix=config.log_path_prefix)
         browser_backend = None
         if config.browser_enabled:
@@ -201,6 +208,7 @@ class NodeRuntime:
             browser_backend=browser_backend,
             browser_enabled=config.browser_enabled,
             web_agent_executor=web_agent_executor,
+            plugin_executor=self.plugin_executor,
         )
         kwargs = {
             "executor": self.executor,
@@ -220,6 +228,7 @@ class NodeRuntime:
         return {
             "node_id": self.config.node_id,
             "worker_id": self.config.worker_id,
+            **({'plugins': self.plugin_executor.manifest()} if self.plugin_executor else {}),
             "capabilities": {
                 **{name: True for name in sorted(self.config.capabilities)
                    if (name != BROWSER_SESSION_CAPABILITY
@@ -240,6 +249,8 @@ class NodeRuntime:
         """Close local browser sessions during orderly Node shutdown."""
         if self.browser_backend is not None:
             self.browser_backend.close_all()
+        if self.plugin_executor is not None:
+            self.plugin_executor.close()
 
 
 __all__ = ["NODE_RUNTIME_CAPABILITIES", "NodeRuntime", "NodeRuntimeConfig"]
