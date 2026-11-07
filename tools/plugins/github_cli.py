@@ -47,8 +47,12 @@ class GitHubContext:
     config_dir: str
 
     def environment(self, hostname):
-        return {**os.environ, 'GH_CONFIG_DIR': self.config_dir, 'GH_HOST': hostname,
-                'NO_COLOR': '1', 'CLICOLOR': '0', 'GH_PROMPT_DISABLED': '1'}
+        env = {**os.environ, 'GH_CONFIG_DIR': self.config_dir,
+               'NO_COLOR': '1', 'CLICOLOR': '0', 'GH_PROMPT_DISABLED': '1'}
+        # Commands select their host explicitly. GH_HOST also makes gh treat an
+        # unconfigured host as known, producing a phantom bad-credentials account.
+        env.pop('GH_HOST', None)
+        return env
 
     def public(self):
         return {'context_id': self.context_id, 'label': self.label,
