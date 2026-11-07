@@ -40,6 +40,7 @@ class NodeClient:
             raise ValueError("node transport credentials required")
         return {
             "Content-Type": "application/json",
+            "User-Agent": "agent-fleet-node/1.0",
             "X-Platform-Node-Credential": self.credential,
         }
 

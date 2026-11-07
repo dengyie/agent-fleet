@@ -95,6 +95,9 @@ def test_node_client_transport_poll_receipt_and_heartbeat(tmp_path):
     class FakeTransport:
         def post_json(self, url, body, headers):
             requests.append((url, body, headers))
+            # The production edge rejects urllib's implicit Python identity.
+            if headers.get('User-Agent') != 'agent-fleet-node/1.0':
+                return 403, {'error': 'edge_client_identity_required'}
             if url.endswith("/poll"):
                 return 200, {"ok": True, "commands": [_command("cmd-net").as_dict()]}
             if url.endswith("/receipts"):
