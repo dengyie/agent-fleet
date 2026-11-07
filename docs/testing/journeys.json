@@ -888,6 +888,9 @@
       "acceptance": "独立插件启停、节点offer与依赖状态；签名命令、重复去重、节点重启和一次性接入文件",
       "boundary": "real SQLite + signed node protocol; temporary gh subprocess fixture",
       "tests": [
+        "tests/test_plugin_hub_setup.py::test_catalog_exposes_missing_command_key_before_enrollment",
+        "tests/test_plugin_hub_setup.py::test_hub_setup_persists_key_and_restart_enables_signed_enrollment",
+        "tests/test_plugin_hub_setup.py::test_setup_preserves_environment_and_rejects_invalid_existing_material",
         "tests/test_plugins.py::test_settings_persist_and_revision_conflict",
         "tests/test_plugins.py::test_commands_are_signed_idempotent_and_owner_scoped",
         "tests/test_plugins.py::test_enrollment_is_one_time_atomic_and_does_not_rotate_existing_node",

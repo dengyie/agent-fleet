@@ -4,7 +4,7 @@
 
 ## 使用流程
 
-1. Hub 已启用 `platform_enabled`，并配置平台命令签名私钥。现有平台节点认证和主动出站 HTTP 链路继续使用。
+1. Hub 已启用 `platform_enabled`。在实际 Hub 发布源码根目录、以运行 Hub 的系统用户执行 `python -m hub.plugins_setup`，再按部署流程重启 Hub，以加载独立的平台命令签名私钥。命令只在密钥不存在时创建 `credentials/platform-command-signing.key`，不会轮换已有密钥；已有 `AGENT_FLEET_PLATFORM_COMMAND_SIGNING_KEY` 时校验并沿用，无效配置拒绝覆盖。平台密钥与 Supervisor 密钥分开。插件中心会在密钥未加载时提示并禁用生成接入文件；仅部署代码不会自动补齐该运行配置。现有平台节点认证和主动出站 HTTP 链路继续使用。
 2. 管理员打开「插件中心」→「接入新节点」，填唯一节点 ID 和名称，生成并下载接入文件。ID 应与现有 Muse/执行节点不同；不同进程不能共用同一节点队列。已有节点 ID 会拒绝创建，不会轮换其凭据。
 3. 将接入文件放到目标 VM。目标机器已有项目源码、Python 3.10+、项目依赖和 GitHub CLI；本流程不自动下载或安装程序。
 4. **以需要使用 GitHub 的开发用户运行**，从项目根目录导入配置：
@@ -91,7 +91,7 @@ Hub 在现有 `platform.db` 中增加 `plugin_settings`、`plugin_targets`、`pl
 
 | 方法 / 路径 | 请求与结果 |
 |---|---|
-| `GET /` | manifests、enabled、revision |
+| `GET /` | manifests、enabled、revision，以及 `enrollment_ready` / `setup_error` |
 | `POST /nodes` | `{node_id,label}` → 201，一次性 enrollment、节点凭据与签名公钥 |
 | `PUT /<plugin_id>` | `{enabled,revision}`；旧 revision 返回 409 |
 | `GET /<plugin_id>/nodes` | 节点、目标启停、readiness、实际 offer、最近 auth observations |

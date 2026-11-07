@@ -8,6 +8,17 @@ const origin = process.argv[2];
     page.setDefaultTimeout(15000);
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
+    const catalogUrl = origin + '/api/platform/v1/plugins';
+    await page.route(catalogUrl, async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      await route.fulfill({response, json: {...body, enrollment_ready: false, setup_error: 'command_signature_required'}});
+    });
+    await page.goto(origin + '/plugins', {waitUntil: 'domcontentloaded'});
+    await page.getByText('接入新节点', {exact: true}).click();
+    await page.getByText('平台命令签名尚未配置。请在 Hub 运行 python -m hub.plugins_setup，随后重启 Hub。', {exact: true}).waitFor();
+    assert.equal(await page.getByRole('button', {name: '生成接入文件', exact: true}).isEnabled(), false);
+    await page.unroute(catalogUrl);
     await page.goto(origin + '/plugins', {waitUntil: 'domcontentloaded'});
     await page.getByText('接入新节点', {exact: true}).click();
     await page.getByRole('textbox', {name: '新节点 ID', exact: true}).fill('browser-enrollment');
