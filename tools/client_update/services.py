@@ -172,11 +172,25 @@ def migrate(service: Service, current: Path, *, stamp: str | None = None,
     return backup
 
 
-def reload(service: Service, run: Runner = _default_run) -> bool:
-    """重新加载定义（会重启该服务）。仅 ``migrate-layout --reload`` 使用。"""
+def reload(service: Service, run: Runner = _default_run, *,
+           sleep: Callable[[float], None] = time.sleep, wait_s: float = 30.0) -> bool:
+    """重新加载定义（会重启该服务）。仅 ``migrate-layout --reload`` 使用。
+
+    ``bootout`` 是异步的：旧进程退出前立即 ``bootstrap`` 会失败（EIO），留下服务
+    处于未加载状态。故先轮询到 label 消失，再带重试 bootstrap。
+    """
     if service.kind == "launchd":
-        run(["launchctl", "bootout", f"{_domain()}/{service.label}"])
-        result = run(["launchctl", "bootstrap", _domain(), str(service.unit_path)])
+        target = f"{_domain()}/{service.label}"
+        run(["launchctl", "bootout", target])
+        waited = 0.0
+        while waited < wait_s and run(["launchctl", "print", target]).returncode == 0:
+            sleep(0.5)
+            waited += 0.5
+        for attempt in range(3):
+            result = run(["launchctl", "bootstrap", _domain(), str(service.unit_path)])
+            if result.returncode == 0:
+                break
+            sleep(1.0 + attempt)
     else:
         run(["systemctl", "--user", "daemon-reload"])
         result = run(["systemctl", "--user", "restart", service.label])
