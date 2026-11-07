@@ -102,6 +102,8 @@ Hub 在现有 `platform.db` 中增加 `plugin_settings`、`plugin_targets`、`pl
 
 节点使用已有 `X-Platform-Node-Credential` 调用 `POST /api/platform/v1/nodes/plugins` 上报完整 inventory（`{plugins:[...]}`），以及已有 poll/receipts/heartbeat。上报空 inventory 表示该节点不再安装插件。
 
+节点所有传输统一带 `User-Agent: agent-fleet-node/1.0`，避免反代或边缘将其识别为默认 Python urllib 客户端而拦截。若上报/轮询失败，先核对边缘响应与 Hub JSON 拒绝；浏览器可打开页面不代表机器请求已经可达。
+
 GitHub 动作默认 `context_id=default`、`hostname=github.com`：`status`、`login_start`、`login_status {login_id}`、`login_cancel {login_id}`、`switch {username}`、`logout {username}`、`repo_check {repository}`。恢复/取消必须引用同 owner、同节点、同配置和同主机的原始登录操作。
 
 `operation.status=succeeded` 表示节点执行了该动作；账号是否有效看 `result.auth.state`；登录是否完成看 `result.state`。创建登录操作成功并不表示用户已完成授权。认证 JSON 模式的退出码 0 也不表示所有账号都有效。
