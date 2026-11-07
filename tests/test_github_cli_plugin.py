@@ -56,6 +56,21 @@ def test_json_exit_zero_with_auth_errors_is_not_success(plugin):
     assert execute(plugin, 'status')['auth']['state'] == 'authentication_failed'
 
 
+@pytest.mark.parametrize('inherited_host', [None, 'github.com', 'other.example.com'])
+def test_empty_context_has_no_phantom_account(plugin, monkeypatch, inherited_host):
+    if inherited_host is None:
+        monkeypatch.delenv('GH_HOST', raising=False)
+    else:
+        monkeypatch.setenv('GH_HOST', inherited_host)
+    root = Path(plugin.contexts['default'].config_dir)
+    root.mkdir()
+    (root / 'empty-config').write_text('')
+    auth = execute(plugin, 'status')['auth']
+    assert auth['state'] == 'not_logged_in'
+    assert auth['accounts'] == []
+    assert auth['active_account'] is None
+
+
 def test_switch_logout_and_repository_permissions(plugin):
     assert execute(plugin, 'switch', username='bob')['auth']['active_account'] == 'bob'
     after_logout = execute(plugin, 'logout', username='bob')['auth']

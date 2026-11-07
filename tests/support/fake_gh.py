@@ -27,6 +27,11 @@ elif args[:2] == ['auth', 'status']:
         print('dial tcp: network is unreachable', file=sys.stderr); sys.exit(1)
     if (root / 'not-logged-in').exists():
         print('You are not logged into any GitHub hosts.', file=sys.stderr); sys.exit(1)
+    if (root / 'empty-config').exists():
+        # Real gh treats GH_HOST as a known host even without any credentials.
+        host = os.environ.get('GH_HOST')
+        rows = [{'state':'error','error':'HTTP 401: Bad credentials','login':'','active':True,'tokenSource':'default'}]
+        print(json.dumps({'hosts': {host: rows} if host else {}})); sys.exit(0)
     if (root / 'malformed').exists():
         print('{"hosts": []}'); sys.exit(0)
     if (root / 'json-network-error').exists():

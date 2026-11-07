@@ -58,6 +58,8 @@
 
 `github.com`/`*.ghe.com` 的 `GH_TOKEN`、`GITHUB_TOKEN` 以及企业主机的 `GH_ENTERPRISE_TOKEN`、`GITHUB_ENTERPRISE_TOKEN` 会覆盖保存的账号。插件显示生效来源，只返回变量名。生效环境令牌存在时，登录/切换/退出保存账号会被拒绝为 `environment_override`，避免页面显示切换成功而 Agent 仍使用旧令牌。状态和仓库检查继续可用。
 
+操作以所选 GitHub 主机的显式 CLI 参数为准，不继承 `GH_HOST` 默认主机。全新配置或退出最后一个账号后显示“未登录”；已有凭据失效仍显示认证失败。
+
 设备登录先读取该主机的 `gh config get git_protocol`，保留现有 HTTPS/SSH 选择，跳过 SSH 密钥上传。协议无法识别时返回 `git_protocol_unavailable`，由开发用户修正 gh 配置后重试。
 
 ## 常驻启动
