@@ -16,7 +16,9 @@ class PluginService:
         self.registry, self.clock = registry, clock
 
     def catalog(self, owner):
-        return {'plugins': [{**p.manifest(), **self.repository.setting(owner, p.plugin_id)}
+        ready = bool(self.delivery.signing_key)
+        return {'enrollment_ready': ready, 'setup_error': None if ready else 'command_signature_required',
+                'plugins': [{**p.manifest(), **self.repository.setting(owner, p.plugin_id)}
                             for p in self.registry.definitions()]}
 
     def enroll(self, owner, node_id, label):

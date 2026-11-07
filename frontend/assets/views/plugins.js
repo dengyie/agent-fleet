@@ -43,7 +43,10 @@ export function mountPlugins(host, {client = defaultClient} = {}) {
       const data = await client.getPlugins();
       if (disposed || !active || ticket !== generation) return;
       if (!Array.isArray(data.plugins)) throw new Error('插件列表格式无效');
-      status.textContent = data.plugins.length ? '' : '暂无可用插件';
+      create.disabled = data.enrollment_ready === false;
+      status.textContent = data.enrollment_ready === false ?
+        '平台命令签名尚未配置。请在 Hub 运行 python -m hub.plugins_setup，随后重启 Hub。' :
+        data.plugins.length ? '' : '暂无可用插件';
       catalog.replaceChildren();
       for (const plugin of data.plugins) {
         const card = el('article', 'plugin-card');
