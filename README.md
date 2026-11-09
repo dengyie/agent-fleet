@@ -1,15 +1,21 @@
-# Agent Fleet
+<div align="center">
 
-> **Lightweight, Zero-Trust AI Agent Fleet Monitoring & Orchestration System**  
-> 轻量级、零信任架构的分布式 AI Agent 舰队观测与受控调度系统。
+# AgentFleet
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python: 3.10+](https://img.shields.io/badge/python-3.10+-brightgreen.svg)](https://www.python.org/)
-[![Architecture: Push--Only](https://img.shields.io/badge/Architecture-Push--Only%20%2F%20Zero--Trust-orange.svg)](#-核心优势与架构亮点)
+**Lightweight, Push-Only AI Agent Fleet Telemetry & Orchestration Control Plane**
+
+[![License](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
+[![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg?style=flat-square)](https://www.python.org/)
+[![Architecture](https://img.shields.io/badge/architecture-Push--Only%20%7C%20Zero--Trust-orange.svg?style=flat-square)](#核心优势与架构亮点)
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg?style=flat-square)]()
+
+[English](./README.md) • [Official Plugins](./docs/platform/official-plugins.md) • [Release Notes](./docs/releases/release-notes.md)
+
+</div>
 
 ---
 
-## 💡 为什么选择 Agent Fleet？
+## 为什么选择 Agent Fleet？
 
 当你在多台开发机、VPS、云服务器上跑各类 AI Coding Agent（如 Claude Code、Codex CLI、Hermes、ZCode 等）时，通常面临三大痛点：
 1. **网络穿透与安全风险**：服务器分散在 NAT/内网或不同云厂商，中心端若直连 SSH 需要大量私钥或打洞，存在严重安全隐患。
