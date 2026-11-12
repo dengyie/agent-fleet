@@ -40,14 +40,14 @@ def frozen(repository: Any, item: Any, *, kind: str, adapter: str, target: str, 
     return claim, resolved
 
 
-def native_setup(tmp_path: Path) -> tuple[Any, Any, Any]:
+def native_setup(tmp_path: Path, *, summary_publisher=publish) -> tuple[Any, Any, Any]:
     from hub.infrastructure.platform_db import PlatformRepository
     from hub.infrastructure.workflow_run_executor import RegisteredRunTarget
     from test_workflow_native_memory import NativeSetup
 
     repository = prepare_database(tmp_path / "platform.db")
     store = WorkflowSummaryRepository(repository)
-    item = publish(store)
+    item = summary_publisher(store)
     platform = PlatformRepository(repository.db_path)
     platform.upsert_workspace(OWNER, {"workspace_id": WORKSPACE, "root_path": str(tmp_path / "workspace")})
     platform.upsert_model(OWNER, {"profile_id": "local", "provider": "deterministic", "model": "local"})
@@ -59,7 +59,7 @@ def native_setup(tmp_path: Path) -> tuple[Any, Any, Any]:
     return NativeSetup(repository, platform, None, target, resolved, Clock(), claim), store, item
 
 
-def external_setup(tmp_path: Path) -> tuple[Any, Any, Any, Any]:
+def external_setup(tmp_path: Path, *, summary_publisher=publish) -> tuple[Any, Any, Any, Any]:
     from hub.application.workflow_external_execution import ExternalStepExecutor
     from hub.application.workflow_external_inputs import WorkflowExternalInputs
     from hub.infrastructure.workflow_external_repository import ExternalWorkflowRepository
@@ -69,7 +69,7 @@ def external_setup(tmp_path: Path) -> tuple[Any, Any, Any, Any]:
     original = make_external(tmp_path, admit=False)
     repository = prepare_database(tmp_path / "summary-platform.db")
     summaries = WorkflowSummaryRepository(repository)
-    item = publish(summaries)
+    item = summary_publisher(summaries)
     store = ExternalWorkflowRepository(repository)
     store.init()
     claim, resolved = frozen(repository, item, kind="external_agent", adapter="muse", target=original.target.target_key,

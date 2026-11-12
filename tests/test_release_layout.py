@@ -87,12 +87,12 @@ class ReleaseLayoutTests(unittest.TestCase):
         allowed.update({'assets/app.js', 'THIRD_PARTY.md',
                         'assets/brand/mango-ddf462d0.png',
                         'assets/brand/mango-cdd3ec60.ico'})
-        allowed.update({'assets/app.js', 'THIRD_PARTY.md'})
         allowed.update({'assets/api/integrations.js', 'assets/api/integration-identities.js',
                         'assets/views/account/integrations.js', 'assets/views/account/identities.js'})
         allowed.add('assets/views/account/mcp-registration.js')
         allowed.update({'assets/api/workflow-summaries.js',
-                        'assets/views/account/workflow-summaries.js'})
+                        'assets/views/account/workflow-summaries.js',
+                        'assets/views/account/workflow-summary-generation.js'})
         allowed.update({'assets/views/session-handoff.js', 'assets/views/session-questions.js',
                         'assets/views/session-search.js', 'assets/views/usage.js'})
         allowed.update({'assets/views/muse.js', 'assets/views/muse/cards.js', 'assets/views/muse/model.js', 'assets/api/muse.js'})

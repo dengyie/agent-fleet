@@ -30,6 +30,7 @@ from hub.platform.tool_broker import ToolBroker
 from hub.platform.remote_tool_broker import RemoteToolBroker
 from fleet_core.web_agent_contract import WEB_AGENT_TOOLS
 from hub.domain.platform import ACCEPTANCE_TOOL_POLICY
+from hub.domain.workflow_summary_generation import SUMMARY_GENERATION_MARKER, SUMMARY_TOOL_POLICY
 from hub.domain.workflow_delivery import DeliveryRunLease
 from hub.domain.workflow_native_memory import (
     NATIVE_CODE_MODE_MARKER, NATIVE_MEDIA_MODE_MARKER, NATIVE_MEMORY_MARKER, NATIVE_TEXT_MODE_MARKER, NativeWorkflowMemoryGuard,
@@ -69,7 +70,8 @@ class LocalRunWorkerService:
                  workflow_remote_test_executor: WorkflowTestExecutionService | None = None,
                  workflow_review_executor: WorkflowReviewExecutionService | None = None,
                  workflow_memory_guard: NativeWorkflowMemoryGuard | None = None,
-                 workflow_code_inputs: WorkflowCodeInputs | None = None):
+                 workflow_code_inputs: WorkflowCodeInputs | None = None,
+                 workflow_summary_generation_guard=None):
         self.repository = repository
         self.run_events = run_events
         self.worker_id = worker_id or ("local-worker_" + secrets.token_hex(8))
@@ -104,6 +106,7 @@ class LocalRunWorkerService:
         self.workflow_review_executor = workflow_review_executor
         self.workflow_memory_guard = workflow_memory_guard
         self.workflow_code_inputs = workflow_code_inputs
+        self.workflow_summary_generation_guard = workflow_summary_generation_guard
 
     def configure_workspace_concurrency(self, capacity: int) -> None:
         """Align tool lease capacity with the scheduler's durable admission."""
@@ -226,10 +229,21 @@ class LocalRunWorkerService:
                 raise WorkflowNativeMemoryError("native_memory_guard_unavailable")
             elif str(claim.get("run_id", "")).startswith("wf-run-") and "workflow_dispatch" not in config:
                 raise WorkflowNativeMemoryError("invalid_native_memory_run")
+            summary_message = None
+            summary_mode = SUMMARY_GENERATION_MARKER in config or str(claim.get("run_id", "")).startswith("summary-run-")
+            if summary_mode:
+                from hub.infrastructure.workflow_repository import WorkflowRepositoryError
+
+                if self.workflow_summary_generation_guard is None:
+                    raise WorkflowNativeMemoryError("summary_generation_guard_unavailable")
+                try:
+                    summary_message = self.workflow_summary_generation_guard.prepare(claim, now=float(self.clock()))
+                except (WorkflowRepositoryError, ValueError) as exc:
+                    raise WorkflowNativeMemoryError(getattr(exc, "code", "summary_generation_invalid")) from exc
             policy = config.get("tool_policy")
-            if policy not in (None, ACCEPTANCE_TOOL_POLICY):
+            if policy not in (None, ACCEPTANCE_TOOL_POLICY, SUMMARY_TOOL_POLICY) or (policy == SUMMARY_TOOL_POLICY and not summary_mode):
                 raise RuntimeError("tool_policy_unavailable")
-            allowed_tools = frozenset({"workspace.list"}) if policy == ACCEPTANCE_TOOL_POLICY else None
+            allowed_tools = frozenset() if summary_mode else (frozenset({"workspace.list"}) if policy == ACCEPTANCE_TOOL_POLICY else None)
             remote_allowed_tools = (allowed_tools if allowed_tools is not None else
                                     ToolBroker.TOOLS - ToolBroker.LOCAL_ONLY_TOOLS)
             workspace_id = config.get("workspace_id") or claim.get("conversation_workspace_id")
@@ -410,18 +424,18 @@ class LocalRunWorkerService:
                     conversation_service=self.conversation_service,
                     service_actions=self.service_actions,
                     defaults_service=self.defaults_service,
-                    mcp_catalog=self.mcp_catalog, mcp_enabled=self.mcp_enabled,
+                    mcp_catalog=self.mcp_catalog, mcp_enabled=self.mcp_enabled and not summary_mode,
                     mcp_pins=config.get("mcp_tools", {}),
                     workflow_code_view=source_view,
                 )
             runtime = NativeAssistantRuntime(
-                provider, broker, limits=self.limits,
+                provider, broker, limits=RuntimeLimits(max_steps=1, max_tokens=self.limits.max_tokens) if summary_mode else self.limits,
                 usage_meter=self.usage_meter, model_key=profile_id or "default",
                 clock=self.clock, checkpoint=checkpoint, save_checkpoint=save_checkpoint,
                 request_message_transform=media_transform,
             )
             worker = PersistentAssistantWorker(runtime, self.run_events)
-            messages = list(claim.get("messages") or [])
+            messages = [summary_message] if summary_mode else list(claim.get("messages") or [])
             if native_memory is not None:
                 messages.insert(0, native_memory.message)
             memory_snapshot = config.get("memory_context")
@@ -448,9 +462,9 @@ class LocalRunWorkerService:
                     remote_allowed_tools if remote else allowed_tools,
                     browser_enabled=remote_browser_enabled, browser_submit_enabled=remote_submit_enabled,
                     web_agent_enabled=remote_web_agent_enabled,
-                    service_actions_enabled=not remote and self.service_actions is not None,
+                    service_actions_enabled=not summary_mode and not remote and self.service_actions is not None,
                     mcp_catalog=self.mcp_catalog if not remote else None,
-                    mcp_enabled=self.mcp_enabled if not remote else False,
+                    mcp_enabled=self.mcp_enabled if not remote and not summary_mode else False,
                     mcp_owner_id=claim["owner_id"] if not remote else None,
                     mcp_workspace_id=workspace["workspace_id"] if not remote else None,
                     mcp_pins=config.get("mcp_tools", {}),

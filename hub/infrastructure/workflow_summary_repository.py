@@ -31,7 +31,7 @@ def _epoch(value: int) -> int:
     return value
 
 
-def _decode(row: Any) -> WorkflowSummaryVersion:
+def _decode(row: Any, connection: sqlite3.Connection | None = None) -> WorkflowSummaryVersion:
     try:
         if row is None or type(row[4]) is not bytes:
             raise WorkflowValidationError("invalid_summary_value")
@@ -40,8 +40,16 @@ def _decode(row: Any) -> WorkflowSummaryVersion:
             raise WorkflowValidationError("summary_snapshot_mismatch")
         validate_reference(row[6])
         _epoch(row[8])
-        expected_digest = canonical_digest({"workspace_id": item.workspace_id, "summary_id": item.summary_id,
-            "title": item.title, "content": item.content, "expected_epoch": row[8]})
+        request = {"workspace_id": item.workspace_id, "summary_id": item.summary_id,
+            "title": item.title, "content": item.content, "expected_epoch": row[8]}
+        if item.generation is not None:
+            from .workflow_summary_generation_repository import WorkflowSummaryGenerationRepository
+
+            if connection is None:
+                raise WorkflowRepositoryError("summary_snapshot_invalid")
+            WorkflowSummaryGenerationRepository.verify_version(connection, item)
+            request["generation"] = item.generation.value
+        expected_digest = canonical_digest(request)
         if row[7] != expected_digest or row[8] < item.revision - 1:
             raise WorkflowValidationError("summary_snapshot_mismatch")
         return item
@@ -91,7 +99,7 @@ class WorkflowSummaryRepository:
             if present:
                 row = connection.execute(f"SELECT {_VERSION_COLUMNS} FROM workflow_summary_versions WHERE owner_id=? AND client_token=?", (owner, client_token)).fetchone()
                 if row is not None:
-                    item = _decode(row)
+                    item = _decode(row, connection)
                     if row[7] != request_digest:
                         raise WorkflowRepositoryError("idempotency_conflict")
                     return item
@@ -116,6 +124,50 @@ class WorkflowSummaryRepository:
                 (owner, workspace, summary_id, revision, item.snapshot, item.sha256, client_token, request_digest, expected_epoch))
             return item
 
+    def publish_generated(self, owner: str, run_id: str, *, now: float) -> WorkflowSummaryVersion:
+        from .workflow_summary_generation_repository import WorkflowSummaryGenerationRepository
+
+        created_ms = int(_time(now) * 1000)
+        with self.workflows.transaction() as connection:
+            row, (request, run, provenance) = WorkflowSummaryGenerationRepository.binding(connection, owner, run_id)
+            token = "summary-generated-" + canonical_digest({"run_id": run_id})
+            prior = connection.execute(f"SELECT {_VERSION_COLUMNS} FROM workflow_summary_versions WHERE owner_id=? AND client_token=?", (owner, token)).fetchone()
+            if prior is not None:
+                item = _decode(prior, connection)
+                if item.generation != provenance:
+                    raise WorkflowRepositoryError("idempotency_conflict")
+                return item
+            self._authority(connection, owner, row["workspace_id"], write=True)
+            if run["state"] != "succeeded" or run["cancel_requested"]:
+                raise WorkflowRepositoryError("summary_generation_not_succeeded")
+            if run["result_text"] is None:
+                raise WorkflowValidationError("summary_output_too_large")
+            if not run["result_text"].strip():
+                raise WorkflowRepositoryError("summary_output_empty")
+            head = self._head(connection, owner, row["workspace_id"], request["summary_id"])
+            if (head["epoch"] if head else 0) != request["expected_epoch"]:
+                raise WorkflowRepositoryError("revision_conflict")
+            if head and not head["enabled"]:
+                raise WorkflowRepositoryError("summary_disabled")
+            revision = head["latest_revision"] + 1 if head else 1
+            try:
+                item = WorkflowSummaryVersion(owner, row["workspace_id"], request["summary_id"], revision,
+                    request["title"], run["result_text"], owner, created_ms, source_kind="model", generation=provenance)
+            except WorkflowValidationError as exc:
+                if exc.code == "context_too_large":
+                    raise WorkflowValidationError("summary_output_too_large") from exc
+                raise
+            digest = canonical_digest({"workspace_id": item.workspace_id, "summary_id": item.summary_id,
+                "title": item.title, "content": item.content, "expected_epoch": request["expected_epoch"], "generation": provenance.value})
+            if head:
+                connection.execute("UPDATE workflow_summary_heads SET latest_revision=?,epoch=epoch+1 WHERE owner_id=? AND workspace_id=? AND summary_id=?",
+                    (revision, owner, item.workspace_id, item.summary_id))
+            else:
+                connection.execute("INSERT INTO workflow_summary_heads VALUES(?,?,?,?,?,1)", (owner, item.workspace_id, item.summary_id, revision, 1))
+            connection.execute("INSERT INTO workflow_summary_versions VALUES(?,?,?,?,?,?,?,?,?)",
+                (owner, item.workspace_id, item.summary_id, revision, item.snapshot, item.sha256, token, digest, request["expected_epoch"]))
+            return item
+
     def head(self, owner: str, workspace: str, summary_id: str) -> dict[str, Any]:
         _scope(owner, workspace, summary_id)
         with self.workflows.transaction(write=False) as connection:
@@ -135,7 +187,7 @@ class WorkflowSummaryRepository:
                 (owner, workspace, summary_id, revision)).fetchone() if inspect_summary_schema(connection) else None
             if row is None:
                 raise WorkflowRepositoryError("summary_not_found")
-            return _decode(row)
+            return _decode(row, connection)
 
     def list(self, owner: str, workspace: str, *, limit: int = 50, cursor: str | None = None) -> dict[str, Any]:
         _scope(owner, workspace)
@@ -205,13 +257,16 @@ class WorkflowSummaryRepository:
             row = by_key.get((ref.ref_id, ref.revision))
             if row is None or row[5] != ref.sha256 or (require_enabled and tuple(row[9:]) != (1, 1)):
                 raise WorkflowValidationError("summary_selection_stale")
-            result.append(_decode(row))
+            result.append(_decode(row, connection))
         return tuple(result)
 
     @staticmethod
     def validate_snapshot(connection: sqlite3.Connection) -> None:
         if not inspect_summary_schema(connection):
             return
+        from .workflow_summary_generation_repository import WorkflowSummaryGenerationRepository
+
+        WorkflowSummaryGenerationRepository.validate_snapshot(connection)
         for table in TABLE_COLUMNS:
             if connection.execute(f"PRAGMA foreign_key_check({table})").fetchone() is not None:
                 raise WorkflowRepositoryError("summary_snapshot_invalid")
@@ -220,7 +275,7 @@ class WorkflowSummaryRepository:
             rows = connection.execute("SELECT rowid AS summary_rowid," + _VERSION_COLUMNS + " FROM workflow_summary_versions "
                 + ("WHERE rowid>? " if cursor is not None else "") + "ORDER BY rowid LIMIT 128", () if cursor is None else (cursor,)).fetchall()
             for row in rows:
-                _decode(tuple(row)[1:])
+                _decode(tuple(row)[1:], connection)
             if len(rows) < 128:
                 break
             cursor = rows[-1][0]
@@ -263,6 +318,6 @@ def validate_summary_input_closure(connection: sqlite3.Connection, records: list
             + ",".join("(?,?,?,?)" for _ in batch) + ") SELECT " + _VERSION_COLUMNS
             + " FROM selected CROSS JOIN workflow_summary_versions USING(owner_id,workspace_id,summary_id,revision) LIMIT ?")
         rows = connection.execute(query, (*(value for identity in batch for value in identity), len(batch)+1)).fetchall()
-        actual = {tuple(row[:4]): _decode(row) for row in rows}
+        actual = {tuple(row[:4]): _decode(row, connection) for row in rows}
         if actual != {identity: expected[identity] for identity in batch}:
             raise WorkflowRepositoryError("summary_snapshot_invalid")

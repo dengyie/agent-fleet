@@ -1,5 +1,9 @@
 # Agent Fleet 深度优化开发入口
 
+本轮[生产发布审查](../../reviews/2026-11-13-production-release.md)已修复七项实际问题；完整同版CI、宿主receiver同步及main部署/真实验收分别留证。用户已授权发布。
+
+模型摘要生成功能正在按[独立规格](../../superpowers/specs/2026-11-13-model-summary-generation.md)和[实施计划](../../superpowers/plans/2026-11-13-model-summary-generation.md)推进，复用原Run队列及摘要权威；未完成或发布的部分不由既有operator摘要/视频CI代填。
+
 部署前补充[摘要 reader 保留修复](../../superpowers/plans/2026-11-13-summary-reader-preservation.md)：首次摘要发布不再降低图片/音频/视频 Run 已要求的 reader13/14/15，原摘要事务失败仍完整回滚。当前未发布；其独立验证不能由PR44/45既有门禁代填。
 
 最新公开试运行候选为PR42→PR43→[PR44](https://github.com/dengyie/agent-fleet/pull/44) / `6ea7e09`；[完整CI43292358951](https://github.com/dengyie/agent-fleet/actions/runs/43292358951)经原工件独立核验7605Linux cases、46journeys/2560selectors、Windows332passed/2POSIXskips。候选包通过真实生产receiver check，尚未合并/切换，线上仍为301e259。生产Workflow登记、可用Node/本地执行环境与任务/下载/恢复验收仍待完成；容器namespace探针实际拒绝，不能用healthz或目录预检代填。见[最新发布与使用条件](../development-completion.md#pr44-最终-ci-与实际使用条件2026-11-13)。

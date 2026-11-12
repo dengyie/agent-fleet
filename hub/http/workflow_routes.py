@@ -20,10 +20,11 @@ from hub.http.errors import ApplicationError, error_response
 
 bp = Blueprint("platform_workflows", __name__, url_prefix="/api/platform/v1")
 _MACHINE_HEADERS = ("X-Agent-Fleet-Token", "X-Runner-Credential", "X-Supervisor-Credential", "X-Platform-Node-Credential", "Authorization")
-_NOT_FOUND = frozenset({"workflow_not_found", "template_not_found", "summary_not_found"})
+_NOT_FOUND = frozenset({"workflow_not_found", "template_not_found", "summary_not_found", "summary_generation_not_found"})
 _CONFLICTS = frozenset({"revision_conflict", "idempotency_conflict", "generation_conflict", "terminal_workflow", "reconciliation_not_required",
                        "reconciliation_in_progress", "unresolved_execution", "cancelled_workflow", "cancellation_in_progress", "policy_revision_conflict",
-                       "generation_exhausted", "retry_requires_failure", "cancelled_generation", "delivery_not_ready", "admission_closed", "admission_frozen", "summary_disabled"})
+                       "generation_exhausted", "retry_requires_failure", "cancelled_generation", "delivery_not_ready", "admission_closed", "admission_frozen", "summary_disabled",
+                       "summary_source_unavailable", "summary_generation_not_succeeded", "summary_generation_unavailable", "summary_output_empty"})
 
 
 def _origin(value: str) -> tuple[str, str, int] | None:
@@ -98,7 +99,7 @@ def _invoke(view: Callable[..., Any]) -> Callable[..., Any]:
                 code = "not_found"
             elif code in _CONFLICTS:
                 status = 409
-            elif code in ("json_too_large", "contract_too_large", "event_too_large"):
+            elif code in ("json_too_large", "contract_too_large", "event_too_large", "summary_input_too_large", "summary_output_too_large"):
                 status = 413
             elif code in ("capacity_exhausted", "budget_exhausted"):
                 status = 429
@@ -113,6 +114,45 @@ def _summaries():
     if service is None:
         raise ApplicationError("workflow_unavailable", "摘要服务不可用", 503)
     return service
+
+
+def _summary_generations():
+    service = current_app.extensions.get("fleet", {}).get("services", {}).get("workflow_summary_generations")
+    if service is None:
+        raise ApplicationError("workflow_unavailable", "摘要生成服务不可用", 503)
+    return service
+
+
+@bp.post("/workflow-summary-generations")
+@require_operator
+@_invoke
+def create_summary_generation() -> Any:
+    values = _body({"workspace_id", "summary_id", "title", "expected_epoch", "model_profile_id", "source_run_ids", "client_token"})
+    return jsonify({"ok": True, "generation": _summary_generations().create(g.operator, values)}), 201
+
+
+@bp.get("/workflow-summary-generations/run")
+@require_operator
+@_invoke
+def get_summary_generation() -> Any:
+    query = _query({"run_id"})
+    return jsonify({"ok": True, "generation": _summary_generations().get(g.operator, query.get("run_id"))})
+
+
+@bp.get("/workflow-summary-generations/token")
+@require_operator
+@_invoke
+def find_summary_generation() -> Any:
+    query = _query({"client_token"})
+    return jsonify({"ok": True, "generation": _summary_generations().find(g.operator, query.get("client_token"))})
+
+
+@bp.post("/workflow-summary-generations/publish")
+@require_operator
+@_invoke
+def publish_generated_summary() -> Any:
+    values = _body({"run_id"})
+    return jsonify({"ok": True, "summary": _summary_generations().publish(g.operator, values["run_id"])}), 201
 
 
 @bp.post("/workflow-summaries")

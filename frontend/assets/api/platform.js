@@ -42,7 +42,7 @@ export async function acceptWorkflow(workflowId, payload) {
 }
 
 export async function getPlatformDefaults() { return object(await platformRequest(apiPath('platform', 'v1', 'defaults')), 'defaults'); }
-export async function getPlatformModels() { return object(await platformRequest(apiPath('platform', 'v1', 'models')), 'models'); }
+export async function getPlatformModels(options) { return object(await platformRequest(apiPath('platform', 'v1', 'models'), options), 'models'); }
 export async function getPlatformWorkspaces(options) { return object(await platformRequest(apiPath('platform', 'v1', 'workspaces'), options), 'workspaces'); }
 export async function getPlatformNodes() { return object(await platformRequest(apiPath('platform', 'v1', 'nodes')), 'nodes'); }
 export async function getPlatformArtifacts(workspaceId, limit) {
@@ -121,20 +121,20 @@ export async function searchPlatformMemories(query, limit) {
     '?q=' + encodeURIComponent(value) + '&limit=' + encodeURIComponent(String(bounded))), 'memory search');
 }
 export async function createConversation(input) { return object(await platformRequest(apiPath('platform', 'v1', 'conversations'), json('POST', input)), 'conversation'); }
-export async function getConversations(limit, archived) {
+export async function getConversations(limit, archived, options) {
   var bounded = typeof limit === 'number' && isFinite(limit)
     ? Math.max(1, Math.min(100, Math.floor(limit))) : 50;
   var path = apiPath('platform', 'v1', 'conversations') +
     '?limit=' + encodeURIComponent(String(bounded));
   if (archived === true) path += '&archived=true';
-  return object(await platformRequest(path), 'conversations');
+  return object(await platformRequest(path, options), 'conversations');
 }
 export async function getConversation(conversationId, options = {}) {
   var path = apiPath('platform', 'v1', 'conversations', segment(conversationId));
   var params = new URLSearchParams();
   if (options.limit !== undefined) params.set('limit', String(options.limit));
   if (options.beforeSequence !== undefined && options.beforeSequence !== null) params.set('before_sequence', String(options.beforeSequence));
-  return object(await platformRequest(path + (params.size ? '?' + params : '')), 'conversation');
+  return object(await platformRequest(path + (params.size ? '?' + params : ''), {signal: options.signal}), 'conversation');
 }
 export async function renameConversation(conversationId, title) { return object(await platformRequest(apiPath('platform', 'v1', 'conversations', segment(conversationId)), json('PATCH', { title: title })), 'rename conversation'); }
 export async function archiveConversation(conversationId) { return object(await platformRequest(apiPath('platform', 'v1', 'conversations', segment(conversationId), 'archive'), json('POST')), 'archive conversation'); }
@@ -147,7 +147,7 @@ export async function getRunEvents(runId, after) {
   if (typeof after === 'number' && isFinite(after)) path += '?after=' + encodeURIComponent(String(Math.max(0, after)));
   return object(await platformRequest(path), 'run events');
 }
-export async function cancelRun(runId) { return object(await platformRequest(apiPath('platform', 'v1', 'runs', segment(runId), 'cancel'), json('POST')), 'cancel run'); }
+export async function cancelRun(runId, options) { return object(await platformRequest(apiPath('platform', 'v1', 'runs', segment(runId), 'cancel'), {...options, ...json('POST')}), 'cancel run'); }
 export async function createPlatformLegacyTask(runId, task) {
   return object(await platformRequest(
     apiPath('platform', 'v1', 'runs', segment(runId), 'legacy-task'),

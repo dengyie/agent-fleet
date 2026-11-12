@@ -1,5 +1,12 @@
 @import url('./identity-registration.css');
 @import url('./mcp-registration.css');
+.workflow-summary-generation { min-width: 0; }
+.workflow-summary-generation fieldset { min-width: 0; max-width: 100%; }
+.workflow-summary-generation .generation-sources > label { display: flex; align-items: center; gap: 8px; }
+.workflow-summary-generation input[type="checkbox"] { width: auto; flex: none; }
+.workflow-summary-generation :is(legend, .generation-status) { overflow-wrap: anywhere; }
+.workflow-summary-management .integration-inspector pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.workflow-summary-management .integration-inspector { grid-template-columns: minmax(0, 1fr); overflow-wrap: anywhere; }
 :is(.mcp-management, .identity-management) { min-width: 0; }
 :is(.mcp-toolbar, .integration-toolbar), :is(.mcp-actions, .integration-actions) { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 :is(.mcp-toolbar, .integration-toolbar) { justify-content: space-between; margin-bottom: 10px; }

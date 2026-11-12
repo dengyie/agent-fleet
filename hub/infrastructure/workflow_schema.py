@@ -4,7 +4,7 @@ from __future__ import annotations
 import sqlite3
 
 SCHEMA_VERSION = 1
-READER_VERSION = 15
+READER_VERSION = 16
 BASE_READER_VERSION = 1
 TABLES = frozenset({
     "workflow_schema_meta", "workflow_runs", "workflow_steps", "workflow_dispatches",

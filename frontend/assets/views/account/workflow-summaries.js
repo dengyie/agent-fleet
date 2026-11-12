@@ -1,5 +1,6 @@
 import {getPlatformWorkspaces} from '../../api/platform.js';
 import {getWorkflowSummaryHead, getWorkflowSummaryVersion, listWorkflowSummaries, publishWorkflowSummary, setWorkflowSummaryEnabled} from '../../api/workflow-summaries.js';
+import {mountWorkflowSummaryGeneration} from './workflow-summary-generation.js';
 
 function node(tag, text, className) {
   const element = document.createElement(tag);
@@ -16,7 +17,7 @@ function field(tag, label, name, required = true) {
   wrapper.append(input); return {wrapper, input};
 }
 
-export function mountWorkflowSummaries(root, {suspended: initiallySuspended = false} = {}) {
+export function mountWorkflowSummaries(root, {suspended: initiallySuspended = false, ownerId = ''} = {}) {
   const panel = node('section', undefined, 'panel account-panel workflow-summary-management');
   panel.setAttribute('aria-label', '工作流摘要管理');
   const status = node('p', '', 'workflow-summary-status'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
@@ -39,10 +40,14 @@ export function mountWorkflowSummaries(root, {suspended: initiallySuspended = fa
   editor.append(idField.wrapper, titleField.wrapper, contentField.wrapper, publish);
   panel.append(toolbar, node('p', '摘要由管理员明确编写并按不可变版本保存；发布不会自动生成或选择摘要，也不会改变已提交流程。', 'meta'), status, layout, editor);
   root.append(panel);
+  const generator = mountWorkflowSummaryGeneration(root, {ownerId, suspended: initiallySuspended, onPublished: summary => {
+    if (workspace.value !== summary.workspace_id) return;
+    selected = summary.summary_id;
+    reconcileAfterWrite('已发布生成摘要');
+  }});
 
   let disposed = false, suspended = initiallySuspended, busy = false, generation = 0, controller = null;
   let cursor = null, selected = null, detail = null, rows = new Map(), workspaces = [];
-  let pendingPublish = null;
 
   function sync() {
     reload.disabled = busy || !workspace.value; more.disabled = busy; more.hidden = cursor === null;
@@ -109,6 +114,7 @@ export function mountWorkflowSummaries(root, {suspended: initiallySuspended = fa
         const option = node('option', item.name || item.workspace_id); option.value = item.workspace_id; workspace.append(option);
       }
       status.textContent = workspaces.length ? '已读取工作区' : '当前没有可用工作区';
+      generator.setWorkspace(workspace.value);
     });
     if (okay && workspace.value) await readPage(true);
   }
@@ -190,27 +196,25 @@ export function mountWorkflowSummaries(root, {suspended: initiallySuspended = fa
     const payload = {workspace_id: workspace.value, summary_id: summaryId, title: titleField.input.value,
       content: contentField.input.value, expected_epoch: existing ? existing.epoch : 0,
       client_token: crypto.randomUUID()};
-    pendingPublish = payload;
     status.textContent = '正在发布不可变摘要版本…';
     let ambiguous = false;
     const okay = await run(async signal => {
       try { return await publishWorkflowSummary(payload, {signal}); }
       catch (error) { ambiguous = !(error.status >= 400 && error.status < 500); throw error; }
     }, result => {
-      pendingPublish = null; selected = summaryId;
+      selected = summaryId;
       status.textContent = '摘要版本 ' + result.summary.revision + ' 已发布';
     });
     if (!okay && !disposed && !suspended) {
       const message = ambiguous ? '发布响应未确认，请先读取当前状态' : '发布未完成，请核对当前状态';
-      pendingPublish = null;
       await reconcileAfterWrite(message);
     } else if (okay) await reconcileAfterWrite('已发布');
   });
-  workspace.addEventListener('change', () => { selected = null; detail = null; cursor = null; rows.clear(); drawList(); drawDetail(); readPage(true); });
+  workspace.addEventListener('change', () => { generator.setWorkspace(workspace.value); selected = null; detail = null; cursor = null; rows.clear(); drawList(); drawDetail(); readPage(true); });
   function stop() { generation += 1; controller?.abort(); controller = null; busy = false; sync(); }
-  function dispose() { disposed = true; stop(); rows.clear(); detail = null; panel.remove(); }
-  dispose.suspend = () => { suspended = true; stop(); };
-  dispose.resume = () => { if (!disposed && suspended) { suspended = false; loadWorkspaces(); } };
+  function dispose() { disposed = true; stop(); generator(); rows.clear(); detail = null; panel.remove(); }
+  dispose.suspend = () => { suspended = true; stop(); generator.suspend(); };
+  dispose.resume = () => { if (!disposed && suspended) { suspended = false; generator.resume(); loadWorkspaces(); } };
   drawList(); drawDetail(); loadWorkspaces();
   return dispose;
 }

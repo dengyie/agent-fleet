@@ -1,4 +1,4 @@
-"""Explicit immutable summary versions; no generation or execution authority."""
+"""Immutable summary versions and complete, explicit model provenance."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
@@ -29,6 +29,43 @@ def _text(value: object, limit: int, *, strip: bool = False) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkflowSummaryGenerationProvenance:
+    run_id: str
+    source_run_ids: tuple[str, ...]
+    source_sha256: str
+    model_profile_id: str
+    provider_digest: str
+
+    def __post_init__(self) -> None:
+        validate_reference(self.run_id)
+        validate_reference(self.model_profile_id)
+        if (type(self.source_run_ids) is not tuple or not 1 <= len(self.source_run_ids) <= 16
+                or any(type(value) is not str for value in self.source_run_ids)):
+            raise WorkflowValidationError("invalid_summary_generation")
+        for value in self.source_run_ids:
+            validate_reference(value)
+        if len(set(self.source_run_ids)) != len(self.source_run_ids):
+            raise WorkflowValidationError("invalid_summary_generation")
+        for value in (self.source_sha256, self.provider_digest):
+            if type(value) is not str or re.fullmatch("[a-f0-9]{64}", value) is None:
+                raise WorkflowValidationError("invalid_summary_generation")
+
+    @property
+    def value(self) -> dict[str, Any]:
+        return {"run_id": self.run_id, "source_run_ids": list(self.source_run_ids),
+            "source_sha256": self.source_sha256, "model_profile_id": self.model_profile_id,
+            "provider_digest": self.provider_digest}
+
+
+def parse_summary_generation(value: object) -> WorkflowSummaryGenerationProvenance:
+    names = {item.name for item in fields(WorkflowSummaryGenerationProvenance)}
+    if (type(value) is not dict or set(value) != names
+            or type(value.get("source_run_ids")) is not list):
+        raise WorkflowValidationError("invalid_summary_generation")
+    return WorkflowSummaryGenerationProvenance(**{**value, "source_run_ids": tuple(value["source_run_ids"])})
+
+
+@dataclass(frozen=True, slots=True)
 class WorkflowSummaryVersion:
     owner_id: str
     workspace_id: str
@@ -39,6 +76,7 @@ class WorkflowSummaryVersion:
     created_by: str
     created_at_ms: int
     source_kind: str = "operator"
+    generation: WorkflowSummaryGenerationProvenance | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         try:
@@ -48,7 +86,9 @@ class WorkflowSummaryVersion:
             validate_reference(self.summary_id)
             if (type(self.revision) is not int or not 1 <= self.revision <= MAX_REVISION
                     or type(self.created_at_ms) is not int or not 0 <= self.created_at_ms <= MAX_REVISION
-                    or self.created_by != self.owner_id or self.source_kind != "operator"):
+                    or self.created_by != self.owner_id
+                    or not ((self.source_kind == "operator" and self.generation is None)
+                        or (self.source_kind == "model" and type(self.generation) is WorkflowSummaryGenerationProvenance))):
                 raise WorkflowValidationError("invalid_summary_value")
             _text(self.title, 160, strip=True)
             _text(self.content, MAX_SUMMARY_BYTES)
@@ -61,7 +101,10 @@ class WorkflowSummaryVersion:
 
     @property
     def snapshot(self) -> bytes:
-        return canonical_json({"schema_version": 1, **{item.name: getattr(self, item.name) for item in fields(self)}})
+        value = {"schema_version": 1, **{item.name: getattr(self, item.name) for item in fields(self) if item.name != "generation"}}
+        if self.generation is not None:
+            value.update(schema_version=2, generation=self.generation.value)
+        return canonical_json(value)
 
     @property
     def sha256(self) -> str:
@@ -75,11 +118,16 @@ def summary_value(item: WorkflowSummaryVersion) -> dict[str, Any]:
 
 
 def parse_summary(value: object) -> WorkflowSummaryVersion:
-    names = {item.name for item in fields(WorkflowSummaryVersion)}
-    if (type(value) is not dict or set(value) != names | {"schema_version"}
-            or type(value["schema_version"]) is not int or value["schema_version"] != 1):
+    names = {item.name for item in fields(WorkflowSummaryVersion)} - {"generation"}
+    if type(value) is not dict or type(value.get("schema_version")) is not int:
         raise WorkflowValidationError("invalid_summary_value")
-    return WorkflowSummaryVersion(**{name: value[name] for name in names})
+    generated = value["schema_version"] == 2
+    if (value["schema_version"] not in (1, 2)
+            or set(value) != names | {"schema_version"} | ({"generation"} if generated else set())
+            or value.get("source_kind") != ("model" if generated else "operator")):
+        raise WorkflowValidationError("invalid_summary_value")
+    return WorkflowSummaryVersion(**{name: value[name] for name in names},
+        generation=parse_summary_generation(value["generation"]) if generated else None)
 
 
 def summary_selection(references: tuple[ContextReference, ...]) -> None:

@@ -194,6 +194,12 @@ class PlatformConversationMixin:
         try:
             conn = self._connect()
             archive_filter = "IS NOT NULL" if archived else "IS NULL"
+            generation_filter = ""
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_summary_generations'").fetchone():
+                generation_filter = """AND NOT EXISTS (
+                    SELECT 1 FROM runs sr JOIN workflow_summary_generations sg
+                    ON sg.owner_id=sr.owner_id AND sg.run_id=sr.run_id
+                    WHERE sr.owner_id=c.owner_id AND sr.conversation_id=c.conversation_id)"""
             rows = conn.execute(
                 f"""
                 SELECT c.*,
@@ -215,7 +221,7 @@ class PlatformConversationMixin:
                   (SELECT MAX(CAST(m.created_at AS REAL)) FROM messages m
                    WHERE m.owner_id=c.owner_id AND m.conversation_id=c.conversation_id) AS latest_message_at
                 FROM conversations c
-                WHERE c.owner_id=? AND c.archived_at {archive_filter}
+                WHERE c.owner_id=? AND c.archived_at {archive_filter} {generation_filter}
                 ORDER BY COALESCE(latest_run_at, latest_message_at, 0) DESC, c.conversation_id DESC
                 LIMIT ?
                 """, (owner_id, limit)).fetchall()
@@ -347,6 +353,12 @@ class PlatformConversationMixin:
             tables = {row[0] for row in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
             run_scope = "SELECT run_id FROM runs WHERE owner_id=? AND conversation_id=?"
+            for table, key in (("workflow_summary_generations", "run_id"),
+                               ("workflow_summary_generation_sources", "source_run_id")):
+                if table in tables and conn.execute(
+                        f"SELECT 1 FROM {table} WHERE owner_id=? AND {key} IN ({run_scope}) LIMIT 1",
+                        (owner_id, owner_id, conversation_id)).fetchone():
+                    raise PlatformRepositoryError("conversation_workflow_referenced")
             if "workflow_runs" in tables:
                 workflow_reference = conn.execute(
                     "SELECT 1 FROM workflow_runs WHERE owner_id=? AND conversation_id=? LIMIT 1",

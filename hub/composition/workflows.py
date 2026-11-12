@@ -25,6 +25,9 @@ def assert_workflow_visibility(path: Path, *, enabled: bool) -> None:
 
             ExternalWorkflowRepository.validate_snapshot(connection)
             WorkflowSummaryRepository.validate_snapshot(connection)
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE name='workflow_summary_generations'").fetchone():
+                if connection.execute("SELECT 1 FROM workflow_summary_generations g JOIN runs r ON r.owner_id=g.owner_id AND r.run_id=g.run_id WHERE r.state NOT IN ('succeeded','failed','cancelled') LIMIT 1").fetchone():
+                    raise WorkflowRepositoryError("workflow_domain_in_use")
             unresolved = connection.execute(
                 "SELECT 1 FROM workflow_dispatches d JOIN workflow_steps s "
                 "USING(owner_id,workspace_id,workflow_id,step_key,generation) "
@@ -83,6 +86,13 @@ def wire_workflows(app, config, dependencies) -> None:
 
     summaries = WorkflowSummaryRepository(repository)
     services["workflow_summaries"] = WorkflowSummaryService(summaries, clock=clock)
+    from hub.infrastructure.workflow_summary_generation_repository import WorkflowSummaryGenerationRepository
+
+    generations = WorkflowSummaryGenerationRepository(repository)
+    fleet["repositories"]["workflow_summary_generations"] = generations
+    from hub.application.workflow_summary_generation import WorkflowSummaryGenerationService
+
+    services["workflow_summary_generations"] = WorkflowSummaryGenerationService(generations, summaries, clock=clock)
     if config.platform_fleet_mcp_enabled:
         from hub.application.integration_identity_admin import IntegrationIdentityAdminService
         from hub.infrastructure.integration_identity_repository import IntegrationIdentityRepository
@@ -129,6 +139,7 @@ def wire_workflows(app, config, dependencies) -> None:
         worker.workflow_memory_guard = WorkflowNativeMemoryRepository(repository, text_inputs=text_inputs,
             code_inputs=code_inputs, media_inputs=media_inputs, clock=clock)
         worker.workflow_code_inputs = code_inputs
+        worker.workflow_summary_generation_guard = generations
     hub_inputs = []
     for owner, workspace, target, executor in dependencies.get("workflow_executors", ()):
         if not isinstance(executor, RunStepExecutor):

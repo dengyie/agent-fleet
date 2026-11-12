@@ -1,5 +1,11 @@
 # 文档开发总账
 
+## 生产发布审查与模型摘要（2026-11-13）
+
+用户已授权根因修复、合入GitHub main、部署及实际深度测试。[本轮审查](../reviews/2026-11-13-production-release.md)记录七项已复现问题及最小修复，包括独立领域reader升级遗漏于回滚识别。当前22模块458passed/2passing subtests；部署回滚48passed，分别记录。完整同版CI、宿主receiver同步和生产验收尚待实际结果，不以本机子集宣称发布完成。
+
+自动摘要复用原Run队列，固定完整来源/provider，单次无工具且禁用provider重试；生成版本schema2/Workflow reader16与原人工版本并存。候选按完整版本上限验证，原token可跨刷新/工作区恢复，来源分页及390px页面已验证。见[实施计划](../superpowers/plans/2026-11-13-model-summary-generation.md)。
+
 ## 部署前摘要 reader 根因修复（2026-11-13）
 
 首次保存摘要原 SQL 将 Workflow minimum reader 无条件改为11，会使已有图片/音频/视频 Run 的13/14/15要求倒退，进而破坏历史重载与备份验证。新增真实媒体派发、摘要追加、仓库重载、原 binding 查回和备份回归，修复前3failed/1passed；同写事务改用`max(minimum_reader_version,11)`后9模块315passed，零failure/error/skip、31.58s。另用SQLite authorizer证明首次摘要写入失败仍回滚建表且保留reader15。此修复当前未发布，不由PR45现有CI代填；见[实施与证据计划](../superpowers/plans/2026-11-13-summary-reader-preservation.md)。

@@ -1,6 +1,5 @@
 """Review regression: rollback after a schema-bumping release restores databases."""
 import json
-from pathlib import Path
 import sqlite3
 
 import pytest
@@ -77,3 +76,62 @@ def test_unchanged_schema_keeps_new_writes(deployment):  # noqa: F811
     backup = next(p for p in manager.state.iterdir() if p.is_dir())
     assert 'restored_databases' not in json.loads((backup / 'result.json').read_text())
     assert not (backup / 'failed-databases').exists()
+
+
+class DomainMigratingHooks(Hooks):
+    def start(self):
+        super().start()
+        with sqlite3.connect(self.live / 'var/data.db') as db:
+            if 'commit: ' + NEW in (self.live / 'RELEASE_ORIGIN').read_text():
+                db.execute('UPDATE workflow_schema_meta SET minimum_reader_version=16')
+                db.execute("INSERT INTO records VALUES ('written-by-domain-upgrade')")
+            elif db.execute('SELECT minimum_reader_version FROM workflow_schema_meta').fetchone()[0] > 15:
+                raise RuntimeError('unsupported_workflow_reader')
+
+    def public_verify(self, sha):
+        super().public_verify(sha)
+        if sha == NEW: raise RuntimeError('public_verify_failed')
+
+
+def test_domain_reader_upgrade_restores_compatible_database_and_preserves_failed_writes(deployment):  # noqa: F811
+    manager, stage, _ = deployment
+    _set_schema(manager.live / 'var/data.db', 3)
+    with sqlite3.connect(manager.live / 'var/data.db') as db:
+        db.execute('CREATE TABLE workflow_schema_meta(singleton INTEGER PRIMARY KEY,schema_version INTEGER,minimum_reader_version INTEGER,admission_mode TEXT)')
+        db.execute("INSERT INTO workflow_schema_meta VALUES(1,3,15,'open')")
+    manager.hooks = DomainMigratingHooks(manager.live)
+    with pytest.raises(release.DeployError, match='rolled_back'):
+        manager.apply(stage, NEW, '100')
+    backup = next(p for p in manager.state.iterdir() if p.is_dir())
+    with sqlite3.connect(manager.live / 'var/data.db') as db:
+        assert db.execute('SELECT minimum_reader_version FROM workflow_schema_meta').fetchone()[0] == 15
+    with sqlite3.connect(backup / 'failed-databases/var/data.db') as db:
+        assert db.execute('SELECT minimum_reader_version FROM workflow_schema_meta').fetchone()[0] == 16
+        assert ('written-by-domain-upgrade',) in db.execute('SELECT value FROM records').fetchall()
+
+
+@pytest.mark.parametrize('table', ['workflow_summary_schema_meta', 'mcp_catalog_meta'])
+def test_first_optional_domain_schema_is_detected_without_base_schema_change(tmp_path, table):
+    live, saved = tmp_path / 'live', tmp_path / 'saved'
+    live.mkdir(); saved.mkdir()
+    for root in (live, saved): _set_schema(root / 'data.db', 3)
+    with sqlite3.connect(live / 'data.db') as db:
+        db.execute(f'CREATE TABLE {table}(singleton INTEGER PRIMARY KEY,schema_version INTEGER,minimum_reader_version INTEGER)')
+        db.execute(f'INSERT INTO {table} VALUES(1,2,2)')
+    assert release.changed_schema_databases(live, saved, ['data.db']) == ['data.db']
+
+
+def test_operational_metadata_changes_do_not_restore_and_erase_new_business_writes(tmp_path):
+    live, saved = tmp_path / 'live', tmp_path / 'saved'
+    live.mkdir(); saved.mkdir()
+    for root in (live, saved):
+        _set_schema(root / 'data.db', 3)
+        with sqlite3.connect(root / 'data.db') as db:
+            db.execute('CREATE TABLE workflow_schema_meta(singleton INTEGER PRIMARY KEY,schema_version INTEGER,minimum_reader_version INTEGER,admission_mode TEXT)')
+            db.execute("INSERT INTO workflow_schema_meta VALUES(1,3,16,'open')")
+            db.execute('CREATE TABLE capability_schema_meta(singleton INTEGER PRIMARY KEY,schema_version INTEGER,minimum_reader_version INTEGER,report_sequence INTEGER)')
+            db.execute('INSERT INTO capability_schema_meta VALUES(1,1,1,0)')
+    with sqlite3.connect(live / 'data.db') as db:
+        db.execute("UPDATE workflow_schema_meta SET admission_mode='frozen'")
+        db.execute('UPDATE capability_schema_meta SET report_sequence=99')
+    assert release.changed_schema_databases(live, saved, ['data.db']) == []

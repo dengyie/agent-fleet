@@ -152,19 +152,26 @@ def backup_databases(live, destination, paths):
                     raise DeployError('database_backup_invalid')
 
 
-def schema_version(path):
-    """Schema marker of one SQLite database: meta.schema_version, else user_version.
+def database_schema_fingerprint(path):
+    """Base and optional domain schema/readers required to reopen the database.
 
     An unreadable database (e.g. left half-migrated) yields a sentinel that
     never equals a readable version, so rollback treats it as changed.
     """
     try:
         with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5) as db:
+            base = ('user_version', db.execute('PRAGMA user_version').fetchone()[0])
             if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone():
                 row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
                 if row is not None:
-                    return ('meta', str(row[0]))
-            return ('user_version', db.execute('PRAGMA user_version').fetchone()[0])
+                    base = ('meta', str(row[0]))
+            domains = []
+            for table in ('workflow_schema_meta', 'workflow_summary_schema_meta', 'workflow_external_schema_meta',
+                          'workflow_integration_schema_meta', 'capability_schema_meta', 'mcp_catalog_meta'):
+                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                    rows = db.execute(f'SELECT singleton,schema_version,minimum_reader_version FROM {table} ORDER BY singleton LIMIT 2').fetchall()
+                    domains.append((table, tuple(rows)))
+            return base, tuple(domains)
     except sqlite3.Error:
         return ('unreadable', None)
 
@@ -172,7 +179,7 @@ def schema_version(path):
 def changed_schema_databases(live, saved, paths):
     """Databases whose live schema differs from the pre-deploy backup copy."""
     return [relative for relative in paths
-            if schema_version(live / relative) != schema_version(saved / relative)]
+            if database_schema_fingerprint(live / relative) != database_schema_fingerprint(saved / relative)]
 
 
 def restore_databases(live, saved, aside, paths, *, uid=None, gid=None):

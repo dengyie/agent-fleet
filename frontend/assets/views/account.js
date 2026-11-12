@@ -59,7 +59,7 @@ export function mountAccount(root) {
       integrationViews.push(mountIntegrationIdentities(root, {suspended}));
     }
     if (data.user.role === 'admin' && data.features?.workflow_summary_management === true) {
-      integrationViews.push(mountWorkflowSummaries(root, {suspended}));
+      integrationViews.push(mountWorkflowSummaries(root, {suspended, ownerId: data.user.id}));
     }
     if (data.user.role === 'admin') await mountAdmin();
   }
