@@ -7,12 +7,13 @@ import ssl
 from threading import Condition, Event, Lock, Thread, Timer
 import time
 from types import TracebackType
-from typing import Any
+from typing import Any, Callable
 from urllib.error import URLError
 from urllib.request import HTTPErrorProcessor, HTTPHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
 
 AddressInfo = tuple[int, int, int, str, tuple[Any, ...]]
+AddressPolicy = Callable[[str, int, tuple[Any, ...]], bool]
 
 
 def _remaining(deadline: float) -> float:
@@ -76,10 +77,11 @@ _RESOLVER = _Resolver()
 
 
 class _Deadline:
-    def __init__(self, timeout_s: float) -> None:
+    def __init__(self, timeout_s: float, *, address_policy: AddressPolicy | None = None) -> None:
         self.expires = time.monotonic() + timeout_s
         self.lock = Lock()
         self.sock: socket.socket | None = None
+        self.address_policy = address_policy
         self.timer = Timer(self.remaining(), self._interrupt)
         self.timer.name = 'fleet-http-deadline'
         self.timer.daemon = True
@@ -102,6 +104,14 @@ class _Deadline:
         last_error = OSError('no resolved addresses')
         for family, socktype, proto, _, sockaddr in _RESOLVER.resolve(address, self.expires):
             self.remaining()
+            if self.address_policy is not None:
+                try:
+                    allowed = self.address_policy(address[0], family, sockaddr)
+                except Exception as exc:
+                    raise OSError("address_policy_failed") from exc
+                if allowed is not True:
+                    last_error = OSError("address_forbidden")
+                    continue
             sock = socket.socket(family, socktype, proto)
             try:
                 with self.lock:
@@ -232,8 +242,9 @@ class DeadlineResponse:
         self.close()
 
 
-def open_http(request: Request, *, timeout_s: float, use_proxy: bool = True) -> DeadlineResponse:
-    deadline = _Deadline(timeout_s)
+def open_http(request: Request, *, timeout_s: float, use_proxy: bool = True,
+              address_policy: AddressPolicy | None = None) -> DeadlineResponse:
+    deadline = _Deadline(timeout_s, address_policy=address_policy)
     transferred = False
     try:
         proxy = ProxyHandler() if use_proxy else ProxyHandler({})

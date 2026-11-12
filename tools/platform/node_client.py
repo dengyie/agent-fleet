@@ -2,11 +2,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import json
 import time
 from typing import Any
 
 from fleet_core.platform_command import args_hash, verify_command
 from fleet_core.web_agent_contract import WEB_AGENT_TOOLS
+from fleet_core.artifact_receive import RECEIVE_ACTION
+from fleet_core.artifact_export import EXPORT_ACTION
+from fleet_core.capability_execution import CAPABILITY_ARGUMENT
+from fleet_core.remote_workflow_test import REMOTE_TEST_ACTION
+from .command_control import CommandControl, ControlRejected
 
 
 class BrowserSessionSyncError(RuntimeError):
@@ -23,7 +29,7 @@ class BrowserSessionSyncError(RuntimeError):
 class NodeClient:
     def __init__(self, journal, *, executor, clock=time.time, node_id=None,
                  credential=None, hub_url=None, transport=None, public_key=None,
-                 require_signature=False, worker_id=None):
+                 require_signature=False, worker_id=None, should_cancel=None):
         self.journal = journal
         self.executor = executor
         self.clock = clock
@@ -34,6 +40,7 @@ class NodeClient:
         self.public_key = public_key
         self.require_signature = bool(require_signature)
         self.worker_id = worker_id or node_id
+        self.should_cancel = should_cancel
 
     def _headers(self):
         if not self.node_id or not self.credential:
@@ -44,13 +51,18 @@ class NodeClient:
             "X-Platform-Node-Credential": self.credential,
         }
 
-    def _post(self, path, body):
+    def _post(self, path, body, *, bounded=False):
         if self.transport is None:
             from tools.transport import Transport
             self.transport = Transport()
         url = self.hub_url + path
         if not url.startswith(("http://", "https://")):
             raise ValueError("hub_url must use http or https")
+        if bounded:
+            exporter = self.executor.artifact_exporter
+            return self.transport.request_bounded_json("POST", url,
+                json.dumps(body, allow_nan=False, separators=(",", ":")).encode("utf-8"), self._headers(),
+                deadline=time.monotonic() + 15, should_cancel=exporter.should_cancel)
         return self.transport.post_json(url, body, self._headers())
 
     def _post_bytes(self, path, body: bytes, headers: Mapping[str, str]):
@@ -173,8 +185,10 @@ class NodeClient:
     def _signature_ok(self, command: Mapping):
         if self.public_key is None:
             action = command.get("action")
-            protected = {"tool.browser.submit"} | {"tool." + tool for tool in WEB_AGENT_TOOLS}
-            signature_ok = not self.require_signature and action not in protected
+            protected = {"tool.browser.submit", RECEIVE_ACTION, EXPORT_ACTION, REMOTE_TEST_ACTION} | {"tool." + tool for tool in WEB_AGENT_TOOLS}
+            arguments = command.get("arguments")
+            capability_bound = isinstance(arguments, Mapping) and CAPABILITY_ARGUMENT in arguments
+            signature_ok = not self.require_signature and action not in protected and not capability_bound
         else:
             signature_ok = verify_command(command, self.public_key)
         if not signature_ok:
@@ -191,24 +205,57 @@ class NodeClient:
             return False
         return True
 
-    def handle(self, command: dict):
+    def _renew_control(self, command_id, lease_s, stopped):
+        status, payload = self.transport.request_bounded_json('POST',
+            self.hub_url + '/api/platform/v1/nodes/commands/control',
+            json.dumps({'command_id': command_id, 'worker_id': self.worker_id, 'lease_s': lease_s},
+                       allow_nan=False, separators=(',', ':')).encode('utf-8'), self._headers(),
+            deadline=time.monotonic() + 2, should_cancel=stopped, max_response_bytes=4096)
+        if status in {400, 401, 403, 404, 409}:
+            raise ControlRejected('command_control_rejected')
+        if status != 200:
+            raise OSError('command_control_unavailable')
+        if not isinstance(payload, dict) or payload.get('ok') is not True:
+            raise ControlRejected('invalid_command_control')
+        return payload.get('control')
+
+    def _execute(self, command, *, control_supported=False, lease_s=60.0):
+        controlled = getattr(self.executor, 'execute_controlled', None)
+        if (not callable(controlled)
+                or command.get('action') not in getattr(self.executor, 'controlled_actions', ())):
+            return self.executor(command)
+        renew = (lambda stopped: self._renew_control(command['command_id'], lease_s, stopped)) if control_supported else None
+        with CommandControl(command, renew=renew, should_stop=self.should_cancel,
+                            clock=self.clock, lease_s=lease_s) as control:
+            return controlled(command, should_cancel=control.should_cancel)
+
+    def handle(self, command: dict, *, control_supported=False, lease_s=60.0):
         command_id = command.get("command_id")
         if not isinstance(command_id, str) or not command_id:
             return {"status": "rejected", "reason": "invalid_command"}
         if not self._signature_ok(command):
             return {"command_id": command_id, "status": "rejected",
                     "reason": "invalid_signature"}
+        if command.get("action") in {RECEIVE_ACTION, EXPORT_ACTION}:
+            # File transfers have their own durable intent and outbox. The
+            # generic running/unknown journal must not prevent recovering a
+            # publication that completed immediately before a process exit.
+            outcome = self.executor(command)
+            return {"command_id": command_id, "status": outcome["state"],
+                "result": outcome["result"], **({"error_code": outcome["error_code"]}
+                if outcome.get("error_code") else {}), **({"deferred": True} if outcome.get("deferred") else {})}
         attribution = {}
         arguments = command.get("arguments")
         if command.get("action") == "tool.browser.submit" and isinstance(arguments, Mapping):
             approval_id = arguments.get("approval_id")
             if isinstance(approval_id, str):
                 attribution["approval_id"] = approval_id
-        prior = self.journal.begin(command_id, now=self.clock(), metadata=attribution)
+        prior = self.journal.begin(command_id, now=self.clock(), metadata=attribution,
+                                   worker_id=self.worker_id)
         if not prior["claimed"]:
             return {"command_id": command_id, "status": prior["state"], "result": prior["result"]}
         try:
-            result = self.executor(command)
+            result = self._execute(command, control_supported=control_supported, lease_s=lease_s)
             if attribution and isinstance(result, Mapping):
                 result = {**result, **attribution}
             if isinstance(result, Mapping):
@@ -223,56 +270,120 @@ class NodeClient:
             saved = self.journal.finish(command_id, "unknown", failure, now=self.clock())
             return {"command_id": command_id, "status": saved["state"], "result": saved["result"] or {}}
 
-    def poll_once(self, *, limit=20, lease_s=60.0):
-        """Poll once, execute each command, and upload bounded receipts."""
+    def _upload_receipt(self, command_id, result, *, worker_id=None, artifact_handler=None, bounded=False):
+        wire_status = result.get("status", "unknown")
+        # Local validation rejections use the Hub's terminal failure state.
+        if wire_status == "rejected":
+            wire_status = "failed"
+        receipt = {
+            "command_id": command_id,
+            "status": wire_status,
+            "worker_id": worker_id or self.worker_id,
+        }
+        if isinstance(result.get("result"), dict):
+            receipt["result"] = result["result"]
+            if isinstance(result.get("error_code"), str):
+                receipt["result"] = dict(receipt["result"])
+                receipt["result"]["error_code"] = result["error_code"][:80]
+        elif result.get("reason"):
+            receipt["result"] = {"reason": str(result["reason"])[:80]}
+            if isinstance(result.get("approval_id"), str):
+                receipt["result"]["approval_id"] = result["approval_id"]
         try:
-            status, payload = self._post(
-                "/api/platform/v1/nodes/poll",
-                {"worker_id": self.worker_id, "limit": limit, "lease_s": lease_s},
-            )
+            options = {"bounded": True} if bounded else {}
+            status, payload = self._post("/api/platform/v1/nodes/receipts", receipt, **options)
+            if status != 200 or not isinstance(payload, Mapping) or not payload.get("ok"):
+                return False
+            if artifact_handler is not None and wire_status == "succeeded":
+                confirmed = payload.get("receipt")
+                if (not isinstance(confirmed, Mapping) or confirmed.get("command_id") != command_id
+                        or confirmed.get("status") != "succeeded" or confirmed.get("result") != receipt.get("result")):
+                    return False
+                artifact_handler.acknowledge(command_id, receipt["result"])
+            elif artifact_handler is None:
+                self.journal.acknowledge_receipt(command_id)
+            return True
         except Exception:
-            return {"ok": False, "commands": 0, "error": "poll_transport_error"}
-        if status != 200 or not isinstance(payload, dict) or not payload.get("ok"):
-            return {"ok": False, "commands": 0, "error": "poll_failed"}
-        commands = payload.get("commands")
-        if not isinstance(commands, list):
-            return {"ok": False, "commands": 0, "error": "malformed_commands"}
-        handled = 0
+            # The terminal journal row stays pending, including when the Hub
+            # accepted it but the acknowledgement was lost in transit.
+            return False
+
+    def poll_once(self, *, limit=20, lease_s=60.0):
+        """Retry receipts, then claim only work that can start immediately.
+
+        ``limit`` is the maximum batch throughput, not a prefetch count: this
+        executor is sequential and every command needs its own fresh lease.
+        """
+        limit = max(1, min(int(limit), 100))
         receipts = 0
-        for command in commands:
-            if not isinstance(command, dict):
+        if self.should_cancel is not None and self.should_cancel():
+            return {'ok': True, 'commands': 0, 'receipts': 0}
+        receiver = getattr(self.executor, "artifact_receiver", None)
+        exporter = getattr(self.executor, "artifact_exporter", None)
+        recovery_errors = ()
+        export_errors = ()
+        for handler, bounded in ((receiver, False), (exporter, True)):
+            if handler is None:
                 continue
-            result = self.handle(command)
-            handled += 1
-            wire_status = result.get("status", "unknown")
-            # The Hub command receipt contract records execution outcomes; a
-            # local validation rejection is represented as bounded failure so
-            # the rejection is durable rather than becoming an invalid HTTP
-            # receipt.
-            if wire_status == "rejected":
-                wire_status = "failed"
-            receipt = {
-                "command_id": command.get("command_id"),
-                "status": wire_status,
-                "worker_id": self.worker_id,
-            }
-            if isinstance(result.get("result"), dict):
-                receipt["result"] = result["result"]
-                if isinstance(result.get("error_code"), str):
-                    receipt["result"] = dict(receipt["result"])
-                    receipt["result"]["error_code"] = result["error_code"][:80]
-            elif result.get("reason"):
-                receipt["result"] = {"reason": str(result["reason"])[:80]}
-                if isinstance(result.get("approval_id"), str):
-                    receipt["result"]["approval_id"] = result["approval_id"]
+            errors = handler.recover(limit=limit)
+            if bounded:
+                export_errors = errors
+            else:
+                recovery_errors = errors
+            for command_id, result in handler.pending_receipts(limit=limit):
+                receipts += self._upload_receipt(command_id, {"status": "succeeded", "result": result},
+                    artifact_handler=handler, bounded=bounded)
+        for saved in self.journal.pending_receipts(limit=limit):
+            receipts += self._upload_receipt(
+                saved["command_id"],
+                {"status": saved["state"], "result": saved["result"] or {}},
+                worker_id=saved["worker_id"],
+            )
+        handled = 0
+        seen = set()
+        for _ in range(limit):
+            if self.should_cancel is not None and self.should_cancel():
+                break
             try:
-                receipt_status, _ = self._post(
-                    "/api/platform/v1/nodes/receipts", receipt)
-                if receipt_status == 200:
-                    receipts += 1
+                status, payload = self._post(
+                    "/api/platform/v1/nodes/poll",
+                    {"worker_id": self.worker_id, "limit": 1, "lease_s": lease_s},
+                )
             except Exception:
-                pass
-        return {"ok": True, "commands": handled, "receipts": receipts}
+                return {"ok": False, "commands": handled, "error": "poll_transport_error"}
+            if status != 200 or not isinstance(payload, dict) or not payload.get("ok"):
+                return {"ok": False, "commands": handled, "error": "poll_failed"}
+            commands = payload.get("commands")
+            if not isinstance(commands, list) or len(commands) > 1:
+                return {"ok": False, "commands": handled, "error": "malformed_commands"}
+            if not commands:
+                break
+            command = commands[0]
+            if not isinstance(command, dict):
+                return {"ok": False, "commands": handled, "error": "malformed_commands"}
+            command_id = command.get("command_id")
+            if not isinstance(command_id, str) or not command_id:
+                return {"ok": False, "commands": handled, "error": "malformed_commands"}
+            if command_id in seen:
+                break
+            seen.add(command_id)
+            control_supported = (payload.get('command_control_version') == 1
+                and callable(getattr(self.transport, 'request_bounded_json', None)))
+            result = self.handle(command, control_supported=control_supported, lease_s=lease_s)
+            handled += 1
+            if result.get("deferred"):
+                continue
+            saved = self.journal.get(command_id) if isinstance(command_id, str) else None
+            action = command.get("action")
+            handler = receiver if action == RECEIVE_ACTION else exporter if action == EXPORT_ACTION else None
+            receipts += self._upload_receipt(
+                command_id, result,
+                worker_id=saved["worker_id"] if saved else self.worker_id,
+                artifact_handler=handler, bounded=action == EXPORT_ACTION,
+            )
+        return {"ok": True, "commands": handled, "receipts": receipts,
+            **({"input_recovery_errors": list(recovery_errors)} if recovery_errors else {}),
+            **({"output_recovery_errors": list(export_errors)} if export_errors else {})}
 
     def heartbeat(self, *, status="online"):
         try:

@@ -60,7 +60,7 @@ def test_remote_tool_broker_enqueues_one_fixed_command_and_maps_receipt():
     events = []
 
     class Delivery:
-        def enqueue(self, command, *, idempotency_key=None):
+        def enqueue(self, command, *, idempotency_key=None, timing=None):
             queued.append((command, idempotency_key))
             return command.as_dict() | {"status": "queued", "result": None}
 
@@ -92,7 +92,7 @@ def test_remote_tool_broker_rejects_invalid_browser_arguments_before_enqueue():
     queued = []
 
     class Delivery:
-        def enqueue(self, command, *, idempotency_key=None):
+        def enqueue(self, command, *, idempotency_key=None, timing=None):
             queued.append(command)
             return command.as_dict() | {"status": "queued", "result": None}
 
@@ -128,7 +128,7 @@ def test_remote_tool_broker_rejects_loopback_even_when_allowlisted():
     queued = []
 
     class Delivery:
-        def enqueue(self, command, *, idempotency_key=None):
+        def enqueue(self, command, *, idempotency_key=None, timing=None):
             queued.append(command)
             return command.as_dict() | {"status": "queued", "result": None}
 
@@ -156,7 +156,7 @@ def test_remote_tool_broker_allows_only_configured_global_external_origin():
     queued = []
 
     class Delivery:
-        def enqueue(self, command, *, idempotency_key=None):
+        def enqueue(self, command, *, idempotency_key=None, timing=None):
             queued.append(command)
             return command.as_dict() | {"status": "queued", "result": None}
 
@@ -186,7 +186,7 @@ def test_remote_tool_broker_never_replays_unknown_receipt():
     calls = []
 
     class Delivery:
-        def enqueue(self, command, *, idempotency_key=None):
+        def enqueue(self, command, *, idempotency_key=None, timing=None):
             calls.append(command.command_id)
             return command.as_dict() | {"status": "queued", "result": None}
 
@@ -219,7 +219,7 @@ def test_node_tool_executor_uses_only_fixed_workspace_actions(tmp_path):
         def execute(self, command_id, argv, *, timeout_s=30):
             return ToolReceipt(command_id, "succeeded", {"argv": argv})
 
-    executor = NodeToolExecutor(Backend())
+    executor = NodeToolExecutor(Backend(), workspace_id="workspace-remote")
     assert executor(_command("cmd-list").as_dict() | {"action": "tool.workspace.list", "arguments": {"path": ""}})["state"] == "succeeded"
     assert executor(_command("cmd-read").as_dict())["result"] == {"path": "report.md"}
     rejected = executor(_command("cmd-bad").as_dict() | {"action": "tool.shell", "arguments": {"argv": ["sh", "-c", "id"]}})
@@ -250,7 +250,7 @@ def test_node_tool_executor_backend_interruption_is_unknown_in_journal(tmp_path)
 
     journal = NodeJournal(tmp_path / "node-unknown.db")
     journal.init()
-    client = NodeClient(journal, executor=NodeToolExecutor(Backend()))
+    client = NodeClient(journal, executor=NodeToolExecutor(Backend(), workspace_id="workspace-remote"))
     result = client.handle(_command("cmd-unknown").as_dict())
     assert result["status"] == "unknown"
     assert journal.get("cmd-unknown")["state"] == "unknown"
@@ -276,7 +276,7 @@ def _submit_broker(approvals, *, submit_enabled=True):
     queued = []
 
     class Delivery:
-        def enqueue_submit(self, command, *, approvals, idempotency_key=None):
+        def enqueue_submit(self, command, *, approvals, idempotency_key=None, timing=None):
             from dataclasses import replace
             from fleet_core.platform_command import args_hash
             approval_id = approvals.consume_submit_approval(

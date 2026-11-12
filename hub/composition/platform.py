@@ -43,6 +43,8 @@ class PlatformComponents:
     platform_worker_service: Any = None
     platform_run_scheduler: Any = None
     plugin_service: Any = None
+    mcp_catalog: Any = None
+    mcp_catalog_repository: Any = None
 
 
 def build_platform(config, repositories: dict[str, Any]) -> PlatformComponents:
@@ -136,7 +138,32 @@ def _build_conversations(p, config, repositories):
             from hub.application.conversation_service import SubmitApprovalService
             p.submit_approval_service = SubmitApprovalService(
                 p.browser_repository, p.platform_repository)
-    p.conversation_service = ConversationService(p.platform_repository, p.platform_service)
+    p.mcp_catalog = repositories.get("mcp_catalog")
+    mcp_connectors = repositories.get("mcp_connectors", ())
+    if config.platform_mcp_connectors_enabled and config.platform_mcp_registration_file is not None:
+        from hub.composition.mcp_registration import read_mcp_registration, validate_mcp_workspaces
+
+        if p.mcp_catalog is not None or mcp_connectors:
+            raise ValueError("mcp_registration_conflicts_with_injected_catalog")
+        mcp_connectors = read_mcp_registration(config.platform_mcp_registration_file)
+        validate_mcp_workspaces(mcp_connectors, p.platform_repository)
+    if config.platform_mcp_connectors_enabled and p.mcp_catalog is None:
+        from hub.application.connector_catalog import ConnectorCatalog
+        from hub.application.mcp_registration import attach_durable_mcp_connections
+        from hub.infrastructure.mcp_catalog_repository import MCPCatalogRepository
+        from hub.platform.connectors.registration import connector_from_config
+
+        p.mcp_catalog_repository = MCPCatalogRepository(config.platform_db)
+        p.mcp_catalog_repository.init()
+        p.mcp_catalog = ConnectorCatalog(enabled=True, store=p.mcp_catalog_repository,
+            clock=repositories.get("mcp_clock", __import__("time").time),
+            registration_factory=connector_from_config if config.platform_mcp_catalog_registration_enabled else None)
+        for connector in mcp_connectors:
+            p.mcp_catalog.register(connector)
+        attach_durable_mcp_connections(p.mcp_catalog)
+    p.conversation_service = ConversationService(
+        p.platform_repository, p.platform_service, mcp_catalog=p.mcp_catalog,
+        mcp_enabled=config.platform_mcp_connectors_enabled)
     p.run_service = RunService(p.platform_repository,
                                browser_repository=p.browser_repository)
     p.run_event_service = RunEventService(p.platform_repository)
@@ -209,6 +236,7 @@ def _build_worker(p, config):
         conversation_service=p.conversation_service,
         service_actions=p.service_actions,
         defaults_service=p.platform_service,
+        mcp_catalog=p.mcp_catalog, mcp_enabled=config.platform_mcp_connectors_enabled,
         browser_enabled=bool(getattr(config, "platform_browser_enabled", False)),
         browser_network_enabled=bool(getattr(
             config, "platform_browser_network_enabled", False)),

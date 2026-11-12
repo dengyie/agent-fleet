@@ -51,6 +51,19 @@ def create_app(
     from hub.composition.platform import build_platform
     from hub.composition.routes import register_http
     from hub.composition.sessions import build_sessions
+    from hub.composition.workflows import assert_workflow_visibility, wire_workflows
+
+    if ((config.platform_workflows_enabled and not config.platform_enabled)
+            or (config.platform_workflow_dispatch_enabled and not config.platform_workflows_enabled)):
+        raise ValueError("workflow gate dependencies")
+    if config.platform_artifact_transfer_enabled and not (config.platform_enabled and config.platform_workflows_enabled):
+        raise ValueError("artifact transfer gate dependencies")
+    if config.platform_capability_routing_enabled and not config.platform_workflows_enabled:
+        raise ValueError("capability routing gate dependencies")
+    assert_workflow_visibility(
+        config.platform_db or config.root / "var" / "platform" / "platform.db",
+        enabled=config.platform_workflows_enabled,
+    )
 
     repositories = repositories or {}
     platform = build_platform(config, repositories)
@@ -66,6 +79,10 @@ def create_app(
         retention=_platform_retention(config, platform.platform_repository,
                                       sessions.session_search_service),
     )
+    if config.platform_workflows_enabled:
+        workflow_dependencies = dict(repositories)
+        workflow_dependencies["task_repository"] = core.task_repository
+        wire_workflows(app, config, workflow_dependencies)
     register_http(app, config, platform, sessions, control)
     return app
 
@@ -177,6 +194,8 @@ def start_background_jobs(
         stops["platform_run_scheduler"] = start_platform_run_scheduler(app)
     elif fleet.get("services", {}).get("platform_worker") is not None and app.config.get("DEV_OPERATOR"):
         stops["platform_worker"] = start_platform_worker(app)
+    if fleet.get("services", {}).get("workflow_coordinator") is not None:
+        stops["workflow_coordinator"] = start_platform_workflow_coordinator(app)
     return stops
 
 
@@ -237,3 +256,13 @@ def start_platform_run_scheduler(app, *, interval_s: float | None = None, stop_e
     if interval_s is not None:
         scheduler.interval_s = max(0.1, min(60.0, float(interval_s)))
     return scheduler.start(stop_event=stop_event)
+
+
+def start_platform_workflow_coordinator(app):
+    """Start only a coordinator already registered in the application assembly."""
+    from hub.platform.assistant_worker import start_workflow_coordinator
+
+    coordinator = app.extensions.get("fleet", {}).get("services", {}).get("workflow_coordinator")
+    if coordinator is None:
+        raise RuntimeError("workflow coordinator is disabled")
+    return start_workflow_coordinator(coordinator, logger=app.logger)

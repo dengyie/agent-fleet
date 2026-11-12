@@ -28,11 +28,13 @@ class ConversationService:
     """
 
     def __init__(self, repository, defaults_service, *, memory_context_service=None,
-                 clock=time.time):
+                 clock=time.time, mcp_catalog=None, mcp_enabled: bool = False):
         self.repository = repository
         self.defaults = defaults_service
         self.memory_context = memory_context_service
         self.clock = clock
+        self.mcp_catalog = mcp_catalog
+        self.mcp_enabled = bool(mcp_enabled and mcp_catalog is not None)
 
     @staticmethod
     def _translate(exc: Exception) -> ApplicationError:
@@ -45,6 +47,7 @@ class ConversationService:
             "conversation_not_archived": 409,
             "conversation_run_active": 409,
             "conversation_command_unresolved": 409,
+            "conversation_workflow_referenced": 409,
             "invalid_conversation_title": 400,
             "idempotency_conflict": 409,
             "reference_forbidden": 409,
@@ -76,6 +79,7 @@ class ConversationService:
             "conversation_not_archived": "请先归档对话，再永久删除",
             "conversation_run_active": "对话仍有运行中的任务，暂不能删除",
             "conversation_command_unresolved": "关联命令尚未完成或结果未知，暂不能删除",
+            "conversation_workflow_referenced": "对话仍被工作流引用，暂不能删除",
             "invalid_conversation_title": "对话标题必须为 1 到 120 个字符",
             "idempotency_conflict": "幂等键对应的请求内容不同",
             "reference_forbidden": "工作区或运行资源不可用",
@@ -111,10 +115,10 @@ class ConversationService:
         except Exception as exc:
             raise self._translate(exc) from exc
 
-    def get(self, owner_id: str, conversation_id: str) -> dict:
+    def get(self, owner_id: str, conversation_id: str, *, limit: int = 20, before_sequence: int | None = None) -> dict:
         owner_id = self._owner(owner_id)
         try:
-            row = self.repository.get_conversation(owner_id, conversation_id)
+            row = self.repository.get_conversation(owner_id, conversation_id, limit=limit, before_sequence=before_sequence)
             if row is None:
                 raise ApplicationError("conversation_not_found", "对话不存在", 404)
             # Public response exposes message text only to its owner, which is
@@ -176,7 +180,7 @@ class ConversationService:
             self.repository.delete_archived_conversation(owner_id, conversation_id)
             return {"ok": True, "deleted": True}
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
     @staticmethod
     def _turn_response(owner_id, conversation_id, result):
@@ -204,6 +208,8 @@ class ConversationService:
         owner_id = self._owner(owner_id)
         if overrides is not None and not isinstance(overrides, Mapping):
             raise ApplicationError("invalid_value", "请求数据不合法", 400)
+        if overrides is not None and {"workflow_memory", "workflow_text_mode", "workflow_code_mode", "workflow_media_mode"} & overrides.keys():
+            raise ApplicationError("invalid_value", "请求数据不合法", 400)
         expected_policy = ACCEPTANCE_TOOL_POLICY if acceptance else None
 
         def verify_policy(run):
@@ -212,40 +218,21 @@ class ConversationService:
 
         try:
             turn = UserTurn.from_input(text, client_token)
-            conversation = self.repository.get_conversation(owner_id, conversation_id)
+            conversation = self.repository.get_conversation_metadata(owner_id, conversation_id)
             if conversation is None:
                 raise ApplicationError("conversation_not_found", "对话不存在", 404)
-            # Reconcile an already accepted token before consulting mutable
-            # model/workspace/memory catalogs. A retry must return the frozen
-            # Run even after its model is disabled or its memory is edited.
-            prior = next((message for message in conversation.get("messages", [])
-                          if message.get("client_token") == turn.client_token), None)
+            prior = self.repository.find_conversation_turn(owner_id, conversation_id, turn.client_token)
             if prior is not None:
-                if prior["content"] != turn.text:
+                if prior["message"]["content"] != turn.text:
                     raise ApplicationError("idempotency_conflict", "幂等键对应的请求内容不同", 409)
-                run = next((item for item in conversation.get("runs", [])
-                            if item["trigger_message_id"] == prior["message_id"]), None)
-                if run is None:
-                    raise ApplicationError("run_not_found", "运行不存在", 404)
-                verify_policy(run)
-                return self._turn_response(owner_id, conversation_id, {
-                    "created": False, "message": prior, "run": run,
-                })
+                verify_policy(prior["run"])
+                return self._turn_response(owner_id, conversation_id, prior)
             if conversation.get("archived_at") is not None:
                 raise ApplicationError("conversation_archived",
                                        "对话已归档，无法继续发送消息", 409)
-            workspace = None
-            if conversation.get("workspace_id"):
-                workspace = self.repository.get_workspace(owner_id, conversation["workspace_id"])
-            # Workspace defaults are represented by the node binding in the
-            # workspace row; DefaultsService validates all references against
-            # the owner-scoped catalogs before the snapshot is committed.
-            workspace_defaults = {}
-            if workspace:
-                workspace_defaults = {
-                    "workspace_id": workspace["workspace_id"],
-                    "execution_node_id": workspace.get("default_node_id"),
-                }
+            # DefaultsService resolves the effective workspace before loading
+            # its node binding. Do not supply the original workspace's node.
+            workspace_defaults = {"workspace_id": conversation.get("workspace_id")}
             snapshot = self.defaults.resolve_run_config(
                 owner_id,
                 conversation=conversation.get("overrides") or {},
@@ -256,6 +243,11 @@ class ConversationService:
                 # Only the dedicated server route selects this fixed policy.
                 # Client defaults/overrides cannot widen it or silently opt out.
                 snapshot["tool_policy"] = ACCEPTANCE_TOOL_POLICY
+            if (self.mcp_enabled and not acceptance
+                    and snapshot.get("execution_node_id") in (None, "", "local", "hub", "host")):
+                snapshot["mcp_tools"] = self.mcp_catalog.run_snapshot(
+                    owner_id=owner_id, workspace_id=snapshot["workspace_id"],
+                )
             if memory_context is not None:
                 if not isinstance(memory_context, Mapping):
                     raise ApplicationError("invalid_memory_context", "memory_context 必须是 JSON 对象", 400)

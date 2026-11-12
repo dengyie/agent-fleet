@@ -8,12 +8,13 @@ then projects only bounded result metadata back into private Run events.
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from collections.abc import Mapping
 from typing import Any, Callable
 
 from hub.application.task_service import ApplicationError
-from hub.domain.task import DomainError, validate_task_input
+from hub.domain.task import DomainError, TaskStopObservation, validate_task_input
 from platform_schema import PlatformValidationError, validate_id, validate_owner_id
 from session_schema import is_valid_session_id
 
@@ -149,16 +150,36 @@ class LegacyTaskBridge:
                 raise
             raise self._translate(exc) from None
 
+    def request_cancel(self, owner_id: str, run_id: str) -> TaskStopObservation:
+        run = self.repository.get_run(owner_id, run_id)
+        if run is None or self.repository.get_legacy_task_link(owner_id, run_id) is None:
+            raise ApplicationError("run_not_found", "运行不存在", 404)
+        return self.tasks.cancel_submission(legacy_client_token(owner_id, run_id), owner_id, now=self.clock())
+
+    def inspect_stop(self, owner_id: str, run_id: str) -> TaskStopObservation | None:
+        return self.task_repository.submission_stop(legacy_client_token(owner_id, run_id), owner_id)
+
     def _process_claim(self, claim: Mapping[str, Any]) -> dict[str, Any]:
         owner_id = claim["owner_id"]
         run_id = claim["run_id"]
         lease_attempt = int(claim["bridge_attempt"])
         try:
+            run = self.repository.get_run(owner_id, run_id)
+            if run is not None and run.get("cancel_requested"):
+                return self._cancel_claim(claim)
             task_id = claim.get("task_id")
             if not task_id:
                 request = dict(claim.get("request") or {})
                 request["client_token"] = legacy_client_token(owner_id, run_id)
-                created = self.tasks.create(request, owner_id)
+                config = run.get("config_snapshot") if run is not None else None
+                if isinstance(config, str):
+                    config = json.loads(config)
+                marker = config.get("workflow_source") if isinstance(config, Mapping) else None
+                origin = None
+                if isinstance(config, Mapping) and isinstance(config.get("workflow_dispatch"), Mapping):
+                    origin = {"owner_id": owner_id, "run_id": run_id,
+                              "repository_id": marker.get("repository_id") if isinstance(marker, Mapping) else None}
+                created = self.tasks.create(request, owner_id, **({"legacy_origin": origin} if origin is not None else {}))
                 task_id = (created.get("task") or {}).get("task_id")
                 if not isinstance(task_id, str) or not task_id:
                     raise ApplicationError("tasks_unavailable", "旧任务创建结果缺少 task_id", 503)
@@ -178,6 +199,8 @@ class LegacyTaskBridge:
             )
             return self._public(saved)
         except (DomainError, PlatformValidationError) as exc:
+            if getattr(exc, "code", None) == "task_submission_cancelled":
+                return self._cancel_claim(claim)
             projection = self._failure_projection(claim.get("task_id"), getattr(exc, "code", "invalid_legacy_task"))
             saved, _changed = self.repository.apply_legacy_task_projection(
                 owner_id, run_id, projection, now=float(self.clock()),
@@ -186,6 +209,18 @@ class LegacyTaskBridge:
             return self._public(saved)
         except Exception:
             return self._release_for_retry(claim, "tasks_unavailable")
+
+    def _cancel_claim(self, claim: Mapping[str, Any]) -> dict[str, Any]:
+        result = self.request_cancel(claim["owner_id"], claim["run_id"])
+        state = result.state if result.state in ("succeeded", "failed") else "cancelled"
+        projection = {"task_id": result.task_id, "attempt_id": result.attempt_id, "session_id": None,
+                      "task_state": state, "bridge_state": state, "stop_confirmed": result.stopped,
+                      "summary": "任务已停止" if result.stopped else "已请求停止，尚未确证", "diff": {}, "tests": {}, "files": []}
+        saved, _ = self.repository.apply_legacy_task_projection(
+            claim["owner_id"], claim["run_id"], projection, now=self.clock(),
+            worker_id=self.worker_id, lease_attempt=claim["bridge_attempt"],
+        )
+        return self._public(saved)
 
     def _release_for_retry(self, claim: Mapping[str, Any], error_code: str) -> dict[str, Any]:
         saved = self.repository.release_legacy_task_claim(

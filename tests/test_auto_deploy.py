@@ -1,6 +1,7 @@
 """Real filesystem/SQLite deployment transactions with injected host boundaries."""
 import io
 import json
+import signal
 from pathlib import Path
 import sqlite3
 import tarfile
@@ -301,8 +302,16 @@ def test_upload_checks_length_and_digest(tmp_path):
 
 
 @pytest.mark.parametrize('failure', ['upload', 'missing_result', 'failed_result'])
-def test_receiver_failures_never_report_success_or_leave_partial_upload(tmp_path, monkeypatch, capsys, failure):
+def test_receiver_failures_never_report_success_or_leave_partial_upload(tmp_path, monkeypatch, capsys, failure, request):
     import hashlib
+    # main() owns process signal handlers in production. In-process tests must
+    # restore the caller's handlers instead of interrupting later browser tests.
+    previous_handlers = {sig: signal.getsignal(sig) for sig in
+                         (signal.SIGINT, signal.SIGTERM, signal.SIGALRM)}
+    def restore_handlers():
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
+    request.addfinalizer(restore_handlers)
     body = b'bundle'
     config = SimpleNamespace(stat=lambda: SimpleNamespace(st_uid=0, st_mode=0o600),
                              read_text=lambda: json.dumps({'state': str(tmp_path)}))

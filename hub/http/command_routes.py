@@ -11,7 +11,11 @@ lease TTL 300s，heartbeat 续期；结果按 attempt_id 幂等。
 统一错误序列化。机器来自认证后的 ``g.runner_machine``，绝不采信 runner JSON
 中的 machine 字段。业务逻辑在 ``hub.application.runner_service``。
 """
-from flask import Blueprint, current_app, g, jsonify
+import hashlib
+import re
+
+from flask import Blueprint, current_app, g, jsonify, request
+from werkzeug.exceptions import ClientDisconnected, RequestEntityTooLarge
 
 from hub.application.runner_service import ApplicationError, RunnerService
 from hub.auth import require_runner, require_task_store
@@ -95,3 +99,40 @@ def result(attempt_id):
     except ApplicationError as exc:
         return _error(exc)
     return jsonify(result)
+
+@bp.route("/api/commands/<attempt_id>/source", methods=["POST"])
+@require_runner
+@require_task_store
+def source(attempt_id):
+    service = _commands()
+    digest = request.headers.get("X-Content-SHA256", "")
+    nonce = request.headers.get("X-Task-Nonce", "")
+    if request.content_length is None:
+        return _error(HttpApplicationError("invalid_content_length", "Content-Length 必填", 400))
+    if type(request.content_length) is not int or not 1 <= request.content_length <= 10 * 1024 * 1024 or len(digest) != 64 or not nonce:
+        return _error(HttpApplicationError("invalid_source_upload", "源码请求无效", 400))
+    if request.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/x-tar" or request.headers.get("Content-Encoding"):
+        return _error(HttpApplicationError("invalid_source_upload", "源码请求无效", 400))
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        return _error(HttpApplicationError("invalid_source_upload", "源码请求无效", 400))
+    try:
+        request.max_content_length = 10 * 1024 * 1024
+        # F3 accepts one bounded tar; consume it in chunks with an exact
+        # allocation and incremental hash rather than Flask's body cache.
+        raw = bytearray(request.content_length)
+        checksum = hashlib.sha256()
+        offset = 0
+        while offset < len(raw):
+            chunk = request.stream.read(min(65536, len(raw) - offset))
+            if not chunk:
+                return _error(HttpApplicationError("invalid_content_length", "源码请求长度不匹配", 400))
+            checksum.update(chunk)
+            raw[offset:offset + len(chunk)] = chunk
+            offset += len(chunk)
+        if checksum.hexdigest() != digest:
+            return _error(HttpApplicationError("source_hash_mismatch", "源码摘要不匹配", 400))
+        return jsonify(service.source(g.runner_machine, attempt_id, nonce, bytes(raw)))
+    except (ClientDisconnected, RequestEntityTooLarge):
+        return _error(HttpApplicationError("invalid_content_length", "源码请求长度不匹配", 400))
+    except ApplicationError as exc:
+        return _error(exc)

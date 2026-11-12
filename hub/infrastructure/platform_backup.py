@@ -20,11 +20,24 @@ import sqlite3
 import sys
 import tempfile
 import time
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from hub.platform.artifact_lock import artifact_snapshot_barrier
+from hub.domain.workflow_contract import parse_contract, parse_definition, parse_resolved
+from hub.domain.workflow_contract_types import ArtifactReference, CodeRevisionReference
+from hub.domain.workflow_errors import WorkflowPersistenceError, WorkflowValidationError
+from hub.domain.capability import CapabilityStoreError
+from hub.domain.integration_identity import IntegrationIdentityError
+from hub.domain.mcp_catalog import MCPCatalogError
+from hub.infrastructure.capability_repository import CapabilityRepository
+from hub.domain.workflow_json import decode_snapshot
+from hub.infrastructure.workflow_schema import CONTROL_TABLES, WorkflowSchemaError, inspect_schema
+from hub.infrastructure.artifact_transfer_repository import (
+    ArtifactTransferRepositoryError, MAX_TRANSFERS, inspect_transfer_schema,
+)
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -178,7 +191,14 @@ def _validate_manifest(value: Mapping[str, Any], artifact_id: str) -> tuple[int,
     size = value.get("size")
     if isinstance(size, bool) or not isinstance(size, int) or size < 0:
         _raise("invalid_manifest")
-    if size > MAX_TOTAL_ARTIFACT_BYTES:
+    version = value.get("schema_version")
+    if version is not None and (type(version) is not int or version != 2):
+        _raise("artifact_schema_unknown")
+    if value.get("ready", True) is not True:
+        _raise("artifact_transfer_incomplete")
+    if version == 2 and (type(value.get("ready")) is not bool or type(value.get("provenance_ref")) is not dict):
+        _raise("invalid_manifest")
+    if size > (256 * 1024 * 1024 if version == 2 else 10 * 1024 * 1024):
         _raise("artifact_too_large")
     digest = value.get("sha256")
     if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
@@ -282,6 +302,223 @@ def _database_integrity(path: Path) -> tuple[int | None, int, str]:
             connection.close()
 
 
+def _workflow_rows(connection: sqlite3.Connection, table: str, columns: str) -> Iterator[tuple[Any, ...]]:
+    """Keyset batches keep offline inventories bounded as history grows."""
+    last: int | None = None
+    while True:
+        predicate = "" if last is None else " WHERE rowid>?"
+        rows = connection.execute(
+            f"SELECT rowid,{columns} FROM {table}{predicate} ORDER BY rowid LIMIT 128",
+            () if last is None else (last,),
+        ).fetchall()
+        if not rows:
+            return
+        for row in rows:
+            yield tuple(row[1:])
+        last = rows[-1][0]
+
+
+def _workflow_definition_artifacts(
+    snapshot: bytes, digest: str, owner: str, workspace: str,
+    check: Callable[[str, str, str, str, int], None], *, minimum_reader: int,
+) -> None:
+    definition = parse_definition(bytes(snapshot))
+    if hashlib.sha256(definition.snapshot).hexdigest() != digest or definition.snapshot != bytes(snapshot):
+        _raise("workflow_snapshot_invalid")
+    for step in definition.steps:
+        if step.contract.schema_version == 2 and minimum_reader < 6:
+            _raise("invalid_contract_reader")
+        for named in step.contract.input_refs:
+            ref = named.reference.source_bundle if type(named.reference) is CodeRevisionReference else named.reference
+            if type(ref) is ArtifactReference:
+                check(owner, workspace, ref.artifact_id, ref.sha256, ref.size)
+
+
+def _workflow_contract(
+    database: Path, artifact_root: Path, inventory: list[dict[str, Any]],
+) -> dict[str, int] | None:
+    """Stream the durable reference closure independently of runtime feature gates."""
+    connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
+    try:
+        _transfer_contract(connection, artifact_root, inventory)
+        from .mcp_catalog_repository import MCPCatalogRepository
+
+        MCPCatalogRepository.validate_snapshot(connection)
+        metadata = inspect_schema(connection)
+        CapabilityRepository.validate_snapshot(connection)
+        from .workflow_external_repository import ExternalWorkflowRepository
+
+        ExternalWorkflowRepository.validate_snapshot(connection)
+        from .integration_identity_repository import IntegrationIdentityRepository
+
+        IntegrationIdentityRepository.validate_snapshot(connection)
+        from .workflow_summary_repository import WorkflowSummaryRepository
+
+        WorkflowSummaryRepository.validate_snapshot(connection)
+        if metadata is None:
+            return None
+        from .workflow_native_memory_repository import validate_native_memory_runs
+
+        validate_native_memory_runs(connection)
+        by_id = {item["artifact_id"]: item for item in inventory}
+        scopes: dict[str, tuple[str, str]] = {}
+
+        def check(owner: str, workspace: str, artifact_id: str, sha256: str, size: int) -> None:
+            item = by_id.get(artifact_id)
+            if item is None:
+                _raise("workflow_artifact_missing")
+            if artifact_id not in scopes:
+                manifest, _length, _digest = _manifest_bytes(artifact_root / artifact_id / "manifest.json")
+                scopes[artifact_id] = (manifest.get("owner_id"), manifest.get("workspace_id"))
+            if (item["sha256"], item["size"], scopes[artifact_id]) != (sha256, size, (owner, workspace)):
+                _raise("workflow_artifact_conflict")
+
+        for table in ("workflow_runs", "workflow_steps", "workflow_dispatches", "workflow_events", "workflow_evidence", "workflow_artifact_refs", "workflow_budget_reservations", "capability_reservations"):
+            if connection.execute(f"PRAGMA foreign_key_check({table})").fetchone() is not None:
+                _raise("workflow_reference_invalid")
+        for table in sorted(CONTROL_TABLES):
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is None:
+                continue
+            if connection.execute(f"PRAGMA foreign_key_check({table})").fetchone() is not None:
+                _raise("workflow_reference_invalid")
+        for owner, workspace, snapshot, digest in _workflow_rows(
+            connection, "workflow_runs", "owner_id,workspace_id,definition_snapshot,definition_digest",
+        ):
+            _workflow_definition_artifacts(snapshot, digest, owner, workspace, check, minimum_reader=metadata["minimum_reader_version"])
+        for (snapshot,) in _workflow_rows(connection, "workflow_steps", "contract_snapshot"):
+            if parse_contract(bytes(snapshot)).schema_version == 2 and metadata["minimum_reader_version"] < 6:
+                _raise("invalid_contract_reader")
+        for owner, workspace, snapshot, digest in _workflow_rows(
+            connection, "workflow_steps", "owner_id,workspace_id,resolved_snapshot,resolved_digest",
+        ):
+            if snapshot is None:
+                continue
+            resolved = parse_resolved(bytes(snapshot))
+            if resolved.contract.schema_version == 2 and metadata["minimum_reader_version"] < 6:
+                _raise("invalid_contract_reader")
+            payload = decode_snapshot(bytes(snapshot))
+            if hashlib.sha256(bytes(snapshot)).hexdigest() != digest or (payload.get("owner_id"), payload.get("workspace_id")) != (owner, workspace):
+                _raise("workflow_snapshot_invalid")
+            for ref in payload["contract"]["input_refs"]:
+                artifact = ref["source_bundle"] if ref["kind"] == "code_revision" else ref
+                check(owner, workspace, artifact["artifact_id"], artifact["sha256"], artifact["size"])
+        for owner, workspace, artifact_id, digest, size in _workflow_rows(
+            connection, "workflow_artifact_refs", "owner_id,workspace_id,artifact_id,sha256,size",
+        ):
+            check(owner, workspace, artifact_id, digest, size)
+        for owner, workspace, artifact_id, digest, size in _workflow_rows(
+            connection, "workflow_evidence", "owner_id,workspace_id,report_artifact_id,report_hash,report_size",
+        ):
+            check(owner, workspace, artifact_id, digest, size)
+        return {"schema_version": metadata["schema_version"], "minimum_reader_version": metadata["minimum_reader_version"]}
+    except (WorkflowSchemaError, CapabilityStoreError, WorkflowPersistenceError, IntegrationIdentityError, MCPCatalogError) as exc:
+        raise BackupError(exc.code) from exc
+    except (WorkflowValidationError, sqlite3.Error, KeyError, TypeError, ValueError) as exc:
+        raise BackupError("workflow_snapshot_invalid") from exc
+    finally:
+        connection.close()
+
+
+def _transfer_contract(connection: sqlite3.Connection, artifact_root: Path, inventory: list[dict[str, Any]]) -> None:
+    """Require a settled, verified V2 closure; never silently omit staging."""
+    try:
+        enabled = inspect_transfer_schema(connection)
+        v2: set[str] = set()
+        for item in inventory:
+            manifest, _size, _digest = _manifest_bytes(artifact_root / item["artifact_id"] / "manifest.json")
+            if manifest.get("schema_version") == 2:
+                v2.add(item["artifact_id"])
+        if not enabled:
+            if v2:
+                _raise("artifact_transfer_reference_invalid")
+            return
+        for table in ("artifact_transfers", "artifact_transfer_parts"):
+            if connection.execute(f"PRAGMA foreign_key_check({table})").fetchone() is not None:
+                _raise("artifact_transfer_reference_invalid")
+        cursor = connection.execute(
+            "SELECT t.transfer_id,t.artifact_id,t.owner_id,t.workspace_id,t.workflow_id,t.step_key,t.generation,t.output_key,"
+            "t.command_id,t.input_digest,t.size,t.sha256,t.state,t.publication_bytes,"
+            "r.artifact_id AS ref_artifact_id,r.sha256 AS ref_sha256,r.size AS ref_size FROM artifact_transfers t "
+            "LEFT JOIN workflow_artifact_refs r ON r.owner_id=t.owner_id AND r.workspace_id=t.workspace_id "
+            "AND r.workflow_id=t.workflow_id AND r.step_key=t.step_key AND r.generation=t.generation "
+            "AND r.output_key='output:'||t.output_key ORDER BY t.transfer_id LIMIT ?", (MAX_TRANSFERS + 1,))
+        names = [item[0] for item in cursor.description]
+        count = 0
+        for values in cursor:
+            count += 1
+            if count > MAX_TRANSFERS:
+                _raise("artifact_transfer_scan_limit")
+            row = dict(zip(names, values))
+            if row["state"] != "ready" or row["publication_bytes"] != 0:
+                _raise("artifact_transfer_incomplete")
+            if row["artifact_id"] not in v2:
+                _raise("artifact_transfer_reference_invalid")
+            v2.remove(row["artifact_id"])
+            manifest, _size, _digest = _manifest_bytes(artifact_root / row["artifact_id"] / "manifest.json")
+            if any(manifest.get(key) != row[key] for key in ("artifact_id", "owner_id", "workspace_id", "size", "sha256")):
+                _raise("artifact_transfer_reference_invalid")
+            provenance = {"workflow_id": row["workflow_id"], "step_key": row["step_key"], "generation": row["generation"],
+                "output_key": row["output_key"], "producer_binding": {"command_id": row["command_id"]}, "input_subject_digest": row["input_digest"]}
+            if manifest.get("provenance_ref") != provenance:
+                _raise("artifact_transfer_reference_invalid")
+            reference = (row["ref_artifact_id"], row["ref_sha256"], row["ref_size"])
+            if reference != (row["artifact_id"], row["sha256"], row["size"]):
+                _raise("artifact_transfer_reference_invalid")
+        if v2:
+            _raise("artifact_transfer_reference_invalid")
+    except (ArtifactTransferRepositoryError, sqlite3.Error) as exc:
+        raise BackupError("artifact_transfer_schema_unknown") from exc
+
+
+def _freeze_restored_workflows(root: Path) -> dict[str, Any]:
+    """Freeze coordination and rebuild only the restored copy's integrity envelope."""
+    path = root / DATABASE_FILENAME
+    with closing(sqlite3.connect(path)) as connection:
+        from .mcp_catalog_schema import inspect_catalog_schema
+
+        metadata = inspect_schema(connection)
+        catalog = inspect_catalog_schema(connection)
+        interrupted = []
+        with connection:
+            # A backup may precede calls completed by the still-live source.
+            # Replaying its otherwise safe checkpoint could repeat effects.
+            # Ordinary same-database worker restart is resumable; restored
+            # copies require operator reconciliation, like Workflow restore.
+            columns = {row[1] for row in connection.execute('PRAGMA table_info(runs)')}
+            if 'runtime_checkpoint' in columns:
+                from .platform_db_base import freeze_run_request_summary
+
+                interrupted = connection.execute(
+                    "SELECT run_id FROM runs WHERE runtime_checkpoint IS NOT NULL "
+                    "AND state NOT IN ('succeeded','failed','unknown','cancelled')").fetchall()
+                for (run_id,) in interrupted:
+                    wait_cleanup = ('runtime_wait_command_id=NULL,runtime_resume_at=NULL,'
+                                    if 'runtime_wait_command_id' in columns else '')
+                    connection.execute(
+                        "UPDATE runs SET state='unknown',lease_id=NULL,lease_owner=NULL,lease_expires_at=NULL,"
+                        + wait_cleanup + "result_text='恢复备份后需核对原执行。' WHERE run_id=?", (run_id,))
+                    freeze_run_request_summary(connection, run_id, 'unknown')
+            if catalog:
+                connection.execute("UPDATE mcp_catalog_connectors SET restore_disabled=1")
+            if metadata is not None:
+                connection.execute("UPDATE workflow_schema_meta SET admission_mode='frozen' WHERE singleton=1")
+                from .integration_identity_schema import inspect_integration_schema
+
+                if inspect_integration_schema(connection):
+                    connection.execute("UPDATE workflow_integration_identities SET restore_disabled=1")
+                if inspect_transfer_schema(connection):
+                    # Settled artifacts are copied; obsolete upload scratch is
+                    # deliberately absent from the restored filesystem.
+                    connection.execute("UPDATE artifact_transfers SET staging_bytes=0,publication_bytes=0")
+    if metadata is None and not catalog and not interrupted:
+        return _validate_backup_files(root)
+    envelope = _json_envelope(root / BACKUP_FILENAME)
+    size, digest = _sha256(path)
+    envelope["database"] = {"filename": DATABASE_FILENAME, "size": size, "sha256": digest}
+    (root / BACKUP_FILENAME).write_text(json.dumps(envelope, ensure_ascii=True, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    return _validate_backup_files(root)
+
+
 def _json_envelope(path: Path) -> dict[str, Any]:
     _regular_file(path)
     try:
@@ -383,6 +620,9 @@ def _validate_backup_files(backup_root: Path) -> dict[str, Any]:
                 _raise("artifact_size_mismatch")
             _raise("artifact_hash_mismatch")
         checked_artifacts.append(entry)
+    workflow = _workflow_contract(database_path, artifacts_root, checked_artifacts)
+    if envelope.get("workflow") != workflow:
+        _raise("workflow_metadata_mismatch")
     return {
         "schema_version": BACKUP_SCHEMA_VERSION,
         "platform_schema_version": schema_version,
@@ -390,6 +630,7 @@ def _validate_backup_files(backup_root: Path) -> dict[str, Any]:
         "artifact_count": len(checked_artifacts),
         "artifact_bytes": sum(item["size"] for item in checked_artifacts),
         "artifacts": checked_artifacts,
+        **({"workflow": workflow} if workflow is not None else {}),
     }
 
 
@@ -397,7 +638,9 @@ def _fsync_path(path: Path) -> None:
     """fsync one regular file or directory (directories are skipped on Windows)."""
     if os.name == "nt" and Path(path).is_dir():
         return
-    fd = os.open(path, os.O_RDONLY)
+    # Windows CRT fsync/_commit requires a writable handle. These are owned
+    # staged files; read-only descriptors remain sufficient on POSIX.
+    fd = os.open(path, os.O_RDWR if os.name == "nt" else os.O_RDONLY)
     try:
         os.fsync(fd)
     finally:
@@ -524,6 +767,11 @@ def _source_summary(value: Any) -> dict[str, Any]:
         if (isinstance(platform_schema, bool) or not isinstance(platform_schema, int)
                 or platform_schema < 0):
             _raise("invalid_encrypted_manifest")
+    workflow = value.get("workflow")
+    if workflow is not None:
+        if (not isinstance(workflow, Mapping) or set(workflow) != {"schema_version", "minimum_reader_version"}
+                or any(type(item) is not int or item < 1 for item in workflow.values())):
+            _raise("invalid_encrypted_manifest")
     return {
         "schema_version": BACKUP_SCHEMA_VERSION,
         "platform_schema_version": platform_schema,
@@ -531,6 +779,7 @@ def _source_summary(value: Any) -> dict[str, Any]:
         "artifact_count": artifact_count,
         "artifact_bytes": artifact_bytes,
         "artifacts": artifacts,
+        **({"workflow": dict(workflow)} if workflow is not None else {}),
     }
 
 
@@ -835,6 +1084,9 @@ class PlatformBackupService:
                 },
                 "artifacts": [entry for entry, _manifest, _content in inventory],
             }
+            workflow = _workflow_contract(staged_db, artifacts_stage, envelope["artifacts"])
+            if workflow is not None:
+                envelope["workflow"] = workflow
             (stage / BACKUP_FILENAME).write_text(
                 json.dumps(envelope, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
                 encoding="utf-8",
@@ -870,6 +1122,7 @@ class PlatformBackupService:
             staged_checked = _validate_backup_files(stage)
             if staged_checked != checked:
                 _raise("restore_validation_failed")
+            staged_checked = _freeze_restored_workflows(stage)
             _publish_new_directory(stage, target)
             return staged_checked
         except BackupError:
@@ -999,6 +1252,7 @@ class PlatformBackupService:
             staged_checked = _validate_backup_files(stage)
             if staged_checked != checked:
                 _raise("restore_validation_failed")
+            staged_checked = _freeze_restored_workflows(stage)
             _publish_new_directory(stage, target)
             return staged_checked
         except InvalidTag:

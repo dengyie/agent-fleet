@@ -270,7 +270,18 @@ def logout():
 
 @bp.get('/me')
 def me():
-    return jsonify(user=g.account, sessions=store().sessions(g.account['id'], request.cookies.get(cookie_name(), '')))
+    features = {}
+    services = current_app.extensions.get('fleet', {}).get('services', {})
+    if g.account['role'] == 'admin':
+        for service, feature in (('mcp_catalog_admin', 'mcp_catalog_management'), ('integration_identity_admin', 'fleet_identity_management')):
+            if services.get(service):
+                features[feature] = True
+        if services.get('workflow_summaries'):
+            features['workflow_summary_management'] = True
+        if getattr(services.get('mcp_catalog_admin'), 'registration_enabled', False):
+            features['mcp_catalog_registration'] = True
+    return jsonify(user=g.account, sessions=store().sessions(g.account['id'], request.cookies.get(cookie_name(), '')),
+                   **({'features': features} if features else {}))
 
 
 @bp.post('/profile')

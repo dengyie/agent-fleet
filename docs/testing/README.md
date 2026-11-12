@@ -106,6 +106,8 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/test_full_flow_browser.py -q
 
 - `tests/test_platform_schedule_recovery.py` 验证实际租约到期回收、活跃重复 tick、两实例并发回收、迟到完成不可覆盖、完成时刻与下次执行计算，以及超过目录首页的到期任务发现。全部使用临时 SQLite 和注入时钟，不发送通知或执行外部动作。
 
+- 功能根因回归纳入 `CONFIG-01`、`NODE-01`、`SCHEDULE-01`、`FILES-01` 和 `RELEASE-01`：排队 Run 固定模型地址与凭据引用，最终工作区决定默认节点；定时任务容忍正常轮询延迟，手动触发执行过期任务；节点回执在断网、HTTP 错误、确认丢失和重启后补传，保留原 worker 且不重执行，Hub 已判定的 unknown 保持不变；连续发布和回退源树不重用版本名，跨过中间发布仍能更新；文件覆盖按替换后的实际大小检查配额。测试使用临时数据库、文件、进程回执与注入传输，不证明线上节点或部署已经升级。
+
 - `tests/test_platform_schedule_memory_validation.py` 通过真实 Flask/SQLite 验证字段类型、布尔启用值、Unicode、数值溢出和版本前置条件；非法输入返回稳定 400，且不新增或更新记录。合法布尔值和整数版本的兼容性同时检查。
 
 - `tests/test_task_patch_bounds.py` 将 UTF-8 patch 从认证 runner POST 贯穿至 SQLite 和 operator GET，验证 Hub 再脱敏、100 KiB 内含截断标记、历史行读取边界、非法类型/Unicode 不写入，以及重复处理稳定性。

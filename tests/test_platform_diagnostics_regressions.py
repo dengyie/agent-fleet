@@ -98,12 +98,12 @@ def test_scheduler_failure_is_logged_and_loop_recovers(tmp_path, caplog):
     recovered = threading.Event()
     scheduler = RunSchedulerService(None, None, interval_s=.1)
     calls = []
-    def tick():
+    def tick(**kwargs):
         calls.append(1)
         if len(calls) == 1:
             raise OSError(SECRET)
         recovered.set(); stop.set()
-    scheduler.run_once = tick
+    scheduler._admit = tick
     shutdown = scheduler.start(stop_event=stop)
     try:
         assert recovered.wait(3)
@@ -168,7 +168,8 @@ def test_heartbeat_exception_marks_lease_lost_and_releases_slot(caplog):
         for thread in threading.enumerate():
             if thread.name == 'platform-run-heartbeat': thread.join(2)
         return {'state': 'succeeded'}
-    worker = SimpleNamespace(lease_s=1.5, worker_id='worker', execute_claim=execute)
+    worker = SimpleNamespace(lease_s=1.5, worker_id='worker', execute_claim=execute,
+                             configure_workspace_concurrency=lambda capacity: None)
     scheduler = RunSchedulerService(Repository(), worker)
     result = scheduler._execute({'owner_id':OWNER,'run_id':'run-test','lease_id':'run-lease','attempt':1}, {}, {'lease_id':'slot'})
     assert result['state'] == 'lease_lost'

@@ -71,6 +71,46 @@ def test_non_streaming_request_uses_frozen_endpoint_model_and_redacts_key():
     assert broker.refs == ["env://TEST_PROVIDER_KEY"]
 
 
+def test_multimodal_content_parts_reach_openai_compatible_wire_unchanged():
+    transport = FakeTransport([_response({
+        "choices": [{"message": {"role": "assistant", "content": "seen"}, "finish_reason": "stop"}],
+    })])
+    provider = OpenAICompatibleProvider(model="test", endpoint="http://localhost", api_key="secret",
+                                        transport=transport)
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "Describe this image."},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,aW1hZ2U="}},
+    ]}]
+
+    assert provider.complete(messages, []).text == "seen"
+    sent = json.loads(transport.calls[0]["body"])
+    assert sent["messages"][0]["content"] == messages[0]["content"]
+
+
+def test_oversized_request_body_fails_before_transport_dispatch():
+    transport = FakeTransport([])
+    provider = OpenAICompatibleProvider(model="test", endpoint="http://localhost", api_key="secret",
+                                        transport=transport)
+
+    messages = [{"role": "user", "content": "x" * (128 * 1024)} for _ in range(70)]
+    with pytest.raises(ProviderError, match="request_too_large"):
+        provider.complete(messages, [])
+
+    assert transport.calls == []
+
+
+def test_invalid_multimodal_parts_report_stable_error_without_dispatch():
+    transport = FakeTransport([])
+    provider = OpenAICompatibleProvider(model="test", endpoint="http://localhost", api_key="secret",
+                                        transport=transport)
+    with pytest.raises(ProviderError) as caught:
+        provider.complete([{"role": "user", "content": [{"type": "image_url", "image_url": {}}]}], [])
+
+    assert caught.value.code == "provider_message_invalid"
+    assert caught.value.diagnostic()["provider_error"] == "provider_message_invalid"
+    assert transport.calls == []
+
+
 def test_structured_tool_call_arguments_are_normalized():
     transport = FakeTransport([_response({
         "choices": [{"message": {"role": "assistant", "tool_calls": [{

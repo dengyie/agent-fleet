@@ -23,13 +23,13 @@ class RunEventService:
         try:
             return self.repository.append_run_event(validate_owner_id(owner_id), run_id, kind, payload, now=float(self.clock()), lease_id=lease_id, worker_id=worker_id)
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
     def list(self, owner_id, run_id, after=0, limit=100):
         try:
             return self.repository.list_run_events(validate_owner_id(owner_id), run_id, after=after, limit=limit)
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
     def state(self, owner_id, run_id, state, *, result_text="", usage=None, lease_id=None, worker_id=None):
         try:
@@ -37,7 +37,7 @@ class RunEventService:
                 return self.repository.finish_run(validate_owner_id(owner_id), run_id, lease_id=lease_id, worker_id=worker_id, state=state, now=float(self.clock()), result_text=result_text, usage=usage)
             return self.repository.set_run_state(validate_owner_id(owner_id), run_id, state, now=float(self.clock()), result_text=result_text, usage=usage)
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
 
 __all__ = ["RunEventService"]

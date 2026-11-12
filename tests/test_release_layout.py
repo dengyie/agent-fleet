@@ -53,6 +53,9 @@ class ReleaseLayoutTests(unittest.TestCase):
                     'assets/api/platform.js', 'assets/api/accounts.js', 'assets/api/plugins.js',
                     'assets/views/plugins.js', 'assets/plugins/registry.js', 'assets/plugins/dom.js',
                     'assets/plugins/github-cli.js', 'assets/styles/plugins.css',
+                    'assets/api/integrations.js', 'assets/api/integration-identities.js',
+                    'assets/api/workflow-summaries.js', 'assets/views/account/workflow-summaries.js',
+                    'assets/views/account/integrations.js', 'assets/views/account/identities.js', 'assets/styles/integrations.css',
                     'assets/realtime/sse.js', 'assets/state/store.js', 'assets/views/fleet.js',
                     'assets/views/machine.js', 'assets/views/task.js', 'assets/views/session.js',
                     'assets/views/assistant.js', 'assets/views/monitoring.js', 'assets/views/account.js',
@@ -84,7 +87,12 @@ class ReleaseLayoutTests(unittest.TestCase):
         allowed.update({'assets/app.js', 'THIRD_PARTY.md',
                         'assets/brand/mango-ddf462d0.png',
                         'assets/brand/mango-cdd3ec60.ico'})
-        allowed.update({'assets/app.js', 'THIRD_PARTY.md'})
+        allowed.update({'assets/api/integrations.js', 'assets/api/integration-identities.js',
+                        'assets/views/account/integrations.js', 'assets/views/account/identities.js'})
+        allowed.add('assets/views/account/mcp-registration.js')
+        allowed.update({'assets/api/workflow-summaries.js',
+                        'assets/views/account/workflow-summaries.js',
+                        'assets/views/account/workflow-summary-generation.js'})
         allowed.update({'assets/views/session-handoff.js', 'assets/views/session-questions.js',
                         'assets/views/session-search.js', 'assets/views/usage.js'})
         allowed.update({'assets/views/muse.js', 'assets/views/muse/cards.js', 'assets/views/muse/model.js', 'assets/api/muse.js'})
@@ -105,6 +113,8 @@ class ReleaseLayoutTests(unittest.TestCase):
                          'assets/api/platform.js', 'assets/api/accounts.js', 'assets/api/plugins.js',
                          'assets/views/plugins.js', 'assets/plugins/registry.js', 'assets/plugins/dom.js',
                          'assets/plugins/github-cli.js', 'assets/styles/plugins.css',
+                         'assets/api/integrations.js', 'assets/api/integration-identities.js',
+                         'assets/views/account/integrations.js', 'assets/views/account/identities.js', 'assets/styles/integrations.css',
                          'assets/realtime/sse.js', 'assets/state/store.js',
                          'assets/views/fleet.js', 'assets/views/machine.js',
                          'assets/views/task.js', 'assets/views/session.js',
@@ -533,25 +543,75 @@ class RuntimeStoreHygieneTests(unittest.TestCase):
                 f"tools resolved outside the release: {proc.stdout}")
 
     def test_full_release_archive_includes_runtime_imports_not_var(self):
-        script = REPO_ROOT / "deploy" / "package-release.sh"
+        input_modules = (
+            "hub/application/workflow_text_inputs.py",
+            "hub/application/workflow_external_execution.py",
+            "fleet_core/workflow/remote_test_codec.py",
+            "tools/platform/artifact_transfer.py",
+            "tools/platform/workflow_remote_test.py",
+            "connectors/external_agents/muse.py",
+        )
+        expected_inputs = {name: (REPO_ROOT / name).read_bytes() for name in input_modules}
         with tempfile.TemporaryDirectory() as td:
+            release = Path(td) / "source"
+            release.mkdir()
+            names = subprocess.check_output(
+                ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+                cwd=REPO_ROOT,
+            ).decode("utf-8").split("\0")
+            for name in sorted(set(names) - {""}):
+                source = REPO_ROOT / name
+                if not source.is_file():
+                    continue
+                target = release / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+            for command in (
+                ["git", "-c", "init.defaultBranch=codex/release-fixture", "init", "-q"],
+                ["git", "add", "--all"],
+            ):
+                subprocess.run(command, cwd=release, capture_output=True, text=True, check=True)
+            tree = subprocess.check_output(["git", "write-tree"], cwd=release, text=True).strip()
+            commit = subprocess.run(
+                ["git", "-c", "user.name=Release fixture", "-c", "user.email=release@example.test",
+                 "commit-tree", tree],
+                input="Frozen source fixture\n", cwd=release, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "update-ref", "refs/heads/codex/release-fixture", commit],
+                cwd=release, capture_output=True, text=True, check=True,
+            )
+            # Exercise the current candidate without committing the development
+            # worktree, and still prove packaging reads only the frozen HEAD.
+            for name in input_modules:
+                (release / name).write_text("uncommitted fixture drift\n", encoding="utf-8")
+            runtime = release / "var" / "adoptions"
+            runtime.mkdir(parents=True, exist_ok=True)
+            (runtime / "meta.db").write_text("untracked fixture store\n", encoding="utf-8")
+            (release / "hub" / "untracked.py").write_text("untracked fixture module\n", encoding="utf-8")
+            script = release / "deploy" / "package-release.sh"
             archive = Path(td) / "agent-fleet-release.tgz"
             proc = subprocess.run(
                 ["bash", str(script), str(archive)],
-                cwd=REPO_ROOT, capture_output=True, text=True,
+                cwd=release, capture_output=True, text=True,
             )
             self.assertEqual(proc.returncode, 0, proc.stderr)
             listing = subprocess.run(
                 ["tar", "-tzf", str(archive)],
                 capture_output=True, text=True, check=True,
             ).stdout.splitlines()
+            with tarfile.open(archive, "r:gz") as packaged:
+                for name, expected in expected_inputs.items():
+                    with packaged.extractfile(name) as content:
+                        self.assertEqual(content.read(), expected, name)
+            self.assertNotIn("hub/untracked.py", listing)
             # No provenance arg → no stamp anywhere in the archive, and no
             # staging leftovers in the working tree.
             self.assertNotIn(".RELEASE_ORIGIN.tmp", listing)
             self.assertFalse(
-                (REPO_ROOT / ".RELEASE_ORIGIN.tmp").exists()
-                or (REPO_ROOT / ".RELEASE_ORIGIN.tmp.staged").exists()
-                or (REPO_ROOT / ".package-release.tmp.tar").exists())
+                (release / ".RELEASE_ORIGIN.tmp").exists()
+                or (release / ".RELEASE_ORIGIN.tmp.staged").exists()
+                or (release / ".package-release.tmp.tar").exists())
         required = (
             "agent_profiles.py",
             "hub/web.py",

@@ -136,6 +136,38 @@ def test_schedule_service_skips_old_occurrences_or_catches_up_once(tmp_path):
     assert repo.status(OWNER_B, "health")["triggers"][0]["state"] == "skipped"
 
 
+@pytest.mark.parametrize("jitter", [0.001, 4.9, 9.9])
+def test_default_schedule_runs_on_delayed_poll_ticks(tmp_path, jitter):
+    repo = _repo(tmp_path)
+    # Exercise the actual default policy; the _schedule helper uses catch_up.
+    repo.create(OWNER_A, {"schedule_id": "health", "action": "service_health",
+                         "target": {"service_id": "api"}, "interval_s": 10}, now=90)
+    now = [100.0]
+    calls = []
+    service = DurableReadOnlyScheduleService(
+        repo, clock=lambda: now[0], executor=lambda *args: calls.append(args) or {"state": "healthy"},
+    )
+    for due in (100, 110, 120):
+        now[0] = due + jitter
+        result = service.tick_once(owner_id=OWNER_A)
+        assert result["executed"] == 1
+        assert result["skipped"] == 0
+    assert len(calls) == 3
+    assert repo.get(OWNER_A, "health")["next_run_at"] == 130
+
+
+def test_manual_run_executes_even_when_skip_schedule_is_overdue(tmp_path):
+    repo = _repo(tmp_path)
+    _schedule(repo, missed_policy="skip")
+    calls = []
+    service = DurableReadOnlyScheduleService(
+        repo, clock=lambda: 150, executor=lambda *args: calls.append(args) or {"state": "healthy"},
+    )
+    assert service.run_once(OWNER_A, "health")["executed"] == 1
+    assert len(calls) == 1
+    assert repo.get(OWNER_A, "health")["next_run_at"] == 160
+
+
 def test_schedule_service_overlap_coalesces_without_duplicate_executor_call(tmp_path):
     repo = _repo(tmp_path)
     calls = []

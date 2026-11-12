@@ -463,7 +463,7 @@ def test_runtime_rejects_unsigned_commands_without_touching_workspace(tmp_path):
     runtime = NodeRuntime(NodeRuntimeConfig(
         node_id='node-a', credential='node-a:secret',
         workspace_root=tmp_path / 'workspace', journal_path=tmp_path / 'journal.db',
-        hub_url='https://hub.invalid', capabilities=frozenset({'workspace.write'}),
+        hub_url='https://hub.invalid', capabilities=frozenset({'workspace.write'}), workspace_id='workspace',
     ))
     command = PlatformCommand.create(
         command_id='unsigned-write', target_node='node-a', owner_id=OWNER,
@@ -481,7 +481,7 @@ def test_runtime_trusted_key_rejects_invalid_envelopes(tmp_path, mutation):
     runtime = NodeRuntime(NodeRuntimeConfig(
         node_id='node-a', credential='node-a:secret', public_key=PUBLIC_KEY,
         workspace_root=tmp_path / 'workspace', journal_path=tmp_path / 'journal.db',
-        hub_url='https://hub.invalid', capabilities=frozenset({'workspace.write'}),
+        hub_url='https://hub.invalid', capabilities=frozenset({'workspace.write'}), workspace_id='workspace',
     ))
     command = PlatformCommand.create(
         command_id='signed-write', target_node='node-a', owner_id=OWNER,

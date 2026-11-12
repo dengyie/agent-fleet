@@ -183,7 +183,9 @@ class Installer:
         if manifest["sequence"] < int(observed.get("sequence") or 0):
             raise UpdateError("sequence_rollback",
                               f"{manifest['sequence']} < {observed.get('sequence')}")
-        if self.layout.link_version(self.layout.current) == manifest["version"]:
+        installed = cr.read_release_info(self.layout.current)
+        if installed and all(installed.get(key) == manifest[key]
+                             for key in ("version", "sequence", "channel")):
             action = "up_to_date"
         elif observed.get("failedSequence") == manifest["sequence"]:
             action = "skip_failed"

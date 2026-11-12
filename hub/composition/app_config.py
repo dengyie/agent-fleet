@@ -14,6 +14,13 @@ def configure_app(app, config, platform, sessions, control):
     app.config["EVENT_LOG"] = str(config.event_log)
     app.config["TASK_DB"] = str(config.task_db)
     app.config["PLATFORM_ENABLED"] = bool(config.platform_enabled)
+    app.config["PLATFORM_WORKFLOWS_ENABLED"] = bool(config.platform_workflows_enabled)
+    app.config["PLATFORM_WORKFLOW_DISPATCH_ENABLED"] = bool(config.platform_workflow_dispatch_enabled)
+    app.config["PLATFORM_CAPABILITY_ROUTING_ENABLED"] = bool(config.platform_capability_routing_enabled)
+    app.config["PLATFORM_EXTERNAL_AGENTS_ENABLED"] = bool(config.platform_external_agents_enabled)
+    app.config["PLATFORM_FLEET_MCP_ENABLED"] = bool(config.platform_fleet_mcp_enabled)
+    app.config["PLATFORM_ARTIFACT_TRANSFER_ENABLED"] = bool(config.platform_artifact_transfer_enabled)
+    app.config["PLATFORM_MCP_CONNECTORS_ENABLED"] = bool(config.platform_mcp_connectors_enabled)
     # 实际生效的会话/纳管门控（服务真正接线才为 True）。
     app.config["SESSION_REPOSITORIES_ENABLED"] = bool(sessions.session_service is not None)
     app.config["ADOPTION_REPOSITORIES_ENABLED"] = bool(control.adoption_service is not None)

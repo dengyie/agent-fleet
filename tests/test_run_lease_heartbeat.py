@@ -20,6 +20,8 @@ def test_heartbeat_failure_is_fenced_and_thread_joins():
     try:
         assert renewed.wait(1) and failed.wait(1)
         with pytest.raises(RunLeaseLost):
+            heartbeat.check()
+        with pytest.raises(RunLeaseLost):
             heartbeat.pulse()
         assert len(calls) == 2, 'lost ownership never renews again'
     finally:

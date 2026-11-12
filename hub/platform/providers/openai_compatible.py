@@ -8,6 +8,7 @@ uses the small stdlib urllib transport below.
 """
 from __future__ import annotations
 
+import base64
 import codecs
 import json
 from http.client import HTTPException
@@ -33,6 +34,13 @@ from fleet_core.request_metadata import (
 
 
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_REQUEST_BYTES = 8 * 1024 * 1024
+MAX_AUDIO_INPUTS = 4
+MAX_AUDIO_ITEM_BYTES = 2 * 1024 * 1024
+MAX_AUDIO_INPUT_BYTES = 4 * 1024 * 1024
+MAX_VIDEO_INPUTS = 4
+MAX_VIDEO_ITEM_BYTES = 2 * 1024 * 1024
+MAX_VIDEO_INPUT_BYTES = 4 * 1024 * 1024
 MAX_TEXT_CHARS = 128 * 1024
 MAX_SSE_EVENTS = 4096
 TRANSIENT_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
@@ -44,9 +52,9 @@ UPSTREAM_ERROR_CODES = frozenset({'system_cpu_overloaded', 'system_memory_overlo
 PROVIDER_ERROR_CODES = frozenset({
     'auth_error', 'rate_limit', 'transient_http', 'request_rejected',
     'provider_http_error', 'timeout', 'network_error', 'invalid_response',
-    'response_too_large', 'provider_unavailable', 'provider_network_disabled',
+    'response_too_large', 'request_too_large', 'provider_unavailable', 'provider_network_disabled',
     'provider_secret_missing', 'provider_secret_unavailable',
-    'provider_tools_invalid', 'redirect_rejected',
+    'provider_tools_invalid', 'provider_message_invalid', 'redirect_rejected',
 })
 
 
@@ -351,8 +359,80 @@ def _internal_tool_name(wire_name: str, tool_names: Mapping[str, str]) -> str:
     raise ProviderError("invalid_response")
 
 
+def _message_content(value: Any, *, audio_budget: list[int] | None = None) -> str | list[dict[str, Any]]:
+    if isinstance(value, str):
+        return value[:MAX_TEXT_CHARS]
+    if not isinstance(value, list):
+        return str(value)[:MAX_TEXT_CHARS]
+    if len(value) > 32:
+        raise ProviderUnavailable("provider_message_invalid")
+    parts = []
+    for part in value:
+        if not isinstance(part, Mapping):
+            raise ProviderUnavailable("provider_message_invalid")
+        if part.get("type") == "text" and set(part) == {"type", "text"} and isinstance(part["text"], str):
+            parts.append({"type": "text", "text": part["text"][:MAX_TEXT_CHARS]})
+            continue
+        video = part.get("video_url")
+        if part.get("type") == "video_url":
+            if (set(part) != {"type", "video_url"} or not isinstance(video, Mapping)
+                    or set(video) != {"url"} or type(video["url"]) is not str
+                    or not video["url"].startswith("data:video/mp4;base64,")):
+                raise ProviderUnavailable("provider_message_invalid")
+            encoded = video["url"][len("data:video/mp4;base64,"):]
+            if not encoded or len(encoded) > ((MAX_VIDEO_ITEM_BYTES + 2) // 3) * 4:
+                raise ProviderUnavailable("provider_message_invalid")
+            try:
+                decoded = base64.b64decode(encoded, validate=True)
+            except (ValueError, TypeError) as exc:
+                raise ProviderUnavailable("provider_message_invalid") from exc
+            if (not decoded or len(decoded) > MAX_VIDEO_ITEM_BYTES
+                    or base64.b64encode(decoded).decode("ascii") != encoded):
+                raise ProviderUnavailable("provider_message_invalid")
+            budget = audio_budget if audio_budget is not None else [0, 0]
+            budget[0] += 1
+            budget[1] += len(decoded)
+            if budget[0] > MAX_VIDEO_INPUTS or budget[1] > MAX_VIDEO_INPUT_BYTES:
+                raise ProviderUnavailable("provider_message_invalid")
+            parts.append({"type": "video_url", "video_url": dict(video)})
+            continue
+        audio = part.get("input_audio")
+        if part.get("type") == "input_audio" and set(part) == {"type", "input_audio"} and isinstance(audio, Mapping):
+            if (set(audio) != {"data", "format"} or type(audio.get("data")) is not str
+                    or audio.get("format") not in {"wav", "mp3"}):
+                raise ProviderUnavailable("provider_message_invalid")
+            encoded = audio["data"]
+            max_encoded = ((MAX_AUDIO_ITEM_BYTES + 2) // 3) * 4
+            if not encoded or len(encoded) > max_encoded:
+                raise ProviderUnavailable("provider_message_invalid")
+            try:
+                decoded = base64.b64decode(encoded, validate=True)
+            except (ValueError, TypeError) as exc:
+                raise ProviderUnavailable("provider_message_invalid") from exc
+            if (not decoded or len(decoded) > MAX_AUDIO_ITEM_BYTES
+                    or base64.b64encode(decoded).decode("ascii") != encoded):
+                raise ProviderUnavailable("provider_message_invalid")
+            budget = audio_budget if audio_budget is not None else [0, 0]
+            budget[0] += 1
+            budget[1] += len(decoded)
+            if budget[0] > MAX_AUDIO_INPUTS or budget[1] > MAX_AUDIO_INPUT_BYTES:
+                raise ProviderUnavailable("provider_message_invalid")
+            parts.append({"type": "input_audio", "input_audio": dict(audio)})
+            continue
+        image = part.get("image_url")
+        if part.get("type") != "image_url" or set(part) != {"type", "image_url"} or not isinstance(image, Mapping):
+            raise ProviderUnavailable("provider_message_invalid")
+        if (set(image) - {"url", "detail"} or not isinstance(image.get("url"), str)
+                or not image["url"].startswith(("data:image/png;base64,", "data:image/jpeg;base64,", "data:image/webp;base64,"))
+                or ("detail" in image and image["detail"] not in ("low", "high", "auto"))):
+            raise ProviderUnavailable("provider_message_invalid")
+        parts.append({"type": "image_url", "image_url": dict(image)})
+    return parts
+
+
 def _messages(messages: list[dict[str, Any]], tool_names: Mapping[str, str]) -> list[dict[str, Any]]:
     result = []
+    audio_budget = [0, 0]
     for message in messages:
         if not isinstance(message, Mapping):
             continue
@@ -364,9 +444,7 @@ def _messages(messages: list[dict[str, Any]], tool_names: Mapping[str, str]) -> 
                 content = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             except (TypeError, ValueError):
                 content = str(value)[:MAX_TEXT_CHARS]
-        if not isinstance(content, str):
-            content = str(content)
-        item = {"role": role, "content": content[:MAX_TEXT_CHARS]}
+        item = {"role": role, "content": _message_content(content, audio_budget=audio_budget)}
         if role == "tool" and isinstance(message.get("tool_call_id"), str):
             item["tool_call_id"] = message["tool_call_id"][:256]
         calls = message.get("tool_calls")
@@ -574,6 +652,8 @@ class OpenAICompatibleProvider:
         if self.stream:
             payload['stream_options'] = {'include_usage': True}
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(body) > MAX_REQUEST_BYTES:
+            raise ProviderError('request_too_large')
         for attempt in range(self.max_retries + 1):
             observation = RequestObservation(request_observer, model=self.model,
                 provider='openai_compatible', index=attempt + 1,

@@ -1,6 +1,10 @@
 """Authenticated platform execution-node transport endpoints."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from typing import Any
+from hub.domain.capability import CapabilityError, CapabilityStoreError
+
 from flask import Blueprint, current_app, g, jsonify, request
 
 from hub.application.browser_artifact_service import (
@@ -71,6 +75,12 @@ def _call(fn):
         return fn()
     except ApplicationError as exc:
         return error_response(exc)
+    except CapabilityError as exc:
+        return error_response(ApplicationError(exc.code, "能力报告不合法", 400))
+    except CapabilityStoreError as exc:
+        status = {"credential_revoked": 409, "offer_revision_conflict": 409,
+                  "report_clock_regressed": 409, "node_unregistered": 404}.get(exc.code, 503)
+        return error_response(ApplicationError(exc.code, "能力目录不可用或报告冲突", status))
     except (PlatformRepositoryError, BrowserRepositoryError, ArtifactError) as exc:
         status = {
             "invalid_node_status": 400, "node_not_found": 404,
@@ -111,6 +121,7 @@ def poll():
         rows = _delivery().poll(
             g.platform_node_id, worker_id, owner_id=g.platform_node_owner,
             limit=limit, lease_s=lease_s,
+            credential_fingerprint=g.platform_node_credential_fingerprint,
         )
         safe = []
         for row in rows:
@@ -119,8 +130,27 @@ def poll():
                 "arguments", "retry_class", "expires_at", "args_hash",
                 "run_id", "grant_id", "signature",
             )})
-        return jsonify({"ok": True, "node_id": g.platform_node_id, "commands": safe})
+        return jsonify({"ok": True, "node_id": g.platform_node_id, "commands": safe,
+                        "command_control_version": 1})
     return _call(_poll)
+
+
+@bp.post('/commands/control')
+@require_platform_node
+def command_control():
+    def _control():
+        body = _body()
+        command_id, worker_id = body.get('command_id'), body.get('worker_id')
+        if not isinstance(command_id, str) or not command_id or len(command_id) > 128:
+            raise ApplicationError('invalid_command', '命令标识不合法', 400)
+        if not isinstance(worker_id, str) or not worker_id or len(worker_id) > 128:
+            raise ApplicationError('invalid_worker', 'worker_id 不合法', 400)
+        lease_s = _bounded_number(body.get('lease_s'), 'lease_s', default=15.0, minimum=1.0, maximum=3600.0)
+        control = _delivery().renew_command(command_id, worker_id, owner_id=g.platform_node_owner,
+            node_id=g.platform_node_id, lease_s=lease_s,
+            credential_fingerprint=g.platform_node_credential_fingerprint)
+        return jsonify({'ok': True, 'control': control})
+    return _call(_control)
 
 
 @bp.post("/receipts")
@@ -141,6 +171,7 @@ def receipt():
         row = _delivery().receipt(
             command_id, status, result=result or {}, worker_id=worker_id,
             owner_id=g.platform_node_owner, node_id=g.platform_node_id,
+            credential_fingerprint=g.platform_node_credential_fingerprint,
         )
         current_app.extensions['fleet']['services']['plugins'].record_receipt(
             g.platform_node_owner, g.platform_node_id, row)
@@ -346,3 +377,26 @@ def health_evidence():
 
 
 __all__ = ["bp"]
+
+
+@bp.post("/capability-offers")
+@require_platform_node
+def capability_offer() -> Any:
+    def _report() -> Any:
+        fleet = current_app.extensions.get("fleet", {})
+        repository = fleet.get("repositories", {}).get("capabilities")
+        if not current_app.config.get("PLATFORM_CAPABILITY_ROUTING_ENABLED") or repository is None:
+            raise ApplicationError("capability_disabled", "能力目录未启用", 404)
+        if not request.is_json:
+            raise ApplicationError("invalid_json", "请求体必须是 JSON 对象", 400)
+        if request.content_length is not None and request.content_length > 65536:
+            raise ApplicationError("offer_too_large", "能力报告超出大小限制", 413)
+        raw = request.stream.read(65537)
+        if len(raw) > 65536:
+            raise ApplicationError("offer_too_large", "能力报告超出大小限制", 413)
+        offer = repository.record_offer(g.platform_node_owner, g.platform_node_id, raw,
+            credential_fingerprint=g.platform_node_credential_fingerprint, now=fleet["capability_clock"]())
+        receipt: dict[str, str | int] = {"node_id": g.platform_node_id, "offer_revision": offer.offer_revision,
+            "received_at": datetime.fromtimestamp(offer.received_at, timezone.utc).isoformat().replace("+00:00", "Z")}
+        return jsonify({"ok": True, "offer": receipt})
+    return _call(_report)

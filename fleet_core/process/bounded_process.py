@@ -19,7 +19,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 from fleet_core.process.local_process import popen as popen_local
-from fleet_core.process.process_group import LineAssembler, signal_group
+from fleet_core.process.process_group import (
+    LineAssembler, posix_group_alive, posix_group_only_zombies, signal_group,
+)
 
 if TYPE_CHECKING:
     from fleet_core.process.windows_job import WindowsJob
@@ -64,7 +66,8 @@ def _pump(stream, target: bytearray, limit: int) -> None:
 
 def _drain_threaded(proc: subprocess.Popen[bytes], deadline: float,
                     stdout_limit: int, stderr_limit: int | None,
-                    timeout_s: float) -> tuple[bytes, bytes]:
+                    timeout_s: float,
+                    should_cancel: Callable[[], bool] | None = None) -> tuple[bytes, bytes]:
     """Windows drain: reader threads plus deadline-bounded joins.
 
     Each thread ends on EOF, so waiting for the threads keeps the POSIX
@@ -83,27 +86,29 @@ def _drain_threaded(proc: subprocess.Popen[bytes], deadline: float,
     for thread in threads:
         thread.start()
     for thread in threads:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise subprocess.TimeoutExpired(proc.args, timeout_s)
-        thread.join(timeout=remaining)
-        if thread.is_alive():
-            raise subprocess.TimeoutExpired(proc.args, timeout_s)
-    proc.wait(timeout=max(0.001, deadline - time.monotonic()))
+        while thread.is_alive():
+            _check_cancel(should_cancel)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(proc.args, timeout_s)
+            thread.join(timeout=remaining if should_cancel is None else min(.1, remaining))
+    _wait_for_exit(proc, deadline, timeout_s, should_cancel)
     return bytes(output), bytes(error)
 
 
 def _drain(proc: subprocess.Popen[bytes], deadline: float, stdout_limit: int,
-           stderr_limit: int | None, timeout_s: float) -> tuple[bytes, bytes]:
+           stderr_limit: int | None, timeout_s: float,
+           should_cancel: Callable[[], bool] | None = None) -> tuple[bytes, bytes]:
     if os.name == "nt":
         return _drain_threaded(proc, deadline, stdout_limit, stderr_limit,
-                               timeout_s)
-    return _drain_posix(proc, deadline, stdout_limit, stderr_limit, timeout_s)
+                               timeout_s, should_cancel)
+    return _drain_posix(proc, deadline, stdout_limit, stderr_limit, timeout_s, should_cancel)
 
 
 def _drain_posix(proc: subprocess.Popen[bytes], deadline: float,
                  stdout_limit: int, stderr_limit: int | None,
-                 timeout_s: float) -> tuple[bytes, bytes]:
+                 timeout_s: float,
+                 should_cancel: Callable[[], bool] | None = None) -> tuple[bytes, bytes]:
     output, error = bytearray(), bytearray()
     with selectors.DefaultSelector() as selector:
         assert proc.stdout is not None
@@ -115,12 +120,29 @@ def _drain_posix(proc: subprocess.Popen[bytes], deadline: float,
             os.set_blocking(stream.fileno(), False)
             selector.register(stream, selectors.EVENT_READ, (target, limit))
         while selector.get_map():
+            _check_cancel(should_cancel)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(proc.args, timeout_s)
-            _read_ready(selector, remaining)
-    proc.wait(timeout=max(0.001, deadline - time.monotonic()))
+            _read_ready(selector, remaining if should_cancel is None else min(.1, remaining))
+    _wait_for_exit(proc, deadline, timeout_s, should_cancel)
     return bytes(output), bytes(error)
+
+
+def _wait_for_exit(proc: subprocess.Popen[bytes], deadline: float, timeout_s: float,
+                   should_cancel: Callable[[], bool] | None) -> None:
+    """Keep cancellation observable after EOF while the process still runs."""
+    while True:
+        _check_cancel(should_cancel)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(proc.args, timeout_s)
+        try:
+            proc.wait(timeout=remaining if should_cancel is None else min(.1, remaining))
+            return
+        except subprocess.TimeoutExpired:
+            if should_cancel is None:
+                raise
 
 
 def _reap_group(proc: subprocess.Popen[bytes]) -> None:
@@ -145,6 +167,19 @@ def _wait_quietly(proc: subprocess.Popen[bytes]) -> None:
 
 class ProcessAborted(RuntimeError):
     """The caller withdrew permission to continue an owned child."""
+
+
+class ProcessCancelled(ProcessAborted):
+    """A bounded command was revoked; owned process cleanup precedes return."""
+
+
+class ProcessStopUnconfirmed(RuntimeError):
+    """Cancellation was requested but cleanup could not prove execution stopped."""
+
+
+def _check_cancel(should_cancel: Callable[[], bool] | None) -> None:
+    if should_cancel is not None and should_cancel():
+        raise ProcessCancelled("process_cancelled")
 
 
 def _drain_lines(proc: subprocess.Popen[bytes], deadline: float, timeout_s: float,
@@ -257,6 +292,8 @@ def _close_job(job: WindowsJob | None, in_flight: BaseException | None) -> None:
     except Exception as exc:
         if in_flight is None:
             raise
+        if isinstance(in_flight, ProcessCancelled):
+            raise ProcessStopUnconfirmed("process_stop_unconfirmed") from exc
         # 清理失败仍可观测，但不替换原始异常。
         note = f"job_cleanup_failed: {type(exc).__name__}: {exc}"[:200]
         add_note = getattr(in_flight, "add_note", None)
@@ -264,6 +301,18 @@ def _close_job(job: WindowsJob | None, in_flight: BaseException | None) -> None:
             add_note(note)
         else:  # Python 3.10 无 add_note
             in_flight.__notes__ = [*getattr(in_flight, "__notes__", []), note]
+
+
+def _confirm_posix_stop(proc: subprocess.Popen[bytes]) -> None:
+    """The owned leader and all live group members must have stopped."""
+    deadline = time.monotonic() + 2
+    while True:
+        if proc.poll() is not None and (
+                not posix_group_alive(proc.pid) or posix_group_only_zombies(proc.pid)):
+            return
+        if time.monotonic() >= deadline:
+            raise ProcessStopUnconfirmed("process_stop_unconfirmed")
+        time.sleep(.01)
 
 
 def run_streamed(argv: Sequence[str], *, cwd: Path, timeout_s: float,
@@ -304,7 +353,8 @@ def run_streamed(argv: Sequence[str], *, cwd: Path, timeout_s: float,
 def run_bounded(argv: Sequence[str], *, cwd: Path, timeout_s: float,
                 stdout_limit: int, stderr_limit: int | None = None,
                 env: Mapping[str, str] | None = None,
-                preexec_fn: Callable[[], None] | None = None) -> subprocess.CompletedProcess[bytes]:
+                preexec_fn: Callable[[], None] | None = None,
+                should_cancel: Callable[[], bool] | None = None) -> subprocess.CompletedProcess[bytes]:
     """Retain at most each limit; drain excess and check the complete exit.
 
     A missing stderr limit merges stderr into stdout. Callers that need a
@@ -317,6 +367,7 @@ def run_bounded(argv: Sequence[str], *, cwd: Path, timeout_s: float,
         raise ValueError("invalid_output_limit")
     if not math.isfinite(timeout_s) or timeout_s <= 0:
         raise ValueError("invalid_process_timeout")
+    _check_cancel(should_cancel)
     deadline = time.monotonic() + timeout_s
     job = None
     options = {"start_new_session": True, "preexec_fn": preexec_fn}
@@ -328,6 +379,11 @@ def run_bounded(argv: Sequence[str], *, cwd: Path, timeout_s: float,
                    "preexec_fn": preexec_fn}  # SUSPENDED | NEW_PROCESS_GROUP
     in_flight: BaseException | None = None
     try:
+        if should_cancel is not None:
+            return _run_owned(argv, cwd, env, deadline, timeout_s, stdout_limit,
+                              stderr_limit, options, job,
+                              drain=lambda proc, end, seconds: _drain(
+                                  proc, end, stdout_limit, stderr_limit, seconds, should_cancel))
         return _run_owned(argv, cwd, env, deadline, timeout_s, stdout_limit,
                           stderr_limit, options, job)
     except BaseException as exc:
@@ -369,3 +425,5 @@ def _run_owned(argv: Sequence[str], cwd: Path, env: Mapping[str, str] | None,
                     _wait_quietly(proc)
             else:
                 _reap_group(proc)
+                if isinstance(in_flight, ProcessCancelled):
+                    _confirm_posix_stop(proc)

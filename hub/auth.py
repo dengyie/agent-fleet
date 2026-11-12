@@ -262,6 +262,7 @@ def extract_platform_node_identity(req=None) -> tuple[str, str] | None:
         return None
     g.platform_node_id = identity["node_id"]
     g.platform_node_owner = identity["owner_id"]
+    g.platform_node_credential_fingerprint = identity.get("credential_fingerprint")
     return identity["owner_id"], identity["node_id"]
 
 

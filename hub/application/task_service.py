@@ -32,6 +32,7 @@ from hub.domain.handoff import HandoffConflict
 from hub.domain.task import (
     DEFAULT_AGENT_TYPES,
     DomainError,
+    TaskStopObservation,
     public_task,
     validate_task_input,
 )
@@ -149,7 +150,11 @@ class TaskService:
         """
         try:
             return fn(*args, **kwargs)
-        except (ApplicationError, DomainError, HandoffConflict):
+        except DomainError as exc:
+            if exc.code == "workflow_control_required":
+                raise ApplicationError(exc.code, exc.detail, 409) from exc
+            raise
+        except (ApplicationError, HandoffConflict):
             raise
         except Exception as exc:
             logger.exception("task repository operation failed: %r", exc)
@@ -161,7 +166,7 @@ class TaskService:
 
     # -- write use case ------------------------------------------------------
 
-    def create(self, data: Any, actor: str, *, handoff: dict | None = None) -> dict:
+    def create(self, data: Any, actor: str, *, handoff: dict | None = None, legacy_origin: dict | None = None) -> dict:
         """Validate, apply policy, persist, and announce a new task.
 
         Returns ``{"ok": True, "created": bool, "task": <public>}``. Raises
@@ -183,6 +188,8 @@ class TaskService:
             raise ApplicationError(
                 "project_not_allowed", f"{machine} 未注册项目 {project}")
         internal = {"handoff": handoff} if handoff is not None else {}
+        if legacy_origin is not None:
+            internal["legacy_origin"] = legacy_origin
         task, created = self._task_op(
             self.task_repo.create_task,
             machine=machine, agent_type=validated["agent_type"],
@@ -260,6 +267,21 @@ class TaskService:
             self._file_bytes[key] = entries
 
     # -- lifecycle mutations --------------------------------------------------
+
+    def cancel_submission(self, client_token: str, actor: str, *, now: float) -> TaskStopObservation:
+        try:
+            task = self.task_repo.fence_submission(client_token, actor, now=now)
+            if task is not None:
+                self.cancel(task["task_id"], actor)
+            result = self.task_repo.submission_stop(client_token, actor)
+        except (DomainError, ApplicationError):
+            raise
+        except Exception as exc:
+            raise ApplicationError("tasks_unavailable", "取消存储不可用", 503) from exc
+        if result is None:
+            raise ApplicationError("tasks_unavailable", "取消记录不可用", 503)
+        return result
+
 
     def cancel(self, task_id: str, actor: str) -> dict:
         """Cancel a queued/leased/running task; emit ``task_cancelled``.

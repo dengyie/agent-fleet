@@ -24,7 +24,7 @@ class LoopbackNode:
         })
         self.journal = NodeJournal(hub.root / 'node-journal.db')
         self.journal.init()
-        executor = NodeToolExecutor(DirectoryBackend(self.workspace))
+        executor = NodeToolExecutor(DirectoryBackend(self.workspace), workspace_id='remote')
 
         def execute(command):
             self.commands.append(command)

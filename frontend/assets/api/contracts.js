@@ -1407,3 +1407,165 @@ export function parseUsageSummary(data) {
   });
   return {ok: true, from: data.from, to: data.to, group_by: [...data.group_by], currency: 'USD', items};
 }
+
+/* Workflow operator DTOs: bounded public projections. */
+var WORKFLOW_EXECUTION_STATES = ['queued', 'running', 'waiting_node', 'waiting_external', 'waiting_approval', 'paused', 'cancelling', 'succeeded', 'failed', 'unknown', 'cancelled'];
+var WORKFLOW_VALIDATION_STATES = ['not_requested', 'pending', 'passed', 'failed', 'inconclusive'];
+var WORKFLOW_ACCEPTANCE_STATES = ['not_requested', 'pending', 'accepted', 'rejected'];
+var WORKFLOW_DELIVERY_STATES = ['needs_reconciliation', 'execution_failed', 'cancelled', 'in_progress', 'validation_failed', 'awaiting_validation', 'rejected', 'awaiting_acceptance', 'delivered'];
+var WORKFLOW_SUMMARY_FIELDS = ['workflow_id', 'workspace_id', 'template_id', 'template_revision', 'execution_state', 'validation_state', 'acceptance_state', 'revision', 'reason_code', 'created_at', 'updated_at'];
+function workflowInvalid(label) { throw new ContractError('invalid_workflow_dto', label + ' is invalid'); }
+function workflowObject(value, fields, label, optional) {
+  requireObject(value, label); optional = optional || [];
+  var allowed = new Set(fields.concat(optional));
+  if (Object.keys(value).some(key => !allowed.has(key)) || fields.some(key => !Object.prototype.hasOwnProperty.call(value, key))) workflowInvalid(label);
+  return value;
+}
+function workflowText(value, label, max) {
+  if (typeof value !== 'string' || !value || value.length > max || /[\x00-\x1f\x7f\ud800-\udfff]/u.test(value)) workflowInvalid(label);
+  return value;
+}
+function workflowNullable(value, parser) { return value === null ? null : parser(value); }
+function workflowCount(value, label, minimum) {
+  if (!Number.isSafeInteger(value) || value < (minimum || 0)) workflowInvalid(label);
+  return value;
+}
+function workflowAmount(value) {
+  if (typeof value === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(value) && BigInt(value) > BigInt(Number.MAX_SAFE_INTEGER)) return value;
+  return workflowCount(value, 'amount');
+}
+function workflowDigest(value) { if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) workflowInvalid('digest'); return value; }
+function workflowTime(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString() !== value) workflowInvalid('time');
+  return value;
+}
+function workflowEnum(value, allowed) { if (!allowed.includes(value)) workflowInvalid('state'); return value; }
+function workflowItems(value, maximum, parse, minimum) {
+  if (!Array.isArray(value) || value.length > maximum || value.length < (minimum || 0)) workflowInvalid('array');
+  return value.map(parse);
+}
+function workflowUnique(values, key) { if (new Set(values.map(key)).size !== values.length) workflowInvalid('duplicates'); return values; }
+function workflowEnvelope(data, fields) { workflowObject(data, ['ok'].concat(fields), 'response'); if (data.ok !== true) workflowInvalid('response'); }
+function parseWorkflowSummary(value) {
+  workflowObject(value, WORKFLOW_SUMMARY_FIELDS, 'summary');
+  return {workflow_id: workflowText(value.workflow_id, 'workflow_id', 128), workspace_id: workflowText(value.workspace_id, 'workspace_id', 128),
+    template_id: workflowText(value.template_id, 'template_id', 128), template_revision: workflowCount(value.template_revision, 'template_revision', 1),
+    execution_state: workflowEnum(value.execution_state, WORKFLOW_EXECUTION_STATES), validation_state: workflowEnum(value.validation_state, WORKFLOW_VALIDATION_STATES),
+    acceptance_state: workflowEnum(value.acceptance_state, WORKFLOW_ACCEPTANCE_STATES), revision: workflowCount(value.revision, 'revision', 1),
+    reason_code: workflowNullable(value.reason_code, v => workflowText(v, 'reason_code', 128)), created_at: workflowTime(value.created_at), updated_at: workflowTime(value.updated_at)};
+}
+export function parseWorkflowTemplates(data) {
+  workflowEnvelope(data, ['templates']);
+  return {ok: true, templates: workflowItems(data.templates, 100, item => {
+    workflowObject(item, ['template_id', 'revision', 'workspace_id', 'policy_revision', 'steps', 'input_refs'], 'template');
+    var steps = workflowUnique(workflowItems(item.steps, 8, step => {
+      workflowObject(step, ['step_key', 'kind'], 'template_step');
+      return {step_key: workflowText(step.step_key, 'step_key', 128), kind: workflowEnum(step.kind, ['native_run', 'coding_task', 'fixed_tool', 'validation', 'external_agent'])};
+    }, 1), step => step.step_key);
+    return {template_id: workflowText(item.template_id, 'template_id', 128), revision: workflowCount(item.revision, 'revision', 1),
+      workspace_id: workflowText(item.workspace_id, 'workspace_id', 128), policy_revision: workflowCount(item.policy_revision, 'policy_revision', 1), steps: steps,
+      input_refs: workflowUnique(workflowItems(item.input_refs, 16, parseWorkflowInput), ref => ref.ref_key)};
+  })};
+}
+function parseWorkflowInput(ref) {
+  requireObject(ref, 'input_reference');
+  if (ref.kind === 'artifact') return Object.assign(parseWorkflowArtifact(ref, ['ref_key', 'kind']), {ref_key: workflowText(ref.ref_key, 'ref_key', 128), kind: 'artifact'});
+  workflowObject(ref, ['ref_key', 'kind', 'repository_id', 'base_commit', 'head_commit', 'tree_id', 'source_bundle'], 'input_reference');
+  if (ref.kind !== 'code_revision') workflowInvalid('input_kind');
+  const objects = ['base_commit', 'head_commit', 'tree_id'].map(key => {
+    if (typeof ref[key] !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(ref[key])) workflowInvalid('git_object');
+    return ref[key];
+  });
+  if (new Set(objects.map(value => value.length)).size !== 1) workflowInvalid('git_object');
+  return {ref_key: workflowText(ref.ref_key, 'ref_key', 128), kind: ref.kind, repository_id: workflowText(ref.repository_id, 'repository_id', 128),
+    base_commit: objects[0], head_commit: objects[1], tree_id: objects[2], source_bundle: parseWorkflowArtifact(ref.source_bundle)};
+}
+export function parseWorkflowPage(data) {
+  workflowEnvelope(data, ['workflows', 'next_cursor']);
+  return {ok: true, workflows: workflowUnique(workflowItems(data.workflows, 100, parseWorkflowSummary), item => item.workflow_id),
+    next_cursor: workflowNullable(data.next_cursor, value => workflowText(value, 'cursor', 512))};
+}
+function parseWorkflowArtifact(item, fields) {
+  workflowObject(item, ['artifact_id', 'sha256', 'size'].concat(fields || []), 'artifact');
+  return {artifact_id: workflowText(item.artifact_id, 'artifact_id', 128), sha256: workflowDigest(item.sha256), size: workflowCount(item.size, 'size')};
+}
+function parseWorkflowEvidence(item) {
+  workflowObject(item, ['evidence_key', 'validator_ref', 'subject_digest', 'source', 'result', 'report'], 'evidence');
+  var report = parseWorkflowArtifact(item.report, ['content_digest']); report.content_digest = workflowDigest(item.report.content_digest);
+  return {evidence_key: workflowText(item.evidence_key, 'evidence_key', 128), validator_ref: workflowText(item.validator_ref, 'validator_ref', 128),
+    subject_digest: workflowDigest(item.subject_digest), source: workflowText(item.source, 'source', 128),
+    result: workflowEnum(item.result, ['passed', 'failed', 'inconclusive']), report: report};
+}
+function parseWorkflowStep(step) {
+  workflowObject(step, ['step_key', 'generation', 'kind', 'execution_state', 'validation_state', 'subject_digest', 'reason_code', 'outputs', 'evidence'], 'step');
+  var outputs = workflowUnique(workflowItems(step.outputs, 16, output => Object.assign(parseWorkflowArtifact(output, ['output_key']), {output_key: workflowText(output.output_key, 'output_key', 128)})), item => item.output_key);
+  return {step_key: workflowText(step.step_key, 'step_key', 128), generation: workflowCount(step.generation, 'generation', 1),
+    kind: workflowEnum(step.kind, ['native_run', 'coding_task', 'fixed_tool', 'validation', 'external_agent']),
+    execution_state: workflowEnum(step.execution_state, WORKFLOW_EXECUTION_STATES.concat(['pending', 'ready', 'dispatching'])),
+    validation_state: workflowEnum(step.validation_state, WORKFLOW_VALIDATION_STATES), subject_digest: workflowNullable(step.subject_digest, workflowDigest),
+    reason_code: workflowNullable(step.reason_code, v => workflowText(v, 'reason_code', 128)), outputs: outputs,
+    evidence: workflowUnique(workflowItems(step.evidence, 32, parseWorkflowEvidence), item => item.evidence_key)};
+}
+function parseWorkflowBudget(row) {
+  workflowObject(row, ['step_key', 'reserved_tokens', 'reserved_requests', 'charged_tokens', 'charged_requests', 'settlement', 'cost', 'cost_state'], 'budget');
+  return {step_key: workflowText(row.step_key, 'step_key', 128), reserved_tokens: workflowAmount(row.reserved_tokens), reserved_requests: workflowAmount(row.reserved_requests),
+    charged_tokens: workflowNullable(row.charged_tokens, workflowAmount), charged_requests: workflowNullable(row.charged_requests, workflowAmount),
+    settlement: workflowEnum(row.settlement, ['reserved', 'unknown', 'settled']), cost: workflowNullable(row.cost, v => workflowText(v, 'cost', 64)),
+    cost_state: workflowEnum(row.cost_state, ['unknown', 'known'])};
+}
+export function parseWorkflowDetail(data) {
+  workflowEnvelope(data, ['workflow']); var value = data.workflow;
+  var extra = ['delivery_state', 'delivery_digest', 'steps', 'budget', 'cancel_requested', 'pause_requested', 'admission_mode'];
+  workflowObject(value, WORKFLOW_SUMMARY_FIELDS.concat(extra), 'detail');
+  var summary = {}; WORKFLOW_SUMMARY_FIELDS.forEach(key => { summary[key] = value[key]; });
+  if (typeof value.cancel_requested !== 'boolean' || typeof value.pause_requested !== 'boolean') workflowInvalid('control_flags');
+  return {ok: true, workflow: Object.assign(parseWorkflowSummary(summary), {
+    delivery_state: workflowEnum(value.delivery_state, WORKFLOW_DELIVERY_STATES), delivery_digest: workflowDigest(value.delivery_digest),
+    steps: workflowUnique(workflowItems(value.steps, 8, parseWorkflowStep, 1), item => item.step_key),
+    budget: workflowUnique(workflowItems(value.budget, 8, parseWorkflowBudget), item => item.step_key), cancel_requested: value.cancel_requested,
+    pause_requested: value.pause_requested, admission_mode: workflowEnum(value.admission_mode, ['open', 'drain', 'frozen'])})};
+}
+var WORKFLOW_EVENT_FIELDS = new Set(['step_key', 'generation', 'reason_code', 'execution_state', 'validation_state', 'state', 'decision',
+  'definition_digest', 'resolved_digest', 'subject_digest', 'delivery_digest', 'evidence_key', 'output_keys', 'generations', 'unknown_execution', 'result', 'settlement', 'charged_tokens', 'charged_requests', 'action', 'reason', 'evidence_source']);
+function parseWorkflowEventPayload(payload) {
+  requireObject(payload, 'payload'); if (Object.keys(payload).some(key => !WORKFLOW_EVENT_FIELDS.has(key)) || JSON.stringify(payload).length > 16384) workflowInvalid('payload');
+  var output = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (key === 'generation') output[key] = workflowCount(value, key, 1);
+    else if (key === 'evidence_source') output[key] = workflowEnum(value, ['none', 'transport', 'accepted', 'agent_reported', 'confirmed', 'unknown']);
+    else if (key === 'charged_tokens' || key === 'charged_requests') output[key] = workflowNullable(value, workflowAmount);
+    else if (key === 'unknown_execution') { if (typeof value !== 'boolean') workflowInvalid(key); output[key] = value; }
+    else if (key === 'output_keys') output[key] = workflowItems(value, 16, item => workflowText(item, key, 128));
+    else if (key === 'generations') output[key] = workflowItems(value, 8, item => { if (!Array.isArray(item) || item.length !== 2) workflowInvalid(key); return [workflowText(item[0], key, 128), workflowCount(item[1], key, 1)]; });
+    else if (key.endsWith('_digest')) output[key] = workflowDigest(value);
+    else output[key] = workflowNullable(value, v => workflowText(v, key, 128));
+  }
+  return output;
+}
+export function parseWorkflowEvents(data) {
+  workflowEnvelope(data, ['events', 'next_cursor']);
+  var previous = 0;
+  var events = workflowItems(data.events, 100, event => {
+    workflowObject(event, ['sequence', 'kind', 'payload', 'created_at'], 'event');
+    var sequence = workflowCount(event.sequence, 'sequence', 1); if (sequence <= previous) workflowInvalid('sequence'); previous = sequence;
+    return {sequence: sequence, kind: workflowText(event.kind, 'kind', 128), payload: parseWorkflowEventPayload(event.payload), created_at: workflowTime(event.created_at)};
+  });
+  var cursor = workflowNullable(data.next_cursor, value => workflowCount(value, 'cursor'));
+  if (events.length && cursor !== events[events.length - 1].sequence) workflowInvalid('cursor');
+  return {ok: true, events: events, next_cursor: cursor};
+}
+export function parseWorkflowOperation(data) {
+  workflowEnvelope(data, ['operation']); var op = data.operation;
+  requireObject(op, 'operation'); var result;
+  if (op.action === 'acceptance') {
+    workflowObject(op, ['action', 'revision', 'acceptance_state', 'delivery_digest'], 'operation');
+    result = {action: op.action, revision: workflowCount(op.revision, 'revision', 1), acceptance_state: workflowEnum(op.acceptance_state, ['accepted', 'rejected']), delivery_digest: workflowDigest(op.delivery_digest)};
+  } else {
+    workflowObject(op, ['action', 'revision', 'execution_state', 'generations'], 'operation');
+    result = {action: workflowEnum(op.action, ['pause', 'resume', 'cancel', 'retry', 'invalidate', 'reconcile']), revision: workflowCount(op.revision, 'revision', 1),
+      execution_state: workflowEnum(op.execution_state, WORKFLOW_EXECUTION_STATES), generations: workflowUnique(workflowItems(op.generations, 8, item => {
+        workflowObject(item, ['step_key', 'generation'], 'generation'); return {step_key: workflowText(item.step_key, 'step_key', 128), generation: workflowCount(item.generation, 'generation', 1)};
+      }), item => item.step_key)};
+  }
+  return {ok: true, operation: result};
+}

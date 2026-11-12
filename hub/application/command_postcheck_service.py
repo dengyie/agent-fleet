@@ -4,8 +4,10 @@ from __future__ import annotations
 import hashlib
 import time
 from collections.abc import Mapping
+from typing import Any
 
 from hub.application.task_service import ApplicationError
+from hub.domain.capability_execution import CAPABILITY_ARGUMENT, CapabilityExecutionContext
 from fleet_core.platform_command import PlatformCommand
 from platform_schema import validate_id, validate_owner_id
 
@@ -90,7 +92,16 @@ class CommandPostcheckService:
         if original.get("action") != "tool.workspace.write":
             raise ApplicationError("postcheck_not_supported", "该命令没有可用的确定性 post-check", 409)
         arguments = original.get("arguments")
-        if not isinstance(arguments, Mapping) or set(arguments) != {"path", "content"}:
+        if not isinstance(arguments, Mapping):
+            raise ApplicationError("postcheck_not_supported", "该命令没有可用的确定性 post-check", 409)
+        if set(arguments) == {"path", "content", CAPABILITY_ARGUMENT}:
+            try:
+                capability_context = CapabilityExecutionContext.from_command(original)
+            except (TypeError, ValueError) as exc:
+                raise ApplicationError("postcheck_not_supported", "该命令没有可用的确定性 post-check", 409) from exc
+            if capability_context.binding.node_id != original.get("target_node"):
+                raise ApplicationError("postcheck_not_supported", "该命令没有可用的确定性 post-check", 409)
+        elif set(arguments) != {"path", "content"}:
             raise ApplicationError("postcheck_not_supported", "该命令没有可用的确定性 post-check", 409)
         path = arguments.get("path")
         content = arguments.get("content")
@@ -100,9 +111,12 @@ class CommandPostcheckService:
         check_id = self._check_command_id(command_id)
         return original, path, expected, check_id
 
-    def _refresh(self, owner_id: str, row: dict):
+    def _refresh(self, owner_id: str, row: dict[str, Any]) -> dict[str, Any]:
         if row.get("state") != "pending":
-            return row
+            return self.repository.finish_postcheck(
+                owner_id, row["command_id"], kind=KIND, state=row["state"], result=row.get("result"),
+                evidence_id=row.get("evidence_id"), now=float(self.clock()),
+            )
         check = self.repository.get_for_owner(owner_id, row["check_command_id"])
         if not check or check.get("status") not in {"succeeded", "failed", "unknown", "expired"}:
             return row
@@ -114,16 +128,13 @@ class CommandPostcheckService:
         expected = row.get("expected_sha256")
         if check.get("status") == "succeeded" and observed.get("sha256") == expected:
             state = "matched"
-            outcome = "confirmed_succeeded"
         elif check.get("status") == "succeeded":
             state = "mismatch"
-            outcome = "remains_unknown"
         else:
             # A failed read proves only that the post-check could not observe
             # the current state; it does not prove whether the original write
             # happened. Keep the original side effect unknown.
             state = "remains_unknown"
-            outcome = "remains_unknown"
         # The check command id is deterministic, so the evidence id is too.
         # This makes concurrent/repeated reads converge on one audit record.
         evidence_id = "postcheck-" + row["check_command_id"]
@@ -131,19 +142,12 @@ class CommandPostcheckService:
             key: observed[key] for key in ("path", "sha256", "size")
             if key in observed and isinstance(observed[key], (str, int, float))
         }
-        saved = self.repository.finish_postcheck(
+        return self.repository.finish_postcheck(
             owner_id, row["command_id"], kind=KIND, state=state,
             result=evidence | ({"error_code": observed.get("error_code")}
                                if check.get("status") != "succeeded" and isinstance(observed.get("error_code"), str) else {}),
             evidence_id=evidence_id, now=float(self.clock()),
         )
-        self.repository.record_reconciliation(
-            owner_id, row["command_id"], actor="postcheck",
-            outcome=outcome, evidence_source="workspace_check",
-            evidence_reference=evidence_id,
-            reconciliation_id=evidence_id, now=float(self.clock()),
-        )
-        return saved
 
     @staticmethod
     def _service_check_command_id(command_id: str) -> str:
@@ -199,9 +203,12 @@ class CommandPostcheckService:
             "created_at": row.get("created_at"), "updated_at": row.get("updated_at"),
         }
 
-    def _refresh_service(self, owner_id: str, row: dict):
+    def _refresh_service(self, owner_id: str, row: dict[str, Any]) -> dict[str, Any]:
         if row.get("state") != "pending":
-            return row
+            return self.repository.finish_service_postcheck(
+                owner_id, row["command_id"], kind=SERVICE_KIND, state=row["state"], result=row.get("result"),
+                evidence_id=row.get("evidence_id"), now=float(self.clock()),
+            )
         check = self.repository.get_for_owner(owner_id, row["check_command_id"])
         if not check or check.get("status") not in {"succeeded", "failed", "unknown", "expired"}:
             return row
@@ -221,13 +228,13 @@ class CommandPostcheckService:
         observed_state = observed.get("state")
         deterministic_state = observed_state in {"healthy", "unhealthy", "degraded", "unsupported"}
         if not version_matches:
-            state, outcome = "remains_unknown", "remains_unknown"
+            state = "remains_unknown"
             observed = {"error_code": "service_version_conflict"}
             deterministic_state = False
         elif check.get("status") == "succeeded" and deterministic_state:
-            state, outcome = "matched", "confirmed_succeeded"
+            state = "matched"
         else:
-            state, outcome = "remains_unknown", "remains_unknown"
+            state = "remains_unknown"
         evidence_id = "postcheck-" + row["check_command_id"]
         evidence = {key: observed[key] for key in ("state", "returncode", "duration_s", "error_code")
                     if key in observed and isinstance(observed[key], (str, int, float, bool))}
@@ -241,16 +248,10 @@ class CommandPostcheckService:
                     if key in observed and isinstance(observed[key], (int, float))
                 },
             })
-        saved = self.repository.finish_service_postcheck(
+        return self.repository.finish_service_postcheck(
             owner_id, row["command_id"], kind=SERVICE_KIND, state=state,
             result=evidence, evidence_id=evidence_id, now=float(self.clock()),
         )
-        self.repository.record_reconciliation(
-            owner_id, row["command_id"], actor="postcheck", outcome=outcome,
-            evidence_source="service_check", evidence_reference=evidence_id,
-            reconciliation_id=evidence_id, now=float(self.clock()),
-        )
-        return saved
 
     @staticmethod
     def _service_logs_public(row):
@@ -355,9 +356,12 @@ class CommandPostcheckService:
             and identity_matches
         )
 
-    def _refresh_service_logs(self, owner_id: str, row: dict):
+    def _refresh_service_logs(self, owner_id: str, row: dict[str, Any]) -> dict[str, Any]:
         if row.get("state") != "pending":
-            return row
+            return self.repository.finish_service_postcheck(
+                owner_id, row["command_id"], kind=SERVICE_LOGS_KIND, state=row["state"], result=row.get("result"),
+                evidence_id=row.get("evidence_id"), now=float(self.clock()),
+            )
         check = self.repository.get_for_owner(owner_id, row["check_command_id"])
         if not check or check.get("status") not in {"succeeded", "failed", "unknown", "expired"}:
             return row
@@ -368,26 +372,20 @@ class CommandPostcheckService:
         observed = raw.get("result") if isinstance(raw.get("result"), Mapping) else raw
         observed = dict(observed) if isinstance(observed, Mapping) else {}
         if not version_matches:
-            state, outcome, observed = "remains_unknown", "remains_unknown", {"error_code": "service_version_conflict"}
+            state, observed = "remains_unknown", {"error_code": "service_version_conflict"}
         elif check.get("status") == "succeeded" and isinstance(observed.get("text"), str):
-            state, outcome = "matched", "confirmed_succeeded"
+            state = "matched"
             observed["text"] = observed["text"][:16 * 1024]
         else:
-            state, outcome = "remains_unknown", "remains_unknown"
+            state = "remains_unknown"
         evidence_id = "postcheck-" + row["check_command_id"]
         evidence = {key: observed[key] for key in ("text", "truncated", "redaction", "observed_at", "error_code") if key in observed}
-        saved = self.repository.finish_service_postcheck(
+        return self.repository.finish_service_postcheck(
             owner_id, row["command_id"], kind=SERVICE_LOGS_KIND, state=state,
             result=evidence, evidence_id=evidence_id, now=float(self.clock()),
         )
-        self.repository.record_reconciliation(
-            owner_id, row["command_id"], actor="postcheck", outcome=outcome,
-            evidence_source="service_logs_check", evidence_reference=evidence_id,
-            reconciliation_id=evidence_id, now=float(self.clock()),
-        )
-        return saved
 
-    def request(self, owner_id: str, command_id: str):
+    def request(self, owner_id: str, command_id: str) -> dict[str, Any]:
         try:
             owner_id = validate_owner_id(owner_id)
             command_id = validate_id(command_id, "command_id")
@@ -409,9 +407,9 @@ class CommandPostcheckService:
         except ApplicationError:
             raise
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
-    def get(self, owner_id: str, command_id: str):
+    def get(self, owner_id: str, command_id: str) -> dict[str, Any]:
         try:
             owner_id = validate_owner_id(owner_id)
             command_id = validate_id(command_id, "command_id")
@@ -422,9 +420,9 @@ class CommandPostcheckService:
         except ApplicationError:
             raise
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
-    def request_service(self, owner_id: str, command_id: str):
+    def request_service(self, owner_id: str, command_id: str) -> dict[str, Any]:
         try:
             owner_id = validate_owner_id(owner_id)
             command_id = validate_id(command_id, "command_id")
@@ -449,9 +447,9 @@ class CommandPostcheckService:
         except ApplicationError:
             raise
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
-    def request_service_logs(self, owner_id: str, command_id: str):
+    def request_service_logs(self, owner_id: str, command_id: str) -> dict[str, Any]:
         try:
             owner_id = validate_owner_id(owner_id)
             command_id = validate_id(command_id, "command_id")
@@ -480,9 +478,9 @@ class CommandPostcheckService:
         except ApplicationError:
             raise
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
-    def request_any(self, owner_id: str, command_id: str):
+    def request_any(self, owner_id: str, command_id: str) -> dict[str, Any]:
         """Dispatch only to a server-selected post-check policy."""
         try:
             owner_id = validate_owner_id(owner_id)
@@ -496,9 +494,9 @@ class CommandPostcheckService:
         except ApplicationError:
             raise
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
-    def get_service(self, owner_id: str, command_id: str):
+    def get_service(self, owner_id: str, command_id: str) -> dict[str, Any]:
         try:
             owner_id = validate_owner_id(owner_id)
             command_id = validate_id(command_id, "command_id")
@@ -509,9 +507,9 @@ class CommandPostcheckService:
         except ApplicationError:
             raise
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
-    def get_service_logs(self, owner_id: str, command_id: str):
+    def get_service_logs(self, owner_id: str, command_id: str) -> dict[str, Any]:
         try:
             owner_id = validate_owner_id(owner_id)
             command_id = validate_id(command_id, "command_id")
@@ -522,9 +520,9 @@ class CommandPostcheckService:
         except ApplicationError:
             raise
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
-    def get_any(self, owner_id: str, command_id: str):
+    def get_any(self, owner_id: str, command_id: str) -> dict[str, Any]:
         try:
             owner_id = validate_owner_id(owner_id)
             command_id = validate_id(command_id, "command_id")
@@ -538,7 +536,7 @@ class CommandPostcheckService:
         except ApplicationError:
             raise
         except Exception as exc:
-            raise self._translate(exc) from None
+            raise self._translate(exc) from exc
 
 
 __all__ = ["CommandPostcheckService", "KIND", "POSTCHECK_ACTION", "SERVICE_KIND", "SERVICE_POSTCHECK_ACTION", "SERVICE_LOGS_KIND", "SERVICE_LOGS_POSTCHECK_ACTION"]

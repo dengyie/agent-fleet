@@ -113,7 +113,7 @@ class DurableReadOnlyScheduleService:
         delay = min(self.failure_backoff_cap_s, float(interval_s) * (2 ** min(max(1, int(failures)), 8)))
         return float(now) + delay
 
-    def _run_one(self, owner_id: str, schedule: Mapping[str, Any], *, now: float) -> dict[str, Any]:
+    def _run_one(self, owner_id: str, schedule: Mapping[str, Any], *, now: float, force: bool = False) -> dict[str, Any]:
         schedule_id = schedule["schedule_id"]
         scheduled_at = float(schedule["next_run_at"])
         interval_s = float(schedule["interval_s"])
@@ -164,7 +164,11 @@ class DurableReadOnlyScheduleService:
             )
             return {"schedule_id": schedule_id, "scheduled_at": scheduled_at, "executed": 0, "skipped": 1}
 
-        if existing is None and schedule["missed_policy"] == "skip" and scheduled_at < now:
+        # A poll usually arrives after the due instant. Treat an occurrence as
+        # missed only after a whole period (or one polling interval), and let
+        # explicit manual runs bypass the missed-occurrence policy.
+        missed = now - scheduled_at >= max(interval_s, self.poll_interval_s)
+        if existing is None and schedule["missed_policy"] == "skip" and missed and not force:
             claim = self.repository.claim_trigger(
                 owner_id, schedule_id, scheduled_at=scheduled_at,
                 worker_id=self.worker_id, now=now, lease_s=self.lease_s,
@@ -234,7 +238,7 @@ class DurableReadOnlyScheduleService:
                 continue
             if not force and float(schedule["next_run_at"]) > now:
                 continue
-            item = self._run_one(owner_id, schedule, now=now)
+            item = self._run_one(owner_id, schedule, now=now, force=force)
             for key in ("executed", "failed", "skipped", "coalesced"):
                 result[key] += int(item.get(key, 0))
             result["results"].append(item)

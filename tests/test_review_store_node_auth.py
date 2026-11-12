@@ -102,3 +102,21 @@ def test_limiter_memory_is_bounded(repo):
         for i in range(50):
             repo._record_auth_failure([("node", f"n{i}")], 1.0)
         assert len(repo._auth_failures) <= 8
+
+
+def test_authenticated_credential_fingerprint_fences_rotation_and_disable(repo):
+    from hub.infrastructure.platform_db import node_credential_is_current
+
+    original = repo.authenticate_node_credential("node-a", SECRET)
+    fingerprint = original["credential_fingerprint"]
+    assert len(fingerprint) == 64
+    with repo._connect() as conn:
+        assert node_credential_is_current(conn, owner=OWNER, node="node-a", fingerprint=fingerprint)
+        assert not node_credential_is_current(conn, owner=OWNER, node="node-a", fingerprint=None)
+    repo.provision_node_credential(OWNER, "node-a", secret="r" * 40)
+    with repo._connect() as conn:
+        assert not node_credential_is_current(conn, owner=OWNER, node="node-a", fingerprint=fingerprint)
+    updated = repo.authenticate_node_credential("node-a", "r" * 40)
+    with repo._connect() as conn:
+        conn.execute("UPDATE nodes SET enabled=0 WHERE owner_id=? AND node_id='node-a'", (OWNER,))
+        assert not node_credential_is_current(conn, owner=OWNER, node="node-a", fingerprint=updated["credential_fingerprint"])

@@ -76,6 +76,20 @@ class DefaultsService:
         try:
             owner = self.repository.get_defaults(owner_id)
             snapshot = resolve_run_config(owner_id, owner=owner, conversation=conversation, workspace=workspace, overrides=overrides)
+            # Node defaults belong to the selected workspace, which may come
+            # from the request, conversation overrides, or owner defaults.
+            if snapshot.workspace_id is not None:
+                selected = self.repository.get_workspace(owner_id, snapshot.workspace_id)
+                if not selected or not selected.get("enabled"):
+                    raise ApplicationError("reference_forbidden", "运行配置引用了不可用工作区", 409)
+                workspace_defaults = {
+                    **(workspace or {}),
+                    "execution_node_id": selected.get("default_node_id"),
+                }
+                snapshot = resolve_run_config(
+                    owner_id, owner=owner, conversation=conversation,
+                    workspace=workspace_defaults, overrides=overrides,
+                )
             # Snapshot references are checked against the same owner's enabled
             # catalog before a worker can consume them.
             catalogs = {
@@ -87,10 +101,9 @@ class DefaultsService:
                 if value is not None and value not in catalogs[key]:
                     raise ApplicationError("reference_forbidden", "运行配置引用了不可用资源", 409)
             result = snapshot.as_dict()
-            # Freeze non-secret provider inputs with the Run.  The secret
-            # reference itself stays in the owner-scoped catalog and is
-            # resolved only by the runtime SecretBroker; it never enters the
-            # durable snapshot or public DTO.
+            # Freeze the complete provider binding, including the reference
+            # (never the secret value). SecretBroker resolves its current value
+            # at execution; the public Run DTO omits these private settings.
             if snapshot.model_profile_id is not None:
                 profile = self.repository.get_model(owner_id, snapshot.model_profile_id)
                 if not profile or not profile.get("enabled"):
@@ -100,6 +113,7 @@ class DefaultsService:
                     "model": profile.get("model"),
                     "provider_config": dict(profile.get("provider_config") or {}),
                     "capabilities": dict(profile.get("capabilities") or {}),
+                    "secret_ref": profile.get("secret_ref"),
                 }
             return result
         except ApplicationError:

@@ -335,7 +335,21 @@ class UsageRepository:
                     int(pending["estimated_tokens"]), float(pending["created_at"]),
                     float(pending["expires_at"]), False,
                 )
-            conn.execute("DELETE FROM platform_usage_reservations WHERE expires_at<=?", (now,))
+            from .workflow_budget import check_request_budget
+            from hub.domain.workflow_errors import WorkflowPersistenceError
+
+            try:
+                exceeded = check_request_budget(conn, owner_id, run_id, estimated_tokens, now)
+            except WorkflowPersistenceError as exc:
+                raise UsageRepositoryError("workflow_budget_unavailable") from exc
+            if exceeded is not None:
+                raise UsageLimitExceeded(exceeded)
+            workflow_present = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_budget_reservations'").fetchone()
+            if workflow_present:
+                conn.execute("DELETE FROM platform_usage_reservations WHERE expires_at<=? AND NOT EXISTS "
+                             "(SELECT 1 FROM workflow_budget_reservations q WHERE q.child_request_id=platform_usage_reservations.run_id)", (now,))
+            else:
+                conn.execute("DELETE FROM platform_usage_reservations WHERE expires_at<=?", (now,))
             policy_row = conn.execute(
                 "SELECT * FROM platform_usage_limits WHERE owner_id=? AND model_key=?",
                 (owner_id, model_key),
@@ -512,6 +526,11 @@ class UsageRepository:
                 (owner_id, run_id, normalized["input_tokens"], normalized["output_tokens"],
                  normalized["total_tokens"], 1, occurred_at),
             )
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_budget_checks'").fetchone():
+                conn.execute(
+                    "UPDATE workflow_budget_checks SET active=1 WHERE (owner_id,workflow_id,step_key,generation) IN "
+                    "(SELECT owner_id,workflow_id,step_key,generation FROM workflow_budget_reservations WHERE child_request_id=?)", (run_id,),
+                )
             conn.execute("COMMIT")
             return normalized
         except (sqlite3.Error, ValueError, TypeError) as exc:

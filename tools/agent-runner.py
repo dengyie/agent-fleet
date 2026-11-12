@@ -19,6 +19,7 @@ import time
 from collections import deque
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 
 def _bootstrap_direct_imports():
@@ -50,6 +51,8 @@ from tools.adapters.base import EXIT_UNSAFE_INSTRUCTION
 from tools.client_update import runtime as client_runtime
 from tools.spawn_policy import UnsafeInstruction, refuse_windows_batch
 from tools.transport import Transport
+from tools.runner_source import (SourceCache, SourceUploadError, atomic_private_json,
+                                 attempt_identity, _source_archive, _source_deadline, _check_source_lifecycle)
 
 ROLE = "runner"
 USER_AGENT = client_runtime.client_headers(ROLE)["User-Agent"]
@@ -138,7 +141,7 @@ class _LogBuffer:
         return lines
 
 
-def post_json(cfg, path, body, timeout=15):
+def post_json(cfg, path, body, timeout=15, *, deadline=None, should_cancel=None):
     """POST JSON 到 hub；网络异常返回 (0, {...}) 不抛。
 
     出站策略由 cfg.transport（tools/transport.Transport，auto 模式）承载：
@@ -152,7 +155,8 @@ def post_json(cfg, path, body, timeout=15):
         "X-Runner-Credential": f"{cfg.machine}:{cfg.credential}",
         **client_runtime.client_headers(ROLE),
     }
-    return cfg.transport.post_json(cfg.hub + path, body, headers, timeout=timeout)
+    options = {} if deadline is None else {"deadline": deadline, "should_cancel": should_cancel}
+    return cfg.transport.post_json(cfg.hub + path, body, headers, timeout=timeout, **options)
 
 
 def _valid_attempt_id(value):
@@ -236,6 +240,14 @@ def flush_pending(cfg):
             if not _valid_attempt_id(attempt_id) or f.stem != attempt_id:
                 _quarantine_pending(cfg, f, "invalid_attempt_id")
                 continue
+            if "source_upload" in body:
+                identity = body["source_upload"]
+                if (type(identity) is not dict
+                        or any(identity.get(key) != getattr(cfg, key) for key in ("hub", "machine", "runner_id"))
+                        or identity.get("attempt_id") != attempt_id or identity.get("nonce") != body.get("nonce")):
+                    raise SourceUploadError("source_cache_identity_mismatch")
+                _resume_source_task(cfg, {**identity, "source_capture": True})
+                continue
             status, _ = post_json(cfg, f"/api/commands/{attempt_id}/result", body)
             if status == 200:
                 f.unlink()
@@ -246,13 +258,21 @@ def flush_pending(cfg):
                 f.unlink()
             elif 400 <= status < 500 and status not in _RETRYABLE_4XX:
                 _quarantine_pending(cfg, f, status)
+        except SourceUploadError as exc:
+            if not exc.retryable:
+                from tools.runner_source import retain_pending
+                try:
+                    retain_pending(cfg.cache_dir, f, exc.code)
+                except OSError as retain_error:
+                    log.error("pending 核对记录保存失败 %s: %s", f.name, retain_error)
+            log.warning("pending 源码回传未完成 %s: %s", f.name, exc.code)
         except Exception as exc:
             log.warning("pending 重传失败 %s: %s: %s",
                         f.name, type(exc).__name__, exc)
 
 
-def _submit_result(cfg, attempt_id, nonce, result, diff_stat, duration_s,
-                   files=None, diff_patch=None, test_summary=None):
+def _result_body(attempt_id, nonce, result, diff_stat, duration_s,
+                 files=None, diff_patch=None, test_summary=None):
     body = {
         "attempt_id": attempt_id, "nonce": nonce, "exit_code": result.exit_code,
         "log_summary": result.log_tail, "diff_stat": diff_stat,
@@ -264,6 +284,12 @@ def _submit_result(cfg, attempt_id, nonce, result, diff_stat, duration_s,
         body["diff_patch"] = diff_patch
     if test_summary:
         body["test_summary"] = test_summary
+    return body
+
+
+def _submit_result(cfg, attempt_id, nonce, result, diff_stat, duration_s,
+                   files=None, diff_patch=None, test_summary=None):
+    body = _result_body(attempt_id, nonce, result, diff_stat, duration_s, files, diff_patch, test_summary)
     if not _valid_attempt_id(attempt_id):
         log.error("attempt_id 非法，拒绝提交结果: %r", str(attempt_id)[:80])
         return 0
@@ -328,6 +354,94 @@ def _finish_capture(capture, exit_code):
         log.warning("会话捕获收尾失败: %s: %s", type(exc).__name__, exc)
 
 
+def _publish_source_result(cfg: runner_config.RunnerConfig, task: dict[str, Any], wt: Path | None, base_commit: str | None,
+                           body: dict[str, Any], *, lease_lost: threading.Event, deadline: float) -> int:
+    cache = SourceCache(cfg.cache_dir, attempt_identity(cfg, task))
+    cache.save_result(body)
+    pending = _pending_dir(cfg) / f"{task['attempt_id']}.json"
+    atomic_private_json(pending, {**body, "source_upload": cache.identity})
+    try:
+        if cache.state()["source_receipt"] is None:
+            receipt = _source_archive(cfg, task, wt, base_commit, lease_lost=lease_lost, deadline=deadline)
+            cache.save_receipt(receipt)
+        _check_source_lifecycle(lease_lost, deadline)
+        status, _ = post_json(cfg, f"/api/commands/{task['attempt_id']}/result", body,
+                              timeout=min(15, deadline - time.monotonic()), deadline=deadline, should_cancel=lease_lost.is_set)
+        if status == 200:
+            pending.unlink(missing_ok=True)
+        return status
+    except SourceUploadError:
+        raise
+    except Exception as exc:
+        raise SourceUploadError("source_delivery_interrupted") from exc
+
+
+def _resume_source_task(cfg: runner_config.RunnerConfig, task: dict[str, Any]) -> dict[str, Any]:
+    cache = SourceCache(cfg.cache_dir, attempt_identity(cfg, task))
+    state = cache.state()
+    if state["result"] is None or cache.archive() is None:
+        raise SourceUploadError("source_capture_unconfirmed")
+    deadline = time.monotonic() + cache.remaining(time.time())
+    lost = threading.Event()
+    _check_source_lifecycle(lost, deadline)
+    status, _ = post_json(cfg, f"/api/commands/{task['attempt_id']}/heartbeat", {"nonce": task["nonce"], "log_lines": []},
+                          timeout=min(15, deadline - time.monotonic()), deadline=deadline, should_cancel=lost.is_set)
+    if status != 200 and not (status == 409 and state["source_receipt"] is not None):
+        raise SourceUploadError("source_lease_unconfirmed")
+    if status == 409:
+        # No source publication is permitted after a failed heartbeat. A
+        # previously confirmed source allows only the original idempotent result.
+        status = _publish_source_result(cfg, task, None, None, state["result"], lease_lost=lost, deadline=deadline)
+        return {"exit_code": state["result"]["exit_code"], "source_pending": status != 200}
+    heartbeat, stop = _start_heartbeat(cfg, task, _LogBuffer(), lost, deadline=deadline)
+    try:
+        status = _publish_source_result(cfg, task, None, None, state["result"], lease_lost=lost, deadline=deadline)
+        return {"exit_code": state["result"]["exit_code"], "source_pending": status != 200}
+    finally:
+        _stop_heartbeat(stop, heartbeat)
+
+
+def _prepare_source_task(cfg: runner_config.RunnerConfig, task: dict[str, Any]) -> tuple[float | None, dict[str, Any] | None]:
+    if not task.get("source_capture"):
+        return None, None
+    deadline = _source_deadline(cfg, task)
+    _check_source_lifecycle(None, deadline)
+    cache = SourceCache(cfg.cache_dir, attempt_identity(cfg, task))
+    if cache.begin(time.time() + max(0, deadline - time.monotonic())):
+        return deadline, None
+    return deadline, _resume_source_task(cfg, task)
+
+
+def _start_heartbeat(cfg: runner_config.RunnerConfig, task: dict[str, Any], log_buffer: _LogBuffer,
+                     lease_lost: threading.Event, *, deadline: float | None = None) -> tuple[threading.Thread, threading.Event]:
+    stop = threading.Event()
+    def heartbeat_loop() -> None:
+        while not stop.wait(max(.1, cfg.heartbeat_interval_s)):
+            if deadline is not None and time.monotonic() >= deadline:
+                lease_lost.set()
+                return
+            lines = _bounded_log_lines(log_buffer.drain())
+            options = {} if deadline is None else {"deadline": deadline, "should_cancel": stop.is_set,
+                                                    "timeout": min(15, deadline - time.monotonic())}
+            status, _ = post_json(cfg, f"/api/commands/{task['attempt_id']}/heartbeat",
+                                  {"nonce": task["nonce"], "log_lines": lines}, **options)
+            if status != 200:
+                lease_lost.set()
+                return
+
+    thread = threading.Thread(target=heartbeat_loop, name="lease-heartbeat", daemon=True)
+    thread.start()
+    return thread, stop
+
+
+def _stop_heartbeat(stop, thread):
+    if thread is None:
+        return True
+    stop.set()
+    thread.join(timeout=20)
+    return not thread.is_alive()
+
+
 def _bf_supervisor():
     """Lazily expose tools.supervisor (only when managed mode is opted in)."""
     from tools.supervisor import supervisor as _s
@@ -356,8 +470,18 @@ def run_task_managed(cfg, task, supervisor):
                        "", 0.0)
         return {"exit_code": 126}
 
+    try:
+        source_deadline, resumed = _prepare_source_task(cfg, task)
+        if resumed is not None:
+            return resumed
+    except SourceUploadError as exc:
+        log.warning("源码 attempt 不能重放 %s: %s", task["attempt_id"], exc.code)
+        return {"exit_code": None, "source_pending": True, "error": exc.code}
+
     wt = None
+    base_commit = None
     capture = None
+    hb_stop = threading.Event()
     log_buffer = _LogBuffer()
     lease_lost = threading.Event()
     # bounded running tail for the final log_summary (mirrors adapter contract)
@@ -379,10 +503,20 @@ def run_task_managed(cfg, task, supervisor):
     lease = _LeaseClock()
 
     def heartbeat_loop():
-        while not lease_lost.wait(cfg.heartbeat_interval_s):
+        while not hb_stop.wait(cfg.heartbeat_interval_s):
+            if source_deadline is not None and should_abort():
+                lease_lost.set()
+                return
             lines = _bounded_log_lines(log_buffer.drain())
+            options = {} if source_deadline is None else {
+                "deadline": source_deadline, "should_cancel": hb_stop.is_set,
+                "timeout": min(15, source_deadline - time.monotonic()),
+            }
             status, _ = post_json(cfg, f"/api/commands/{task['attempt_id']}/heartbeat",
-                                  {"nonce": task["nonce"], "log_lines": lines})
+                                  {"nonce": task["nonce"], "log_lines": lines}, **options)
+            if source_deadline is not None and should_abort():
+                lease_lost.set()
+                return
             if status == 200:
                 lease.renewed()
             elif status == 409:
@@ -390,7 +524,8 @@ def run_task_managed(cfg, task, supervisor):
                 return
 
     def should_abort():
-        return lease_lost.is_set() or lease.expired()
+        return lease_lost.is_set() or lease.expired() or (
+            source_deadline is not None and time.monotonic() >= source_deadline)
 
     started = time.monotonic()
     session_id = None
@@ -401,9 +536,14 @@ def run_task_managed(cfg, task, supervisor):
                               name="lease-heartbeat", daemon=True)
         hb.start()
         wt = worktree.create_worktree(project, task["task_id"])
+        if source_deadline is not None:
+            _check_source_lifecycle(lease_lost, source_deadline)
+            base_commit = worktree.head_commit(wt)
         agent_cfg = cfg.agents.get(task["agent_type"], {})
         adapter = adapters.create(task["agent_type"], command=agent_cfg.get("command"))
         timeout_s = agent_cfg.get("timeout_s", 1800)
+        if source_deadline is not None:
+            timeout_s = min(timeout_s, max(0, source_deadline - time.monotonic()))
         if not adapter.command:
             result = adapters.AdapterResult(
                 exit_code=127, log_tail="managed: adapter 未配置 command")
@@ -450,7 +590,17 @@ def run_task_managed(cfg, task, supervisor):
             timed_out=result.timed_out,
             aborted=result.aborted,
         )
-        lease_lost.set()
+        if source_deadline is not None and adapter_result.exit_code == 0:
+            if should_abort():
+                raise SourceUploadError("source_lease_lost")
+            _finish_capture(capture, adapter_result.exit_code)
+            out = _collect_outputs(wt)
+            body = _result_body(task["attempt_id"], task["nonce"], adapter_result, out["diff"],
+                time.monotonic() - started, out["files"], out["patch"] or None, out["summary"])
+            status = _publish_source_result(cfg, task, wt, base_commit, body,
+                lease_lost=lease_lost, deadline=source_deadline)
+            return {"exit_code": adapter_result.exit_code, "source_pending": status != 200}
+        hb_stop.set()
         hb.join(timeout=20)
         _finish_capture(capture, adapter_result.exit_code)
         duration = time.monotonic() - started
@@ -459,6 +609,9 @@ def run_task_managed(cfg, task, supervisor):
                        adapter_result, out["diff"], duration, files=out["files"],
                        diff_patch=out["patch"] or None, test_summary=out["summary"])
         return {"exit_code": adapter_result.exit_code}
+    except SourceUploadError as exc:
+        log.warning("源码交付保留待恢复 %s: %s", task["attempt_id"], exc.code)
+        return {"exit_code": None, "source_pending": True, "error": exc.code}
     except Exception as exc:
         lease_lost.set()
         result = adapters.AdapterResult(
@@ -467,6 +620,7 @@ def run_task_managed(cfg, task, supervisor):
                        result, "", time.monotonic() - started)
         return {"exit_code": 125}
     finally:
+        _stop_heartbeat(hb_stop, hb)
         lease_lost.set()
         if capture is not None:
             capture.stop_upload()
@@ -512,8 +666,19 @@ def run_task(cfg, task):
         _submit_result(cfg, attempt_id, nonce, result, "", 0.0)
         return {"exit_code": 126}
 
+    try:
+        source_deadline, resumed = _prepare_source_task(cfg, task)
+        if resumed is not None:
+            return resumed
+    except SourceUploadError as exc:
+        log.warning("源码 attempt 不能重放 %s: %s", attempt_id, exc.code)
+        return {"exit_code": None, "source_pending": True, "error": exc.code}
+
     wt = None
+    base_commit = None
     capture = None
+    hb = None
+    hb_stop = threading.Event()
     # 有界日志缓冲：入队截断 ≤500 字符/行，仅保留最新 50 行 ——
     # heartbeat 上传恒 ≤50 行 × 500 字符（与 hub 契约一致，旧行安全丢弃）。
     log_buffer = _LogBuffer()
@@ -527,10 +692,20 @@ def run_task(cfg, task):
     lease = _LeaseClock()
 
     def heartbeat_loop():
-        while not lease_lost.wait(cfg.heartbeat_interval_s):
+        while not hb_stop.wait(cfg.heartbeat_interval_s):
+            if source_deadline is not None and should_abort():
+                lease_lost.set()
+                return
             lines = _bounded_log_lines(log_buffer.drain())
+            options = {} if source_deadline is None else {
+                "deadline": source_deadline, "should_cancel": hb_stop.is_set,
+                "timeout": min(15, source_deadline - time.monotonic()),
+            }
             status, _ = post_json(cfg, f"/api/commands/{attempt_id}/heartbeat",
-                                  {"nonce": nonce, "log_lines": lines})
+                                  {"nonce": nonce, "log_lines": lines}, **options)
+            if source_deadline is not None and should_abort():
+                lease_lost.set()
+                return
             if status == 200:
                 lease.renewed()
             elif status == 409:
@@ -540,20 +715,37 @@ def run_task(cfg, task):
     def should_abort():
         # 409 / 本地租约到期（长时间续约失败）中止 adapter；
         # 会话捕获失败只降级（RunnerCapture.degraded），不中止健康任务。
-        return lease_lost.is_set() or lease.expired()
+        return lease_lost.is_set() or lease.expired() or (
+            source_deadline is not None and time.monotonic() >= source_deadline)
 
     try:
         capture = _start_capture(cfg, task)
         wt = worktree.create_worktree(project, task_id)
+        if source_deadline is not None:
+            _check_source_lifecycle(lease_lost, source_deadline)
+            base_commit = worktree.head_commit(wt)
         agent_cfg = cfg.agents.get(task["agent_type"], {})
+        timeout_s = agent_cfg.get("timeout_s", 1800)
+        if source_deadline is not None:
+            timeout_s = min(timeout_s, max(0, source_deadline - time.monotonic()))
         adapter = adapters.create(task["agent_type"],
                                   command=agent_cfg.get("command"),
-                                  timeout_s=agent_cfg.get("timeout_s", 1800))
+                                  timeout_s=timeout_s)
         hb = threading.Thread(target=heartbeat_loop, name="lease-heartbeat", daemon=True)
         hb.start()
         result = adapter.run(task["instruction"], wt, on_line=on_line,
                              should_abort=should_abort)
-        lease_lost.set()  # 停 heartbeat 线程
+        if source_deadline is not None and result.exit_code == 0:
+            if should_abort():
+                raise SourceUploadError("source_lease_lost")
+            _finish_capture(capture, result.exit_code)
+            out = _collect_outputs(wt)
+            body = _result_body(attempt_id, nonce, result, out["diff"], time.monotonic() - started,
+                out["files"], out["patch"] or None, out["summary"])
+            status = _publish_source_result(cfg, task, wt, base_commit, body,
+                lease_lost=lease_lost, deadline=source_deadline)
+            return {"exit_code": result.exit_code, "source_pending": status != 200}
+        hb_stop.set()  # 停 heartbeat 线程，独立于真实租约失效状态
         hb.join(timeout=20)
         _finish_capture(capture, result.exit_code)
         duration = time.monotonic() - started
@@ -562,6 +754,9 @@ def run_task(cfg, task):
                        files=out["files"], diff_patch=out["patch"] or None,
                        test_summary=out["summary"])
         return {"exit_code": result.exit_code}
+    except SourceUploadError as exc:
+        log.warning("源码交付保留待恢复 %s: %s", attempt_id, exc.code)
+        return {"exit_code": None, "source_pending": True, "error": exc.code}
     except Exception as exc:
         lease_lost.set()
         result = adapters.AdapterResult(
@@ -569,6 +764,7 @@ def run_task(cfg, task):
         _submit_result(cfg, attempt_id, nonce, result, "", time.monotonic() - started)
         return {"exit_code": 125}
     finally:
+        _stop_heartbeat(hb_stop, hb)
         lease_lost.set()
         if capture is not None:
             capture.stop_upload()

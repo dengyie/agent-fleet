@@ -65,6 +65,15 @@ def register_fleet_extension(app, config, repositories, core, platform, sessions
         services["command_inspection"] = p.command_inspection
         services["command_postcheck"] = p.command_postcheck
         services["platform_artifacts"] = p.artifact_store
+        if p.mcp_catalog is not None:
+            services["mcp_catalog"] = p.mcp_catalog
+        if (config.platform_mcp_connectors_enabled and p.mcp_catalog is not None
+                and getattr(p.mcp_catalog, "enabled", False) and getattr(p.mcp_catalog, "store", None) is not None):
+            from hub.application.mcp_catalog_admin import MCPCatalogAdminService
+            services["mcp_catalog_admin"] = MCPCatalogAdminService(p.mcp_catalog,
+                registration_enabled=config.platform_mcp_catalog_registration_enabled)
+        if p.mcp_catalog_repository is not None:
+            repos["mcp_catalog"] = p.mcp_catalog_repository
         if p.service_health is not None:
             services["service_health"] = p.service_health
         if p.service_repository is not None:

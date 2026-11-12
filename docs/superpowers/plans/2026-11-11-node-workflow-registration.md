@@ -1,0 +1,25 @@
+# Persistent Node Workflow configuration
+
+**Goal:** Start the proven remote fixed-test capability from the existing long-running Node CLI configuration, without a test-only Python runtime constructor.
+
+**Architecture:** Extend `tools.plugins.node` with an optional `workflow_test` section assembled by `tools.platform.node_registration`. Reuse the same `NodeRuntime`, capability reporter, signed artifact receiver, fixed-test executor, journal, local lock and signal loop. Existing plugin enrollments/configurations retain their behavior. An empty plugin map is allowed only with explicit Workflow opt-in; no arbitrary action/capability configuration is introduced.
+
+**Constraints:** Python 3.10; UTF-8 without BOM; no dependency installation, production mutation or downloads. No new execution lifecycle, protocol/schema, fixture success synthesis or automatic human acceptance. This slice does not cover general MCP/Muse integration or all node roles.
+
+- [x] Reproduce the existing CLI rejecting a Workflow configuration; retain the red evidence.
+- [x] Parse exact fixed-test capability, explicit source directory and absolute launcher argv into the original runtime config. Reject mismatched capability and incomplete local opt-in before local mutation.
+- [x] Exercise real Hub capability HTTP/report/poll, CLI manifest/once, lock contention and restart; retain plugin regression coverage and validate same signed journal reuse.
+- [x] Document persistent config, shutdown/restart and live verification boundaries; register journey selectors and verify lint/syntax/encoding plus focused integration tests.
+
+Back to [Hub registration](2026-11-11-workflow-startup-registration.md), [Workflow configuration](../../platform/workflow-platform/startup-registration.md), [acceptance matrix](../../testing/workflow-platform-acceptance.md) and [development ledger](../../platform/development-completion.md).
+
+## Verified results — 2026-11-11
+
+- Initial CLI registration reproduction: two failing positive cases, six rejection cases passed (`agent-fleet-node-workflow-startup-red.xml`). Existing CLI allowed no Workflow section; runtime components already existed. Added optional config translation in `tools.platform.node_registration`, reused by `tools.plugins.node`. Empty plugins are permitted only with explicit Workflow configuration. No new HTTP endpoints, command actions, lifecycle or dependencies.
+- Signal regression separately reproduced two failures: SIGTERM/SIGINT stopped the outer loop but did not reach the active NodeRuntime. `request_stop()` now sets the existing cancellation event from the CLI signal handler; shutdown/lock release still happens after poll returns. The existing actual process-control regressions remain in the associated suite.
+- Configuration test runs the real CLI as an independent subprocess against a real local Hub HTTP server, with Hub startup registration from file. Original heartbeat/capability-offers/poll each return 200; no plugin registration for a pure test Node. Lock contention, restart, signed receive and outbox reuse are verified. Native Linux fixed-test execution binds the original capability preflight, source receipt, recipe, report/JUnit and journal; restart invokes neither preflight nor test execution, with one download total. Its fixture launcher is deliberately not claimed as isolation evidence.
+- Independent frozen source `feab24dd47c0ba3125570cccade957a225a7d159`, 1170 files, 6,935,210-byte source archive. macOS twelve-module associated suite: **240 passed, one Linux-only skip, 41.61 s**. Same source SG Linux startup suite: **13 passed, no skips, 3.30 s**; twelve-module associated suite: **241 passed, no skips, 65.15 s**. Linux used the existing private Python 3.11.2 environment and existing sandbox tools; no installation, downloads, service/configuration or production changes.
+- Both source sets remain hash-identical; local frozen checkout is clean. Copied Linux XML reports have matching remote/local SHA-256. CI-selected Ruff, diff, Python3.10 AST for 825 Python files, UTF-8/no-BOM and JSON/Python config examples pass. Seven selectors added to NODE-01 (plus the five Hub startup selectors in WF-01); full collection is **7070 cases, 44 journeys, 2085 selectors, none missing**. Collection and associated suites do not constitute the full release gate.
+- Evidence, original failures, source manifest/archive and independently parsed XML summary: `/Users/mango/.cache/agent-fleet/verification/node-startup-20261111-5l7xqxji/verified-summary.json`. Operator instructions: [persistent Node startup](../../platform/workflow-platform/node-startup.md). Post-freeze changes only record results in documentation.
+
+Follow-up: repeatable Hub workspace/conversation bootstrap is verified in the [bootstrap plan](2026-11-11-workflow-bootstrap.md#verified-results--2026-11-11). Remaining: selected production launcher/reviewer configuration, final same-source release gates and deployment; full WF-04/05, external integrations and the remaining overall roadmap. No human acceptance, commit/push/merge or production rollout is implied.

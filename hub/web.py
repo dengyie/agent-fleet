@@ -159,6 +159,13 @@ def _optional_setting(value, *, env: str):
     return os.environ.get(env) or None
 
 
+def _file_setting(value, *, env: str):
+    """Resolve a file-backed setting; an explicitly empty value disables it."""
+    if value is not None:
+        return value
+    return os.environ[env] if env in os.environ else _gate_conf_text(env)
+
+
 def _bounded_float(value, *, default: float, lower: float, upper: float) -> float:
     try:
         parsed = float(default if value is None else value)
@@ -214,6 +221,17 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
              platform_worker_lease_s=None, platform_worker_scheduler_enabled=None,
              platform_worker_max_concurrency=None, platform_sandbox_launcher=None,
              platform_worker_max_workspace_concurrency=None,
+             platform_workflows_enabled=None, platform_workflow_dispatch_enabled=None,
+             platform_workflow_registration_file=None,
+             platform_mcp_connectors_enabled=None,
+             platform_mcp_catalog_registration_enabled=None,
+             platform_mcp_registration_file=None,
+             platform_capability_routing_enabled=None,
+             platform_external_agents_enabled=None,
+             platform_muse_registration_file=None,
+             platform_fleet_mcp_enabled=None,
+             platform_artifact_transfer_enabled=None,
+             platform_artifact_transfer_max_bytes=64 * 1024 * 1024,
              platform_provider_network_enabled=None,
              platform_remote_execution_enabled=None,
              platform_browser_enabled=None, platform_browser_network_enabled=None,
@@ -397,6 +415,29 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         platform_worker_scheduler_enabled=platform_worker_scheduler_on,
         platform_worker_max_concurrency=platform_worker_max_concurrency,
         platform_worker_max_workspace_concurrency=platform_worker_max_workspace_concurrency,
+        platform_workflows_enabled=_feature_on(
+            platform_workflows_enabled, env="AGENT_FLEET_PLATFORM_WORKFLOWS_ENABLED"),
+        platform_workflow_dispatch_enabled=_feature_on(
+            platform_workflow_dispatch_enabled, env="AGENT_FLEET_PLATFORM_WORKFLOW_DISPATCH_ENABLED"),
+        platform_workflow_registration_file=_file_setting(platform_workflow_registration_file,
+            env="AGENT_FLEET_PLATFORM_WORKFLOW_REGISTRATION_FILE"),
+        platform_capability_routing_enabled=_feature_on(
+            platform_capability_routing_enabled, env="AGENT_FLEET_PLATFORM_CAPABILITY_ROUTING_ENABLED"),
+        platform_external_agents_enabled=_feature_on(
+            platform_external_agents_enabled, env="AGENT_FLEET_PLATFORM_EXTERNAL_AGENTS_ENABLED"),
+        platform_muse_registration_file=_file_setting(platform_muse_registration_file,
+            env="AGENT_FLEET_PLATFORM_MUSE_REGISTRATION_FILE"),
+        platform_fleet_mcp_enabled=_feature_on(
+            platform_fleet_mcp_enabled, env="AGENT_FLEET_PLATFORM_FLEET_MCP_ENABLED"),
+        platform_artifact_transfer_enabled=_feature_on(
+            platform_artifact_transfer_enabled, env="AGENT_FLEET_PLATFORM_ARTIFACT_TRANSFER_ENABLED"),
+        platform_artifact_transfer_max_bytes=platform_artifact_transfer_max_bytes,
+        platform_mcp_connectors_enabled=_feature_on(
+            platform_mcp_connectors_enabled, env="AGENT_FLEET_PLATFORM_MCP_CONNECTORS_ENABLED"),
+        platform_mcp_catalog_registration_enabled=_feature_on(
+            platform_mcp_catalog_registration_enabled, env="AGENT_FLEET_PLATFORM_MCP_CATALOG_REGISTRATION_ENABLED"),
+        platform_mcp_registration_file=_file_setting(platform_mcp_registration_file,
+            env="AGENT_FLEET_PLATFORM_MCP_REGISTRATION_FILE"),
         platform_worker_interval_s=platform_worker_interval,
         platform_worker_lease_s=platform_worker_lease,
         platform_sandbox_launcher=sandbox_launcher,

@@ -1,5 +1,4 @@
 import json
-import os
 import sqlite3
 from pathlib import Path
 
@@ -10,6 +9,7 @@ from hub.infrastructure.platform_backup import (
     PlatformBackupService,
     _rename_directory_no_replace,
     _publish_new_directory,
+    _fsync_path,
 )
 from hub.infrastructure.platform_db import PlatformRepository
 from hub.platform.artifacts import ArtifactStore
@@ -133,6 +133,30 @@ def test_create_backup_never_overwrites_existing_target(tmp_path):
         PlatformBackupService().create_backup(db_path, artifact_root, target)
     assert exc.value.code == "destination_exists"
     assert marker.read_text(encoding="utf-8") == "keep"
+
+
+def test_staged_backup_file_flush_preserves_complete_bytes(tmp_path):
+    payload = tmp_path / "payload.bin"
+    original = b"backup\x00\xff" * 1024
+    payload.write_bytes(original)
+    _fsync_path(payload)
+    assert payload.read_bytes() == original
+
+
+def test_publish_flush_failure_keeps_stage_and_target_absent(tmp_path, monkeypatch):
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (stage / "payload").write_bytes(b"preserve staged evidence")
+    target = tmp_path / "backup"
+
+    def failed_flush(descriptor):
+        raise OSError("injected flush failure")
+
+    monkeypatch.setattr("hub.infrastructure.platform_backup.os.fsync", failed_flush)
+    with pytest.raises(BackupError, match="publish_failed"):
+        _publish_new_directory(stage, target)
+    assert not target.exists()
+    assert (stage / "payload").read_bytes() == b"preserve staged evidence"
 
 
 def test_publish_does_not_replace_empty_target_created_after_check(

@@ -9,6 +9,8 @@ import re
 import subprocess
 import xml.etree.ElementTree as ET
 
+from tools.testing.png_evidence import verify_png
+
 
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -220,16 +222,18 @@ def verify_release_evidence(evidence_dir: Path | str, *, expected_revision: str,
     junit_cases = _verify_junit(evidence / "results.xml")
     _verify_external_checks(matrix, report)
     browser_dir = evidence / "browser"
-    screenshots = [path for path in browser_dir.rglob("*.png") if path.is_file()] if browser_dir.is_dir() else []
-    if not screenshots:
-        raise EvidenceError("browser_evidence_missing")
+    found_screenshot = False
     try:
-        for path in screenshots:
+        for path in browser_dir.rglob("*.png"):
+            if not path.is_file():
+                continue
+            found_screenshot = True
             with path.open("rb") as image:
-                if image.read(8) != b"\x89PNG\r\n\x1a\n":
-                    raise EvidenceError("browser_evidence_invalid")
-    except OSError:
-        raise EvidenceError("browser_evidence_invalid") from None
+                verify_png(image)
+    except (OSError, ValueError) as exc:
+        raise EvidenceError("browser_evidence_invalid") from exc
+    if not found_screenshot:
+        raise EvidenceError("browser_evidence_missing")
     _verify_checkout(root, expected_revision)
     return {"journeys": journey_count, "selectors": selector_count, "junit_cases": junit_cases}
 

@@ -7,22 +7,18 @@ from typing import Any
 from fleet_core.backends.base import ToolReceipt
 from fleet_core.browser_policy import BROWSER_TOOLS, BrowserBackendError
 from fleet_core.web_agent_contract import WEB_AGENT_TOOLS, MuseBridgeError
+from fleet_core.artifact_receive import ArtifactReceiveError, RECEIVE_ACTION
+from fleet_core.artifact_export import ArtifactExportError, EXPORT_ACTION
+from fleet_core.capability import CapabilityError
+from fleet_core.capability_execution import CAPABILITY_ARGUMENT
+from fleet_core.remote_workflow_test import REMOTE_TEST_ACTION, RemoteTestError
 from .browser_backend import BrowserExecutionError
 
 
-BROWSER_SESSION_CAPABILITY = "browser.session"
-NODE_TOOLS = frozenset({
-    "workspace.list", "workspace.read", "workspace.write",
-    "workspace.exec",
-}) | BROWSER_TOOLS | WEB_AGENT_TOOLS
-POSTCHECK_ACTION = "reconcile.workspace.digest"
-SERVICE_POSTCHECK_ACTION = "reconcile.service.inspect"
-SERVICE_LOGS_POSTCHECK_ACTION = "reconcile.service.logs"
-POSTCHECK_ACTIONS = frozenset({
-    POSTCHECK_ACTION,
-    SERVICE_POSTCHECK_ACTION,
-    SERVICE_LOGS_POSTCHECK_ACTION,
-})
+from fleet_core.node_action_contract import (
+    BROWSER_SESSION_CAPABILITY, NODE_TOOLS, POSTCHECK_ACTION,
+    SERVICE_POSTCHECK_ACTION, SERVICE_LOGS_POSTCHECK_ACTION, POSTCHECK_ACTIONS,
+)
 
 
 class NodeToolExecutor:
@@ -33,14 +29,32 @@ class NodeToolExecutor:
     assembled into a shell command here.
     """
 
+    controlled_actions = frozenset({'tool.workspace.exec', REMOTE_TEST_ACTION})
+
     def __init__(self, backend, *, allowed_tools: frozenset[str] | set[str] | None = None,
                  service_executor=None, log_reader=None, browser_backend=None,
                  browser_enabled: bool = False, web_agent_executor=None,
                  plugin_executor=None,
+                 artifact_receiver=None, artifact_exporter=None,
+                 capability_prepare=None,
+                 workflow_test_executor=None,
+                 workspace_id: str | None = None, workspace_backends: Mapping[str, Any] | None = None,
                  allowed_postcheck_actions: frozenset[str] | set[str] | None = None):
         self.backend = backend
+        self.workspace_backends = dict(workspace_backends or {})
+        if any(not isinstance(resource_id, str) or not resource_id or candidate is None
+                for resource_id, candidate in self.workspace_backends.items()):
+            raise ValueError("invalid workspace binding")
+        if workspace_id is not None:
+            if not isinstance(workspace_id, str) or not workspace_id or backend is None or workspace_id in self.workspace_backends:
+                raise ValueError("invalid workspace binding")
+            self.workspace_backends[workspace_id] = backend
         self.web_agent_executor = web_agent_executor
         self.plugin_executor = plugin_executor
+        self.artifact_receiver = artifact_receiver
+        self.artifact_exporter = artifact_exporter
+        self.capability_prepare = capability_prepare
+        self.workflow_test_executor = workflow_test_executor
         self.browser_backend = browser_backend
         self.browser_enabled = bool(browser_enabled)
         self.allowed_tools = frozenset(NODE_TOOLS if allowed_tools is None else allowed_tools)
@@ -54,24 +68,69 @@ class NodeToolExecutor:
     @staticmethod
     def _wire(command_id: str, receipt: ToolReceipt) -> dict[str, Any]:
         return {
-            "state": receipt.state if receipt.state in {"succeeded", "failed"} else "failed",
+            "state": receipt.state if receipt.state in {"succeeded", "failed", "unknown"} else "failed",
             "result": dict(receipt.result or {}),
             "error_code": receipt.error_code,
             "truncated": bool(receipt.truncated),
             "command_id": command_id,
         }
 
-    def __call__(self, command: Mapping[str, Any]) -> dict[str, Any]:
+    def execute_controlled(self, command: Mapping[str, Any], *, should_cancel):
+        return self(command, should_cancel=should_cancel)
+
+    def __call__(self, command: Mapping[str, Any], *, should_cancel=None) -> dict[str, Any]:
         if not isinstance(command, Mapping):
             return {"state": "failed", "result": {}, "error_code": "invalid_command"}
         command_id = command.get("command_id")
         action = command.get("action")
         if not isinstance(command_id, str) or not command_id or not isinstance(action, str):
             return {"state": "failed", "result": {}, "error_code": "invalid_command"}
+        if should_cancel is not None and should_cancel():
+            return {'state': 'failed', 'result': {}, 'error_code': 'cancelled', 'command_id': command_id}
+        arguments = command.get("arguments")
+        signed_command = command
+        if action == REMOTE_TEST_ACTION and (not isinstance(arguments, Mapping) or CAPABILITY_ARGUMENT not in arguments):
+            return {"state": "failed", "result": {}, "error_code": "capability_unavailable", "command_id": command_id}
+        if isinstance(arguments, Mapping) and CAPABILITY_ARGUMENT in arguments:
+            if self.capability_prepare is None:
+                return {"state": "failed", "result": {}, "error_code": "capability_unavailable", "command_id": command_id}
+            try:
+                command = self.capability_prepare(command)
+            except CapabilityError as exc:
+                return {"state": "failed", "result": {}, "error_code": exc.code, "command_id": command_id}
+        if action == REMOTE_TEST_ACTION:
+            if self.workflow_test_executor is None or not self.workflow_test_executor.available:
+                return {"state": "failed", "result": {}, "error_code": "capability_unavailable", "command_id": command_id}
+            try:
+                result = self.workflow_test_executor.execute(signed_command, **(
+                    {'should_cancel': should_cancel} if should_cancel is not None else {}))
+                return {"state": "succeeded", "result": result, "command_id": command_id}
+            except RemoteTestError as exc:
+                return {"state": "unknown" if exc.uncertain else "failed", "result": {},
+                    "error_code": exc.code, "command_id": command_id}
         if action.startswith('plugin.'):
             if self.plugin_executor is None:
                 return {'state': 'failed', 'result': {}, 'error_code': 'plugin_not_installed', 'command_id': command_id}
             return self.plugin_executor.execute(command)
+        if action == RECEIVE_ACTION:
+            if self.artifact_receiver is None or not self.artifact_receiver.available:
+                return {"state": "failed", "result": {}, "error_code": "capability_unavailable", "command_id": command_id}
+            try:
+                result = self.artifact_receiver.receive(command)
+                return {"state": "succeeded", "result": result, "command_id": command_id}
+            except ArtifactReceiveError as exc:
+                return {"state": "unknown" if exc.uncertain else "failed", "result": {},
+                    "error_code": exc.code, "command_id": command_id}
+        if action == EXPORT_ACTION:
+            if self.artifact_exporter is None or not self.artifact_exporter.available:
+                return {"state": "failed", "result": {}, "error_code": "capability_unavailable", "command_id": command_id}
+            try:
+                result = self.artifact_exporter.export(command)
+                return {"state": "succeeded", "result": result, "command_id": command_id}
+            except ArtifactExportError as exc:
+                return {"state": "unknown" if exc.uncertain else "failed", "result": {},
+                    "error_code": exc.code, "command_id": command_id,
+                    "deferred": self.artifact_exporter.deferred(command_id)}
         if action in POSTCHECK_ACTIONS and action not in self.allowed_postcheck_actions:
             return {"state": "failed", "result": {},
                     "error_code": "capability_unavailable", "command_id": command_id}
@@ -79,8 +138,12 @@ class NodeToolExecutor:
             arguments = command.get("arguments")
             if not isinstance(arguments, Mapping) or set(arguments) != {"path"} or not isinstance(arguments.get("path"), str):
                 return {"state": "failed", "result": {}, "error_code": "invalid_arguments", "command_id": command_id}
+            resource_id = command.get("resource_id")
+            backend = self.workspace_backends.get(resource_id) if isinstance(resource_id, str) else None
+            if backend is None:
+                return {"state": "failed", "result": {}, "error_code": "workspace_unavailable", "command_id": command_id}
             try:
-                receipt = self.backend.digest(arguments["path"])
+                receipt = backend.digest(arguments["path"])
             except Exception:
                 raise
             if not isinstance(receipt, ToolReceipt):
@@ -206,25 +269,30 @@ class NodeToolExecutor:
         arguments = command.get("arguments")
         if not isinstance(arguments, Mapping):
             return {"state": "failed", "result": {}, "error_code": "invalid_arguments", "command_id": command_id}
+        resource_id = command.get("resource_id")
+        backend = self.workspace_backends.get(resource_id) if isinstance(resource_id, str) else None
+        if backend is None:
+            return {"state": "failed", "result": {}, "error_code": "workspace_unavailable", "command_id": command_id}
         try:
             if tool == "workspace.list":
                 if set(arguments) - {"path"} or not isinstance(arguments.get("path", ""), str):
                     return {"state": "failed", "result": {}, "error_code": "invalid_arguments", "command_id": command_id}
-                receipt = self.backend.list(arguments.get("path", ""))
+                receipt = backend.list(arguments.get("path", ""))
             elif tool == "workspace.read":
                 if set(arguments) - {"path"} or not isinstance(arguments.get("path"), str):
                     return {"state": "failed", "result": {}, "error_code": "invalid_arguments", "command_id": command_id}
-                receipt = self.backend.read(arguments.get("path"))
+                receipt = backend.read(arguments.get("path"))
             elif tool == "workspace.write":
                 if set(arguments) - {"path", "content"} or not isinstance(arguments.get("path"), str) or not isinstance(arguments.get("content"), str):
                     return {"state": "failed", "result": {}, "error_code": "invalid_arguments", "command_id": command_id}
                 if len(arguments["content"].encode("utf-8")) > 64 * 1024:
                     return {"state": "failed", "result": {}, "error_code": "content_too_large", "command_id": command_id}
-                receipt = self.backend.write(arguments["path"], arguments["content"].encode("utf-8"))
+                receipt = backend.write(arguments["path"], arguments["content"].encode("utf-8"))
             elif tool == "workspace.exec":
                 if set(arguments) - {"argv", "timeout_s"} or not isinstance(arguments.get("argv"), list):
                     return {"state": "failed", "result": {}, "error_code": "invalid_arguments", "command_id": command_id}
-                receipt = self.backend.execute(command_id, arguments["argv"], timeout_s=arguments.get("timeout_s", 30))
+                receipt = backend.execute(command_id, arguments["argv"], timeout_s=arguments.get("timeout_s", 30),
+                    **({'should_cancel': should_cancel} if should_cancel is not None else {}))
             else:
                 return {"state": "failed", "result": {}, "error_code": "unknown_tool", "command_id": command_id}
             if not isinstance(receipt, ToolReceipt):

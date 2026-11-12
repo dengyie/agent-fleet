@@ -8,7 +8,7 @@ import tracemalloc
 import pytest
 
 from tools import worktree
-from tests.support.processes import assert_process_exited
+from support.processes import assert_process_exited
 
 
 @pytest.fixture

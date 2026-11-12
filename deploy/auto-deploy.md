@@ -44,7 +44,7 @@ restrict,command="sudo -n /usr/local/sbin/agent-fleet-deploy \"$SSH_ORIGINAL_COM
 
 1. Receiver 校验命令、完整 SHA、run ID、压缩包大小（最多 128 MiB）和 SHA-256；传输限时 120 秒。tar 拒绝路径穿越、软/硬链接、设备、重复项、非法顶层文件、超过 30000 项或展开超过 512 MiB。剩余磁盘不足 1 GiB 时拒绝新上传。
 2. 使用 systemd 启动独立事务；SSH 断开不杀部署。事务保存 `pending.json`，防止进程异常中断后下一次发布覆盖现场。systemd 运行上限 600 秒，TERM 留 120 秒完成回滚。
-3. 检查原实例的唯一 Hub/guardian、活动 Run/任务、账号会话、readiness；在容器临时目录导入候选代码，并在候选运行时显式导入 Flask、PyYAML、cryptography 和 websocket-client。缺少生产依赖时在切换前失败。版本必须与后台 RELEASE_ORIGIN、前端 manifest 和同一个 run 完全一致。
+3. 检查原实例的唯一 Hub/guardian、活动 Run/任务、账号会话、readiness；在容器临时目录导入候选代码，并在候选运行时显式导入 Flask、PyYAML、cryptography、websocket-client 和 jsonschema。缺少生产依赖时在切换前失败。版本必须与后台 RELEASE_ORIGIN、前端 manifest 和同一个 run 完全一致。预检由宿主预安装的 receiver 执行；更新仓库文件或发布应用包不会自动更新该 receiver，应单独核对已安装版本。
 4. 保存旧代码和 Nginx，建立现有 launcher 的维护屏障；Nginx 临时返回 503，阻止公网新请求。再查活动任务；如果已有新任务，恢复访问并退出，不停止任务。
 5. 只停止 UID、cwd、脚本和进程启动时间均匹配的 guardian/Hub；停写后对配置中的每个 SQLite 数据库使用 backup API，并检查 integrity/FK。
 6. 在原 LIVE 目录内更新有限的发布管理路径。**不覆盖** `fleet-gates.conf`、`hosts.yaml`、`.env`、`credentials/`、`state/`、`var/`，不改变 LIVE inode。前端部署到不可变的完整 SHA 目录。
@@ -79,6 +79,6 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/test_auto_deploy.py tests/test_rel
 - `rolled_back`：旧代码和 Nginx 已恢复，旧应用的账号/健康探针通过；CI 仍失败，不能记作新版本发布成功。
 - `rollback_failed` / `unfinished_deployment_requires_recovery`：保留 `pending.json`、维护屏障及备份目录，阻断下一次自动部署。若新版本已有活动任务，停止会被拒绝，需等待其终态后按环境运维手册恢复。
 - `unconfirmed`：SSH/systemd 未返回完整结果；先查询 `systemctl status agent-fleet-deploy-*` 和 state 下对应 job/result/pending，**不要自动重发**。
-- 备份目录包含旧代码、Nginx 和停写时数据库快照。自动回滚**永不恢复数据库**；恢复旧 DB 需要独立确认数据影响。出现不兼容迁移时保持维护，按环境手册人工修复。
+- 备份目录包含旧代码、Nginx 和停写时数据库快照。当前仓库的 receiver 在 schema 标记不变时保留新版写入；若 `meta.schema_version`（不存在该项时使用 `PRAGMA user_version`）发生变化，会把失败版本数据库及其 sidecar 移到备份目录的 `failed-databases/`，再恢复部署前快照，并在结果中记录 `restored_databases`。因此回滚后的在线数据可能不含失败版本的新写入，需要从保留数据库中人工核对、恢复；不能将 `rolled_back` 当成所有写入都仍在线。该检查只比较版本标记，不判断任意表结构或 Workflow reader 的兼容性。宿主预装 receiver 可能仍是旧版，部署前须单独核对其实现；不能以仓库当前行为推断线上已具备此能力。人工恢复其他数据库仍需独立确认数据影响。
 - GitHub 保存 `agent-fleet-deployment` 结果 14 天；宿主保留结果与备份，上传/解包临时文件在 job 完成后清理。代码、数据库和前端历史版本不自动删除，定期按保留策略清理；磁盘不足时拒绝发布以保护当前服务。
 - 禁用自动部署可移除 environment 的 SSH key secret，并删除宿主对应 authorized_keys 行；不要撤销其他运维 key。已有 systemd 事务应先查状态，不能通过删除 key 来推断已停止。

@@ -8,13 +8,15 @@ result persistence semantics. It does not depend on Flask or module globals.
 import contextlib
 import json
 import logging
+import math
 import os
 import sqlite3
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 from hub.domain.task import (
-    LEASE_HOLDING_STATES, TASK_STATES, can_cancel, can_continue, can_pause, can_retry,
+    LEASE_HOLDING_STATES, TASK_STATES, DomainError, TaskStopObservation, can_cancel, can_continue, can_pause, can_retry,
     holds_lease,
 )
 from hub.infrastructure.sqlite import connect as sqlite_connect
@@ -72,6 +74,20 @@ CREATE TABLE IF NOT EXISTS handoff_receipts (
   attempt_id TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_lease_task ON leases(task_id);
+CREATE TABLE IF NOT EXISTS legacy_task_origins (
+  task_id TEXT PRIMARY KEY REFERENCES tasks(task_id), owner_id TEXT NOT NULL, run_id TEXT NOT NULL,
+  repository_id TEXT, UNIQUE(owner_id,run_id)
+);
+CREATE TABLE IF NOT EXISTS task_source_receipts (
+  task_id TEXT NOT NULL REFERENCES tasks(task_id), attempt_id TEXT PRIMARY KEY,
+  artifact_id TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL,
+  recorded_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS task_submission_cancellations (
+  client_token TEXT PRIMARY KEY,
+  requested_by TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS results (
   attempt_id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES tasks(task_id),
@@ -261,6 +277,8 @@ class SqliteTaskRepository:
                 raise sqlite3.IntegrityError("task schema migration violates foreign keys")
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_attempt ON tasks(attempt_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_live_lease ON tasks(state,attempt_id) WHERE state IN ('leased','running')")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_task_source_receipts_task ON task_source_receipts(task_id)")
         # 附加式索引（回滚安全）：lease_task 按机器取最早 queued；expire_* 与保留
         # 任务按 state+expires_at 定位；保留清理按 task_id/ts 删除子表与审计。
         for ddl in (
@@ -276,7 +294,7 @@ class SqliteTaskRepository:
 
     def create_task(self, *, machine, agent_type, project, instruction, requested_by,
                     client_token=None, ttl_s=TASK_TTL_S, now=None, confirm=False,
-                    handoff=None):
+                    handoff=None, legacy_origin=None):
         """创建任务；(client_token 命中, False) 幂等返回已有任务。
 
         超长 instruction 服务端截断至 2000 字符后再 INSERT（不依赖 SQLite CHECK
@@ -292,6 +310,11 @@ class SqliteTaskRepository:
                     existing = conn.execute(
                         "SELECT * FROM tasks WHERE client_token=?", (client_token,)).fetchone()
                     if existing:
+                        if legacy_origin is not None:
+                            origin = conn.execute("SELECT owner_id,run_id,repository_id FROM legacy_task_origins WHERE task_id=?",
+                                                  (existing["task_id"],)).fetchone()
+                            if origin is None or dict(origin) != legacy_origin:
+                                raise DomainError("legacy_task_conflict", "legacy_task_conflict")
                         if handoff is not None:
                             receipt = conn.execute(
                                 "SELECT request_digest FROM handoff_receipts WHERE client_token=?",
@@ -299,6 +322,9 @@ class SqliteTaskRepository:
                             if not receipt or receipt["request_digest"] != handoff["request_digest"]:
                                 raise HandoffConflict()
                         return dict(existing), False
+                    cancelled = conn.execute("SELECT requested_by FROM task_submission_cancellations WHERE client_token=?", (client_token,)).fetchone()
+                    if cancelled is not None:
+                        raise DomainError("task_submission_cancelled", "task_submission_cancelled")
                 attempt_id = uuid.uuid4().hex
                 conn.execute(
                     "INSERT INTO tasks (task_id, client_token, machine, agent_type, project,"
@@ -312,6 +338,11 @@ class SqliteTaskRepository:
                         " handoff_id, task_id, attempt_id) VALUES (?,?,?,?,?,?)",
                         (client_token, handoff["request_digest"], handoff["source_session_id"],
                          "h-" + uuid.uuid4().hex, task_id, attempt_id))
+                if legacy_origin is not None:
+                    if set(legacy_origin) != {"owner_id", "run_id", "repository_id"} or requested_by != legacy_origin["owner_id"]:
+                        raise DomainError("invalid_legacy_origin", "invalid_legacy_origin")
+                    conn.execute("INSERT INTO legacy_task_origins VALUES(?,?,?,?)",
+                                 (task_id, legacy_origin["owner_id"], legacy_origin["run_id"], legacy_origin["repository_id"]))
                 if confirm:
                     conn.execute(
                         "INSERT INTO task_gates (task_id, kind, state, requested_by,"
@@ -426,8 +457,9 @@ class SqliteTaskRepository:
         try:
             with _tx(conn):
                 row = conn.execute(
-                    "SELECT t.* FROM tasks t"
+                    "SELECT t.*,o.repository_id AS source_repository_id FROM tasks t"
                     " LEFT JOIN task_gates g ON g.task_id=t.task_id"
+                    " LEFT JOIN legacy_task_origins o ON o.task_id=t.task_id"
                     # ``+`` keeps expires_at off the index choice so the planner seeks
                     # idx_tasks_machine_state_created (machine, state) in created_at order.
                     " WHERE t.machine=? AND t.state='queued' AND +t.expires_at>?"
@@ -453,9 +485,84 @@ class SqliteTaskRepository:
                 "agent_type": row["agent_type"], "project": row["project"],
                 "instruction": row["instruction"], "attempt_id": attempt_id,
                 "nonce": nonce, "lease_ttl_s": lease_ttl_s, "lease_expires_at": expires,
+                "source_capture": row["source_repository_id"] is not None,
+                "source_repository_id": row["source_repository_id"],
             }
         finally:
             conn.close()
+
+    @contextlib.contextmanager
+    def source_fence(self, machine: str, attempt_id: str, nonce: str, *, now: float, recovered: bool = False):
+        """Serialize only the final source write against Task cancellation/release."""
+        conn = self._connect()
+        try:
+            with _tx(conn):
+                row = conn.execute("SELECT t.task_id,t.state,t.attempt_id,t.machine,t.requested_by,t.client_token,"
+                    "t.project,t.agent_type,t.instruction,l.nonce,l.expires_at,o.owner_id,o.run_id,o.repository_id "
+                    "FROM leases l JOIN tasks t USING(task_id) JOIN legacy_task_origins o USING(task_id) "
+                    "WHERE l.attempt_id=?", (attempt_id,)).fetchone()
+                if row is None or (row["machine"], row["attempt_id"], row["nonce"]) != (machine, attempt_id, nonce):
+                    raise DomainError("lease_mismatch", "lease_mismatch")
+                if not recovered and (row["state"] not in ("leased", "running") or row["expires_at"] <= _iso(now)):
+                    raise DomainError("lease_mismatch", "lease_mismatch")
+                origin = conn.execute("SELECT owner_id,run_id,repository_id FROM legacy_task_origins WHERE task_id=?", (row["task_id"],)).fetchone()
+                receipt = conn.execute("SELECT artifact_id,sha256,size FROM task_source_receipts WHERE task_id=? AND attempt_id=?",
+                                       (row["task_id"], attempt_id)).fetchone()
+                row = {**dict(row), "origin_owner_id": origin["owner_id"] if origin else None,
+                       "origin_run_id": origin["run_id"] if origin else None,
+                       "repository_id": origin["repository_id"] if origin else None,
+                       "source_receipt": dict(receipt) if receipt else None}
+                yield {**row, "_connection": conn}
+        finally:
+            conn.close()
+
+
+    def source_origin(self, machine: str, attempt_id: str, nonce: str) -> dict[str, Any] | None:
+        with contextlib.closing(self._connect()) as conn:
+            row = conn.execute("SELECT t.task_id,t.state,t.attempt_id,t.machine,t.requested_by,t.client_token,"
+                "t.project,t.agent_type,t.instruction,l.expires_at,o.owner_id,o.run_id,o.repository_id "
+                "FROM leases l JOIN tasks t USING(task_id) JOIN legacy_task_origins o USING(task_id) "
+                "WHERE l.attempt_id=? AND l.nonce=? AND t.machine=?", (attempt_id, nonce, machine)).fetchone()
+            return dict(row) if row is not None else None
+
+
+    def source_receipt(self, machine: str, attempt_id: str, nonce: str) -> dict[str, Any] | None:
+        with contextlib.closing(self._connect()) as conn:
+            row = conn.execute("SELECT r.artifact_id,r.sha256,r.size FROM task_source_receipts r "
+                "JOIN leases l USING(attempt_id) JOIN tasks t USING(task_id) "
+                "WHERE r.attempt_id=? AND l.nonce=? AND t.machine=?", (attempt_id, nonce, machine)).fetchone()
+            return dict(row) if row is not None else None
+
+
+    def record_source_receipt(self, *, task_id: str, attempt_id: str, artifact_id: str, sha256: str, size: int,
+                              now: float, connection: sqlite3.Connection | None = None, recovered: bool = False) -> None:
+        owned = connection is None
+        conn = self._connect() if owned else connection
+        try:
+            if owned:
+                transaction = _tx(conn)
+            else:
+                if not conn.in_transaction:
+                    raise DomainError("invalid_source_transaction", "invalid_source_transaction")
+                transaction = contextlib.nullcontext()
+            with transaction:
+                lease = conn.execute("SELECT l.task_id,l.expires_at,t.state,t.attempt_id FROM leases l JOIN tasks t USING(task_id) "
+                                     "WHERE l.attempt_id=?", (attempt_id,)).fetchone()
+                if lease is None or lease["task_id"] != task_id or lease["attempt_id"] != attempt_id:
+                    raise DomainError("lease_mismatch", "lease_mismatch")
+                if not recovered and (lease["state"] not in ("leased", "running") or lease["expires_at"] <= _iso(now)):
+                    raise DomainError("lease_mismatch", "lease_mismatch")
+                prior = conn.execute("SELECT artifact_id,sha256,size FROM task_source_receipts WHERE attempt_id=?", (attempt_id,)).fetchone()
+                if prior is not None:
+                    if tuple(prior) != (artifact_id, sha256, size):
+                        raise DomainError("source_upload_conflict", "source_upload_conflict")
+                    return
+                conn.execute("INSERT INTO task_source_receipts VALUES(?,?,?,?,?,?)",
+                             (task_id, attempt_id, artifact_id, sha256, int(size), _iso(now)))
+        finally:
+            if owned:
+                conn.close()
+
 
     def heartbeat(self, *, attempt_id, nonce, machine=None,
                   extend_s=LEASE_TTL_S, now=None):
@@ -549,6 +656,11 @@ class SqliteTaskRepository:
                     return None
                 if not holds_lease(task["state"]):
                     return None
+                origin = conn.execute("SELECT 1 FROM legacy_task_origins WHERE task_id=? AND repository_id IS NOT NULL", (lease["task_id"],)).fetchone()
+                source = conn.execute("SELECT 1 FROM task_source_receipts WHERE task_id=? AND attempt_id=?",
+                                      (lease["task_id"], attempt_id)).fetchone()
+                if origin is not None and int(exit_code) == 0 and source is None:
+                    return None
                 state = "succeeded" if int(exit_code) == 0 else "failed"
                 conn.execute(
                     "INSERT INTO results (attempt_id, task_id, exit_code, log_summary,"
@@ -636,19 +748,21 @@ class SqliteTaskRepository:
                 # 仅处理「当前 attempt」：lease 的 attempt_id 必须仍是任务的最新
                 # attempt_id，否则说明该 lease 已被重派/完成取代，不能把新运行打回 queued。
                 rows = conn.execute(
-                    "SELECT l.task_id, l.attempt_id, t.state FROM tasks t"
+                    "SELECT l.task_id, l.attempt_id, t.state,o.task_id AS workflow_task FROM tasks t"
                     " JOIN leases l ON l.attempt_id=t.attempt_id AND l.task_id=t.task_id"
+                    " LEFT JOIN legacy_task_origins o ON o.task_id=t.task_id"
                     f" WHERE t.state IN {_LEASE_HOLDING_STATES_SQL} AND l.expires_at<=?"
                     " ORDER BY l.expires_at, l.task_id",
                     (now_iso,)).fetchall()
                 requeued = []
                 for lease in rows:
                     if holds_lease(lease["state"]):
-                        conn.execute("UPDATE tasks SET state='queued' WHERE task_id=?",
-                                     (lease["task_id"],))
+                        state = "expired" if lease["workflow_task"] else "queued"
+                        conn.execute("UPDATE tasks SET state=? WHERE task_id=?", (state, lease["task_id"]))
                         _audit(conn, "hub", "lease_expired", lease["task_id"],
-                               {"attempt_id": lease["attempt_id"]}, now)
-                        requeued.append(lease["task_id"])
+                               {"attempt_id": lease["attempt_id"], "state": state}, now)
+                        if state == "queued":
+                            requeued.append(lease["task_id"])
             return requeued
         finally:
             conn.close()
@@ -670,6 +784,43 @@ class SqliteTaskRepository:
             return [r["task_id"] for r in rows]
         finally:
             conn.close()
+
+    @staticmethod
+    def _submission_identity(client_token: str, actor: str) -> None:
+        if type(client_token) is not str or not 1 <= len(client_token) <= 128 or type(actor) is not str or not 1 <= len(actor) <= 128:
+            raise DomainError("invalid_submission_identity", "invalid_submission_identity")
+
+
+    def fence_submission(self, client_token: str, actor: str, *, now: float) -> dict[str, Any] | None:
+        """Durably block a late cross-database create using the original token."""
+        self._submission_identity(client_token, actor)
+        if type(now) not in (int, float) or not 0 <= now <= 253402300799 or not math.isfinite(now):
+            raise DomainError("invalid_submission_clock", "invalid_submission_clock")
+        with contextlib.closing(self._connect()) as connection, _tx(connection):
+            task = connection.execute("SELECT * FROM tasks WHERE client_token=?", (client_token,)).fetchone()
+            prior = connection.execute("SELECT requested_by FROM task_submission_cancellations WHERE client_token=?", (client_token,)).fetchone()
+            if (task is not None and task["requested_by"] != actor) or (prior is not None and prior[0] != actor):
+                raise DomainError("submission_owner_conflict", "submission_owner_conflict")
+            connection.execute("INSERT OR IGNORE INTO task_submission_cancellations VALUES(?,?,?)", (client_token, actor, _iso(now)))
+            return dict(task) if task is not None else None
+
+
+    def submission_stop(self, client_token: str, actor: str) -> TaskStopObservation | None:
+        self._submission_identity(client_token, actor)
+        with contextlib.closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT c.requested_by,t.task_id,t.attempt_id,t.state,"
+                "EXISTS(SELECT 1 FROM leases l WHERE l.task_id=t.task_id) AS ever_leased "
+                "FROM task_submission_cancellations c LEFT JOIN tasks t USING(client_token) WHERE c.client_token=?", (client_token,),
+            ).fetchone()
+            if row is None:
+                return None
+            if row["requested_by"] != actor:
+                raise DomainError("submission_owner_conflict", "submission_owner_conflict")
+            state = row["state"]
+            stopped = row["task_id"] is None or state in ("succeeded", "failed") or (state == "cancelled" and not row["ever_leased"])
+            return TaskStopObservation(row["task_id"], row["attempt_id"], state or "cancelled", stopped)
+
 
     def cancel_task(self, task_id, actor, now=None):
         """非终态（queued/leased/running）任务 → cancelled；终态返回 (row, False)，不存在 (None, False)。
@@ -705,8 +856,11 @@ class SqliteTaskRepository:
                 row = conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
                 if not row:
                     return None, False
+                self._require_independent_task(conn, task_id)
                 if not can_retry(row["state"]):
                     return dict(row), False
+                if row["client_token"] and conn.execute("SELECT 1 FROM task_submission_cancellations WHERE client_token=?", (row["client_token"],)).fetchone():
+                    raise DomainError("task_submission_cancelled", "task_submission_cancelled")
                 conn.execute(
                     "UPDATE tasks SET state='queued', attempt_id=?, expires_at=? WHERE task_id=?",
                     (uuid.uuid4().hex, _iso(now + TASK_TTL_S), task_id))
@@ -741,6 +895,7 @@ class SqliteTaskRepository:
                     "SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
                 if not row:
                     return None, False
+                self._require_independent_task(conn, task_id)
                 if not can_pause(row["state"]):
                     return dict(row), False
                 conn.execute(
@@ -762,6 +917,7 @@ class SqliteTaskRepository:
                     "SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
                 if not row:
                     return None, False
+                self._require_independent_task(conn, task_id)
                 if not can_continue(row["state"]):
                     return dict(row), False
                 attempt_id = uuid.uuid4().hex
@@ -777,6 +933,12 @@ class SqliteTaskRepository:
             return out, True
         finally:
             conn.close()
+
+    @staticmethod
+    def _require_independent_task(connection: sqlite3.Connection, task_id: str) -> None:
+        if connection.execute("SELECT 1 FROM legacy_task_origins WHERE task_id=?", (task_id,)).fetchone() is not None:
+            raise DomainError("workflow_control_required", "请通过工作流控制该步骤")
+
 
     def confirm_task(self, task_id, actor, now=None):
         """pending gate → confirmed so poll can see the queued task."""

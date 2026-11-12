@@ -130,6 +130,18 @@ class FleetConfig:
     # Memory context injection is a second, independent default-off gate. CRUD
     # access never implies that a model Run may receive MemoryItems.
     platform_memory_context_enabled: bool = False
+    platform_workflows_enabled: bool = False
+    platform_workflow_dispatch_enabled: bool = False
+    platform_workflow_registration_file: Path | None = None
+    platform_mcp_connectors_enabled: bool = False
+    platform_mcp_catalog_registration_enabled: bool = False
+    platform_mcp_registration_file: Path | None = None
+    platform_capability_routing_enabled: bool = False
+    platform_external_agents_enabled: bool = False
+    platform_muse_registration_file: Path | None = None
+    platform_fleet_mcp_enabled: bool = False
+    platform_artifact_transfer_enabled: bool = False
+    platform_artifact_transfer_max_bytes: int = 64 * 1024 * 1024
     # Retention horizon (days) for operational history: finished tasks and
     # their audit, execution windows, transcript audit and policy signals.
     history_retention_days: float = 90.0
@@ -208,6 +220,18 @@ class FleetConfig:
         platform_usage_limits_enabled: bool = False,
         platform_memory_enabled: bool = False,
         platform_memory_context_enabled: bool = False,
+        platform_workflows_enabled: bool = False,
+        platform_workflow_dispatch_enabled: bool = False,
+        platform_workflow_registration_file: str | Path | None = None,
+        platform_mcp_connectors_enabled: bool = False,
+        platform_mcp_catalog_registration_enabled: bool = False,
+        platform_mcp_registration_file: str | Path | None = None,
+        platform_capability_routing_enabled: bool = False,
+        platform_external_agents_enabled: bool = False,
+        platform_muse_registration_file: str | Path | None = None,
+        platform_fleet_mcp_enabled: bool = False,
+        platform_artifact_transfer_enabled: bool = False,
+        platform_artifact_transfer_max_bytes: int = 64 * 1024 * 1024,
         history_retention_days: float = 90.0,
         **extra: Any,
     ) -> "FleetConfig":
@@ -425,6 +449,23 @@ class FleetConfig:
             platform_memory_context_enabled=bool(
                 platform_memory_context_enabled and platform_enabled
                 and platform_memory_enabled),
+            platform_workflows_enabled=bool(platform_enabled and platform_workflows_enabled),
+            platform_workflow_dispatch_enabled=bool(
+                platform_enabled and platform_workflows_enabled and platform_workflow_dispatch_enabled),
+            platform_workflow_registration_file=(Path(platform_workflow_registration_file).expanduser()
+                                                 if platform_workflow_registration_file else None),
+            platform_mcp_connectors_enabled=bool(platform_enabled and platform_mcp_connectors_enabled),
+            platform_mcp_catalog_registration_enabled=bool(
+                platform_enabled and platform_mcp_connectors_enabled and platform_mcp_catalog_registration_enabled),
+            platform_mcp_registration_file=(Path(platform_mcp_registration_file).expanduser()
+                                            if platform_mcp_registration_file else None),
+            platform_capability_routing_enabled=bool(platform_enabled and platform_workflows_enabled and platform_capability_routing_enabled),
+            platform_external_agents_enabled=bool(platform_enabled and platform_external_agents_enabled),
+            platform_muse_registration_file=(Path(platform_muse_registration_file).expanduser()
+                                             if platform_muse_registration_file else None),
+            platform_fleet_mcp_enabled=bool(platform_enabled and platform_workflows_enabled and platform_fleet_mcp_enabled),
+            platform_artifact_transfer_enabled=bool(platform_enabled and platform_workflows_enabled and platform_artifact_transfer_enabled),
+            platform_artifact_transfer_max_bytes=platform_artifact_transfer_max_bytes,
             history_retention_days=history_days,
             extra=dict(extra),
         )

@@ -1,6 +1,7 @@
 """Real SQLite admission, redelivery and terminal-state fencing."""
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event
+import sqlite3
 
 import pytest
 
@@ -22,6 +23,24 @@ def journal_at(path):
     journal = NodeJournal(path)
     journal.init()
     return journal
+
+
+def test_journal_migrates_legacy_schema_and_keeps_acknowledged_results(tmp_path):
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE command_journal (command_id TEXT PRIMARY KEY, state TEXT NOT NULL, result TEXT, updated_at REAL NOT NULL)")
+        conn.execute("INSERT INTO command_journal VALUES ('old', 'succeeded', '{\"written\":true}', 1)")
+    journal = journal_at(path)
+    assert journal.get("old")["result"] == {"written": True}
+    assert not journal.begin("old", now=2)["claimed"]
+    journal.begin("new", now=2, worker_id="worker-original")
+    journal.finish("new", "succeeded", {"written": True}, now=3)
+    reopened = journal_at(path)
+    assert [row["command_id"] for row in reopened.pending_receipts()] == ["new"]
+    assert reopened.pending_receipts()[0]["worker_id"] == "worker-original"
+    reopened.acknowledge_receipt("new")
+    assert reopened.pending_receipts() == []
+    assert reopened.get("new")["result"] == {"written": True}
 
 
 def test_restarted_client_never_replays_running_record(tmp_path):

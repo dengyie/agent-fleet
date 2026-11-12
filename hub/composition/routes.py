@@ -82,6 +82,9 @@ def _register_platform_blueprints(app, config, platform):
     from hub.http.legacy_task_routes import bp as legacy_task_bp
     from hub.http.execution_window_routes import bp as execution_window_bp
     app.register_blueprint(platform_bp)
+    if "mcp_catalog_admin" in app.extensions["fleet"]["services"]:
+        from hub.http.mcp_admin_routes import bp as mcp_admin_bp
+        app.register_blueprint(mcp_admin_bp)
     from hub.http.muse_routes import bp as muse_bp
     from hub.application.muse_service import MuseService
     from hub.infrastructure.muse_repository import MuseRepository
@@ -94,6 +97,19 @@ def _register_platform_blueprints(app, config, platform):
     # start_background_jobs 启动；运行期操作员显式开启时服务自行按需启动。
     app.register_blueprint(muse_bp)
     app.register_blueprint(conversation_bp)
+    if config.platform_workflows_enabled:
+        from hub.http.workflow_routes import bp as workflows_bp
+        app.register_blueprint(workflows_bp)
+        if config.platform_fleet_mcp_enabled:
+            from hub.http.fleet_mcp_routes import bp as fleet_mcp_bp
+            from hub.http.integration_admin_routes import bp as integration_admin_bp
+            app.register_blueprint(fleet_mcp_bp)
+            app.register_blueprint(integration_admin_bp)
+        if config.platform_artifact_transfer_enabled:
+            from hub.http.artifact_transfer_routes import bp as transfer_bp
+            from hub.http.artifact_input_routes import bp as input_bp
+            app.register_blueprint(transfer_bp)
+            app.register_blueprint(input_bp)
     app.register_blueprint(node_bp)
     from hub.http.plugin_routes import bp as plugins_bp
     app.register_blueprint(plugins_bp)

@@ -1,5 +1,21 @@
 # 当前规格审计矩阵
 
+> 2026-11-12本地提交：功能分支已记录当前功能分支 HEAD，专项回归163 passed/2subtests，精确CI Ruff和空白检查通过；没有推送/合并/部署。完整7370/7332测试报告绑定前一冻结47bcd3b5，提交只增加文档和测试末尾空白清理，发布仍须CI按新SHA重新生成报告。
+
+> 2026-11-12生产只读核验：现网仍为301e259；容器可导入cryptography/flask/websocket/yaml但缺jsonschema，候选receiver预检会拒绝，故先更新宿主receiver和运行环境。Workflow/MCP/Muse gate和登记均未配置；现有节点最后心跳约4天以上，不能代替新鲜NODE-LIVE。探针无生产写入，详见[开发总账](../platform/development-completion.md#生产只读配置与运行依赖核验2026-11-12)。
+
+> 2026-11-12当前复验：原6c99ffdd macOS完整7369 passed/1 Muse依赖边界failure/11 Linux专用skip/204subtests、43/46 journeys、46完整PNG，原核验仍拒绝。依赖修复冻结47bcd3b5的同12模块macOS252 passed/2subtests/0skip、Linux251 passed/1浏览器环境skip/2subtests；实际1134后端/69前端包逐字节及两端解包启动/receiver组合验证通过。原6c99ffdd Linux完整7331 passed/1相同failure/49浏览器环境skip/204subtests、30/46 journeys，原报告SHA一致且源码clean；47bcd3b5 macOS完整7370 passed/0 failure/11 Linux专用skip/204subtests、46 PNG有效，但Darwin的NODE-01/RELEASE-01/WF-01不完整；Linux完整7332 passed/0 failure/49浏览器环境skip/204subtests已终态；与macOS候选均无测试失败，但严格release verifier仍拒绝journey_incomplete（Linux缺浏览器相关16条、macOS缺Linux专用3条）。见[开发总账](../platform/development-completion.md)与[Muse计划](../superpowers/plans/2026-11-12-muse-startup-registration.md#integrated-release-packaging-verification--2026-11-12)。所有真实浏览器/接管、通知、外部模型/邮件/节点、备份回退与生产配置任务验收继续按各自合同保留，不以当前关联结果关闭。
+
+> 2026-11-11摘要完成与根因修复：4a3e15f1冻结本机全仓7043 passed/5个Linux专用skip/204 subtests、43/44 journeys、2071 selectors、46完整PNG；同源Linux关联832 passed。后续b44fe1bc修复Windows备份fsync，三端相同摘要/明文加密备份集合各96 passed/0skip。当前矩阵44条/2073 selectors、7050实例可解析；原release verifier仍拒绝journey_incomplete。源码与原失败、报告及范围见[摘要计划](../superpowers/plans/2026-11-11-versioned-summary-context.md)，完整Linux/browser、真实CLI/model和发布仍开放。
+
+
+> 2026-11-11当前目标树增量：固定测试运行时兼容修复与真实四结果见51f71614证据；随后cd7019aa冻结完成实际Windows/Linux能力生命周期20 passed/0skip（8自动、12独立postcheck）、本机10矩阵及417关联分别通过。20份Hub数据库、两端journal/file及106份证据复制已独立核验；这些子集不替代同一版本完整Linux/browser门禁或真实模型完整交付。当前总账、原失败和独立冻结见[开发总账](../platform/development-completion.md)与[原生能力计划](../superpowers/plans/2026-11-11-native-capability-integration.md)。未发布/部署。
+
+> 2026-11-10 最新目标树：远程取消冻结 `69028deb2cf7b2908e3a4d415aba95e819dd1fa6` 全仓6903 passed/5平台skip/204 subtests，43/44 journeys、1984 selectors、46完整PNG，1124源码摘要不变、checkout clean。原发布核验仍拒绝journey_incomplete；Linux和真实外部验收开放。见[开发总账](../platform/development-completion.md)。
+
+> 2026-11-10 当前集成更新：本分支 `codex/functional-root-fixes` 基于GitHub main `301e259`，下文历次checkpoint不构成本次证明。当前总账为[文档开发总账](../platform/development-completion.md)。第四轮本机全仓6887 passed/5 Linux平台skip/204 passing subtests，43/44 journeys、1975 selectors及46完整PNG，1121源码摘要不变；随后运行依赖声明修复另验182 passed，新增启动selector后矩阵1976。严格门禁未通过，真实跨平台/外部试点与后续扩展单独验收；未推送、合并或部署。
+
+
 审计维护日期：2026-10-10（初始完整矩阵证据记录于 2026-10-08）
 初始审计基线：本地 `main` 的开发集成分支 `codex/development-completion-todo`；当时 HEAD 为 `d715e743cf176be3af52f40635703ea58270a555`，验证代码提交为 `88b12483691bc41c630df68d0bdce00430d87572`。该基线之后的复验按下方各日期 checkpoint 记录。
 

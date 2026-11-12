@@ -1,0 +1,5 @@
+.mcp-registration-fields { display: grid; gap: 12px; min-width: 0; margin: 16px 0; padding: 0; border: 0; }
+.mcp-registration-fields label { display: grid; gap: 6px; min-width: 0; }
+.mcp-registration-fields :is(input, textarea) { width: 100%; min-width: 0; box-sizing: border-box; }
+.mcp-registration-fields textarea { resize: vertical; }
+.mcp-registration .mcp-actions { position: sticky; bottom: -24px; padding: 12px 0; background: var(--panel); }
