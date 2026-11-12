@@ -533,4 +533,3 @@ def test_video_corrupt_history_rejects_startup_and_backup(tmp_path: Path, damage
         assert_workflow_visibility(setup.workflows.db_path, enabled=False)
     with pytest.raises(BackupError):
         PlatformBackupService().create_backup(setup.workflows.db_path, setup.artifacts.root, tmp_path / "backup")
-
