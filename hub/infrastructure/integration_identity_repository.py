@@ -55,8 +55,9 @@ class IntegrationIdentityRepository:
             self._require_schema(connection)
             self.validate_snapshot(connection)
 
-    def register(self, identity: IntegrationIdentity, *, now: float) -> IntegrationIdentity:
-        if type(identity) is not IntegrationIdentity:
+    def register(self, identity: IntegrationIdentity, *, now: float,
+                 require_available_workspaces: bool = False) -> IntegrationIdentity:
+        if type(identity) is not IntegrationIdentity or type(require_available_workspaces) is not bool:
             raise IntegrationIdentityError("invalid_integration_identity")
         now = _time(now)
         with self.workflows.transaction() as connection:
@@ -70,6 +71,14 @@ class IntegrationIdentityRepository:
                 return saved
             if connection.execute("SELECT 1 FROM workflow_integration_identities WHERE token_digest=?", (identity.token_digest,)).fetchone() is not None:
                 raise IntegrationIdentityError("integration_token_conflict")
+            if require_available_workspaces:
+                if inspect_schema(connection)["admission_mode"] != "open":
+                    raise IntegrationIdentityError("integration_admission_unavailable")
+                workspaces = tuple(sorted(identity.workspace_ids))
+                rows = connection.execute("SELECT workspace_id,enabled FROM workspaces WHERE owner_id=? AND workspace_id IN ("
+                    + ",".join("?" for _ in workspaces) + ")", (identity.owner_id, *workspaces)).fetchall()
+                if len(rows) != len(workspaces) or any(row[1] != 1 for row in rows):
+                    raise IntegrationIdentityError("integration_workspace_unavailable")
             connection.execute("INSERT INTO workflow_integration_identities(" + _COLUMNS + ") VALUES(?,?,?,?,?,?,?,0)",
                 (identity.owner_id, identity.integration_id, identity.token_digest, identity.snapshot, identity.definition_digest,
                  now, now if identity.revoked else None))

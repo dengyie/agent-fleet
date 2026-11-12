@@ -4,9 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-from .integration_identity import IntegrationIdentity, IntegrationIdentityError
+from platform_schema import validate_owner_id
+from .integration_identity import IntegrationIdentity, IntegrationIdentityError, parse_integration_identity
 from .workflow_errors import WorkflowValidationError
-from .workflow_identity import validate_reference
+from .workflow_identity import canonical_json, validate_reference
 
 IntegrationIdentityState = Literal["active", "revoked", "restore_disabled"]
 
@@ -42,6 +43,23 @@ class IntegrationRevokeCommand:
         if type(payload["expected_state"]) is not str or payload["expected_state"] != "active":
             raise IntegrationIdentityError("invalid_identity_command")
         return cls("active")
+
+
+@dataclass(frozen=True, slots=True)
+class IntegrationRegisterCommand:
+    identity: IntegrationIdentity = field(repr=False)
+
+    @classmethod
+    def parse(cls, payload: object) -> IntegrationRegisterCommand:
+        try:
+            if type(payload) is not dict or set(payload) != {"identity"}:
+                raise ValueError("invalid registration command")
+            identity = parse_integration_identity(canonical_json(payload["identity"]))
+            if validate_owner_id(identity.owner_id) != identity.owner_id:
+                raise ValueError("invalid registration owner")
+            return cls(identity)
+        except (ValueError, TypeError) as exc:
+            raise IntegrationIdentityError("invalid_identity_registration") from exc
 
 
 @dataclass(frozen=True, slots=True)

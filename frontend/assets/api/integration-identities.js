@@ -7,6 +7,8 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', {ignoreBOM: true});
 const summaryFields = ['owner_id', 'integration_id', 'scopes', 'template_count', 'workspace_count',
   'max_artifacts', 'max_budget_tokens', 'max_budget_requests', 'state', 'created_at', 'revoked_at'];
+const registrationFields = ['owner_id', 'integration_id', 'token_digest', 'template_ids', 'workspace_ids',
+  'scopes', 'max_artifacts', 'max_budget_tokens', 'max_budget_requests'];
 const scopes = new Set(['workflow.create_from_template', 'workflow.get', 'workflow.list_artifacts']);
 const states = new Set(['active', 'revoked', 'restore_disabled']);
 function check(condition) {
@@ -73,6 +75,23 @@ export function parseIdentityRevocation(value) {
   exact(value.revocation, ['owner_id', 'integration_id', 'state']); reference(value.revocation.owner_id); reference(value.revocation.integration_id);
   check(value.revocation.state === 'revoked'); return value;
 }
+export function parseIdentityRegistrationCommand(value) {
+  exact(value, ['identity']); const item = value.identity; exact(item, registrationFields);
+  reference(item.owner_id); reference(item.integration_id);
+  check(typeof item.token_digest === 'string' && /^[a-f0-9]{64}$/.test(item.token_digest));
+  for (const name of ['template_ids', 'workspace_ids']) {
+    check(Array.isArray(item[name]) && item[name].length >= 1 && item[name].length <= 128);
+    references(item[name], item[name].length);
+  }
+  check(Array.isArray(item.scopes) && item.scopes.length <= 3);
+  let previous = null;
+  for (const scope of item.scopes) {
+    check(scopes.has(scope) && (previous === null || compare(previous, scope) < 0)); previous = scope;
+  }
+  integer(item.max_artifacts, 1, 100); integer(item.max_budget_tokens, 0, 2000000); integer(item.max_budget_requests, 0, 1000);
+  return value;
+}
+export function sortIdentityReferences(values) { return values.sort(compare); }
 function path(action, ownerId, integrationId) {
   reference(ownerId); reference(integrationId);
   return apiPath('platform', 'v1', 'integrations', 'fleet', action) + '?owner_id=' + encodeURIComponent(ownerId) +
@@ -91,4 +110,15 @@ export async function revokeIntegrationIdentity(ownerId, integrationId, options 
   const result = parseIdentityRevocation(await platformRequest(path('revoke', ownerId, integrationId), {...options,
     method: 'POST', headers: {'Content-Type': 'application/json'}, body: {expected_state: 'active'}}));
   check(result.revocation.owner_id === ownerId && result.revocation.integration_id === integrationId); return result;
+}
+export async function registerIntegrationIdentity(payload, options = {}) {
+  const command = parseIdentityRegistrationCommand(structuredClone(payload)), expected = command.identity;
+  const result = parseIdentityDetail(await platformRequest(apiPath('platform', 'v1', 'integrations', 'fleet', 'register'),
+    {...options, method: 'POST', headers: {'Content-Type': 'application/json'}, body: command}));
+  const item = result.identity.summary;
+  check(item.owner_id === expected.owner_id && item.integration_id === expected.integration_id);
+  for (const name of ['max_artifacts', 'max_budget_tokens', 'max_budget_requests']) check(item[name] === expected[name]);
+  check(JSON.stringify(item.scopes) === JSON.stringify(expected.scopes));
+  for (const name of ['template_ids', 'workspace_ids']) check(JSON.stringify(result.identity[name]) === JSON.stringify(expected[name]));
+  return result;
 }

@@ -1,6 +1,20 @@
 # Fleet MCP 身份运维登记
 
-此入口把[原持久身份](../../superpowers/plans/2026-10-25-fleet-integration-identities.md)登记到正常 Hub 已使用的数据库，供外部 MCP 客户端调用三个 Workflow 工具。返回[平台索引](README.md)；查看与撤销仍使用[账号集成页面](../../superpowers/plans/2026-10-25-fleet-identity-administration.md)，实现与证据见[登记计划](../../superpowers/plans/2026-11-12-integration-identity-setup.md)。
+此入口把[原持久身份](../../superpowers/plans/2026-10-25-fleet-integration-identities.md)登记到正常 Hub 已使用的数据库，供外部 MCP 客户端调用三个 Workflow 工具。返回[平台索引](README.md)；账号页面的查看与撤销见[原管理计划](../../superpowers/plans/2026-10-25-fleet-identity-administration.md)，CLI 见[登记计划](../../superpowers/plans/2026-11-12-integration-identity-setup.md)，页面登记增量见[2026-11-13 实施计划](../../superpowers/plans/2026-11-13-fleet-identity-registration-ui.md)。本页包含开发分支新增能力，不表示已审公开 PR42 或现网已有该入口。
+
+## 从账号页面登记
+
+已启用平台、Workflow、Fleet MCP gate（具体字段见下方“准备配置”）的 Hub 中，账户管理员可打开账号页的“Fleet 集成身份管理”，选择“登记新身份”。填写实际 owner、一个新的集成身份标识，以及每行一个的模板和工作区；选择创建、查询、产物列表三种权限，设置产物数和用量预算。默认 600000 token/150 次请求可覆盖现有三步 coding-delivery 模板；其他模板按全部步骤合同上限调整。工作区应事先创建并启用，模板和执行器也按原流程配置。
+
+选择“生成令牌并登记”后，浏览器生成一个随机访问令牌，只把其 SHA-256 摘要和完整授权定义提交到原 Hub 身份存储。请在窗口中保存令牌；关闭窗口后无法再次查看。这个入口不会创建 Workflow、调用模型或向外部客户端发送消息；原 MCP endpoint 每次从持久库读取身份，因此登记后无需重启 Hub。
+
+第一次提交后定义和令牌固定。连接中断或响应不合法时，页面保持“登记结果待核对”；显式选择“核对并重试原登记”会使用原身份、完整范围和同一令牌，不自动重复 POST。已提交的同一不可变定义重复登记返回原记录，新的预算/范围或令牌与已有记录冲突则拒绝。撤销和恢复禁用不会因重复登记变为有效；界面按实际返回状态显示令牌是否可用。
+
+标识按原 UTF-8 内容保留，不自动修剪 owner、集成身份或模板/工作区名称；列表只忽略空行并按原字节顺序排序。请填写与现有配置完全一致的标识，避免把名称中的空白或特殊字符误当作可省略的部分。
+
+新登记在原写事务中核对 Workflow admission 与所有 owner/workspace 的启用状态，缺失、跨 owner、停用或 frozen 状态不插入身份。Cookie 管理员、Origin 与严格 JSON 边界沿用原页面管理接口；只有登记的完整 allowlist 请求上限为 65536 字节，原撤销接口仍为 2048 字节。CLI 文件、预算和重复登记合同保持兼容。
+
+关闭对话框、离开账号页或切换账号会结束本地观察，不把迟到结果渲染到其他页面或身份。令牌生成尚未完成时关窗不会继续发送登记；已到服务端的登记按实际事务结果保留。页面能力不替代真实外部客户端、账号策略和生产任务验收。
 
 ## 准备配置
 

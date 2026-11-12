@@ -35,10 +35,10 @@ def _inspect(connection, owner, workspace, conversations):
     return saved is None, missing
 
 
-def _report(*, apply, workspace_missing, missing):
+def _report(*, apply, workspace_missing, missing, total):
     return {"ok": True, "mode": "apply" if apply else "preview",
         "create": {"workspaces": int(workspace_missing), "conversations": len(missing)},
-        "existing": {"workspaces": int(not workspace_missing), "conversations": 3 - len(missing)}}
+        "existing": {"workspaces": int(not workspace_missing), "conversations": total - len(missing)}}
 
 
 def prepare_workflow_workspace(repository: PlatformRepository, *, owner_id: str, workspace_id: str,
@@ -51,13 +51,32 @@ def prepare_workflow_workspace(repository: PlatformRepository, *, owner_id: str,
         validate_id(value, "conversation_id")
     if len(set(conversation_ids)) != 3:
         raise WorkflowSetupError("workflow_setup_requires_distinct_conversations")
+    return prepare_workflow_conversations(repository, owner_id=owner_id, workspace_id=workspace_id,
+        root_path=root_path, conversations=tuple(zip(("develop", "review", "test"), conversation_ids)), apply=apply)
+
+
+def prepare_workflow_conversations(repository: PlatformRepository, *, owner_id: str, workspace_id: str,
+                                   root_path: Path, conversations: tuple[tuple[str, str], ...], apply: bool = False):
+    """Create each referenced conversation once, preserving the original transaction."""
+    owner = validate_owner_id(owner_id)
+    validate_reference(owner)
+    if type(conversations) is not tuple or not 1 <= len(conversations) <= 8:
+        raise WorkflowSetupError("workflow_setup_invalid_conversations")
+    unique = {}
+    for pair in conversations:
+        if type(pair) is not tuple or len(pair) != 2:
+            raise WorkflowSetupError("workflow_setup_invalid_conversations")
+        phase, conversation_id = pair
+        validate_reference(phase)
+        validate_id(conversation_id, "conversation_id")
+        unique.setdefault(conversation_id, phase)
+    conversations = tuple((phase, conversation_id) for conversation_id, phase in unique.items())
     root = Path(root_path).expanduser()
     if not root.is_absolute() or not root.is_dir():
         raise WorkflowSetupError("workflow_setup_root_unavailable")
     workspace = validate_workspace({"workspace_id": workspace_id, "root_path": str(root.resolve(strict=True))})
-    conversations = tuple(zip(("develop", "review", "test"), conversation_ids))
     if not apply and not repository.db_path.exists():
-        return _report(apply=False, workspace_missing=True, missing=conversations)
+        return _report(apply=False, workspace_missing=True, missing=conversations, total=len(conversations))
     if apply:
         repository.init()
     try:
@@ -77,7 +96,7 @@ def prepare_workflow_workspace(repository: PlatformRepository, *, owner_id: str,
                     for phase, conversation_id in missing:
                         connection.execute("INSERT INTO conversations(conversation_id,owner_id,title,workspace_id,overrides,revision) "
                             "VALUES(?,?,?,?,?,0)", (conversation_id, owner, "Workflow " + phase, workspace_id, "{}"))
-                report = _report(apply=apply, workspace_missing=workspace_missing, missing=missing)
+                report = _report(apply=apply, workspace_missing=workspace_missing, missing=missing, total=len(conversations))
                 connection.execute("COMMIT" if apply else "ROLLBACK")
                 return report
             except BaseException:

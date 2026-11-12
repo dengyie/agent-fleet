@@ -10,7 +10,7 @@ from typing import Any, Callable
 from flask import Blueprint, Response, current_app, g, request
 
 from hub.application.integration_identity_admin import IntegrationIdentityAdminService
-from hub.domain.integration_administration import IntegrationIdentityKey, IntegrationRevokeCommand
+from hub.domain.integration_administration import IntegrationIdentityKey, IntegrationRevokeCommand, IntegrationRegisterCommand
 from hub.domain.integration_identity import IntegrationIdentityError
 from hub.domain.workflow_errors import WorkflowPersistenceError
 from hub.http.errors import ApplicationError, error_response, get_request_id
@@ -42,13 +42,14 @@ def _admin(view: Callable[..., Response]) -> Callable[..., Any]:
             return error_response(exc)
         except (IntegrationIdentityError, WorkflowPersistenceError) as exc:
             status = 503
-            if exc.code in {"invalid_identity_command", "invalid_identity_page", "invalid_identity_reference"}:
+            if exc.code in {"invalid_identity_command", "invalid_identity_page", "invalid_identity_reference", "invalid_identity_registration"}:
                 status = 400
             if exc.code == "precondition_required":
                 status = 428
             if exc.code == "integration_not_found":
                 status = 404
-            if exc.code in {"integration_revision_conflict", "integration_state_changed"}:
+            if exc.code in {"integration_revision_conflict", "integration_state_changed", "integration_registration_conflict",
+                            "integration_token_conflict", "integration_workspace_unavailable", "integration_admission_unavailable"}:
                 status = 409
             detail = {400: "身份管理请求格式无效", 404: "集成身份不存在", 409: "身份状态已变化，请重新读取并核对",
                 428: "请先读取身份并确认当前有效状态", 503: "Fleet 身份存储暂时不可用"}[status]
@@ -103,3 +104,16 @@ def revoke_identity() -> Response:
         "integration_id": result.integration_id, "action": "revoke", "state": result.state}
     current_app.logger.info("integration_identity_admin_action %s", json.dumps(context, ensure_ascii=True, separators=(",", ":")))
     return _response(revocation=asdict(result))
+
+
+@bp.post("/register")
+@_admin
+def register_identity() -> Response:
+    if request.args:
+        raise ApplicationError("invalid_identity_query", "身份登记不接受查询参数", 400)
+    command = IntegrationRegisterCommand.parse(strict_admin_body(maximum_bytes=65536))
+    result = _service().register(command)
+    context = {"request_id": get_request_id(), "actor": g.account["id"], "owner_id": result.summary.owner_id,
+        "integration_id": result.summary.integration_id, "action": "register", "state": result.summary.state}
+    current_app.logger.info("integration_identity_admin_action %s", json.dumps(context, ensure_ascii=True, separators=(",", ":")))
+    return _response(identity=asdict(result))

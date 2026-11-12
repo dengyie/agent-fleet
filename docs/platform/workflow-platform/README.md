@@ -1,6 +1,10 @@
 # Agent Fleet 深度优化开发入口
 
-> 当前状态（2026-11-12）：候选 `4bdb9c6` 已通过独立 Linux 完整门禁：7482 passed、0 skip、46/46 journeys、2508 selectors，原 release verifier 退出 0，源码前后不变。生产 receiver 依赖预检及容器 jsonschema 已补齐，尚未切换应用；GitHub main/现网仍为 `301e259`。公开发布与 CI、真实模型/Node/产物下载/重启恢复，以及其余 F5/F6 TODO 仍开放。macOS 全量两项环境缺依赖失败及补齐后23项复验独立记录，不回写原报告。详见[最新开发总账](../development-completion.md#当前交付候选与生产依赖准备2026-11-12)。
+Fleet 身份页面登记已在独立开发分支补齐：原库新增身份、不可变重复登记、正常 Hub 重启和真实 MCP 凭据使用已有证据；后端关联247项、两个集成浏览器模块20项、其他关联351项通过。见 [操作说明](integration-setup.md#从账号页面登记)、[实施计划](../../superpowers/plans/2026-11-13-fleet-identity-registration-ui.md)及[开发总账](../development-completion.md#fleet-身份页面登记开发增量2026-11-13独立于公开-pr42)。此增量尚未进入 PR42/生产，新版本完整门禁和其余 TODO 仍开放。
+
+> 当前状态（2026-11-13）：公开候选 `db4c7ff` 的 PR42 官方 CI 已通过：Linux7482项、0失败/跳过、46/46流程、2508selectors；Windows224通过/2平台跳过。真实CLI试点完成开发/独立评审/31固定测试/5产物下载和重登恢复，仍待人工接受；实际跨机Node四场景通过。生产receiver的候选包check已过，未合并/部署，main/现网仍为 `301e259`。正式CI打包部署、生产模型/新鲜Node的实际任务与恢复、完整WF-04/05及其余F5/F6 TODO仍开放。详见[最新开发总账](../development-completion.md#公开候选-ci-与生产包预检2026-11-13)。
+
+> 2026-11-13独立开发增量：Native workspace/conversation 现在可通过同一 preview/apply CLI 初始化，支持精确模板选择、1–8 step 和共用会话去重；原对象保留及事务不变。14模块关联390项通过。该改动尚未进入公开PR42，不混用旧候选的官方CI或部署证据，完整新版本门禁仍开放。见 [初始化操作](startup-registration.md#工作区和会话初始化)与 [实施计划](../../superpowers/plans/2026-11-13-native-workflow-setup.md)。
 
 > 2026-11-12功能补齐：外部 Agent 合同的 `capability_requirements` 必须与已登记 adapter 显式声明的能力 revision 匹配，并随不可变 target/configuration digest 固定；不匹配在 admission 前稳定拒绝。旧空能力 target 快照保持兼容。受控外部 Workflow 回归 427 项通过；真实外部账号与生产试点仍按原边界单独验收。
 

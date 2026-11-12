@@ -340,6 +340,7 @@ Hub 子集的实际边界见[产物契约 §6.4](../specs/2026-10-20-artifact-ca
 - [x] Fleet 身份登记/撤销持久化：不可变快照、全局 token 摘要索引、跨进程竞争、原 Workflow 事务内授权与预算复核、reader 4、备份恢复禁用导入凭据；启动历史扫描为 WAL 只读事务。具体证据见[身份持久化计划](2026-10-25-fleet-integration-identities.md)。MCP 目录持久化和目录管理界面见 F5.1。
 - [x] 提供正常 Hub 的身份运维登记入口：可信摘要配置、离线预览、显式原库登记、重启/撤销/恢复禁用语义，见[部署用法](../../platform/workflow-platform/integration-setup.md)。实际客户端账号策略与生产任务验收仍开放。
 - [x] Fleet 身份查看/撤销 UI：Cookie 管理员脱敏复合分页、完整权限/预算/恢复禁用事实、原 digest 及 active 状态事务复核、显式确认和不确定结果只读核对；登记/令牌仍由可信配置提供。见[身份管理计划](2026-10-25-fleet-identity-administration.md)。
+- [x] Fleet 身份页面登记：浏览器生成令牌、digest-only 原库写入、完整 allowlists/scopes/预算、事务内 workspace/admission 复核、原身份重复/撤销/恢复语义和精确 UTF-8 保留；正常 Hub 重启、原 MCP 认证与浏览器创建/丢响应/关窗/账号切换已验证。见[页面登记计划](2026-11-13-fleet-identity-registration-ui.md)。仅完成此配置入口，其他集成 UI 和真实外部试点仍开放。
 
 **验证：** `PYTHONPATH=. python3 -m pytest tests/test_integration_identity.py tests/test_fleet_mcp_boundary.py tests/test_mcp_http.py tests/test_auth_matrix.py -q`。退出：外部助手可发起预授权工作，无法替人扩大权限。
 

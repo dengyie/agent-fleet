@@ -7,12 +7,15 @@ from typing import Literal, Protocol
 
 from hub.domain.integration_administration import (
     IntegrationIdentityDetail, IntegrationIdentityKey, IntegrationIdentityPage, IntegrationIdentityRecord,
-    IntegrationIdentitySummary, IntegrationRevocation, IntegrationRevokeCommand, identity_page,
+    IntegrationIdentitySummary, IntegrationRevocation, IntegrationRevokeCommand, IntegrationRegisterCommand, identity_page,
 )
 from hub.domain.integration_identity import IntegrationIdentity, IntegrationIdentityError
+from hub.domain.workflow_json import decode_snapshot
 
 
 class IntegrationIdentityAdminStore(Protocol):
+    def register(self, identity: IntegrationIdentity, *, now: float,
+                 require_available_workspaces: bool = False) -> IntegrationIdentity: ...
     def list_page(self, after: IntegrationIdentityKey | None = None, limit: int = 8) -> tuple[tuple[IntegrationIdentityRecord, ...], IntegrationIdentityKey | None]: ...
     def get_record(self, owner: str, integration_id: str) -> IntegrationIdentityRecord: ...
     def revoke(self, owner: str, integration_id: str, *, expected_digest: str, now: float,
@@ -46,6 +49,13 @@ class IntegrationIdentityAdminService:
         record = self.store.get_record(owner, integration_id)
         return IntegrationIdentityDetail(_summary(record), tuple(sorted(record.identity.template_ids)),
             tuple(sorted(record.identity.workspace_ids)))
+
+    def register(self, command: IntegrationRegisterCommand) -> IntegrationIdentityDetail:
+        if type(command) is not IntegrationRegisterCommand or type(command.identity) is not IntegrationIdentity:
+            raise IntegrationIdentityError("invalid_identity_registration")
+        command = IntegrationRegisterCommand.parse({"identity": decode_snapshot(command.identity.snapshot)})
+        identity = self.store.register(command.identity, now=self.clock(), require_available_workspaces=True)
+        return self.detail(identity.owner_id, identity.integration_id)
 
     def revoke(self, owner: str, integration_id: str, command: IntegrationRevokeCommand) -> IntegrationRevocation:
         IntegrationIdentityKey(owner, integration_id)

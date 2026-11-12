@@ -6,7 +6,7 @@
 
 Hub 的普通 `hub.web.make_app()` 入口可读取 operator 管理的 JSON 文件，装配原有 `coding-delivery@1` 以及 Native 文本、代码和媒体输入执行器。不会在请求中接受可执行命令，也不会仅因加载配置启动后台线程。
 
-先在原平台库准备启用的 owner/workspace、三个同 owner/workspace 且未归档的 conversation，使用下节的初始化命令。workspace 使用 Hub 实际可访问的绝对目录。开发 machine/project 必须已被原 Tasks 项目白名单授权，Runner 使用原注册与轮询方式。评审命令及 launcher 必须是实际可执行的绝对 argv；它们由运维提供，需实现原 `CommandReviewAdapter` 合同：从环境变量 `FLEET_REVIEW_REQUEST` 指向的文件读取 JSON 请求，向 stdout 返回 JSON 报告。不要将测试夹具当作生产评审器。
+先在原平台库准备启用的 owner/workspace 及同 owner/workspace 且未归档的 conversation，使用下节的初始化命令。coding-delivery 要求三个独立会话；Native 按模板中 1–8 个 step 的 binding 准备会话，共用的 conversation 只创建一次。workspace 使用 Hub 实际可访问的绝对目录。开发 machine/project 必须已被原 Tasks 项目白名单授权，Runner 使用原注册与轮询方式。评审命令及 launcher 必须是实际可执行的绝对 argv；它们由运维提供，需实现原 `CommandReviewAdapter` 合同：从环境变量 `FLEET_REVIEW_REQUEST` 指向的文件读取 JSON 请求，向 stdout 返回 JSON 报告。不要将测试夹具当作生产评审器。
 
 配置路径解析顺序：显式 `make_app(platform_workflow_registration_file=...)` → `AGENT_FLEET_PLATFORM_WORKFLOW_REGISTRATION_FILE` 环境变量 → `FLEET_HOME/fleet-gates.conf` 同名字段。显式空串或存在但为空的环境变量关闭文件登记，不回退到文件。配置必须是绝对路径、UTF-8 无 BOM JSON 普通文件，最大 256 KiB，`schema_version` 必须为整数 1，`coding_delivery` 与 `native` 至少有一项且总数不超过 32。
 
@@ -55,7 +55,7 @@ Native 入口与 `coding_delivery` 可以放在同一个登记文件中。Native
 
 ## 工作区和会话初始化
 
-候选代码提供本地运维入口 `python3 -m hub.workflow_setup`，读取下面同一份登记文件，精确选择一项 owner/workspace，准备该项的工作区与 develop/review/test 三个会话。先保存登记文件并准备实际存在的工作区目录，再运行预览。以下路径为部署结构示例，必须使用当前 Hub 的真实数据库及对应 Python，不能误把另一空库当作生产库；未显式配置时原平台库默认在 release root 的 `var/platform/platform.db`。
+候选代码提供本地运维入口 `python3 -m hub.workflow_setup`，读取同一份登记文件，精确选择一项 owner/workspace，准备该项的工作区与会话。coding-delivery 创建 develop/review/test 三个独立会话；2026-11-13 的开发增量也支持 Native binding 初始化，该增量尚未包含在公开 PR42 中。先保存登记文件并准备实际存在的工作区目录，再运行预览。以下路径为部署结构示例，必须使用当前 Hub 的真实数据库及对应 Python，不能误把另一空库当作生产库；未显式配置时原平台库默认在 release root 的 `var/platform/platform.db`。
 
 ```bash
 python3 -m hub.workflow_setup \
@@ -66,6 +66,18 @@ python3 -m hub.workflow_setup \
 ```
 
 默认只预览：数据库不存在时也不会创建目录或数据库；已有数据库使用只读连接，不初始化 schema。成功输出 `mode=preview` 及 `create/existing` 数量。确认绑定后，用同一命令追加 `--apply`，通过原 `PlatformRepository.init()` 初始化/迁移 schema，再在一个写事务中创建缺失的工作区和会话；不会启动任何 Workflow、Runner、模型或 Node 命令。退出码 0 为完成，2 为配置、冲突或存储错误。
+
+Native 初始化使用同一命令，`--template` 精确匹配 `definition.template_id`：
+
+```bash
+python3 -m hub.workflow_setup \
+  --database /srv/agent-fleet/var/platform/platform.db \
+  --registration /var/lib/agent-fleet/native-input.json \
+  --owner operator-a --workspace workspace-a \
+  --root /srv/workspaces/project-a --template native-input
+```
+
+无 selector 时，同一 owner/workspace 存在 coding-delivery 就保持原 coding 选择；否则要求恰好一个 Native 条目。多 Native 模板需分别指定 `--template`；指定 `coding-delivery` 时也检查实际匹配项，与同名 Native 条目冲突则拒绝。缺失、歧义或不合法的 Native 定义/binding 在创建数据库前退出 2。计数按不同 conversation ID 计算，共用会话的 title 取首次出现的 step。模型目录和 provider secret 仍须另行配置；apply 成功只证明对象已准备，随后应以关闭 dispatch 的普通 Hub 加载同一 manifest，检查模板后再进行真实任务验收。实现与回归见 [Native 初始化计划](../../superpowers/plans/2026-11-13-native-workflow-setup.md)。
 
 重复 apply 的新增数量为零；已有工作区 name/default_node、会话 title/overrides/revision 和历史保持原样。已有工作区必须启用、使用 directory backend、root 与指定目录解析后相同；已有会话须同 owner/workspace 且未归档。跨 owner 的同名会话、错误 workspace、已归档/停用对象和 root 漂移会明确拒绝，不自动重绑或复活。所有既有对象先核对再插入；任意会话插入失败会回滚该项的全部内容写入。原 schema 初始化单独遵循原平台迁移合同，不等同于内容事务。
 

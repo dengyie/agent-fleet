@@ -1,5 +1,33 @@
 # 文档开发总账
 
+## Fleet 身份页面登记开发增量（2026-11-13，独立于公开 PR42）
+
+账号页现在可以创建 Fleet MCP 集成身份：填写原 owner/integration、模板/工作区列表、三工具权限及预算，浏览器生成令牌并仅提交摘要；原身份仓库在同一写事务中验证新登记的工作区和 admission。相同定义重复登记保持原时间、撤销和恢复禁用，定义/token 冲突拒绝；原 CLI/bootstrap 默认合同不变，正常 Hub 无需重启即可使用新凭据。
+
+原缺口 29 项测试失败、浏览器缺按钮失败均已留证。实际浏览器另外复现异步 `close` 事件之前发送登记的窗口，以及 `trim()` 改写合法 UTF-8 owner 的问题；现发送前检查 dialog 的同步 open/connected 状态，关闭只中止本次登记观察，所有标识原文保留。令牌辅助说明标签和 CSS import 顺序也已修正；可见性断言复现令牌处于 modal 视口之外，现生成后自动定位并选中，桌面/手机实际 hit-test 通过。中间的工作区 name 超限、缺浏览器 window 替身及两权限工具数量断言属于验收夹具问题，原失败报告保留。
+
+后端/身份/CLI/Fleet MCP/明文与加密备份七模块 **247 passed、零失败/错误/跳过**；两个集成管理浏览器模块 **20 passed、零跳过**，含桌面/390px 创建、权限选择、实际原 MCP 认证、丢响应固定重试、关窗、账号切换和精确 UTF-8 标识。最新登记专属 **31 passed**；共享管理边界、账号矩阵、前端合同、架构、打包和门禁八模块 **351 passed、零跳过**。这几组报告独立保存，不标为全仓门禁。
+
+原证据位于本机私有 verification 根 `identity-registration-20261113/`。26张最新PNG完整校验并抽查配置/令牌视图；46条journey/2529selectors/7541实例收集齐全。Windows CI新增两个实际模块（Native setup与Fleet登记），复用runner已有Node，不新增运行时安装；该配置变更后164项CI/打包/架构关联复验通过，尚无新Windows终态结果。操作与范围见 [页面登记说明](workflow-platform/integration-setup.md#从账号页面登记)及 [实施计划](../superpowers/plans/2026-11-13-fleet-identity-registration-ui.md)。当前尚未进入 PR42/生产；新的完整 Linux/browser/Windows 门禁和正式发布仍须单独验证。其余 MCP/外部集成配置 UI、自动摘要、视频/其他执行 context、真实外部试点及完整 TODO 继续开放。
+
+## Native 初始化开发增量（2026-11-13，未进入公开候选）
+
+原 `hub.workflow_setup` 仅初始化 coding-delivery 的三个独立会话，Native-only manifest 无法通过该入口准备普通 Hub 所需对象。开发分支现复用启动登记的纯 parser，支持 Native 1–8 step、精确 `--template` 选择及共享会话去重；沿用原只读 preview 和 create-only 写事务。模型及 secret 单独配置，初始化不派发任务。错误定义、歧义、超限 target 和不合法 model profile 在建库前拒绝；既有对象、归档冲突、插入回滚和两个 CLI 同时 apply 均有实际存储断言。
+
+原缺口 6 failed、边界补充 3 failed 的报告保留。最终 setup/startup 集合 **81 passed**，扩展到 Native 文本/代码/图片/音频/Memory/恢复、明文与加密备份、架构边界的 14 模块 **390 passed、零失败/错误/跳过**；门禁关联 **134 passed、零跳过**，CI 必需 Ruff 规则、Python 3.10 语法、UTF-8 无 BOM 与 diff 检查通过。46 条 journey、2516 个 selector 全部对应当前收集的 7504 个实例，仅证明收集完整。原报告位于本机私有 verification 根 `native-workflow-setup-20261113/`。首次 green 命令因引用不存在的模块退出 4、未执行测试，未计入通过结果。
+
+这组结果只覆盖本地开发增量，**不属于公开 PR42 / db4c7ff 的官方 CI 或候选包**，也不代替新版本完整 Linux/browser/Windows 门禁及生产验收。实施细节见 [Native 初始化计划](../superpowers/plans/2026-11-13-native-workflow-setup.md)，操作示例见 [工作区和会话初始化](workflow-platform/startup-registration.md#工作区和会话初始化)。
+
+## 公开候选 CI 与生产包预检（2026-11-13）
+
+公开候选 `db4c7ffa72f054d5bd5dd1e22d765b8ecf7188f1` 的 [PR42 CI](https://github.com/dengyie/agent-fleet/actions/runs/43249983897) 已成功：Linux **7482 passed、0 failed/skipped、204 passing subtests**，**46/46 journeys、2508 selectors**；Windows **224 passed、2 POSIX skips**。已下载并核对原 JUnit（7482 cases，零 failure/error/skip）、journeys 和 51 张 PNG。GitHub 的 PR merge-test revision `e6b6aecdde1ff571232265054783a52b415536a4` 与公开候选 Git tree 相同，均为 `0f47c6c1313d72bcc3352ef6d68f73a0c0adc2a0`。PR 的 package/deploy 按设计跳过，五项外部检查仍为 `not_run`。原报告位于本机私有 verification 根的 `ready-4bdb9c6-20261112/pr42-linux/` 与 `pr42-windows/`。
+
+同公开候选完成真实 Codex CLI 开发、同模型独立会话评审、31 项固定测试、5 份 HTTP 产物下载及重登恢复，184.72 秒；桌面和 390px reload 通过，无 pageerror，1224 源文件前后不变。交付仍为 `awaiting_acceptance` / revision 22，人工接受未执行。独立 Linux Node 的原 `remote_test_probe.py` passed/failed/lost/unknown 四场景 **4 passed、17.57 秒**；每场景实际固定测试只执行一次，recover/replay 零执行、零下载，unknown 保留 held。测试失败证据仍为 failed，执行报告的 Run 成功不改写测试结论。原 root 降 DAC 后无法遍历 nobody 私有 runtime 的四项启动失败报告保留；切换到 runtime 所有者运行后重跑，未修改产品或放松隔离断言。远端产品/测试源码与候选相同；这不是完整生产 Workflow 或生产 Node 验收。
+
+按正式脚本本地打包公开候选，包为 7158996 bytes、SHA-256 `fa657ec13b821c5a7b955e87456401fb1979be22c16428fd0448f45b558679d5`；实际生产 receiver 的 `check` 返回 `checked`，包含运行依赖、账号探针和候选导入。此包明确标记为本地预检包，不冒充 GitHub CI package。检查前后 LIVE inode、RELEASE_ORIGIN、gates/hosts 摘要一致，无 pending/维护标记，容器 healthz 为 200。公开分支 fetch/rebase 最新 main 后提交不变；[PR42](https://github.com/dengyie/agent-fleet/pull/42) 已转为 ready for review，尚未合并或部署。生产仍为 `301e259`。
+
+剩余验收和功能保持开放：正式同次 CI package/deploy、生产每个启用模型与新鲜常驻 Node 的真实任务/下载/恢复、外部 MCP/Muse/邮件、其余集成配置界面、视频及其他执行 context、完整 WF-04/05 故障/竞争矩阵和 F6 的条件准入。上述试点和完整 CI 不代填这些范围。证据另位于本机私有 verification 根的 `live-cli-db4c7ff-20261112/`、`pr42-remote-node-20261113-owner-rerun/` 和 `pr42-production-candidate-check-20261113/`；CLI 证据含私有运行配置，不应公开整个目录。
+
 ## 当前交付候选与生产依赖准备（2026-11-12）
 
 候选 `4bdb9c65efa00ade252112f962b9b7d34fa2cfd1` 在独立 Linux 环境完成原完整 pytest/browser/journey 门禁：**7482 passed、0 failed、0 skipped、204 passing subtests**，2230.42 秒；原发布核验器退出 0，确认 **46/46 journeys、2508 selectors、7482 JUnit cases**。运行前后源码摘要与 clean checkout 一致。原证据位于独立测试机 `/var/tmp/g4bdb/full/`，源码 `/var/tmp/agent-fleet-candidate-4bdb9c6/source/`；外部检查仍为 `not_run`。插件停用后取消登录的真实 Linux Chromium 流程在相同候选连续 8 次通过。后续仅文档修订不改变该测试覆盖的产品及测试源码，最终公开提交仍需自己的 CI。

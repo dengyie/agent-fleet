@@ -5,9 +5,10 @@ import argparse
 import json
 from pathlib import Path
 
-from hub.composition.workflow_registration import read_workflow_registration
+from hub.composition.native_registration import parse_native_registration
+from hub.composition.workflow_registration import read_workflow_manifest
 from hub.infrastructure.platform_db import PlatformRepository, PlatformRepositoryError
-from hub.infrastructure.workflow_setup import WorkflowSetupError, prepare_workflow_workspace
+from hub.infrastructure.workflow_setup import WorkflowSetupError, prepare_workflow_conversations, prepare_workflow_workspace
 from platform_schema import validate_owner_id, validate_id
 
 
@@ -18,21 +19,42 @@ def main(argv=None):
     parser.add_argument("--owner", required=True)
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--root", required=True, type=Path)
+    parser.add_argument("--template", help="Exact Native template ID or coding-delivery; mixed manifests default to coding")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
     try:
         if not args.database.is_absolute():
             raise WorkflowSetupError("workflow_setup_requires_absolute_database")
         owner, workspace = validate_owner_id(args.owner), validate_id(args.workspace, "workspace_id")
-        entries = read_workflow_registration(args.registration.expanduser())
-        matches = [row for row in entries if type(row) is dict
+        manifest = read_workflow_manifest(args.registration.expanduser())
+        coding = [row for row in manifest.get("coding_delivery", []) if type(row) is dict
             and row.get("owner_id") == owner and row.get("workspace_id") == workspace]
+        native = [row for row in manifest.get("native", []) if type(row) is dict
+            and row.get("owner_id") == owner and row.get("workspace_id") == workspace]
+        if args.template is None and coding:
+            kind, matches = "coding", coding
+        elif args.template is not None:
+            candidates = [("coding", row) for row in coding if args.template == "coding-delivery"]
+            candidates.extend(("native", row) for row in native if type(row.get("definition")) is dict
+                and row["definition"].get("template_id") == args.template)
+            if len(candidates) != 1:
+                raise WorkflowSetupError("workflow_setup_requires_exact_registration")
+            kind, row = candidates[0]
+            matches = [row]
+        else:
+            kind, matches = "native", native
         if len(matches) != 1:
             raise WorkflowSetupError("workflow_setup_requires_exact_registration")
         row = matches[0]
-        conversations = tuple(row[phase]["conversation_id"] for phase in ("develop", "review", "test"))
-        report = prepare_workflow_workspace(PlatformRepository(args.database), owner_id=owner,
-            workspace_id=workspace, root_path=args.root, conversation_ids=conversations, apply=args.apply)
+        if kind == "coding":
+            conversations = tuple(row[phase]["conversation_id"] for phase in ("develop", "review", "test"))
+            report = prepare_workflow_workspace(PlatformRepository(args.database), owner_id=owner,
+                workspace_id=workspace, root_path=args.root, conversation_ids=conversations, apply=args.apply)
+        else:
+            definition, bindings = parse_native_registration(row)
+            conversations = tuple((step.step_key, bindings[step.step_key]["conversation_id"]) for step in definition.steps)
+            report = prepare_workflow_conversations(PlatformRepository(args.database), owner_id=owner,
+                workspace_id=workspace, root_path=args.root, conversations=conversations, apply=args.apply)
     except WorkflowSetupError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}))
         return 2

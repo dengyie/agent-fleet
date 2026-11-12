@@ -15,15 +15,15 @@ def require_account_admin() -> None:
         raise ApplicationError("forbidden", "集成管理需要账户管理员权限", 403)
 
 
-def strict_admin_body() -> object:
+def strict_admin_body(*, maximum_bytes: int = 2048) -> object:
     if request.headers.get("Origin") != current_app.config["ACCOUNT_ORIGIN"]:
         raise ApplicationError("invalid_origin", "请求来源无效", 403)
     if not request.is_json:
         raise ApplicationError("invalid_json", "请求体必须是 JSON", 415)
-    if request.content_length is not None and request.content_length > 2048:
+    if request.content_length is not None and request.content_length > maximum_bytes:
         raise ApplicationError("request_too_large", "集成管理请求超过限制", 413)
-    raw = request.stream.read(2049)
-    if len(raw) > 2048:
+    raw = request.stream.read(maximum_bytes + 1)
+    if len(raw) > maximum_bytes:
         raise ApplicationError("request_too_large", "集成管理请求超过限制", 413)
 
     def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

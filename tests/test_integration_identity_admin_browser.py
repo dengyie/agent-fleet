@@ -64,3 +64,17 @@ def test_both_integration_panels_resume_in_real_browser(tmp_path: Path) -> None:
         accounts={"enabled": True, "origin": "http://127.0.0.1"}))
     app.extensions["accounts"].bootstrap_admin("admin@example.test", PASSWORD)
     _browser_acceptance(app, "integration_identities_browser.cjs", "both", "desktop")
+
+
+@pytest.mark.parametrize("mode,viewport", [("create", "desktop"), ("create", "mobile"),
+    ("retry", "desktop"), ("hash-close", "desktop"), ("lifecycle", "desktop"), ("exact-ids", "desktop")])
+def test_fleet_identity_registration_in_real_browser(identity_admin: IdentityAdminSetup, tmp_path: Path, mode: str, viewport: str) -> None:
+    if not os.environ.get("FLEET_PLAYWRIGHT_MODULE"):
+        pytest.skip("Set FLEET_PLAYWRIGHT_MODULE for real browser acceptance")
+    from test_integration_identity_registration import workspace
+    setup = identity_admin
+    setup.app.config["ACCOUNT_COOKIE_SECURE"] = False
+    workspace(setup, tmp_path)
+    if mode == "exact-ids":
+        workspace(setup, tmp_path, owner="\ufefftenant")
+    _browser_acceptance(setup.app, "identity_registration_browser.cjs", mode, viewport)

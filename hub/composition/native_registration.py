@@ -7,12 +7,13 @@ from hub.application.workflow_coordinator import RegisteredWorkflowPlan
 from hub.application.workflow_templates import RegisteredWorkflowTemplate
 from hub.domain.workflow_contract import parse_definition
 from hub.domain.workflow_contract_types import CatalogRef
-from hub.domain.workflow_identity import canonical_json
+from hub.domain.workflow_identity import canonical_json, validate_reference
 from hub.infrastructure.workflow_run_executor import (
     RegisteredRunTarget,
     RunStepExecutor,
     _valid_provider_snapshot,
 )
+from platform_schema import validate_id
 
 _FIELDS = {"owner_id", "workspace_id", "definition", "bindings"}
 _BINDING_FIELDS = {
@@ -23,6 +24,42 @@ _MODES = {"text": (True, False, False), "code": (False, True, False),
 _LOCAL_NODES = (None, "", "local", "hub", "host")
 
 
+def parse_native_registration(row):
+    """Validate the shared manifest shape without consulting or creating a store."""
+    if type(row) is not dict or set(row) != _FIELDS:
+        raise ValueError("invalid_native_registration_fields")
+    definition = parse_definition(canonical_json(row["definition"]))
+    if (not definition.steps or any(step.kind != "native_run" or step.contract.output_specs
+            or step.contract.validator_refs or step.contract.capability_requirements for step in definition.steps)):
+        raise ValueError("unsupported_native_template")
+    bindings = row["bindings"]
+    if type(bindings) is not list or len(bindings) != len(definition.steps):
+        raise ValueError("invalid_native_bindings")
+    by_step, target_keys = {}, set()
+    for binding in bindings:
+        if type(binding) is not dict or set(binding) != _BINDING_FIELDS:
+            raise ValueError("invalid_native_binding_fields")
+        if any(type(binding[key]) is not str or not binding[key]
+               for key in ("step_key", "target_key", "conversation_id", "model_profile_id", "input_mode")):
+            raise ValueError("invalid_native_binding_fields")
+        validate_reference(binding["target_key"])
+        validate_id(binding["conversation_id"], "conversation_id")
+        validate_id(binding["model_profile_id"], "model_profile_id")
+        if not _valid_provider_snapshot(binding["provider_snapshot"]):
+            raise ValueError("invalid_native_provider_snapshot")
+        if binding["step_key"] in by_step:
+            raise ValueError("duplicate_native_binding")
+        if binding["target_key"] in target_keys:
+            raise ValueError("duplicate_native_target")
+        target_keys.add(binding["target_key"])
+        if binding["input_mode"] not in _MODES:
+            raise ValueError("invalid_native_input_mode")
+        by_step[binding["step_key"]] = binding
+    if set(by_step) != {step.step_key for step in definition.steps}:
+        raise ValueError("native_bindings_do_not_match_steps")
+    return definition, by_step
+
+
 def load_native_registration(entries, config, fleet, repository, *, clock):
     platform = fleet["platform_repository"]
     defaults = fleet["services"].get("platform_defaults")
@@ -30,38 +67,14 @@ def load_native_registration(entries, config, fleet, repository, *, clock):
         raise ValueError("native_registration_requires_platform_defaults")
     templates, plans, executors, target_keys = [], [], [], set()
     for row in entries:
-        if type(row) is not dict or set(row) != _FIELDS:
-            raise ValueError("invalid_native_registration_fields")
+        definition, by_step = parse_native_registration(row)
         owner, workspace = row["owner_id"], row["workspace_id"]
         if config.platform_workflow_dispatch_enabled and not config.platform_worker_scheduler_enabled and owner != config.dev_operator:
             raise ValueError("workflow_registration_owner_not_scheduled")
         workspace_row = platform.get_workspace(owner, workspace)
         if not workspace_row or not workspace_row.get("enabled"):
             raise ValueError("native_registration_workspace_unavailable")
-        definition = parse_definition(canonical_json(row["definition"]))
-        if (not definition.steps or any(step.kind != "native_run" or step.contract.output_specs
-                or step.contract.validator_refs or step.contract.capability_requirements for step in definition.steps)):
-            raise ValueError("unsupported_native_template")
         template = RegisteredWorkflowTemplate(owner, workspace, definition)
-        bindings = row["bindings"]
-        if type(bindings) is not list or len(bindings) != len(definition.steps):
-            raise ValueError("invalid_native_bindings")
-        by_step = {}
-        for binding in bindings:
-            if type(binding) is not dict or set(binding) != _BINDING_FIELDS:
-                raise ValueError("invalid_native_binding_fields")
-            if any(type(binding[key]) is not str or not binding[key]
-                   for key in ("step_key", "target_key", "conversation_id", "model_profile_id", "input_mode")):
-                raise ValueError("invalid_native_binding_fields")
-            if not _valid_provider_snapshot(binding["provider_snapshot"]):
-                raise ValueError("invalid_native_provider_snapshot")
-            if binding["step_key"] in by_step:
-                raise ValueError("duplicate_native_binding")
-            if binding["input_mode"] not in _MODES:
-                raise ValueError("invalid_native_input_mode")
-            by_step[binding["step_key"]] = binding
-        if set(by_step) != {step.step_key for step in definition.steps}:
-            raise ValueError("native_bindings_do_not_match_steps")
 
         policy_ref = definition.steps[0].contract.policy_ref
         definition_digest = hashlib.sha256(definition.snapshot).hexdigest()
@@ -103,4 +116,4 @@ def load_native_registration(entries, config, fleet, repository, *, clock):
     return tuple(templates), tuple(plans), tuple(executors)
 
 
-__all__ = ["load_native_registration"]
+__all__ = ["load_native_registration", "parse_native_registration"]
