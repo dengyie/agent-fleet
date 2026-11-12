@@ -58,6 +58,64 @@ def test_summary_publish_is_immutable_canonical_scoped_and_reconstructable(tmp_p
         assert connection.execute("SELECT minimum_reader_version FROM workflow_schema_meta").fetchone()[0] == 11
 
 
+@pytest.mark.parametrize("media_kind,reader", [("image", 13), ("audio", 14), ("video", 15)])
+def test_first_summary_preserves_existing_native_media_reader_and_recovery(tmp_path: Path, media_kind: str, reader: int) -> None:
+    import asyncio
+
+    from hub.application.workflow_media_inputs import WorkflowMediaInputs
+    from hub.infrastructure.workflow_run_executor import RunStepExecutor
+    from hub.infrastructure.workflow_summary_repository import WorkflowSummaryRepository
+    from test_workflow_native_audio_inputs import WAV
+    from test_workflow_native_audio_inputs import _target as audio_target
+    from test_workflow_native_media_inputs import PNG
+    from test_workflow_native_media_inputs import _target as image_target
+    from test_workflow_native_text_inputs import make_text
+    from test_workflow_native_video_inputs import MP4, video_target
+
+    content_type, raw, target_factory = {
+        "image": ("image/png", PNG, image_target),
+        "audio": ("audio/wav", WAV, audio_target),
+        "video": ("video/mp4", MP4, video_target),
+    }[media_kind]
+    setup = make_text(tmp_path, raw=raw, content_type=content_type)
+    setup.target = target_factory(setup)
+    executor = RunStepExecutor(setup.workflows, setup.target, clock=setup.clock,
+        media_inputs=WorkflowMediaInputs(setup.artifacts))
+    binding = setup.dispatch(executor).binding
+    store = WorkflowSummaryRepository(setup.workflows)
+    first = publish(store)
+    second = publish(store, token="second-after-media", epoch=1, content="second", now=101)
+    assert (first.revision, second.revision) == (1, 2)
+    with setup.workflows.transaction(write=False) as connection:
+        assert connection.execute("SELECT minimum_reader_version FROM workflow_schema_meta").fetchone()[0] == reader
+    setup.workflows.init()
+    assert asyncio.run(executor.lookup(binding.token, setup.resolved.digest, setup.resolved)) == binding
+    assert store.get(OWNER, WORKSPACE, "summary-a", revision=1) == first
+    summary = PlatformBackupService().create_backup(setup.workflows.db_path, setup.artifacts.root, tmp_path / "backup")
+    assert summary["workflow"]["minimum_reader_version"] == reader
+
+
+def test_failed_first_summary_does_not_change_existing_higher_reader(tmp_path: Path, monkeypatch: Any) -> None:
+    store = store_for(tmp_path / "platform.db")
+    with store.workflows.transaction() as connection:
+        connection.execute("UPDATE workflow_schema_meta SET minimum_reader_version=15")
+    original = store.workflows.transaction
+
+    @contextmanager
+    def rejected(**kwargs: Any) -> Any:
+        with original(**kwargs) as connection:
+            connection.set_authorizer(lambda action, table, *rest: sqlite3.SQLITE_DENY
+                if (action, table) == (sqlite3.SQLITE_INSERT, "workflow_summary_versions") else sqlite3.SQLITE_OK)
+            yield connection
+
+    monkeypatch.setattr(store.workflows, "transaction", rejected)
+    with pytest.raises(WorkflowRepositoryError):
+        publish(store)
+    with original(write=False) as connection:
+        assert connection.execute("SELECT minimum_reader_version FROM workflow_schema_meta").fetchone()[0] == 15
+        assert connection.execute("SELECT name FROM sqlite_master WHERE name GLOB 'workflow_summary_*'").fetchall() == []
+
+
 def test_summary_token_returns_original_version_after_append_and_disable(tmp_path: Path) -> None:
     store = store_for(tmp_path / "platform.db")
     original = publish(store)

@@ -99,7 +99,7 @@ class WorkflowSummaryRepository:
             if not present:
                 for statement in STATEMENTS:
                     connection.execute(statement)
-                connection.execute("UPDATE workflow_schema_meta SET minimum_reader_version=11 WHERE singleton=1")
+                connection.execute("UPDATE workflow_schema_meta SET minimum_reader_version=max(minimum_reader_version,11) WHERE singleton=1")
             head = self._head(connection, owner, workspace, summary_id)
             if (head["epoch"] if head else 0) != expected_epoch:
                 raise WorkflowRepositoryError("revision_conflict")

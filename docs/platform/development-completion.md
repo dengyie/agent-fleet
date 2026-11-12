@@ -1,6 +1,16 @@
 # 文档开发总账
 
+## 部署前摘要 reader 根因修复（2026-11-13）
+
+首次保存摘要原 SQL 将 Workflow minimum reader 无条件改为11，会使已有图片/音频/视频 Run 的13/14/15要求倒退，进而破坏历史重载与备份验证。新增真实媒体派发、摘要追加、仓库重载、原 binding 查回和备份回归，修复前3failed/1passed；同写事务改用`max(minimum_reader_version,11)`后9模块315passed，零failure/error/skip、31.58s。另用SQLite authorizer证明首次摘要写入失败仍回滚建表且保留reader15。此修复当前未发布，不由PR45现有CI代填；见[实施与证据计划](../superpowers/plans/2026-11-13-summary-reader-preservation.md)。
+
+最终12模块380passed、零failure/error/skip、41.30s，覆盖真实摘要浏览器/API、三种媒体、Run恢复及明文/加密备份、发布/依赖合同。2026-11-13 05:04 SGT真实生产只读检查仍为2enabled Node/0新鲜心跳，持久gate仅platform/worker/scheduler开启，bwrap缺失且namespace实际拒绝；公网healthz正常、manifest/main仍301e259。当前可准备自用试运行，完整Workflow实际使用须先完成发布、持久登记、可用执行器和真实任务/下载/恢复。
+
 ## Native 完整视频输入增量（2026-11-13）
+
+已建立[PR45](https://github.com/dengyie/agent-fleet/pull/45)，base为PR44，draft；公开`0f02d7ebd7c112093fc31c447109132866622e8f`与开发`f0ab27a6bb0c534dbe6de5ee6f29c5ce2752b9ee`完整tree均为`38fb50f1716b0d1fee4b975fddc9539ceb86e864`，原pre-push保护保留。[CI43303433905](https://github.com/dengyie/agent-fleet/actions/runs/43303433905)确认在精确公开HEAD运行；尚无此增量完整终态。46journeys/2578selectors/7661cases收集无缺项。后续只删了测试文件末尾额外空行，652项本机行为证据保持原范围，正式CI仍需自己的终态。
+
+PR45同次Windows job已终态success；原下载JUnit389cases，387passed/2POSIXskips、零failure/error，含55项视频用例。Linux完整终态仍待核验；不合并不同版本的证据。
 
 本地Native目标现支持完整MP4 ArtifactRef，复用原`inline_media_inputs`、verified descriptor、Run事务和worker；必须固定`video_input=True`。使用文档确认的`video_url`data URL传递完整视频，不抽帧或转摘要。快照schema7/reader15只保存有序hash/size/MIME引用；旧图片/音频schema和wire保持。两帧16×16真实MP4为1103bytes、SHA-256 `10df2ff54573bdd08f65e7f7775bf4a3c2c457e0e58f5cffec3e1e9bc710e6b2`，本机ffprobe确认2帧，测试不依赖ffmpeg安装。
 

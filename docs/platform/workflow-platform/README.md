@@ -1,5 +1,7 @@
 # Agent Fleet 深度优化开发入口
 
+部署前补充[摘要 reader 保留修复](../../superpowers/plans/2026-11-13-summary-reader-preservation.md)：首次摘要发布不再降低图片/音频/视频 Run 已要求的 reader13/14/15，原摘要事务失败仍完整回滚。当前未发布；其独立验证不能由PR44/45既有门禁代填。
+
 最新公开试运行候选为PR42→PR43→[PR44](https://github.com/dengyie/agent-fleet/pull/44) / `6ea7e09`；[完整CI43292358951](https://github.com/dengyie/agent-fleet/actions/runs/43292358951)经原工件独立核验7605Linux cases、46journeys/2560selectors、Windows332passed/2POSIXskips。候选包通过真实生产receiver check，尚未合并/切换，线上仍为301e259。生产Workflow登记、可用Node/本地执行环境与任务/下载/恢复验收仍待完成；容器namespace探针实际拒绝，不能用healthz或目录预检代填。见[最新发布与使用条件](../development-completion.md#pr44-最终-ci-与实际使用条件2026-11-13)。
 
 后续开发增量已补本地Native完整MP4引用输入，固定`video_input=True`、schema7/reader15和完整`video_url`data URL，不改旧图片/音频快照；见[视频计划](../../superpowers/plans/2026-11-13-native-video-inputs.md)和[执行合同](../../superpowers/specs/2026-10-20-workflow-execution-contract.md#544-本地-native-run-的完整-mp4-视频输入)。此增量不属于上方PR44证据，须独立验证和发布；真实视频模型与非Native媒体context继续开放。

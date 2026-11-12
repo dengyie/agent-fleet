@@ -46,7 +46,8 @@
 
 - [x] Add exact new selectors and the opt-in transport contract; retain real video models, non-Native contexts, remaining UI/automatic summary/archive/production TODOs as open.
 - [x] Run associated media/provider/Run/history/backup/startup/package/architecture tests, required Ruff, Python3.10 grammar, UTF-8/noBOM anddiff checks.
-- [ ] Record actual red/green commands and outcomes. Commit only verified code; publish a separate exact-tree increment onto reviewed PR44 with its own complete CI and keep its release evidence separate.
+- [x] Record actual red/green commands and outcomes. Commit only verified code; export an exact-tree increment onto reviewed PR44, create/attach its own PR and dispatch exact-head CI.
+- [ ] Inspect terminal Linux/browser and Windows evidence for this increment; keep production/live model acceptance and the full project TODO separate.
 
 Return to [Workflow index](../../platform/workflow-platform/README.md), [roadmap](2026-10-20-workflow-platform-roadmap.md) and [development ledger](../../platform/development-completion.md).
 
@@ -77,3 +78,13 @@ Earlier19-module610pass and publication association202pass/2subtests remain thei
 The vault's unrelated rebase has now completed. Itsmaster branch and clean relevant files were checked; existingcanonical runbook, project/development indexes and two router twins have been updated onmaster. Other vault work remains untouched. Native video publication/fullCI, realvideo provider and the complete projectTODO remain open until their own actual evidence.
 
 Vault navigation/governance scan completed with exit0/OK,zero errors/warnings,366 inspected documents and49 route rows. This confirms its declared router/one-hop scope, not full-vault facts or anchor certification.
+
+## Publication checkpoint
+
+Development`f0ab27a6bb0c534dbe6de5ee6f29c5ce2752b9ee` and public`0f02d7ebd7c112093fc31c447109132866622e8f` share the complete tree`38fb50f1716b0d1fee4b975fddc9539ceb86e864`. The functional commit is`1e45debf90f65bd9ad27278d6c7b07a8e95b34ff`; the subsequent one-line change only removes an extra final blank line caught by the publication staged diff check. The exact final tree was checked before push, with the original executable pre-push hook unchanged.
+
+[PR45](https://github.com/dengyie/agent-fleet/pull/45) isdraft,basePR44's`codex/mcp-connection-registration`. Exact workflow-dispatch[CI43303433905](https://github.com/dengyie/agent-fleet/actions/runs/43303433905) isconfirmedrunning on`0f02d7e` with Linux andWindows jobs inprogress. Its result must not be inferred fromPR44 orlocal652; feature package/deploy retains the originalmain-only conditions. All46journeys/2578selectors resolve against7661collected cases,zero missing selectors. These arecollectionfacts, not a full-suite pass.
+
+Subsequent Windows terminal evidence: original artifact13983166622,8228bytes,389JUnitcases=387passed+2POSIXskips,zero failure/error,55video cases. Linux was still running when this checkpoint was inspected; Windows success is not a complete release verdict.
+
+The vault's existing sync recorded the five updated files in observedcommit`d54755a139094b27daaf3af1df6a4adfff172d50` before the attempted manual commit; Git correctly returnednothing tocommit. No vault push was executed by this task. Main/production remain301e259,with no merge or deployment.
