@@ -1,5 +1,13 @@
 # 文档开发总账
 
+## MCP 页面接入发布与目录查询修正（2026-11-13）
+
+页面接入已建立[独立 PR44](https://github.com/dengyie/agent-fleet/pull/44)，base 为 PR43。初始公开 `5d9e2f88818e89058501faa76b685fc13cbb9a37` 与开发 `0ec239cee2fcb2489bcca5bb7fea6d80bea7bfa4` 完整 tree 相同，均为 `193df0f5b26d565599cab34250b8ccfa6600ec2a`；原 pre-push 保护保留。初次 CI43288542639 的 Windows 原工件已下载核对：330cases，328passed/2POSIXskips，零 failure/error；Linux 尚在运行。这个结果不代替后续修正的新版本完整 CI。
+
+128条active连接的真实正常Hub/SQLite本机测量发现，每次单工具调用为附着新登记而重新解码所有已附着定义，目录准备P95从原2.015ms升至80.298ms。1/20/128三项确定回归复现解码2/21/129记录；SQL查询现排除已附着的不可变适配器，原 `_durable` 每次仍读取所用连接的当前完整版本和撤销状态。相同数据库修正后P95为3.137ms（同期原行为2.971ms），50samples各自保存。这里只测RPC前准备，不是生产或完整工具时延。
+
+最终15模块含实际MCP/Fleet管理浏览器的组合 **537passed、2passing subtests、零failure/error/skip**；四项成本/首次调用后新登记/撤销回归全部通过。46journeys/2560selectors/7605tests收集无缺项。原发布清单遗漏、成本失败及中间夹具错误的报告分别保留；修正的新公开revision与完整CI仍需自己的证据。操作、原备份/HTTPS/浏览器证据与范围见[实施计划](../superpowers/plans/2026-11-13-mcp-connection-registration.md)和[页面接入](workflow-platform/mcp-startup.md#从账号页面登记连接)。生产未切换，真实外部服务、其他配置与自动摘要/媒体/长期归档等完整TODO继续开放。
+
 ## 首批线上试运行判断（2026-11-13）
 
 首批候选为 PR42 + PR43，公开 HEAD `f09ef3e81764f17436d0be3044226032fa1194e1`。其官方 Linux/browser 与 Windows CI 已成功，真实 CLI 开发、独立评审、固定测试、下载及重登恢复证据见下文。适合进入线上自用试运行准备，尚未完成生产 Workflow 验收。

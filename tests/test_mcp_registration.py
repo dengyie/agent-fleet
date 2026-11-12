@@ -492,3 +492,51 @@ def test_corrupt_durable_registration_is_store_unavailable_not_bad_input(setup, 
     result = request(setup.admin, path=path)
     assert result.status_code == 503
     assert result.get_json()["error"] == "connector_snapshot_invalid"
+
+
+@pytest.mark.parametrize("connections", [1, 20, 128])
+def test_attached_scope_only_decodes_called_authority_and_keeps_revocation(setup, monkeypatch, connections):
+    import hub.infrastructure.mcp_catalog_repository as repository_module
+    from hub.application.mcp_registration import MCPRegistrationCommand, register_mcp_connection
+    from hub.platform.connectors.snapshots import encode_discovery
+    from test_mcp_catalog_persistence import _connector
+
+    for index in range(connections):
+        key = f"c{index:03d}"
+        record = register_mcp_connection(setup.catalog, MCPRegistrationCommand.parse(payload(connector_id=key)))
+        discovery = _connector(_messages(), connector_id=key).discover()
+        setup.catalog.store.publish(key, expected_epoch=record.epoch,
+            discovery_snapshot=encode_discovery(discovery), now=setup.catalog.clock())
+    calls = install_peer(monkeypatch)
+    decoded = []
+    original_decode = repository_module._decode
+
+    def observe(row):
+        decoded.append(row["connector_id"])
+        return original_decode(row)
+
+    monkeypatch.setattr(repository_module, "_decode", observe)
+    result = setup.catalog.call("mcp.c000.weather", {"city": "Singapore"}, owner_id="owner", workspace_id="workspace")
+    assert result.state == "succeeded" and calls == ["tools/call"]
+    assert decoded == ["c000"], "attached immutable adapters must not cause a full-scope discovery decode per call"
+
+    record = setup.catalog.store.get_many(("c000",))[0]
+    setup.catalog.store.revoke("c000", expected_digest=record.config_digest, now=setup.catalog.clock())
+    decoded.clear()
+    with pytest.raises(MCPCatalogError, match="tool_not_allowed"):
+        setup.catalog.call("mcp.c000.weather", {"city": "Singapore"}, owner_id="owner", workspace_id="workspace")
+    assert decoded == ["c000"] and calls == ["tools/call"]
+
+
+def test_peer_scope_still_attaches_new_registration_after_an_original_tool_call(setup, monkeypatch):
+    peer = create_app(setup.settings).extensions["fleet"]["services"]["mcp_catalog"]
+    register(setup)
+    calls = install_peer(monkeypatch)
+    assert request(setup.admin, "post", "/discover?connector_id=weather", json={"expected_epoch": 1}).status_code == 200
+    assert peer.call("mcp.weather.weather", {"city": "Singapore"}, owner_id="owner", workspace_id="workspace").state == "succeeded"
+
+    register(setup, connector_id="another")
+    assert request(setup.admin, "post", "/discover?connector_id=another", json={"expected_epoch": 1}).status_code == 200
+    assert set(peer.run_snapshot(owner_id="owner", workspace_id="workspace")) == {"mcp.weather.weather", "mcp.another.weather"}
+    assert peer.call("mcp.another.weather", {"city": "Singapore"}, owner_id="owner", workspace_id="workspace").state == "succeeded"
+    assert calls == ["server/discover", "tools/list", "tools/call", "server/discover", "tools/list", "tools/call"]

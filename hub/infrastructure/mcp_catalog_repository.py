@@ -166,13 +166,18 @@ class MCPCatalogRepository:
             raise MCPCatalogError("connector_not_found")
         return _decode(row)
 
-    def get_scope(self, owner_id: str, workspace_id: str) -> tuple[MCPCatalogRecord, ...]:
+    def get_scope(self, owner_id: str, workspace_id: str, *,
+                  exclude_ids: tuple[str, ...] = ()) -> tuple[MCPCatalogRecord, ...]:
+        if type(exclude_ids) is not tuple or len(exclude_ids) > MAX_CONNECTORS:
+            raise MCPCatalogError("invalid_catalog_page")
+        excluded = tuple(_id(key) for key in exclude_ids)
+        exclusion = (" AND connector_id NOT IN (" + ",".join("?" for _ in excluded) + ")") if excluded else ""
         with self._transaction() as connection:
             self._require_schema(connection)
             rows = connection.execute(f"SELECT {_COLUMNS} FROM mcp_catalog_connectors "
                 "WHERE json_extract(CAST(config_snapshot AS TEXT),'$.owner_id')=? "
                 "AND json_extract(CAST(config_snapshot AS TEXT),'$.workspace_id')=? "
-                "ORDER BY connector_id LIMIT 129", (owner_id, workspace_id)).fetchall()
+                + exclusion + " ORDER BY connector_id LIMIT 129", (owner_id, workspace_id, *excluded)).fetchall()
             if len(rows) > MAX_CONNECTORS:
                 raise MCPCatalogError("too_many_connectors")
             return tuple(_decode(row) for row in rows)

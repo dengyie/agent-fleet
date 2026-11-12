@@ -2690,7 +2690,9 @@
         "tests/test_mcp_registration.py::test_browser_registration_command_and_public_policy_correlation",
         "tests/test_mcp_registration.py::test_real_backup_restore_keeps_registered_connection_disabled",
         "tests/test_mcp_registration.py::test_corrupt_durable_registration_is_store_unavailable_not_bad_input",
-        "tests/test_mcp_catalog_admin_browser.py::test_mcp_connection_registration_and_explicit_discovery_in_real_browser"
+        "tests/test_mcp_catalog_admin_browser.py::test_mcp_connection_registration_and_explicit_discovery_in_real_browser",
+        "tests/test_mcp_registration.py::test_attached_scope_only_decodes_called_authority_and_keeps_revocation",
+        "tests/test_mcp_registration.py::test_peer_scope_still_attaches_new_registration_after_an_original_tool_call"
       ]
     },
     {
