@@ -51,7 +51,12 @@ def run(store, login_id, executable, *, parent_stream=None, timeout_s=900, git_p
             if parsed.hostname == job['hostname'] and not parsed.username and not parsed.password:
                 values['verification_uri'] = raw[:2048]
         if values:
-            store.update(login_id, 'waiting_authorization', **values)
+            prompt = {**current, **values}
+            # gh emits the code and URL on separate lines. Publish readiness
+            # with both fields so clients never observe an unusable prompt.
+            state = ('waiting_authorization' if prompt.get('user_code')
+                     and prompt.get('verification_uri') else current['state'])
+            store.update(login_id, state, **values)
         elif current['state'] in ACTIVE:
             store.update(login_id, current['state'])
 
