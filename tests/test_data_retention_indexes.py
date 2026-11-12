@@ -32,7 +32,8 @@ def _plan(conn, sql, params=()):
 
 def _assert_uses(conn, sql, params, index, table):
     plan = _plan(conn, sql, params)
-    assert index in plan, plan
+    accepted = (index,) if isinstance(index, str) else index
+    assert any(name in plan for name in accepted), plan
     assert f"SCAN {table}" not in plan.replace(f"SCAN {table} USING", "")
     for line in plan.split(" | "):
         assert line.strip() != f"SCAN {table}", plan
@@ -68,16 +69,17 @@ def test_claim_run_seeks_owner_state_index(platform_db):
     from hub.infrastructure import platform_db_runs
 
     source = open(platform_db_runs.__file__, encoding="utf-8").read()
-    assert "r.state IN ('queued','cancelling','running')" in source
+    assert "r.state IN ('queued','cancelling','running','waiting_node')" in source
     conn = sqlite3.connect(platform_db)
     sql = (
         "SELECT r.* FROM runs r JOIN messages trigger ON trigger.message_id=r.trigger_message_id "
-        "WHERE r.owner_id=? AND r.state IN ('queued','cancelling','running') AND ((r.state='queued' AND"
+        "WHERE r.owner_id=? AND r.state IN ('queued','cancelling','running','waiting_node') "
+        "AND ((r.state='waiting_node' AND r.runtime_resume_at<=?) OR (r.state='queued' AND"
         " (r.lease_id IS NULL OR r.lease_expires_at IS NULL OR r.lease_expires_at<=?)) OR"
         " (r.state='cancelling' AND (r.lease_expires_at IS NULL OR r.lease_expires_at<=?)) OR"
         " (r.state='running' AND r.lease_expires_at IS NOT NULL AND r.lease_expires_at<=?))"
         " ORDER BY r.created_at, trigger.turn_sequence, r.run_id LIMIT 1")
-    _assert_uses(conn, sql, ("o", 1, 1, 1), "idx_runs_owner_state_created", "r")
+    _assert_uses(conn, sql, ("o", 1, 1, 1, 1), "idx_runs_owner_state_created", "r")
     conn.close()
 
 
@@ -117,7 +119,9 @@ def test_execution_window_indexes(platform_db):
      ("m", "x"), "idx_tasks_machine_state_created", "t"),
     ("SELECT l.task_id FROM tasks t JOIN leases l ON l.attempt_id=t.attempt_id AND l.task_id=t.task_id"
      " WHERE t.state IN ('leased','running') AND l.expires_at<=?",
-     ("x",), "idx_tasks_state_expires", "t"),
+     # Both plans seek active tasks by state, then probe the current lease by
+     # attempt_id. SQLite may prefer the narrower partial Workflow-era index.
+     ("x",), ("idx_tasks_state_expires", "idx_tasks_live_lease"), "t"),
     ("SELECT task_id FROM tasks WHERE state='queued' AND expires_at<=?",
      ("x",), "idx_tasks_state_expires", "tasks"),
     ("SELECT id FROM audit WHERE ts<? LIMIT ?", ("x", 5), "idx_audit_ts", "audit"),

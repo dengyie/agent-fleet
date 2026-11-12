@@ -18,7 +18,8 @@ Rules (every table is optional; a missing table is skipped):
   strictly before the schedule's ``next_run_at`` (so the occurrence can never
   be claimed again);
 * usage events: ``occurred_at`` older than the cutoff (90 days by default,
-  well beyond ``MAX_WINDOW_S`` of the usage limiter);
+  well beyond ``MAX_WINDOW_S`` of the usage limiter), unless a Workflow budget
+  reservation still needs the original request ledger for reconciliation;
 * commands: ``owner_id IS NULL``, terminal status, ``updated_at`` older than
   the cutoff; child rows (outbox / reconciliations / postchecks) go first in
   the same transaction to keep foreign keys intact;
@@ -41,7 +42,8 @@ Rules (every table is optional; a missing table is skipped):
 * task store (``task_db``, history horizon): terminal tasks whose queue TTL
   and every audit row are older than the cutoff, with their leases, results,
   result files, gates and handoff receipts; plus task audit rows older than
-  the cutoff.
+  the cutoff. Workflow origins, source receipts and cancellation observations
+  retain their tasks and audit history, including already terminal tasks.
 
 The history horizon is ``AGENT_FLEET_HISTORY_RETENTION_DAYS`` (see
 ``FleetConfig.history_retention_days``).
@@ -232,9 +234,19 @@ class PlatformRetention:
         ).rowcount
 
     def _prune_usage(self, conn, cutoff, tables) -> int:
+        workflow_guard = ""
+        if "workflow_budget_reservations" in tables:
+            # Settled generations also remain replayable: a late provider
+            # charge wakes projection, which compares against the original
+            # request ledger and rejects an apparent accounting regression.
+            workflow_guard = (
+                " AND NOT EXISTS (SELECT 1 FROM workflow_budget_reservations q "
+                "WHERE q.child_request_id=e.run_id AND q.owner_id=e.owner_id)"
+            )
         return conn.execute(
             "DELETE FROM platform_usage_events WHERE rowid IN ("
-            "SELECT rowid FROM platform_usage_events WHERE occurred_at<? LIMIT ?)",
+            "SELECT e.rowid FROM platform_usage_events e "
+            f"WHERE e.occurred_at<?{workflow_guard} LIMIT ?)",
             (cutoff, self.policy.batch_size),
         ).rowcount
 
@@ -388,7 +400,8 @@ class PlatformRetention:
         params = (*states, cutoff_iso) + ((cutoff_iso,) if audit_guard else ())
         ids = [row[0] for row in conn.execute(
             "SELECT t.task_id FROM tasks t "
-            f"WHERE t.state IN ({marks}) AND t.expires_at<?{audit_guard} LIMIT ?",
+            f"WHERE t.state IN ({marks}) AND t.expires_at<?{audit_guard}"
+            f"{self._task_evidence_guard(tables)} LIMIT ?",
             (*params, self.policy.batch_size),
         )]
         if not ids:
@@ -400,10 +413,34 @@ class PlatformRetention:
         return conn.execute(f"DELETE FROM tasks WHERE task_id IN ({id_marks})", ids).rowcount
 
     def _prune_task_audit(self, conn, cutoff, tables) -> int:
+        guard = self._task_evidence_guard(tables)
+        protected_task = (
+            " AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.task_id=a.task_id "
+            f"AND NOT (1=1{guard}))"
+        ) if guard and "tasks" in tables else ""
         return conn.execute(
-            "DELETE FROM audit WHERE id IN (SELECT id FROM audit WHERE ts<? LIMIT ?)",
+            "DELETE FROM audit WHERE id IN ("
+            f"SELECT a.id FROM audit a WHERE a.ts<?{protected_task} LIMIT ?)",
             (_iso_seconds(cutoff), self.policy.batch_size),
         ).rowcount
+
+    @staticmethod
+    def _task_evidence_guard(tables) -> str:
+        """Indexed exclusions shared by task and audit retention, before LIMIT.
+
+        Submission fences outlive their task TTL: forgetting a cancellation
+        would turn a late bridge create into a new execution. Keeping the
+        original task also preserves whether its attempt actually stopped.
+        """
+        guards = []
+        for table, key, reference in (
+            ("legacy_task_origins", "task_id", "t.task_id"),
+            ("task_source_receipts", "task_id", "t.task_id"),
+            ("task_submission_cancellations", "client_token", "t.client_token"),
+        ):
+            if table in tables:
+                guards.append(f" AND NOT EXISTS (SELECT 1 FROM {table} ref WHERE ref.{key}={reference})")
+        return "".join(guards)
 
 
 __all__ = [

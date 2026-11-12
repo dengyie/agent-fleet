@@ -1,6 +1,7 @@
 import {uiIcon} from '../routes.js';
 import {accountRequest} from '../api/accounts.js';
 import {getOperatorSession, setOperatorToken} from '../api/client.js';
+import {mountCaptcha} from './captcha.js';
 
 export function mountAccountLogin(options, returnTo) {
   const host = document.getElementById('login-view');
@@ -12,13 +13,13 @@ export function mountAccountLogin(options, returnTo) {
   let mode = 'login';
   let busy = false;
   let codeAttempts = 0;
-  let hcaptchaWidgetId = null;
-  let turnstileWidgetId = null;
+  let clearCaptchas = () => {};
 
   function render(message = '') {
+    clearCaptchas();
     form.replaceChildren();
-    hcaptchaWidgetId = null;
-    turnstileWidgetId = null;
+    let hcaptcha = null, turnstile = null;
+    clearCaptchas = () => { hcaptcha?.remove(); turnstile?.remove(); };
     title.textContent = {login: '登录工作空间', register: '创建账号', reset: '找回密码'}[mode];
     document.title = title.textContent + ' · Agent Fleet';
     const fields = {};
@@ -53,27 +54,11 @@ export function mountAccountLogin(options, returnTo) {
       form.append(captchaWrapper);
 
       const ensureHcaptcha = () => {
-        if (!options.hcaptcha_sitekey) return null;
-        if (typeof window.hcaptcha === 'undefined') {
-          status.textContent = '正在加载人机验证服务…若长时间未显示，请检查网络或关闭广告拦截插件。';
-          return null;
-        }
-        if (hcaptchaWidgetId !== null) return hcaptchaWidgetId;
-        const box = document.createElement('div');
-        box.id = 'hcaptcha-slot';
-        captchaWrapper.append(box);
-        try {
-          hcaptchaWidgetId = window.hcaptcha.render(box, {
-            sitekey: options.hcaptcha_sitekey,
-            size: 'normal',
-            theme: document.documentElement.getAttribute('data-resolved-theme') || 'light'
-          });
-          return hcaptchaWidgetId;
-        } catch (e) {
-          status.textContent = '人机验证组件渲染失败，请刷新页面重试';
-          return null;
+        if (options.hcaptcha_sitekey && !hcaptcha) {
+          hcaptcha = mountCaptcha('hcaptcha', options.hcaptcha_sitekey, captchaWrapper);
         }
       };
+      if (options.turnstile_sitekey) turnstile = mountCaptcha('turnstile', options.turnstile_sitekey, captchaWrapper);
 
       const send = document.createElement('button'); send.type = 'button'; send.textContent = '发送验证码';
       send.disabled = !options.mail_available;
@@ -87,36 +72,34 @@ export function mountAccountLogin(options, returnTo) {
         }
 
         busy = true; send.disabled = true;
+        let submitted = false;
         try {
           const payload = {email: fields.email.value, purpose: mode === 'register' ? 'register' : 'reset'};
           if (fields.invite_code && fields.invite_code.value.trim()) payload.invite_code = fields.invite_code.value.trim();
           
-          if (hcaptchaWidgetId !== null && typeof window.hcaptcha !== 'undefined') {
-            const hresp = window.hcaptcha.getResponse(hcaptchaWidgetId);
-            if (hresp) payload.hcaptcha_response = hresp;
-          }
-          if (options.turnstile_sitekey && typeof window.turnstile !== 'undefined' && turnstileWidgetId !== null) {
-            const tresp = window.turnstile.getResponse(turnstileWidgetId);
-            if (tresp) payload.turnstile_response = tresp;
+          const hresp = hcaptcha?.getResponse();
+          if (hresp) payload.hcaptcha_response = hresp;
+          if (turnstile) {
+            const tresp = turnstile.getResponse();
+            if (!tresp) { status.textContent = '请先完成人机验证。'; return; }
+            payload.turnstile_response = tresp;
           }
 
+          submitted = true;
           const response = await accountRequest('code', payload);
           codeAttempts += 1;
           status.textContent = response.detail;
-          if (hcaptchaWidgetId !== null && typeof window.hcaptcha !== 'undefined') {
-            window.hcaptcha.reset(hcaptchaWidgetId);
-          }
         } catch (error) {
           codeAttempts += 1;
           if (error.code === 'captcha_required' || error.code === 'invalid_captcha') {
             ensureHcaptcha();
-            if (hcaptchaWidgetId !== null && typeof window.hcaptcha !== 'undefined') {
-              window.hcaptcha.reset(hcaptchaWidgetId);
-            }
           }
           status.textContent = error.detail || '验证码发送失败';
         }
-        finally { busy = false; send.disabled = !options.mail_available; }
+        finally {
+          if (submitted) { hcaptcha?.reset(); turnstile?.reset(); }
+          busy = false; send.disabled = !options.mail_available;
+        }
       });
       form.append(send);
       if (!options.mail_available) {

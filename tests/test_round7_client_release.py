@@ -197,6 +197,36 @@ def test_same_commit_dirty_tree_gets_unique_version(tmp_path, no_rebuild_cache):
     assert svc.current()["version"] == "0123456789ab"
     (root / "tools" / "a.py").write_text("x = 3\n")
     assert svc.current()["version"] == "0123456789ab-s2"
+    (root / "tools" / "a.py").write_text("x = 4\n")
+    assert svc.current()["version"] == "0123456789ab-s3"
+    assert service(root, tmp_path, None).current() == svc.current()
+
+
+def test_republishing_an_earlier_tree_does_not_reuse_its_version(tmp_path, no_rebuild_cache):
+    root = make_tree(tmp_path / "src")
+    svc = service(root, tmp_path, None)
+    original = svc.current()
+    (root / "tools" / "a.py").write_text("x = 2\n")
+    second = svc.current()
+    (root / "tools" / "a.py").write_text("x = 1\n")
+    restored = svc.current()
+    assert len({original["version"], second["version"], restored["version"]}) == 3
+    assert restored["sequence"] == 3
+
+
+def test_legacy_release_state_keeps_identity_until_next_content_change(tmp_path, no_rebuild_cache):
+    root = make_tree(tmp_path / "src")
+    (root / "RELEASE_ORIGIN").write_text("commit: 0123456789abcdef\n")
+    svc = service(root, tmp_path, None)
+    svc.state_path.parent.mkdir(parents=True)
+    svc._write_state({"channels": {"stable": {
+        "treeDigest": cr.tree_digest(cr.tree_files(root)),
+        "sequence": 7, "version": "0123456789ab", "publishedAt": NOW - 100,
+    }}})
+    assert svc.current()["version"] == "0123456789ab"
+    assert svc.current()["sequence"] == 7
+    (root / "tools" / "a.py").write_text("x = 8\n")
+    assert svc.current()["version"] == "0123456789ab-s8"
 
 
 def test_signed_manifest_verifies_and_unsigned_fails_closed(tmp_path):

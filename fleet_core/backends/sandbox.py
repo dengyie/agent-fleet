@@ -6,16 +6,22 @@ import subprocess
 import math
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
-from .directory import DirectoryBackend, ALLOWED_EXECUTABLES, MAX_OUTPUT_BYTES
-from fleet_core.process.bounded_process import decode_prefix, run_bounded
+from .directory import DirectoryBackend, MAX_OUTPUT_BYTES, executable_allowed
+from fleet_core.process.bounded_process import (
+    ProcessCancelled, ProcessStopUnconfirmed, decode_prefix, run_bounded,
+)
 
 
 @dataclass(frozen=True)
 class SandboxPolicy:
     cpu_seconds: int = 30
     memory_bytes: int = 512 * 1024 * 1024
-    process_count: int = 32
+    # RLIMIT_NPROC counts every thread belonging to the real host uid. Only
+    # dedicated-account launchers may opt into this host-wide limit; namespace
+    # launchers apply their per-task budget after switching user namespaces.
+    process_count: int | None = None
     timeout_seconds: float = 30.0
     network_enabled: bool = False
 
@@ -39,7 +45,8 @@ class SandboxBackend(DirectoryBackend):
                for item in self.launcher):
             raise ValueError("invalid sandbox launcher")
         if (self.policy.cpu_seconds < 1 or self.policy.memory_bytes < 1
-                or self.policy.process_count < 1
+                or (self.policy.process_count is not None and
+                    (type(self.policy.process_count) is not int or self.policy.process_count < 1))
                 or not math.isfinite(float(self.policy.timeout_seconds))
                 or self.policy.timeout_seconds <= 0):
             raise ValueError("invalid sandbox policy")
@@ -52,13 +59,15 @@ class SandboxBackend(DirectoryBackend):
             import resource
             resource.setrlimit(resource.RLIMIT_CPU, (self.policy.cpu_seconds, self.policy.cpu_seconds))
             resource.setrlimit(resource.RLIMIT_AS, (self.policy.memory_bytes, self.policy.memory_bytes))
-            resource.setrlimit(resource.RLIMIT_NPROC, (self.policy.process_count, self.policy.process_count))
+            if self.policy.process_count is not None:
+                resource.setrlimit(resource.RLIMIT_NPROC, (self.policy.process_count, self.policy.process_count))
         except (ImportError, OSError, ValueError):
             # The launcher remains the isolation authority on platforms that
             # do not expose POSIX resource limits.
             pass
 
-    def execute(self, command_id: str, argv: list[str], *, timeout_s: float = 30.0):
+    def execute(self, command_id: str, argv: list[str], *, timeout_s: float = 30.0,
+                should_cancel: Callable[[], bool] | None = None):
         if self._unavailable:
             return self._receipt(command_id, "failed", error_code="sandbox_unavailable")
         if not isinstance(argv, list) or not argv or any(not isinstance(arg, str) or len(arg) > 4096 for arg in argv):
@@ -69,8 +78,7 @@ class SandboxBackend(DirectoryBackend):
             return self._receipt(command_id, "failed", error_code="invalid_timeout")
         if not math.isfinite(timeout_s) or timeout_s <= 0:
             return self._receipt(command_id, "failed", error_code="invalid_timeout")
-        executable = Path(argv[0]).name
-        if executable not in ALLOWED_EXECUTABLES or any(arg in {"-c", "--command"} for arg in argv[1:]):
+        if not executable_allowed(argv[0]) or any(arg in {"-c", "--command"} for arg in argv[1:]):
             return self._receipt(command_id, "failed", error_code="command_not_allowed")
         command = [*self.launcher, *argv]
         home = self.root / ".sandbox-home"
@@ -82,7 +90,8 @@ class SandboxBackend(DirectoryBackend):
             proc = run_bounded(command, cwd=self.root, env=env,
                                timeout_s=max(0.1, min(timeout_s, self.policy.timeout_seconds)),
                                stdout_limit=MAX_OUTPUT_BYTES + 1,
-                               preexec_fn=self._preexec if os.name == "posix" else None)
+                               preexec_fn=self._preexec if os.name == "posix" else None,
+                               should_cancel=should_cancel)
             output, truncated = decode_prefix(proc.stdout, MAX_OUTPUT_BYTES)
             return self._receipt(command_id, "succeeded" if proc.returncode == 0 else "failed",
                                  {"returncode": proc.returncode, "output": output},
@@ -90,6 +99,10 @@ class SandboxBackend(DirectoryBackend):
                                  truncated=truncated)
         except subprocess.TimeoutExpired:
             return self._receipt(command_id, "failed", error_code="timeout")
+        except ProcessCancelled:
+            return self._receipt(command_id, "cancelled", error_code="cancelled")
+        except ProcessStopUnconfirmed:
+            return self._receipt(command_id, "unknown", error_code="process_stop_unconfirmed")
         except OSError:
             return self._receipt(command_id, "failed", error_code="sandbox_exec_failed")
 

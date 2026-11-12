@@ -19,6 +19,24 @@ NODE_AUTH_MAX_FAILURES = 20
 NODE_AUTH_LIMITER_MAX_KEYS = 4096
 
 
+def _node_credential_fingerprint(salt: bytes, digest: bytes) -> str:
+    return hashlib.sha256(salt + digest).hexdigest()
+
+
+def node_credential_is_current(connection: sqlite3.Connection, *, owner: str, node: str,
+                               fingerprint: str | None) -> bool:
+    """Recheck the authenticated credential generation within an admission write."""
+    if type(fingerprint) is not str or len(fingerprint) != 64:
+        return False
+    row = connection.execute(
+        "SELECT c.salt,c.secret_digest FROM node_credentials c JOIN nodes n USING(owner_id,node_id) "
+        "WHERE c.owner_id=? AND c.node_id=? AND c.enabled=1 AND n.enabled=1 LIMIT 1",
+        (owner, node),
+    ).fetchone()
+    return row is not None and hmac.compare_digest(
+        fingerprint, _node_credential_fingerprint(bytes(row["salt"]), bytes(row["secret_digest"])))
+
+
 class PlatformNodeAuthMixin:
     def enroll_node(self, owner_id: str, data: dict) -> dict[str, Any]:
         """Create a node and its initial credential atomically; never rotate an existing node."""
@@ -170,7 +188,9 @@ class PlatformNodeAuthMixin:
                     or now < float(last_used)):
                 conn.execute("UPDATE node_credentials SET last_used_at=? WHERE owner_id=? AND node_id=?", (now, owner_id, node_id))
                 conn.execute("UPDATE nodes SET last_seen_at=?,status='online' WHERE owner_id=? AND node_id=?", (now, owner_id, node_id))
-            return {"owner_id": owner_id, "node_id": node_id, "last_seen_at": now}
+            return {"owner_id": owner_id, "node_id": node_id, "last_seen_at": now,
+                    "credential_fingerprint": _node_credential_fingerprint(
+                        bytes(match["salt"]), bytes(match["secret_digest"]))}
         except (PlatformValidationError, sqlite3.Error):
             raise PlatformRepositoryError("platform_store") from None
         finally:

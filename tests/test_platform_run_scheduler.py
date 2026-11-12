@@ -1,12 +1,11 @@
-from concurrent.futures import ThreadPoolExecutor
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
+from hub.application.run_event_service import RunEventService
 from hub.application.run_scheduler_service import RunSchedulerService
 from hub.application.run_worker_service import LocalRunWorkerService
-from hub.application.run_event_service import RunEventService
 from hub.infrastructure.platform_db import PlatformRepository
 from hub.platform.providers.base import ModelResponse
-
 
 OWNER_A = "owner-a@example.test"
 OWNER_B = "owner-b@example.test"
@@ -168,6 +167,7 @@ def test_scheduler_preserves_worker_result_when_slot_release_fails(caplog):
         SimpleNamespace(
             lease_s=60,
             worker_id="worker-a",
+            configure_workspace_concurrency=lambda capacity: None,
             execute_claim=lambda claim: {
                 "run_id": claim["run_id"], "state": "succeeded"
             },
@@ -183,3 +183,215 @@ def test_scheduler_preserves_worker_result_when_slot_release_fails(caplog):
 
     assert result == {"run_id": "run-a", "state": "succeeded"}
     assert "platform_slot_release_failed" in caplog.text
+
+
+def test_background_scheduler_refills_free_slot_while_slow_run_continues(tmp_path):
+    repo = PlatformRepository(tmp_path / "platform.db")
+    repo.init()
+    for run_id, workspace_id in (("a-slow", "slow"), ("b-fast", "fast"),
+                                 ("c-next", "next")):
+        _queued(repo, OWNER_A, run_id, workspace_id, tmp_path / workspace_id)
+    slow_entered = threading.Event()
+    next_entered = threading.Event()
+    release = threading.Event()
+
+    class Provider:
+        def complete(self, messages, tools, *, request_observer=None):
+            run_id = messages[-1]["message_id"].removeprefix("msg-")
+            if run_id == "a-slow":
+                slow_entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("test did not release the slow provider")
+            elif run_id == "c-next":
+                next_entered.set()
+            return ModelResponse(kind="final", text="done")
+
+    scheduler = _scheduler(repo, max_concurrency=2,
+                           provider_factory=lambda profile: Provider())
+    scheduler.interval_s = 0.1
+    shutdown = scheduler.start()
+    try:
+        assert slow_entered.wait(2)
+        assert next_entered.wait(2), "free slot was not refilled during slow execution"
+        assert repo.get_run(OWNER_A, "a-slow")["state"] == "running"
+        assert repo.get_run(OWNER_A, "b-fast")["state"] == "succeeded"
+    finally:
+        release.set()
+        shutdown()
+
+
+def test_scheduler_skips_busy_workspace_without_claiming_its_run(tmp_path):
+    repo = PlatformRepository(tmp_path / "platform.db")
+    repo.init()
+    _queued(repo, OWNER_A, "a-busy", "busy", tmp_path / "busy")
+    _queued(repo, OWNER_A, "b-free", "free", tmp_path / "free")
+    repo.claim_worker_slot(
+        OWNER_A, "blocker", worker_id="other-scheduler",
+        workspace_key=f"{OWNER_A}:busy", max_concurrency=2,
+        max_workspace_concurrency=1, now=2, lease_s=60,
+    )
+
+    result = _scheduler(repo, max_concurrency=2).tick_once()
+
+    assert result["run_id"] == "b-free"
+    assert result["state"] == "succeeded"
+    assert repo.get_run(OWNER_A, "a-busy")["state"] == "queued"
+    assert repo.get_run(OWNER_A, "a-busy")["attempt"] == 0
+
+
+def test_scheduler_skips_owner_with_only_busy_workspaces(tmp_path):
+    repo = PlatformRepository(tmp_path / "platform.db")
+    repo.init()
+    _queued(repo, OWNER_A, "a-busy", "busy", tmp_path / "busy")
+    _queued(repo, OWNER_B, "b-free", "free", tmp_path / "free")
+    repo.claim_worker_slot(
+        OWNER_A, "blocker", worker_id="other-scheduler",
+        workspace_key=f"{OWNER_A}:busy", max_concurrency=2,
+        max_workspace_concurrency=1, now=2, lease_s=60,
+    )
+
+    result = _scheduler(repo, max_concurrency=2).tick_once()
+
+    assert result["run_id"] == "b-free"
+    assert result["state"] == "succeeded"
+    assert repo.get_run(OWNER_A, "a-busy")["attempt"] == 0
+
+
+def test_capacity_filter_keeps_interrupted_run_recovery_eligible(tmp_path):
+    repo = PlatformRepository(tmp_path / "platform.db")
+    repo.init()
+    _queued(repo, OWNER_A, "a-interrupted", "busy", tmp_path / "busy")
+    claim = repo.claim_run(OWNER_A, worker_id="dead-worker", now=2, lease_s=5)
+    repo.append_run_event(
+        OWNER_A, "a-interrupted", "run_started", {}, now=2,
+        lease_id=claim["lease_id"], worker_id="dead-worker",
+    )
+    repo.claim_worker_slot(
+        OWNER_A, "other-run", worker_id="other-scheduler",
+        workspace_key=f"{OWNER_A}:busy", max_concurrency=2,
+        max_workspace_concurrency=1, now=10, lease_s=60,
+    )
+    scheduler = _scheduler(repo, max_concurrency=2)
+    scheduler.clock = lambda: 10
+
+    result = scheduler.tick_once()
+
+    assert result["run_id"] == "a-interrupted"
+    assert result["state"] == "unknown"
+    assert repo.get_run(OWNER_A, "a-interrupted")["attempt"] == 1
+
+
+def test_capacity_filter_uses_conversation_workspace_when_snapshot_has_none(tmp_path):
+    repo = PlatformRepository(tmp_path / "platform.db")
+    repo.init()
+    _queued(repo, OWNER_A, "a-busy", "busy", tmp_path / "busy")
+    _queued(repo, OWNER_A, "b-free", "free", tmp_path / "free")
+    with repo._connect() as conn:
+        conn.execute("UPDATE runs SET config_snapshot='{}' WHERE run_id='a-busy'")
+    repo.claim_worker_slot(
+        OWNER_A, "other-run", worker_id="other-scheduler",
+        workspace_key=f"{OWNER_A}:busy", max_concurrency=2,
+        max_workspace_concurrency=1, now=2, lease_s=60,
+    )
+
+    assert _scheduler(repo, max_concurrency=2).tick_once()["run_id"] == "b-free"
+    assert repo.get_run(OWNER_A, "a-busy")["attempt"] == 0
+
+
+def test_background_stop_drains_admitted_work_without_claiming_more(tmp_path):
+    repo = PlatformRepository(tmp_path / "platform.db")
+    repo.init()
+    _queued(repo, OWNER_A, "a-slow", "slow", tmp_path / "slow")
+    _queued(repo, OWNER_A, "b-next", "next", tmp_path / "next")
+    entered = threading.Event()
+    release = threading.Event()
+    stopped = threading.Event()
+    shutdown_started = threading.Event()
+
+    class Provider:
+        def complete(self, messages, tools, *, request_observer=None):
+            entered.set()
+            assert release.wait(5)
+            return ModelResponse(kind="final", text="done")
+
+    scheduler = _scheduler(repo, provider_factory=lambda profile: Provider())
+    scheduler.interval_s = 0.1
+    shutdown = scheduler.start(stop_event=stopped)
+
+    def close():
+        stopped.set()
+        shutdown_started.set()
+        shutdown()
+
+    thread = threading.Thread(target=close)
+    try:
+        assert entered.wait(2)
+        thread.start()
+        assert shutdown_started.wait(2)
+        assert repo.get_run(OWNER_A, "b-next")["attempt"] == 0
+    finally:
+        release.set()
+        if thread.ident is not None:
+            thread.join(3)
+        else:
+            shutdown()
+    assert not thread.is_alive()
+    assert repo.get_run(OWNER_A, "a-slow")["state"] == "succeeded"
+    assert repo.get_run(OWNER_A, "b-next")["state"] == "queued"
+
+
+def test_background_worker_exception_releases_slot_and_dispatches_next(tmp_path):
+    repo = PlatformRepository(tmp_path / "platform.db")
+    repo.init()
+    for run_id, workspace_id in (("a-error", "error"), ("b-next", "next")):
+        _queued(repo, OWNER_A, run_id, workspace_id, tmp_path / workspace_id)
+    entered = threading.Event()
+    scheduler = _scheduler(repo)
+    scheduler.interval_s = 0.1
+    original = scheduler.worker.execute_claim
+
+    def execute(claim):
+        if claim["run_id"] == "a-error":
+            raise RuntimeError("controlled worker failure")
+        result = original(claim)
+        entered.set()
+        return result
+
+    scheduler.worker.execute_claim = execute
+    shutdown = scheduler.start()
+    try:
+        assert entered.wait(2)
+        assert repo.get_run(OWNER_A, "b-next")["state"] == "succeeded"
+    finally:
+        shutdown()
+
+
+def test_configured_same_workspace_parallel_runs_both_reach_provider(tmp_path):
+    repo = PlatformRepository(tmp_path / "platform.db")
+    repo.init()
+    _queued(repo, OWNER_A, "a-shared", "shared", tmp_path / "shared")
+    _queued(repo, OWNER_A, "b-shared", "shared", tmp_path / "shared")
+    entered = {run: threading.Event() for run in ("a-shared", "b-shared")}
+    release = threading.Event()
+
+    class Provider:
+        def complete(self, messages, tools, *, request_observer=None):
+            run_id = messages[-1]["message_id"].removeprefix("msg-")
+            entered[run_id].set()
+            assert release.wait(5)
+            return ModelResponse(kind="final", text="done")
+
+    scheduler = _scheduler(repo, max_concurrency=2, max_workspace_concurrency=2,
+                           provider_factory=lambda profile: Provider())
+    scheduler.interval_s = 0.1
+    shutdown = scheduler.start()
+    try:
+        assert entered["a-shared"].wait(2)
+        assert entered["b-shared"].wait(2), "admitted Run failed at the exclusive process lease"
+        assert repo.get_run(OWNER_A, "a-shared")["state"] == "running"
+        assert repo.get_run(OWNER_A, "b-shared")["state"] == "running"
+    finally:
+        release.set()
+        shutdown()
+    assert repo.get_run(OWNER_A, "a-shared")["state"] == "succeeded"
+    assert repo.get_run(OWNER_A, "b-shared")["state"] == "succeeded"

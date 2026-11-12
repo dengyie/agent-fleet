@@ -232,3 +232,29 @@ def test_concurrent_submission_has_single_writer(setup):
         thread.join(5)
     assert not errors
     assert len(transport.sends) == 1
+
+
+def test_lookup_is_journal_only_and_checks_original_payload_and_scope(setup):
+    bridge, transport, path = setup
+    assert bridge.lookup('task-1', 'Find facts', scope='workspace') is None
+    original = bridge.submit('task-1', 'Find facts', scope='workspace')
+    calls = len(transport.sends)
+    # A journal lookup must not read or send to the UI, even when it is offline.
+    class Offline:
+        def request(self, *args, **kwargs):
+            raise AssertionError('lookup touched the external UI')
+
+    restarted = MuseBridge(path / 'bridge.db', transport=Offline())
+    assert restarted.lookup('task-1', 'Find facts', scope='workspace') == original
+    for prompt, scope in [('changed', 'workspace'), ('Find facts', 'other')]:
+        with pytest.raises(MuseBridgeError, match='task_conflict'):
+            restarted.lookup('task-1', prompt, scope=scope)
+    assert len(transport.sends) == calls
+
+
+def test_lookup_of_absent_journal_does_not_create_database_or_lock(setup):
+    bridge, transport, path = setup
+    assert bridge.lookup('task-1', 'Find facts', scope='workspace') is None
+    assert not bridge.path.exists()
+    assert not bridge.path.with_suffix('.db.lock').exists()
+    assert not transport.sends

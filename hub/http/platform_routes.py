@@ -79,7 +79,14 @@ def get_readiness():
 @bp.get("/defaults")
 @require_operator
 def get_defaults():
-    return _invoke(lambda: jsonify(_service().get_defaults(g.operator)))
+    def read():
+        result = _service().get_defaults(g.operator)
+        if current_app.config.get("PLATFORM_WORKFLOWS_ENABLED", False):
+            from hub.domain.workflow_identity import canonical_digest
+
+            result["workflows"] = {"enabled": True, "scope": canonical_digest({"operator": g.operator})}
+        return jsonify(result)
+    return _invoke(read)
 
 
 @bp.put("/defaults")

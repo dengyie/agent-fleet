@@ -203,7 +203,13 @@ export function mountGitHubCli(host, {plugin: initialPlugin, client}) {
       if (!Array.isArray(operationData.operations)) throw new Error('插件状态格式无效');
       operations = operationData.operations; latestLogin = operationData.login;
       render();
-      if (currentJob && activeLogin.has(currentJob.state) && target()?.readiness === 'ready' && !posting) {
+      // Disabling the plugin stops the normal background status traffic, but a
+      // successful cancel request still needs recovery polling: the cancel
+      // receipt acknowledges the request and can contain the pre-cancel state
+      // until the node worker persists the terminal state.
+      const allowRecoveryPoll = plugin.enabled || currentJob?.cancel_requested === true;
+      if (allowRecoveryPoll && currentJob && activeLogin.has(currentJob.state)
+          && target()?.readiness === 'ready' && !posting) {
         const pending = operations.some(o => matching(o) && o.action === 'login_status' && !terminal.has(o.status));
         if (!pending) await perform('login_status', {login_id: currentJob.login_id}, true);
       } else if (currentJob?.state === 'succeeded' && !refreshedLogins.has(currentJob.login_id) && plugin.enabled && target()?.enabled) {

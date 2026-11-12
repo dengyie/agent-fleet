@@ -1,0 +1,29 @@
+:is(.mcp-management, .identity-management) { min-width: 0; }
+:is(.mcp-toolbar, .integration-toolbar), :is(.mcp-actions, .integration-actions) { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+:is(.mcp-toolbar, .integration-toolbar) { justify-content: space-between; margin-bottom: 10px; }
+:is(.mcp-status, .integration-status) { min-height: 1.6em; margin: 12px 0; color: var(--text-2); overflow-wrap: anywhere; }
+:is(.mcp-layout, .integration-layout) { display: grid; grid-template-columns: minmax(160px, 240px) minmax(0, 1fr); gap: 20px; align-items: start; }
+:is(.mcp-list, .integration-list) { display: grid; gap: 8px; margin-bottom: 12px; max-height: 65vh; overflow: auto; padding: 4px; }
+:is(.mcp-row, .integration-row) { display: grid; justify-content: start; text-align: left; width: 100%; gap: 4px; overflow-wrap: anywhere; }
+:is(.mcp-row, .integration-row)[aria-pressed="true"] { border-color: var(--link); background: var(--link-bg); }
+:is(.mcp-state, .integration-state) { color: var(--link); font-size: 13px; }
+:is(.mcp-inspector, .integration-inspector) { min-width: 0; display: grid; gap: 12px; }
+:is(.mcp-metadata, .integration-metadata) { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; margin: 0; font-size: 13px; }
+:is(.mcp-metadata, .integration-metadata) dt { color: var(--text-2); }
+:is(.mcp-metadata, .integration-metadata) dd { margin: 0; overflow-wrap: anywhere; }
+:is(.mcp-snapshot, .integration-snapshot) { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 10px; min-width: 0; }
+:is(.mcp-snapshot, .integration-snapshot) summary { cursor: pointer; font-weight: 600; }
+:is(.mcp-snapshot, .integration-snapshot) p { margin-top: 10px; overflow-wrap: anywhere; }
+:is(.mcp-snapshot, .integration-snapshot) pre { max-height: 360px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; padding: 10px; background: var(--bg); border-radius: var(--radius-sm); font-size: 12px; }
+:is(.mcp-confirm, .integration-confirm) { max-width: min(540px, calc(100vw - 28px)); max-height: calc(100dvh - 28px); overflow: auto; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 24px; }
+:is(.mcp-confirm, .integration-confirm)::backdrop { background: #0008; }
+:is(.mcp-confirm, .integration-confirm) p { margin: 12px 0; overflow-wrap: anywhere; }
+:is(.mcp-review-check, .integration-review-check) { display: flex !important; align-items: center; gap: 10px; margin: 16px 0; }
+:is(.mcp-review-check, .integration-review-check) input { width: auto; }
+@media (max-width: 700px) {
+  :is(.mcp-layout, .integration-layout) { grid-template-columns: minmax(0, 1fr); }
+  :is(.mcp-list, .integration-list) { max-height: 220px; }
+  :is(.mcp-management, .identity-management) { padding: 16px; }
+  :is(.mcp-metadata, .integration-metadata) { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  :is(.mcp-metadata, .integration-metadata) dd { margin-bottom: 8px; }
+}

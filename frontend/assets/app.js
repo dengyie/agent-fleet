@@ -34,6 +34,8 @@ function protectConsole() {
   const MAX_CACHED_ROUTES = 5;
   let activeRouteView = null, disposeNavigation, mounted = false, checking = false, redirecting = false, account = null;
   let lastSessionCheckAt = 0;
+  let sessionRecheckPending = false;
+  let sessionResetPending = false;
   function routeKey(value) {
     return value.page + ':' + (value.id || '');
   }
@@ -191,13 +193,27 @@ function protectConsole() {
   }
   async function verifyAccess({force = false} = {}) {
     const now = Date.now();
-    if (checking || redirecting || (!force && now - lastSessionCheckAt < 60000)) return;
+    if (redirecting) return;
+    if (checking) {
+      if (force || now - lastSessionCheckAt >= 60000) sessionRecheckPending = true;
+      return;
+    }
+    if (!force && now - lastSessionCheckAt < 60000) return;
     checking = true;
     lastSessionCheckAt = now;
     try {
-      const session = await api.getOperatorSession();
-      if (redirecting) return;
+      const session = await api.getOperatorSession({deferUnauthorized: true});
+      if (redirecting || sessionRecheckPending) return;
       const nextAccount = session.user || null;
+      if (sessionResetPending) {
+        // A feature's 401 may belong to a previous cookie session. Its view
+        // has been disposed; rebuild only after checking the current cookie.
+        if (account?.id !== nextAccount?.id || account?.role !== nextAccount?.role) {
+          redirecting = true;
+          window.location.reload();
+        } else requireLogin();
+        return;
+      }
       if (mounted && (account?.id !== nextAccount?.id || account?.role !== nextAccount?.role)) {
         // A session may have changed in another tab. The old view, async work,
         // navigation and store belong to that identity; recreate the document.
@@ -222,12 +238,30 @@ function protectConsole() {
       else resumeRouteView(activeRouteView);
       gate.hidden = true; shell.hidden = false; if (!account || account.role === "admin") sse.start();
     } catch (error) {
+      if (sessionRecheckPending) return;
       if (error.status === 401) requireLogin();
-      else if (!mounted) document.getElementById('route-view').textContent =
-        '工作空间暂时无法连接，稍后会自动重试。';
-    } finally { checking = false; }
+      else if (!mounted) {
+        const message = '工作空间暂时无法连接，稍后会自动重试。';
+        if (sessionResetPending) {
+          gate.hidden = false;
+          gate.querySelector('p').textContent = message;
+          retry.hidden = false;
+        } else document.getElementById('route-view').textContent = message;
+      }
+    } finally {
+      checking = false;
+      if (sessionRecheckPending && !redirecting) {
+        sessionRecheckPending = false;
+        verifyAccess({force: true});
+      }
+    }
   }
-  window.addEventListener('fleet-auth-required', requireLogin);
+  window.addEventListener('fleet-auth-required', () => {
+    if (redirecting || sessionResetPending) return;
+    sessionResetPending = true;
+    disposeView();
+    verifyAccess({force: true});
+  });
   document.getElementById('operator-logout').addEventListener('click', async () => {
     try { if (account) await accountRequest('logout', {}); requireLogin(); }
     catch (error) { gate.hidden = false; gate.querySelector('p').textContent = '退出登录失败，请重试'; }

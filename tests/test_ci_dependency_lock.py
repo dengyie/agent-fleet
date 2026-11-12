@@ -74,3 +74,20 @@ def test_ci_gates_are_blocking():
         assert "|| true" not in step["run"] and not step.get("continue-on-error")
     names = [s.get("name") for s in _steps("test")]
     assert names.index("Audit pinned dependencies") < names.index("Run test suite")
+
+
+def test_linux_ci_provisions_workflow_isolation_before_the_full_gate():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["test"]
+    steps = job["steps"]
+    suite_index = next(i for i, step in enumerate(steps) if step.get("name") == "Run test suite")
+    isolation_steps = [
+        step.get("run", "") for step in steps[:suite_index]
+        if step.get("name") == "Install Linux isolation test tools"
+    ]
+    assert len(isolation_steps) == 1
+    setup = isolation_steps[0]
+    assert "sudo apt-get update" in setup
+    assert "sudo apt-get install --no-install-recommends -y bubblewrap libseccomp2" in setup
+    # The preserved Linux full gate already takes ~28 minutes before setup.
+    assert 45 <= job["timeout-minutes"] <= 60

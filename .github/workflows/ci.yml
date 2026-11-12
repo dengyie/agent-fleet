@@ -22,7 +22,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -43,6 +43,10 @@ jobs:
         run: shellcheck --shell=bash --severity=error deploy/*.sh
       - name: Audit pinned dependencies
         run: pip-audit -r requirements-lock.txt --disable-pip --no-deps --strict
+      - name: Install Linux isolation test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y bubblewrap libseccomp2
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -98,6 +102,12 @@ jobs:
           tests/test_worktree_diff_streaming.py tests/test_workspace_output_bounds.py
           tests/test_platform_sandbox_artifacts.py tests/test_bounded_process.py -q
           tests/test_main_review_regressions.py tests/test_round5_windows_process.py
+          tests/test_workflow_shared_node_startup.py tests/test_workflow_startup.py
+          tests/test_workflow_setup.py
+          tests/test_artifact_capacity.py::test_download_pool_is_shared_across_reopened_directories_and_nodes
+          tests/test_artifact_capacity.py::test_download_processes_compete_for_one_last_slot
+          tests/test_artifact_capacity.py::test_download_process_death_releases_native_pool
+          tests/fixtures/workflow/windows_artifact_probe.py
           --junitxml=windows-results.xml
       - name: Preserve Windows test evidence
         if: always()

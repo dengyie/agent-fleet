@@ -9,6 +9,18 @@ from hub.application.errors import ApplicationError
 from .artifacts import ArtifactError
 from .resource_lease import ResourceLeaseError
 
+from hub.domain.mcp_tool_pins import MCPToolPin, MCPToolPinError, parse_mcp_tool_pins
+from .connectors.mcp import MCPConnectorError
+
+_UNSET_MCP_PINS = object()
+
+
+def _parse_mcp_pins(value: object) -> tuple[MCPToolPin, ...]:
+    try:
+        return parse_mcp_tool_pins(value)
+    except MCPToolPinError as exc:
+        raise MCPConnectorError(exc.code, cause=exc) from exc
+
 
 class ToolBroker:
     CONVERSATION_TOOLS = frozenset({
@@ -25,6 +37,23 @@ class ToolBroker:
         "platform.get_defaults", "platform.update_defaults",
     }) | BROWSER_TOOLS | WEB_AGENT_TOOLS
     TOOLS = TOOLS | CONVERSATION_TOOLS
+    CODE_TOOLS = frozenset({"workflow.input.list", "workflow.input.read"})
+    _CODE_TOOL_DEFINITIONS = (
+        {"name": "workflow.input.list", "risk": "read_only", "scope_kind": "workflow_input",
+         "description": "List entries in a verified read-only source package.",
+         "parameters": {"type": "object", "properties": {
+             "ref_key": {"type": "string"}, "path": {"type": "string"},
+             "offset": {"type": "integer", "minimum": 0},
+             "limit": {"type": "integer", "minimum": 1, "maximum": 128}},
+             "required": ["ref_key"], "additionalProperties": False}},
+        {"name": "workflow.input.read", "risk": "read_only", "scope_kind": "workflow_input",
+         "description": "Read a bounded UTF-8 chunk from a verified source package.",
+         "parameters": {"type": "object", "properties": {
+             "ref_key": {"type": "string"}, "path": {"type": "string"},
+             "offset": {"type": "integer", "minimum": 0},
+             "max_bytes": {"type": "integer", "minimum": 4, "maximum": 8192}},
+             "required": ["ref_key", "path"], "additionalProperties": False}},
+    )
     _BASE_TOOL_DEFINITIONS = ({'name': 'workspace.list',
       'risk': 'read_only',
       'scope_kind': 'workspace',
@@ -206,7 +235,9 @@ class ToolBroker:
                  artifact_workspace_id: str | None = None, allowed_tools=None,
                  browser_backend=None, browser_enabled: bool = False,
                  browser_submit_enabled: bool = False, conversation_service=None,
-                 service_actions=None, defaults_service=None):
+                 service_actions=None, defaults_service=None, mcp_catalog=None,
+                 mcp_enabled: bool = False, mcp_pins: object = _UNSET_MCP_PINS,
+                 workflow_code_view=None):
         self.backend = backend
         self.leases = leases
         self.resource_id = resource_id
@@ -220,13 +251,34 @@ class ToolBroker:
         self.conversation_service = conversation_service
         self.service_actions = service_actions
         self.defaults_service = defaults_service
-        self.allowed_tools = self.TOOLS if allowed_tools is None else self.TOOLS.intersection(allowed_tools)
+        self.mcp_catalog = mcp_catalog
+        self.workflow_code_view = workflow_code_view
+        self.mcp_enabled = bool(mcp_enabled and mcp_catalog is not None)
+        self.mcp_pins = {pin.public_name: pin for pin in _parse_mcp_pins(mcp_pins)} if (
+            mcp_pins is not _UNSET_MCP_PINS) else None
+        if self.mcp_pins and not self.mcp_enabled:
+            raise MCPConnectorError("mcp_disabled")
+        self.mcp_revisions = {}
+        if self.mcp_enabled:
+            self.mcp_revisions = ({name: pin.revision for name, pin in self.mcp_pins.items()}
+                if self.mcp_pins is not None else mcp_catalog.revision_pins(workspace_id=self.artifact_workspace_id))
+        self.allowed_mcp_tools = frozenset(self.mcp_revisions) if allowed_tools is None else frozenset(self.mcp_revisions).intersection(allowed_tools)
+        available_tools = self.TOOLS | (self.CODE_TOOLS if workflow_code_view is not None else frozenset())
+        self.allowed_tools = available_tools if allowed_tools is None else available_tools.intersection(allowed_tools)
 
     @classmethod
     def tool_definitions(cls, allowed_tools=None, *, browser_enabled: bool = False,
                          browser_submit_enabled: bool = False,
-                         service_actions_enabled: bool = False, web_agent_enabled: bool = False):
+                         service_actions_enabled: bool = False, web_agent_enabled: bool = False,
+                         mcp_catalog=None, mcp_enabled: bool = False, mcp_owner_id: str | None = None,
+                         mcp_workspace_id: str | None = None, mcp_pins: object = _UNSET_MCP_PINS,
+                         workflow_code_inputs: bool = False):
+        pins = _parse_mcp_pins(mcp_pins) if mcp_pins is not _UNSET_MCP_PINS else None
+        if pins and not (mcp_enabled and mcp_catalog is not None):
+            raise MCPConnectorError("mcp_disabled")
         definitions = [dict(item) for item in cls._BASE_TOOL_DEFINITIONS]
+        if workflow_code_inputs:
+            definitions.extend(dict(item) for item in cls._CODE_TOOL_DEFINITIONS)
         if web_agent_enabled:
             definitions.extend(dict(item) for item in WEB_AGENT_DEFINITIONS)
         if browser_enabled:
@@ -236,11 +288,42 @@ class ToolBroker:
         if not service_actions_enabled:
             definitions = [item for item in definitions
                            if item["name"] != "service.request_action"]
-        allowed = cls.TOOLS if allowed_tools is None else cls.TOOLS.intersection(allowed_tools)
-        return [item for item in definitions if item["name"] in allowed]
+        available_tools = cls.TOOLS | (cls.CODE_TOOLS if workflow_code_inputs else frozenset())
+        allowed = available_tools if allowed_tools is None else available_tools.intersection(allowed_tools)
+        definitions = [item for item in definitions if item["name"] in allowed]
+        if mcp_enabled and mcp_catalog is not None:
+            if pins is not None and allowed_tools is not None:
+                pins = tuple(pin for pin in pins if pin.public_name in allowed_tools)
+            selected = [item for item in mcp_catalog.tool_definitions(owner_id=mcp_owner_id, workspace_id=mcp_workspace_id,
+                expected_pins=pins)
+                        if allowed_tools is None or item["name"] in allowed_tools]
+            definitions.extend(selected[:max(0, 20 - len(definitions))])
+        return definitions
+
 
     def execute(self, *, command_id: str, tool: str, arguments: dict, owner_id: str, epoch: int) -> ToolReceipt:
-        if tool not in self.TOOLS:
+        if tool.startswith("mcp."):
+            if not self.mcp_enabled or self.mcp_catalog is None:
+                return ToolReceipt(command_id, "failed", {}, "mcp_disabled")
+            if tool not in self.allowed_mcp_tools:
+                return ToolReceipt(command_id, "failed", {}, "tool_not_allowed")
+            if not isinstance(arguments, dict):
+                return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
+            if not self.leases.validate(self.resource_id, self.lease_owner_id or owner_id, epoch):
+                return ToolReceipt(command_id, "failed", {}, "lease_mismatch")
+            try:
+                result = self.mcp_catalog.call(
+                    tool, arguments, owner_id=owner_id, workspace_id=self.artifact_workspace_id,
+                    expected_revision=self.mcp_revisions[tool],
+                    expected_pin=self.mcp_pins[tool] if self.mcp_pins is not None else None)
+            except Exception as exc:
+                code = getattr(exc, "code", "mcp_failed")
+                return ToolReceipt(command_id, "failed", {}, code)
+            return ToolReceipt(command_id, result.state, {
+                "structured_content": result.structured_content,
+                "content": list(result.content),
+            }, result.error_code)
+        if tool not in self.TOOLS and tool not in self.CODE_TOOLS:
             return ToolReceipt(command_id, "failed", {}, "unknown_tool")
         if tool not in self.allowed_tools:
             return ToolReceipt(command_id, "failed", {}, "tool_not_allowed")
@@ -248,6 +331,24 @@ class ToolBroker:
             return ToolReceipt(command_id, "failed", {}, "lease_mismatch")
         if not isinstance(arguments, dict):
             return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
+        if tool in self.CODE_TOOLS:
+            if self.workflow_code_view is None:
+                return ToolReceipt(command_id, "failed", {}, "tool_not_allowed")
+            valid_keys = {"ref_key", "path", "offset", "limit"} if tool == "workflow.input.list" else {
+                "ref_key", "path", "offset", "max_bytes"}
+            required = {"ref_key"} if tool == "workflow.input.list" else {"ref_key", "path"}
+            if set(arguments) - valid_keys or not required.issubset(arguments):
+                return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
+            try:
+                if tool == "workflow.input.list":
+                    result = self.workflow_code_view.list(arguments["ref_key"], arguments.get("path", ""),
+                        offset=arguments.get("offset", 0), limit=arguments.get("limit", 128))
+                else:
+                    result = self.workflow_code_view.read(arguments["ref_key"], arguments["path"],
+                        offset=arguments.get("offset", 0), max_bytes=arguments.get("max_bytes", 8192))
+            except Exception as exc:
+                return ToolReceipt(command_id, "failed", {}, getattr(exc, "code", "code_input_unavailable"))
+            return ToolReceipt(command_id, "succeeded", result)
         if tool in WEB_AGENT_TOOLS:
             return ToolReceipt(command_id, "failed", {}, "capability_unavailable")
         if tool in BROWSER_TOOLS:

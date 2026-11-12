@@ -21,6 +21,8 @@ JSON_REFERENCE_SURFACES = {
     "execution_window_events": "payload",
     "run_events": "payload",
     "platform_commands": "result",
+    "workflow_runs": "definition_snapshot",
+    "workflow_steps": "resolved_snapshot",
 }
 _GC_OWN_TABLES = frozenset({"browser_artifact_tickets", "browser_capture_gc", "browser_capture_gc_done"})
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -233,20 +235,30 @@ class BrowserCaptureGcRepository:
             (artifact_id, now),
         )
 
-    def _reference_surfaces(self, conn: sqlite3.Connection) -> tuple[list[str], list[tuple[str, str]]]:
+    def _reference_surfaces(self, conn: sqlite3.Connection) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
         """Return (direct artifact_id tables, JSON surfaces) after fail-closed checks."""
         tables = [row["name"] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()]
         if not {"run_events", "platform_commands"} <= set(tables):
             raise BrowserCaptureGcError("capture_gc_reference_surface_unknown")
-        direct: list[str] = []
+        from hub.infrastructure.workflow_schema import WorkflowSchemaError, inspect_schema
+        from hub.infrastructure.artifact_transfer_repository import (
+            ArtifactTransferRepositoryError, inspect_transfer_schema,
+        )
+        try:
+            inspect_schema(conn)
+            inspect_transfer_schema(conn)
+        except (WorkflowSchemaError, ArtifactTransferRepositoryError, sqlite3.Error) as exc:
+            raise BrowserCaptureGcError("capture_gc_reference_surface_unknown") from exc
+        direct: list[tuple[str, str]] = []
         json_surfaces: list[tuple[str, str]] = []
         for table in tables:
             quoted_table = _quote(table)
             columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({quoted_table})")}
-            if "artifact_id" in columns and table not in _GC_OWN_TABLES:
-                direct.append(table)
+            direct_column = "report_artifact_id" if table == "workflow_evidence" else "artifact_id"
+            if direct_column in columns and table not in _GC_OWN_TABLES:
+                direct.append((table, direct_column))
             column = JSON_REFERENCE_SURFACES.get(table)
             if column is None:
                 continue
@@ -257,7 +269,7 @@ class BrowserCaptureGcRepository:
 
     @staticmethod
     def _referenced(conn: sqlite3.Connection,
-                    surfaces: tuple[list[str], list[tuple[str, str]]],
+                    surfaces: tuple[list[tuple[str, str]], list[tuple[str, str]]],
                     id_table: str) -> set[str]:
         """Return which ids in ``temp.<id_table>`` are referenced anywhere.
 
@@ -269,20 +281,23 @@ class BrowserCaptureGcRepository:
         direct, json_surfaces = surfaces
         quoted_ids = f"temp.{_quote(id_table)}"
         referenced: set[str] = set()
-        for table in direct:
+        for table, column in direct:
+            quoted_column = _quote(column)
             for row in conn.execute(
-                f"SELECT DISTINCT artifact_id FROM {_quote(table)} "
-                f"WHERE artifact_id IN (SELECT artifact_id FROM {quoted_ids})"
+                f"SELECT DISTINCT {quoted_column} AS artifact_id FROM {_quote(table)} "
+                f"WHERE {quoted_column} IN (SELECT artifact_id FROM {quoted_ids})"
             ):
                 referenced.add(row["artifact_id"])
         for table, column in json_surfaces:
-            quoted_column = _quote(column)
+            # Workflow snapshots are canonical UTF-8 bytes (BLOB storage).
+            # Cast explicitly for SQLite releases that reject JSON BLOB input.
+            quoted_column = f"CAST({_quote(column)} AS TEXT)"
             try:
                 for row in conn.execute(
                     f"SELECT j.type AS type, j.value AS value FROM {_quote(table)} e, "
-                    f"json_tree(e.{quoted_column}) j "
-                    f"WHERE e.{quoted_column} IS NOT NULL "
-                    f"AND instr(e.{quoted_column}, '\"artifact_id\"')>0 "
+                    f"json_tree({quoted_column}) j "
+                    f"WHERE {quoted_column} IS NOT NULL "
+                    f"AND instr({quoted_column}, '\"artifact_id\"')>0 "
                     "AND j.key='artifact_id' "
                     f"AND (j.type!='text' OR j.value IN (SELECT artifact_id FROM {quoted_ids}))"
                 ):

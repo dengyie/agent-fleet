@@ -6,12 +6,14 @@ import sqlite3
 from typing import Any
 
 from hub.infrastructure.platform_db_base import PlatformRepositoryError
+from hub.infrastructure.run_capacity import workspace_capacity_filter
 from platform_schema import validate_id, validate_owner_id
 
 
 class PlatformWorkerMixin:
     def claim_worker_owner(self, *, worker_id: str, now: float,
-                           lease_s: float = 60.0) -> dict[str, Any] | None:
+                           lease_s: float = 60.0,
+                           max_workspace_concurrency: int | None = None) -> dict[str, Any] | None:
         """Claim the fairest owner that has an eligible Run.
 
         This lease is a scheduler slot, separate from the Run lease. It keeps
@@ -33,17 +35,19 @@ class PlatformWorkerMixin:
             conn.execute(
                 "INSERT OR IGNORE INTO platform_worker_owners(owner_id, enabled, updated_at) "
                 "SELECT DISTINCT owner_id, 1, ? FROM runs", (now,))
+            capacity_sql, capacity_params = workspace_capacity_filter(max_workspace_concurrency, now)
             row = conn.execute(
                 "SELECT o.owner_id FROM platform_worker_owners o "
                 "WHERE o.enabled=1 AND (o.lease_expires_at IS NULL OR o.lease_expires_at<=?) "
                 "AND EXISTS (SELECT 1 FROM runs r WHERE r.owner_id=o.owner_id AND ("
-                "(r.state='queued' AND (r.lease_id IS NULL OR r.lease_expires_at IS NULL OR r.lease_expires_at<=?)) OR "
+                "(r.state='waiting_node' AND r.runtime_resume_at<=?) OR (r.state='queued' AND (r.lease_id IS NULL OR r.lease_expires_at IS NULL OR r.lease_expires_at<=?)) OR "
                 "(r.state='cancelling' AND (r.lease_expires_at IS NULL OR r.lease_expires_at<=?)) OR "
                 "(r.state='running' AND r.lease_expires_at IS NOT NULL AND r.lease_expires_at<=?) OR "
                 "EXISTS (SELECT 1 FROM legacy_task_links l WHERE l.owner_id=o.owner_id AND l.state IN ('pending','linked')"
                 " OR (l.state='leased' AND (l.lease_expires_at IS NULL OR l.lease_expires_at<=?)))"
-                ")) ORDER BY (o.last_claim_at IS NOT NULL), o.last_claim_at, o.owner_id LIMIT 1",
-                (now, now, now, now, now),
+                ")" + capacity_sql +
+                ") ORDER BY (o.last_claim_at IS NOT NULL), o.last_claim_at, o.owner_id LIMIT 1",
+                (now, now, now, now, now, now, *capacity_params),
             ).fetchone()
             if row is None:
                 conn.execute("ROLLBACK")
@@ -114,7 +118,14 @@ class PlatformWorkerMixin:
                     "SELECT COUNT(*) FROM platform_worker_slots WHERE workspace_key=? AND expires_at>?",
                     (workspace_key, float(now)),
                 ).fetchone()[0])
-                if active_workspace >= max_workspace_concurrency:
+                waiting_workspace = int(conn.execute(
+                    "SELECT COUNT(*) FROM runs w WHERE w.run_id!=? AND w.runtime_wait_command_id IS NOT NULL "
+                    "AND NOT EXISTS (SELECT 1 FROM platform_worker_slots ws WHERE ws.run_id=w.run_id AND ws.expires_at>?) "
+                    "AND w.owner_id || ':' || "
+                    "COALESCE(NULLIF(json_extract(w.config_snapshot,'$.workspace_id'),''),"
+                    "(SELECT c.workspace_id FROM conversations c WHERE c.conversation_id=w.conversation_id))=?",
+                    (run_id, float(now), workspace_key)).fetchone()[0])
+                if active_workspace + waiting_workspace >= max_workspace_concurrency:
                     conn.execute("ROLLBACK")
                     return None
             lease_id = "workerslot_" + secrets.token_urlsafe(18)

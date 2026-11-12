@@ -40,6 +40,18 @@ Windows 有界执行以 suspended 状态创建子进程，加入带
 
 以上文件均位于 `tests/`。同一测试为多个 journey 提供证据时只执行一次；selector 数、参数实例数和 pytest 用例总数不是同一指标。
 
+`RELEASE-01` 还要求部署 helper 逐个检查直接运行依赖，并在 preflight/stage/verify
+访问线上目录前拒绝缺失依赖。HTTP JSON 回归经过原请求助手与实际路由：数组、对象
+127/128层可解析，129层及超深请求返回 `invalid_json`；解码后的深度检查不代表解析前
+资源限制。对应 `test_runtime_dependencies.py`、`test_round5_deep_json.py` 与接管路由
+回归均登记为必需 selector。Windows CI 的节点/进程范围与完整 Hub 路由验证分别记录；
+Windows Node 支持不证明 POSIX Hub 存储在 Windows 上可用。
+
+`WF-03` 的协调回归还验证无变化观察不写owner队列，以及每tick最多32条租约在一个
+事务内释放、逐条保留epoch/worker/到期围栏、每owner只刷新一次。真实SQLite失败注入
+要求整批回滚，旧租约与过期租约不能改写新领取；NULL队列和公平性仍由原队列测试
+覆盖。已绑定派发轮询必须在其他连接持有真实SQLite写锁时仍可读取；未绑定派发在读写之间revision变化时重新复核并拒绝，已有epoch/frozen/generation围栏保留。实测容量及余量见[Linux容量样本](workflow-platform-acceptance.md#2026-11-11-linux-当前候选测量与协调器修复)。
+
 ### 只读权限的四道证据
 
 1. **HTTP 入口和身份。** `test_acceptance_route_enforces_account_owner_origin_and_policy` 通过真实账号 HTTP 验证匿名、伪造 Origin、其他 owner、已撤销 Cookie 被拒绝，拒绝后数据库没有新消息或 Run。
@@ -113,6 +125,7 @@ sequence 重放、非受管降级、PTY 低置信度和 schema 迁移故障；�
 | 旧任务表删除后升级中断，重启创建空表而旧数据滞留迁移表 | 历史 schema 升级在一个事务中；复制/删除/重命名失败及进程退出均完整回滚；重试和并发启动保留任务、租约、结果、文件和审计 | `test_task_schema_migration.py`，已绑定 RELEASE-01；schema 固定来自 `182e034` |
 | 只读验收先写后拒绝 | 执行前拒绝；文件字节、产物数量、节点派发均无变化 | `test_platform_acceptance_check.py::test_acceptance_denies_tools_before_side_effects`；`test_platform_run_worker.py::test_acceptance_policy_is_frozen_and_enforced_by_new_worker`；上述 adversarial wire 用例 |
 | 单个参数 node ID、`-k`、`--deselect` 隐藏失败参数 | 不完整集合不得生成 passed 报告；完整兄弟参数仍属于必需集合 | `test_journey_gate.py::test_hidden_failing_parameter_cannot_pass_journey` |
+| HTTP取消后远程排队命令仍写文件，或worker等到原截止 | 取消贯穿worker/broker/receipt wait；事务内未领取为expired、已领取为unknown，原终态不改；释放取消等待的scheduler槽；每100ms取消检查不续写Run租约 | `test_platform_remote_cancellation.py`，RUN-01；真实HTTP/SQLite/NodeToolExecutor文件对照，不证明远程进程强停 |
 | 慢响应或截止后才到达 succeeded | 统一截止时间约束创建、提交、轮询、events、恢复；返回 acceptance_timeout/unconfirmed 并保留已知定位信息 | `test_acceptance_deadline.py::test_model_deadline_rejects_late_success_without_replay` |
 | `--lf` 缓存提前裁剪参数 | 与 require-journeys / journey-report 同用时退出 UsageError；普通局部调试可使用 | `test_journey_gate.py::test_last_failed_cache_cannot_hide_required_parameters` |
 | DNS/TCP/TLS 超过总预算 | DNS 不能迟到后发送请求；多地址连接共享预算；TLS 保留证书/主机名校验 | `test_acceptance_deadline.py` 中 DNS、TCP、TLS 用例 |
@@ -170,7 +183,11 @@ gh run download RUN_ID --repo dengyie/agent-fleet \
   --name agent-fleet-test-evidence --dir /tmp/fleet-ci-evidence
 ```
 
-Linux CI 会在测试成功后、上传证据和启动打包前调用 tools.testing.release_evidence；验证失败会阻断 package job。需要人工复核时，应在**与报告 revision 对应的干净代码检出**中执行下方校验。本机 dirty 报告只能作为开发证据。校验器绑定报告 revision、clean tree、矩阵 SHA-256、全部 journey/参数化 selector、JUnit failure/error/skip、浏览器 PNG 签名和外部项 not_run 状态。Linux artifact 中任何 skip 都会阻断打包。pytest subtests 的总数可高于 JUnit testcase 元素数，校验器分别验证 journey 参数计数与 JUnit 汇总，不假设两者总数相等。
+Linux CI 会在测试成功后、上传证据和启动打包前调用 tools.testing.release_evidence；验证失败会阻断 package job。需要人工复核时，应在**与报告 revision 对应的干净代码检出**中执行下方校验。本机 dirty 报告只能作为开发证据。校验器绑定报告 revision、clean tree、矩阵 SHA-256、全部 journey/参数化 selector、JUnit failure/error/skip、浏览器 PNG 完整性和外部项 not_run 状态。Linux artifact 中任何 skip 都会阻断打包。pytest subtests 的总数可高于 JUnit testcase 元素数，校验器分别验证 journey 参数计数与 JUnit 汇总，不假设两者总数相等。
+
+PNG 校验流式检查完整结构、chunk CRC、IDAT/zlib、扫描行长度与 filter、IEND 及尾随字节；只有八字节签名、截断或损坏的数据不能成为截图证据。内存回归在独立 Python 子进程中运行同一校验器，保持原像素输入和分配上限，避免其他测试的进程级 tracemalloc 峰值污染测量。
+
+运行依赖回归 `test_runtime_dependencies.py` 在独立 Python 中限制可导入的第三方包为 `requirements.txt` 已安装依赖闭包，启动真实 Hub、Workflow 与 Fleet MCP 并查询 Workflow HTTP 列表，防止测试依赖掩盖运行时缺包。它复用本机已安装分发包，不替代干净环境安装或真实外部集成验收。
 
 ```bash
 python3 -m tools.testing.release_evidence \

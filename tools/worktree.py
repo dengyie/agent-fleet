@@ -7,6 +7,13 @@ import os
 import re
 import subprocess
 import threading
+import tempfile
+import asyncio
+import time
+import stat
+from datetime import datetime, timezone
+from typing import Callable, Mapping
+from fleet_core.process.local_process import NO_WINDOW
 from pathlib import Path
 
 from fleet_core.task_result import MAX_DIFF_PATCH, bound_patch
@@ -108,6 +115,160 @@ def create_worktree(project: Path, task_id: str) -> Path:
     with _TRUSTED_LOCK:
         _TRUSTED_GITDIRS[_key(target)] = Path(resolved)
     return target
+
+
+def head_commit(worktree: Path) -> str:
+    value = _git(Path(worktree), "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value):
+        raise WorktreeError("invalid_worktree_head")
+    return value
+
+
+async def _source_git(argv: list[str], cwd: Path, environment: Mapping[str, str], input_bytes: bytes | None,
+                      deadline: float, should_cancel: Callable[[], bool] | None) -> bytes:
+    process = None
+    tasks: list[asyncio.Task] = []
+    try:
+        if time.monotonic() >= deadline or (should_cancel is not None and should_cancel()):
+            raise WorktreeError("source_capture_stopped")
+        process = await asyncio.create_subprocess_exec(*argv, cwd=cwd, env=environment,
+            stdin=asyncio.subprocess.PIPE if input_bytes is not None else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, creationflags=NO_WINDOW)
+
+        async def read(stream: asyncio.StreamReader, limit: int) -> bytes:
+            chunks = bytearray()
+            while True:
+                chunk = await stream.read(min(65536, limit - len(chunks) + 1))
+                if not chunk:
+                    return bytes(chunks)
+                chunks.extend(chunk)
+                if len(chunks) > limit:
+                    raise WorktreeError("source_git_output_limit")
+
+        async def write() -> None:
+            if input_bytes is None:
+                return
+            try:
+                for offset in range(0, len(input_bytes), 65536):
+                    process.stdin.write(memoryview(input_bytes)[offset:offset + 65536])
+                    await process.stdin.drain()
+            finally:
+                process.stdin.close()
+
+        tasks = [asyncio.create_task(read(process.stdout, 4 * 1024 * 1024)),
+                 asyncio.create_task(read(process.stderr, 8192)), asyncio.create_task(write()),
+                 asyncio.create_task(process.wait())]
+        pending = set(tasks)
+        while pending:
+            if time.monotonic() >= deadline or (should_cancel is not None and should_cancel()):
+                raise WorktreeError("source_capture_stopped")
+            done, pending = await asyncio.wait(pending, timeout=min(.1, max(0, deadline - time.monotonic())),
+                                               return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
+        if process.returncode != 0:
+            raise WorktreeError("source_git_failed: " + tasks[1].result().decode("utf-8", errors="replace")[:200])
+        return tasks[0].result()
+    finally:
+        if process is not None and process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                await process.wait()
+            await asyncio.shield(process.wait())
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _source_file(root: Path, encoded: bytes, remaining: int) -> tuple[bytes, str] | None:
+    """Open every component relative to pinned, non-link directory descriptors."""
+    from fleet_core.workflow.source import _parts
+
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise WorktreeError("source_file_boundary_unavailable")
+    parts = _parts(encoded.decode("utf-8", errors="strict"))
+    directory_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY
+    directory = os.open(root, directory_flags)
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, directory_flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        try:
+            descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        except FileNotFoundError:
+            return None
+        with os.fdopen(descriptor, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise WorktreeError("unsupported_source_entry")
+            raw = handle.read(remaining + 1)
+            if len(raw) > remaining:
+                raise WorktreeError("source_archive_too_large")
+            return raw, "100755" if info.st_mode & 0o111 else "100644"
+    finally:
+        os.close(directory)
+
+
+def freeze_source_commit(worktree: Path, base_commit: str, *, task_id: str, timestamp: float,
+                         object_directory: Path, deadline: float | None = None,
+                         should_cancel: Callable[[], bool] | None = None) -> tuple[str, str]:
+    """Build a fixed task-output commit using a private index and no branch update."""
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", base_commit) or not TASK_ID_RE.fullmatch(task_id):
+        raise WorktreeError("invalid_source_identity")
+    date = datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000")
+    deadline = time.monotonic() + 120 if deadline is None else deadline
+    environment = {
+        **_git_env(_git_dir_for(Path(worktree)), Path(worktree)),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_AUTHOR_NAME": "Agent Fleet Source Exporter",
+        "GIT_AUTHOR_EMAIL": "source-exporter@invalid",
+        "GIT_COMMITTER_NAME": "Agent Fleet Source Exporter",
+        "GIT_COMMITTER_EMAIL": "source-exporter@invalid",
+        "GIT_AUTHOR_DATE": date,
+        "GIT_COMMITTER_DATE": date,
+        "GIT_OBJECT_DIRECTORY": str(Path(object_directory).resolve()),
+    }
+    try:
+        Path(object_directory).mkdir(parents=True, exist_ok=True)
+        objects = asyncio.run(_source_git(["git", "rev-parse", "--git-path", "objects"], Path(worktree),
+            {key: value for key, value in environment.items() if key != "GIT_OBJECT_DIRECTORY"}, None, deadline, should_cancel)).decode().strip()
+        alternate = (Path(worktree) / objects).resolve()
+        environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = str(alternate)
+        with tempfile.TemporaryDirectory(prefix="fleet-source-index-") as temp_name:
+            index = Path(temp_name) / "index"
+            environment["GIT_INDEX_FILE"] = str(index)
+
+            def git(*args: str, input_bytes: bytes | None = None) -> bytes:
+                return asyncio.run(_source_git(["git", "-c", f"core.hooksPath={os.devnull}", "-c", "core.fsmonitor=false",
+                    "-c", "gc.auto=0", "--no-replace-objects", *args], Path(worktree), environment, input_bytes, deadline, should_cancel))
+
+            paths = tuple(dict.fromkeys(part for part in git("ls-files", "--cached", "--others", "--exclude-standard", "-z").split(b"\0") if part))
+            if len(paths) > 4096:
+                raise WorktreeError("source_file_limit")
+            git("read-tree", "--empty")
+            records = bytearray()
+            total = 0
+            for encoded in paths:
+                entry = _source_file(Path(worktree), encoded, 10 * 1024 * 1024 - total)
+                if entry is None:
+                    continue
+                raw, mode = entry
+                total += len(raw)
+                oid = git("hash-object", "--no-filters", "-w", "--stdin", input_bytes=raw).strip()
+                records.extend(mode.encode("ascii") + b" " + oid + b"\t" + encoded + b"\0")
+            git("update-index", "-z", "--index-info", input_bytes=bytes(records))
+            tree = git("write-tree").decode().strip()
+            commit = git("commit-tree", tree, "-p", base_commit, "-m", f"Fleet task output {task_id}").decode().strip()
+            return commit, tree
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise WorktreeError("source_commit_failed") from exc
 
 
 def _truncate_text(out: str, max_bytes: int) -> str:

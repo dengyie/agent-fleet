@@ -73,7 +73,7 @@ def test_signed_node_exec_cannot_read_outside_workspace(tmp_path):
     private, public = generate_ed25519_keypair()
     outside = tmp_path / 'outside-workspace.txt'
     outside.write_text('review-outside-sentinel')
-    runtime = NodeRuntime(NodeRuntimeConfig(node_id='node-review', credential='node-review:fixture', workspace_root=tmp_path / 'workspace', journal_path=tmp_path / 'journal.db', hub_url='https://hub.invalid', public_key=public, capabilities=frozenset({'workspace.exec'})))
+    runtime = NodeRuntime(NodeRuntimeConfig(node_id='node-review', credential='node-review:fixture', workspace_root=tmp_path / 'workspace', workspace_id='home', journal_path=tmp_path / 'journal.db', hub_url='https://hub.invalid', public_key=public, capabilities=frozenset({'workspace.exec'})))
     command = PlatformCommand.create(command_id='cmd-review', target_node='node-review', owner_id=OWNER, action='tool.workspace.exec', resource_id='home', arguments={'argv':['cat',str(outside)]}, expires_at=time.time()+60).signed(private)
     receipt = runtime.client.handle(command.as_dict())
     assert 'review-outside-sentinel' not in str(receipt), receipt
@@ -90,13 +90,13 @@ def test_cancellation_does_not_hide_unknown_remote_write(tmp_path):
     repo.upsert_workspace(OWNER, {'workspace_id':'home','root_path':str(tmp_path/'hub-workspace')})
     repo.create_conversation(OWNER, 'conv-review', title='', workspace_id='home')
     repo.append_turn(OWNER, 'conv-review', 'msg-review', 'run-review', text='write', client_token='turn-review', config_snapshot={'workspace_id':'home','model_profile_id':'local','execution_node_id':'node-review'}, now=time.time())
-    runtime = NodeRuntime(NodeRuntimeConfig(node_id='node-review', credential='node-review:fixture', workspace_root=tmp_path/'node-workspace', journal_path=tmp_path/'journal.db', hub_url='https://hub.invalid', public_key=public, capabilities=frozenset({'workspace.write'})))
+    runtime = NodeRuntime(NodeRuntimeConfig(node_id='node-review', credential='node-review:fixture', workspace_root=tmp_path/'node-workspace', workspace_id='home', journal_path=tmp_path/'journal.db', hub_url='https://hub.invalid', public_key=public, capabilities=frozenset({'workspace.write'})))
     worker = fleet['services']['platform_worker']
     class Provider:
         def complete(self, messages, tools, *, request_observer=None):
             return ModelResponse(kind='tool_call', tool='workspace.write', arguments={'path':'published.txt','content':'side effect happened'})
     class LostReceipt:
-        def wait_for_receipt(self, command_id, *, timeout_s):
+        def wait_for_receipt(self, command_id, *, timeout_s, should_cancel=None):
             row = fleet['platform_commands'].get(command_id)
             assert runtime.client.handle(row)['status'] == 'succeeded'
             repo.cancel_run(OWNER, 'run-review', now=time.time())
@@ -148,9 +148,19 @@ def test_successful_multibyte_completion_is_persisted(tmp_path, answer, leased):
     assert 'text' not in finished['payload']
     assert len(json.dumps(finished['payload']).encode()) < 64 * 1024
     repo.append_turn(OWNER, 'conv-review', 'msg-next', 'run-next', text='continue', client_token='next', config_snapshot={}, now=time.time())
+    # Full responses remain durable and available to the history UI. Provider
+    # context now keeps complete turns within its UTF-8 budget.
+    conversation = repo.get_conversation(OWNER, 'conv-review')
+    assert conversation['messages'][1]['role'] == 'assistant'
+    assert conversation['messages'][1]['content'] == answer
     context = repo.get_run_execution_context(OWNER, 'run-next')
-    assert context['messages'][1]['role'] == 'assistant'
-    assert context['messages'][1]['content'] == answer
+    if len(('report' + answer + 'continue').encode('utf-8')) <= 65536:
+        assert context['messages'][1]['role'] == 'assistant'
+        assert context['messages'][1]['content'] == answer
+        assert conversation['context_window']['omitted_turns'] == 0
+    else:
+        assert context['messages'] == [{'message_id': 'msg-next', 'role': 'user', 'content': 'continue'}]
+        assert conversation['context_window']['omitted_turns'] == 1
 
 
 
@@ -207,7 +217,7 @@ def test_future_schema_is_rejected_without_migration(tmp_path):
 def test_node_launcher_is_immutable_validated_and_used(tmp_path):
     private, public = generate_ed25519_keypair()
     arguments = dict(node_id='node-review', credential='node-review:fixture',
-                     workspace_root=tmp_path/'workspace', journal_path=tmp_path/'journal.db',
+                     workspace_root=tmp_path/'workspace', workspace_id='home', journal_path=tmp_path/'journal.db',
                      hub_url='https://hub.invalid', public_key=public,
                      capabilities=frozenset({'workspace.exec'}))
     for invalid in ('/bin/sh', [None], [''], ['bad\x00arg']):

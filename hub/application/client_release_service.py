@@ -5,7 +5,8 @@ hub 运行的代码树就是客户端的唯一来源：首次请求时从 ``sour
 
 * **序号**：持久化在 ``state_path``。闭包内容（tree digest）不变则沿用序号与版本；
   内容变化才 ``sequence + 1``，避免 hub-only 改动让全舰队无意义重启。
-* **版本标签**：源树 ``RELEASE_ORIGIN`` 的 commit 前 12 位，否则 ``dev-<digest12>``。
+* **版本标签**：源树 ``RELEASE_ORIGIN`` 的 commit 前 12 位，否则 ``dev-<digest12>``；
+  首次发布后始终附加 ``-s<sequence>``，避免跳过中间版本或回退源树时重名。
 * **签名**：复用 supervisor Ed25519 key（清单签名带独立域前缀，见 fleet_core）。
   无 key = fail-closed，接口返回 503 ``client_release_unsigned``。
 """
@@ -87,8 +88,9 @@ class ClientReleaseService:
             previous = entry if isinstance(entry, dict) else {}
             sequence = int(previous.get("sequence", 0)) + 1
             version = _origin_commit(self.source_root) or f"dev-{digest[:12]}"
-            if version == previous.get("version"):
-                # 同一 commit 上的树变了（脏树）：版本目录名必须唯一
+            if sequence > 1:
+                # Every later publication needs a unique directory, including
+                # a third dirty build or a return to an earlier source tree.
                 version = f"{version}-s{sequence}"
             entry = {
                 "treeDigest": digest,

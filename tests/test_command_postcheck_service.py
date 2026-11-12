@@ -52,6 +52,13 @@ class FakeRepository:
     def finish_postcheck(self, owner, command_id, *, kind, state, result, evidence_id, now):
         row = self.postchecks[(owner, command_id, kind)]
         row.update(state=state, result=result, evidence_id=evidence_id, updated_at=now)
+        # Repository completion now owns the atomic descriptor+audit boundary.
+        # Keep the service fake faithful without restoring a second audit write.
+        if not any(item["reconciliation_id"] == evidence_id for item in self.reconciliations):
+            self.record_reconciliation(owner, command_id,
+                reconciliation_id=evidence_id, actor="postcheck",
+                outcome="confirmed_succeeded" if state == "matched" else "remains_unknown",
+                evidence_source="workspace_postcheck", evidence_reference=evidence_id)
         return dict(row)
 
     def record_reconciliation(self, owner, command_id, **kwargs):

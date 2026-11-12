@@ -67,7 +67,14 @@ def list_conversations():
 @bp.get("/conversations/<conversation_id>")
 @require_operator
 def get_conversation(conversation_id):
-    return _call(lambda: jsonify(_services()[0].get(g.operator, conversation_id)))
+    def _get():
+        try:
+            limit = int(request.args.get('limit', '20'))
+            before = int(request.args['before_sequence']) if 'before_sequence' in request.args else None
+        except (TypeError, ValueError):
+            raise ApplicationError('invalid_value', '分页参数不合法', 400) from None
+        return jsonify(_services()[0].get(g.operator, conversation_id, limit=limit, before_sequence=before))
+    return _call(_get)
 
 @bp.patch("/conversations/<conversation_id>")
 @require_operator

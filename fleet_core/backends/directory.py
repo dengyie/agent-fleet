@@ -4,10 +4,14 @@ from __future__ import annotations
 import os
 import hashlib
 import subprocess
+import sys
 from pathlib import Path
+from typing import Callable
 
 from fleet_core.workspace import WorkspaceError, normalize_relative_path
-from fleet_core.process.bounded_process import decode_prefix, run_bounded
+from fleet_core.process.bounded_process import (
+    ProcessCancelled, ProcessStopUnconfirmed, decode_prefix, run_bounded,
+)
 from .base import ToolReceipt
 
 MAX_READ_BYTES = 64 * 1024
@@ -17,6 +21,12 @@ ALLOWED_EXECUTABLES = frozenset({
     "cat", "find", "git", "ls", "pwd", "python",
     "python3", "pytest", "rg", "sed",
 })
+
+
+def executable_allowed(executable: str) -> bool:
+    """Admit fixed aliases and the exact runtime used to register recipes."""
+    path = Path(executable)
+    return path.name in ALLOWED_EXECUTABLES or (path.is_absolute() and executable == sys.executable)
 
 
 class DirectoryBackend:
@@ -102,7 +112,8 @@ class DirectoryBackend:
                 return self._receipt("", "failed", error_code="invalid_content")
             path = self._path(relative_path)
             current_size = sum(p.stat().st_size for p in self.root.rglob("*") if p.is_file())
-            if current_size + len(content) > self.quota_bytes:
+            replaced_size = path.stat().st_size if path.is_file() else 0
+            if current_size - replaced_size + len(content) > self.quota_bytes:
                 return self._receipt("", "failed", error_code="disk_quota")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(bytes(content))
@@ -112,23 +123,27 @@ class DirectoryBackend:
         except OSError:
             return self._receipt("", "failed", error_code="write_failed")
 
-    def execute(self, command_id: str, argv: list[str], *, timeout_s: float = 30.0):
+    def execute(self, command_id: str, argv: list[str], *, timeout_s: float = 30.0,
+                should_cancel: Callable[[], bool] | None = None):
         if not isinstance(argv, list) or not argv or any(not isinstance(arg, str) or len(arg) > 4096 for arg in argv):
             return self._receipt(command_id, "failed", error_code="invalid_command")
-        executable = Path(argv[0]).name
-        if executable not in ALLOWED_EXECUTABLES or any(arg in {"-c", "--command"} for arg in argv[1:]):
+        if not executable_allowed(argv[0]) or any(arg in {"-c", "--command"} for arg in argv[1:]):
             return self._receipt(command_id, "failed", error_code="command_not_allowed")
         try:
             proc = run_bounded(argv, cwd=self.root, timeout_s=max(0.1, min(float(timeout_s), 300.0)),
                                stdout_limit=MAX_OUTPUT_BYTES + 1, stderr_limit=MAX_OUTPUT_BYTES + 1,
-                               env={"PATH": os.environ.get("PATH", "")})
+                               env={"PATH": os.environ.get("PATH", "")}, should_cancel=should_cancel)
             raw = proc.stdout + proc.stderr
             output, truncated = decode_prefix(raw, MAX_OUTPUT_BYTES)
             return self._receipt(command_id, "succeeded" if proc.returncode == 0 else "failed", {"returncode": proc.returncode, "output": output}, error_code=None if proc.returncode == 0 else "process_failed", truncated=truncated)
         except subprocess.TimeoutExpired:
             return self._receipt(command_id, "failed", error_code="timeout")
+        except ProcessCancelled:
+            return self._receipt(command_id, "cancelled", error_code="cancelled")
+        except ProcessStopUnconfirmed:
+            return self._receipt(command_id, "unknown", error_code="process_stop_unconfirmed")
         except OSError:
             return self._receipt(command_id, "failed", error_code="exec_failed")
 
 
-__all__ = ["ALLOWED_EXECUTABLES", "DirectoryBackend", "MAX_DIGEST_BYTES", "MAX_OUTPUT_BYTES", "MAX_READ_BYTES"]
+__all__ = ["ALLOWED_EXECUTABLES", "DirectoryBackend", "MAX_DIGEST_BYTES", "MAX_OUTPUT_BYTES", "MAX_READ_BYTES", "executable_allowed"]

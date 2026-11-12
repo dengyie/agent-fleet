@@ -164,6 +164,16 @@ function readJsonBeforeAbort(response, signal) {
 async function request(path, options) {
   options = options || {};
   var controller = new AbortController();
+  var externalSignal = options.signal;
+  var onAbort = function () { controller.abort(); };
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener('abort', onAbort, { once: true });
+  }
+  function cleanup() {
+    clearTimeout(timer);
+    if (externalSignal) externalSignal.removeEventListener('abort', onAbort);
+  }
   var timer = setTimeout(function () {
     controller.abort();
   }, boundedTimeout(options.timeoutMs));
@@ -184,36 +194,37 @@ async function request(path, options) {
       signal: controller.signal,
     });
   } catch (err) {
-    clearTimeout(timer);
-    var aborted = err && (err.name === 'AbortError' || err.code === 20);
-    if (aborted) {
-      throw new ApiError('timeout', 0, 'request_timeout',
-        '请求超时，请稍后重试', null);
-    }
-    throw new ApiError('network', 0, 'network_error',
-      '网络错误，无法连接服务', null);
+    cleanup();
+    var aborted = controller.signal.aborted || (err && (err.name === 'AbortError' || err.code === 20));
+    var failure = aborted
+      ? new ApiError('timeout', 0, 'request_timeout', '请求超时，请稍后重试', null)
+      : new ApiError('network', 0, 'network_error', '网络错误，无法连接服务', null);
+    failure.cause = err;
+    throw failure;
   }
 
   // Every feature uses this boundary, including non-JSON edge rejections.
-  if (response.status === 401 && typeof window.dispatchEvent === 'function') {
+  if (response.status === 401 && !options.deferUnauthorized && typeof window.dispatchEvent === 'function') {
     window.dispatchEvent(new Event('fleet-auth-required'));
   }
   var data = null;
   try {
     data = await readJsonBeforeAbort(response, controller.signal);
   } catch (e) {
+    var failure;
     if (controller.signal.aborted || (e && (e.name === 'AbortError' || e.code === 20))) {
-      throw new ApiError('timeout', 0, 'request_timeout',
+      failure = new ApiError('timeout', 0, 'request_timeout',
         '请求超时，请稍后重试', null);
-    }
-    if (!response.ok) {
-      throw new ApiError('http', response.status, 'http_error',
+    } else if (!response.ok) {
+      failure = new ApiError('http', response.status, 'http_error',
         '服务返回异常，请稍后重试', null);
+    } else {
+      failure = new ApiError('parse', response.status, 'invalid_json', '响应不是合法 JSON', null);
     }
-    throw new ApiError('parse', response.status, 'invalid_json',
-      '响应不是合法 JSON', null);
+    failure.cause = e;
+    throw failure;
   } finally {
-    clearTimeout(timer);
+    cleanup();
   }
 
   if (!response.ok) {
@@ -245,8 +256,10 @@ export async function platformRequest(path, options) {
 
 /* -- 对外异步接口 --------------------------------------------------------- */
 
-export async function getOperatorSession() {
-  var data = await request('/operator/session');
+export async function getOperatorSession({deferUnauthorized = false} = {}) {
+  // The shell may have a newer session check queued behind this response.
+  // Let that caller adjudicate stale 401s; other callers keep the global event.
+  var data = await request('/operator/session', {deferUnauthorized});
   if (!data || data.authenticated !== true) {
     throw new ApiError('contract', 200, 'invalid_session', '登录状态响应无效', null);
   }

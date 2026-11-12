@@ -1,6 +1,7 @@
 """Schedule service recovery must respect real, transaction-fenced leases."""
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from queue import Queue
 import threading
 from threading import Barrier
 from typing import Any
@@ -169,6 +170,24 @@ def test_background_scheduler_eventually_services_owners_after_first_page(tmp_pa
     repo.init()
     final_owner = "owner-100@example.test"
     reached_final_owner = threading.Event()
+    executed_owners: list[str] = []
+
+    class ControlledPoll(threading.Event):
+        """Advance real scheduler batches without imposing an execution SLA."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.polls: Queue[float | None] = Queue()
+            self.advance = threading.Semaphore(0)
+
+        def wait(self, timeout: float | None = None) -> bool:
+            self.polls.put(timeout)
+            self.advance.acquire()
+            return self.is_set()
+
+        def set(self) -> None:
+            super().set()
+            self.advance.release()
 
     for index in range(101):
         owner_id = f"owner-{index:03}@example.test"
@@ -179,6 +198,7 @@ def test_background_scheduler_eventually_services_owners_after_first_page(tmp_pa
         }, now=90)
 
     def execute(owner_id: str, _action: str, _target: Any) -> dict[str, str]:
+        executed_owners.append(owner_id)
         if owner_id == final_owner:
             reached_final_owner.set()
         return {"state": "healthy"}
@@ -187,15 +207,27 @@ def test_background_scheduler_eventually_services_owners_after_first_page(tmp_pa
         repo, executor=execute, clock=lambda: 100, poll_interval_s=1,
     )
     existing_threads = set(threading.enumerate())
-    stop = service.start()
+    stop = ControlledPoll()
+    assert service.start(stop_event=stop) is stop
     scheduler_thread = next(
         thread for thread in threading.enumerate()
         if thread not in existing_threads and thread.name == "platform-schedules"
     )
     try:
-        assert reached_final_owner.wait(timeout=5), "owner past the first 100 remains unscheduled"
+        assert stop.polls.get(timeout=20) == 1
+        assert executed_owners == []
+        stop.advance.release()
+        assert stop.polls.get(timeout=20) == 1  # First batch has committed.
+        assert executed_owners == [f"owner-{index:03}@example.test" for index in range(100)]
+        assert not reached_final_owner.is_set()
+        stop.advance.release()
+        assert stop.polls.get(timeout=20) == 1  # Second batch has committed.
+        assert reached_final_owner.is_set(), "owner past the first 100 remains unscheduled"
+        assert executed_owners == [f"owner-{index:03}@example.test" for index in range(101)]
+        assert repo.get_trigger(final_owner, "health", 100)["state"] == "succeeded"
     finally:
-        stop()
+        stop.set()
+        scheduler_thread.join(10)
     assert not scheduler_thread.is_alive()
 
 

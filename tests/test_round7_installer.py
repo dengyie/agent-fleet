@@ -110,6 +110,55 @@ def test_install_switches_current_and_verifies(env):
     assert env["make"]().update()["action"] == "up_to_date"
 
 
+@pytest.mark.parametrize("stored", [None, {"sequence": 1}, {"channel": "beta"}])
+def test_check_requires_installed_release_metadata_to_match_manifest(env, stored):
+    env["fetcher"].publish("v1", 3)
+    updater = env["make"]()
+    updater.update()
+    path = env["layout"].current / cr.RELEASE_INFO
+    info = cr.read_release_info(env["layout"].current)
+    # Simulate an old installation with a matching directory name but a
+    # different release identity (or missing/corrupt installation metadata).
+    if stored is None:
+        path.write_text("{}", encoding="utf-8")
+    else:
+        inst._write_json(path, {**info, **stored})
+    assert updater.check()["action"] == "install"
+
+
+def test_client_skipping_an_intermediate_dirty_release_still_installs_latest(env, tmp_path, monkeypatch):
+    from hub.application.client_release_service import ClientReleaseService
+
+    monkeypatch.setattr("hub.application.client_release_service._REBUILD_CHECK_S", 0.0)
+    source = make_source(tmp_path / "hub-source", "V = 1\n")
+    (source / "RELEASE_ORIGIN").write_text("commit: 0123456789abcdef\n", encoding="utf-8")
+    releases = ClientReleaseService(
+        source_root=source, state_path=tmp_path / "release-state.json",
+        signing_key=PRIVATE, clock=lambda: NOW,
+    )
+
+    class Fetcher:
+        def manifest(self, channel):
+            return releases.signed_manifest()
+
+        def artifact(self, sha256, size):
+            return releases.artifact(sha256)
+
+    updater = env["make"]()
+    updater.fetcher = Fetcher()
+    assert updater.update()["action"] == "installed"
+    original_version = env["layout"].link_version(env["layout"].current)
+    for sequence in (2, 3):
+        (source / "tools" / "agent-runner.py").write_text(f"V = {sequence}\n", encoding="utf-8")
+        assert releases.current()["sequence"] == sequence
+    result = updater.update()
+    assert result["action"] == "installed"
+    assert result["sequence"] == 3
+    assert (env["layout"].current / "tools" / "agent-runner.py").read_text() == "V = 3\n"
+    assert env["layout"].link_version(env["layout"].previous) == original_version
+    assert updater.update()["action"] == "up_to_date"
+
+
 def test_check_rejects_bad_signature_and_sequence_rollback(env):
     fetcher = env["fetcher"]
     fetcher.publish("v2", 2)

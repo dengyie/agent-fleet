@@ -81,6 +81,10 @@ def test_acceptance_http_chain_closes_report_and_node_journal(chain_target, caps
     assert client.request(f'/api/platform/v1/workspaces/{workspace_id}/artifacts')['artifacts'] == []
     events = client.request('/api/platform/v1/runs/' + row['run_id'] + '/events')['events']
     middle = ['node_command_queued', 'node_receipt'] if node else []
+    if node and any(e['kind'] == 'run_waiting_node' for e in events):
+        # A pending remote receipt releases the worker; its original Run then
+        # resumes. A receipt already present at enqueue needs no suspension.
+        middle = ['node_command_queued', 'run_waiting_node', 'node_receipt', 'run_started']
     assert [e['kind'] for e in events] == [
         'run_started', 'provider_request_started', 'provider_request_finished',
         'tool_call', *middle, 'tool_result', 'provider_request_started',

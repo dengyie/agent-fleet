@@ -84,7 +84,7 @@ def test_postcheck_http_node_digest_records_match_without_changing_unknown(tmp_p
     transport = FlaskTransport(client)
     node = NodeClient(
         journal,
-        executor=NodeToolExecutor(DirectoryBackend(workspace)),
+        executor=NodeToolExecutor(DirectoryBackend(workspace), workspace_id="workspace-a"),
         node_id="node-a", credential="node-a:" + "a" * 40,
         hub_url="https://hub.invalid", transport=transport,
         worker_id="node-worker",
@@ -129,7 +129,7 @@ def test_postcheck_mismatch_remains_unknown_and_is_owner_scoped(tmp_path):
     client.post("/api/platform/v1/commands/cmd-write/postcheck")
     node = NodeClient(
         NodeJournal(tmp_path / "node.db"),
-        executor=NodeToolExecutor(DirectoryBackend(workspace)),
+        executor=NodeToolExecutor(DirectoryBackend(workspace), workspace_id="workspace-a"),
         node_id="node-a", credential="node-a:" + "a" * 40,
         hub_url="https://hub.invalid", transport=FlaskTransport(client),
         worker_id="node-worker",
@@ -177,7 +177,7 @@ def test_digest_is_bounded_and_large_current_file_remains_unknown(tmp_path):
     journal = NodeJournal(tmp_path / "node.db")
     journal.init()
     node = NodeClient(
-        journal, executor=NodeToolExecutor(DirectoryBackend(workspace)),
+        journal, executor=NodeToolExecutor(DirectoryBackend(workspace), workspace_id="workspace-a"),
         node_id="node-a", credential="node-a:" + "a" * 40,
         hub_url="https://hub.invalid", transport=FlaskTransport(client),
         worker_id="node-worker",

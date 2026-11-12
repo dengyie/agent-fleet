@@ -57,6 +57,32 @@ def test_worker_claims_and_finishes_local_run_with_events(tmp_path):
     assert [event["kind"] for event in events] == ["run_started", "provider_request_started", "provider_request_finished", "tool_call", "tool_result", "provider_request_started", "provider_request_finished", "run_finished"]
 
 
+def test_queued_run_keeps_provider_credential_binding_after_profile_edit(tmp_path):
+    from hub.application.run_worker_service import LocalRunWorkerService
+    from tests.test_platform_provider import Broker, FakeTransport, _response
+
+    app = _app(tmp_path)
+    repo = _catalog(app, tmp_path)
+    profile = {"profile_id": "local", "provider": "openai_compatible", "model": "model-a",
+               "secret_ref": "env://KEY_A",
+               "provider_config": {"endpoint": "https://one.example.test"}}
+    repo.upsert_model(OWNER, profile)
+    run = _queued(app)
+    repo.upsert_model(OWNER, {**profile, "model": "model-b", "secret_ref": "env://KEY_B",
+                             "provider_config": {"endpoint": "https://two.example.test"}})
+    # Values are resolved at execution, including rotation at the frozen reference.
+    broker = Broker({"env://KEY_A": "rotated-a", "env://KEY_B": "new-b"})
+    transport = FakeTransport([_response({"choices": [{"message": {"content": "done"}}]})])
+    worker = LocalRunWorkerService(repo, app.extensions["fleet"]["services"]["run_events"],
+                                  secret_broker=broker, provider_transport=transport)
+    assert worker.run_once(OWNER)["state"] == "succeeded"
+    assert transport.calls[0]["url"] == "https://one.example.test/v1/chat/completions"
+    assert transport.calls[0]["headers"]["Authorization"] == "Bearer rotated-a"
+    public = app.test_client().get(f"/api/platform/v1/runs/{run['run_id']}").get_json()
+    assert "KEY_A" not in str(public)
+    assert "rotated-a" not in str(repo.get_run(OWNER, run["run_id"]))
+
+
 @pytest.mark.parametrize('remote', [False, True])
 @pytest.mark.parametrize('tool', ['workspace.list', 'workspace.write', 'workspace.artifact', 'workspace.exec'])
 def test_acceptance_policy_is_frozen_and_enforced_by_new_worker(tmp_path, remote, tool):
@@ -96,6 +122,7 @@ def test_acceptance_policy_is_frozen_and_enforced_by_new_worker(tmp_path, remote
     class Delivery:
         def enqueue(self, command, **kwargs):
             commands.append(command.action)
+            return command.as_dict()
 
         def wait_for_receipt(self, *args, **kwargs):
             return {'status': 'succeeded', 'result': {}}
@@ -418,11 +445,11 @@ def test_remote_browser_tools_require_node_session_capability(tmp_path):
         def __init__(self):
             self.commands = []
 
-        def enqueue(self, command, *, idempotency_key=None):
+        def enqueue(self, command, *, idempotency_key=None, timing=None):
             self.commands.append(command)
             return command.as_dict()
 
-        def wait_for_receipt(self, command_id, *, timeout_s=30.0):
+        def wait_for_receipt(self, command_id, *, timeout_s=30.0, should_cancel=None):
             raise AssertionError("browser command must not be enqueued")
 
     delivery = Delivery()
@@ -471,11 +498,11 @@ def test_remote_run_uses_node_delivery_without_local_filesystem(tmp_path):
         def __init__(self):
             self.commands = []
 
-        def enqueue(self, command, *, idempotency_key=None):
+        def enqueue(self, command, *, idempotency_key=None, timing=None):
             self.commands.append(command)
             return command.as_dict()
 
-        def wait_for_receipt(self, command_id, *, timeout_s=30.0):
+        def wait_for_receipt(self, command_id, *, timeout_s=30.0, should_cancel=None):
             return {"command_id": command_id, "status": "succeeded",
                     "result": {"content": "remote"}}
 
@@ -516,9 +543,9 @@ def test_remote_unknown_receipt_finishes_run_unknown_without_replay(tmp_path):
 
     class Delivery:
         def __init__(self): self.commands = []
-        def enqueue(self, command, *, idempotency_key=None):
+        def enqueue(self, command, *, idempotency_key=None, timing=None):
             self.commands.append(command); return command.as_dict()
-        def wait_for_receipt(self, command_id, *, timeout_s=30.0):
+        def wait_for_receipt(self, command_id, *, timeout_s=30.0, should_cancel=None):
             return {"command_id": command_id, "status": "unknown",
                     "result": {"reason": "receipt_timeout"}}
 

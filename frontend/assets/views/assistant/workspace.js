@@ -25,10 +25,11 @@ export function mountInspector(root, heading, inspector, groups) {
   header.appendChild(label); header.appendChild(close); inspector.appendChild(header);
   const tabs = el('div', 'inspector-tabs'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', '工作面板');
   inspector.appendChild(tabs);
-  const entries = groups.map(({id, title, sections}) => {
+  const entries = groups.map(({id, title, sections, hidden}) => {
     const button = el('button', 'inspector-tab', title); button.type = 'button'; button.id = 'inspector-tab-' + id;
     const panel = el('div', 'inspector-panel'); panel.id = 'inspector-panel-' + id;
     button.setAttribute('role', 'tab'); button.setAttribute('aria-controls', panel.id);
+    button.hidden = hidden === true;
     panel.setAttribute('role', 'tabpanel'); panel.setAttribute('aria-labelledby', button.id); panel.tabIndex = 0;
     sections.forEach(section => panel.appendChild(section));
     tabs.appendChild(button); inspector.appendChild(panel);
@@ -55,6 +56,7 @@ export function mountInspector(root, heading, inspector, groups) {
     if (restoreFocus) toggle.focus();
   }
   function select(id, reveal = false) {
+    if (!entries.some(entry => entry.id === id && !entry.button.hidden)) return;
     for (const entry of entries) {
       const active = entry.id === id;
       entry.button.setAttribute('aria-selected', String(active));
@@ -63,16 +65,18 @@ export function mountInspector(root, heading, inspector, groups) {
     }
     if (reveal) { setOpen(true); if (narrow?.matches) entries.find(entry => entry.id === id).button.focus(); }
   }
-  entries.forEach((entry, index) => {
+  entries.forEach(entry => {
     entry.button.addEventListener('click', () => select(entry.id));
     entry.button.addEventListener('keydown', event => {
+      const visible = entries.filter(item => !item.button.hidden);
+      const index = visible.indexOf(entry);
       let next;
-      if (event.key === 'ArrowRight') next = (index + 1) % entries.length;
-      if (event.key === 'ArrowLeft') next = (index + entries.length - 1) % entries.length;
+      if (event.key === 'ArrowRight') next = (index + 1) % visible.length;
+      if (event.key === 'ArrowLeft') next = (index + visible.length - 1) % visible.length;
       if (event.key === 'Home') next = 0;
-      if (event.key === 'End') next = entries.length - 1;
+      if (event.key === 'End') next = visible.length - 1;
       if (next === undefined) return;
-      event.preventDefault(); select(entries[next].id); entries[next].button.focus();
+      event.preventDefault(); select(visible[next].id); visible[next].button.focus();
     });
   });
   toggle.addEventListener('click', () => { setOpen(!open); if (open) entries.find(entry => !entry.panel.hidden).button.focus(); });
@@ -91,6 +95,16 @@ export function mountInspector(root, heading, inspector, groups) {
   });
   const onResize = () => setOpen(!narrow.matches, narrow.matches && inspector.contains(document.activeElement));
   narrow?.addEventListener('change', onResize);
-  select(entries[0].id); setOpen(open);
-  return { select, dispose: () => { narrow?.removeEventListener('change', onResize); setOpen(false); } };
+  function setVisible(id, value) {
+    const entry = entries.find(item => item.id === id);
+    if (!entry) return;
+    entry.button.hidden = !value;
+    if (!value) {
+      const active = entry.button.getAttribute('aria-selected') === 'true';
+      entry.panel.hidden = true;
+      if (active) select(entries.find(item => !item.button.hidden).id);
+    }
+  }
+  select(entries.find(entry => !entry.button.hidden).id); setOpen(open);
+  return { select, setVisible, dispose: () => { narrow?.removeEventListener('change', onResize); setOpen(false); } };
 }

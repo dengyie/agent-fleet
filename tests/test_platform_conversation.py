@@ -192,7 +192,7 @@ def test_run_cancel_is_explicit_and_idempotent(tmp_path):
     assert again.get_json()["cancel_requested"] is True
 
 
-def test_run_snapshot_freezes_non_secret_provider_settings(tmp_path):
+def test_run_snapshot_freezes_private_provider_binding(tmp_path):
     app = _app(tmp_path)
     client = app.test_client()
     repo = app.extensions["fleet"]["services"]["platform_defaults"].repository
@@ -214,8 +214,39 @@ def test_run_snapshot_freezes_non_secret_provider_settings(tmp_path):
     snapshot = persisted["config_snapshot"]
     assert snapshot["provider_snapshot"]["model"] == "gpt-a"
     assert snapshot["provider_snapshot"]["provider_config"]["endpoint"] == "https://one.example.test"
-    assert "secret_ref" not in snapshot
-    assert "KEY_A" not in str(snapshot)
+    assert snapshot["provider_snapshot"]["secret_ref"] == "env://KEY_A"
+    assert "KEY_A" not in str(run)
+    assert "KEY_A" not in str(client.get(f"/api/platform/v1/runs/{run['run_id']}").get_json())
+
+
+@pytest.mark.parametrize("selection", ["request", "conversation", "owner"])
+@pytest.mark.parametrize("explicit_node", [None, "request", "conversation"])
+def test_turn_uses_selected_workspace_node_defaults(tmp_path, selection, explicit_node):
+    app = _app(tmp_path)
+    repo = app.extensions["fleet"]["platform_repository"]
+    owner = "owner@example.test"
+    for key in ("a", "b", "explicit"):
+        repo.upsert_node(owner, {"node_id": f"node-{key}"})
+        repo.upsert_workspace(owner, {"workspace_id": f"workspace-{key}",
+                                     "root_path": str(tmp_path / key),
+                                     "default_node_id": f"node-{key}"})
+    repo.update_defaults(owner, {"workspace_id": "workspace-b", "execution_node_id": "node-a"}, 0)
+    client = app.test_client()
+    conversation_overrides = {"workspace_id": "workspace-b"} if selection == "conversation" else {}
+    request_overrides = {"workspace_id": "workspace-b"} if selection == "request" else {}
+    if explicit_node:
+        (request_overrides if explicit_node == "request" else conversation_overrides)["execution_node_id"] = "node-explicit"
+    conversation = client.post("/api/platform/v1/conversations", json={
+        "workspace_id": None if selection == "owner" else "workspace-a",
+        "overrides": conversation_overrides,
+    }).get_json()["conversation"]
+    response = client.post(f"/api/platform/v1/conversations/{conversation['conversation_id']}/turns", json={
+        "text": "inspect", "client_token": "workspace-selection", "overrides": request_overrides,
+    })
+    assert response.status_code == 202
+    config = response.get_json()["run"]["config"]
+    assert config["workspace_id"] == "workspace-b"
+    assert config["execution_node_id"] == ("node-explicit" if explicit_node else "node-b")
 
 
 def test_memory_context_is_explicit_frozen_and_publicly_redacted(tmp_path):

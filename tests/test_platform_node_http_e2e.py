@@ -93,6 +93,109 @@ class FlaskTransport:
         return response.status_code, response.get_json()
 
 
+@pytest.mark.parametrize("failure", ["disconnect", "http_error", "lost_ack"])
+@pytest.mark.parametrize("restart", [False, True])
+def test_node_retries_durable_receipt_without_reexecuting(tmp_path, failure, restart):
+    app = _app(tmp_path)
+    repo = app.extensions["fleet"]["platform_repository"]
+    delivery = app.extensions["fleet"]["services"]["platform_delivery"]
+    now = [100.0]
+    delivery.repository.clock = lambda: now[0]
+    repo.upsert_node(OWNER, {"node_id": "node-retry", "label": "Retry node"})
+    credential = repo.provision_node_credential(
+        OWNER, "node-retry", secret="r" * 40)["credential"]
+    command = PlatformCommand.create(
+        command_id="cmd-retry", target_node="node-retry", owner_id=OWNER,
+        action="tool.workspace.write", resource_id="workspace-retry",
+        arguments={"path": "result.txt", "content": "once"},
+        retry_class="manual_only", expires_at=1000,
+    )
+    delivery.enqueue(command)
+    calls = []
+
+    def executor(envelope):
+        calls.append(envelope["command_id"])
+        return {"state": "succeeded", "result": {"written": "once"}}
+
+    class FlakyTransport(FlaskTransport):
+        fail_next_receipt = True
+
+        def post_json(self, url, body, headers):
+            if url.endswith("/receipts") and self.fail_next_receipt:
+                self.fail_next_receipt = False
+                if failure == "http_error":
+                    return 503, {"ok": False}
+                if failure == "lost_ack":
+                    super().post_json(url, body, headers)
+                raise ConnectionError("receipt connection lost")
+            return super().post_json(url, body, headers)
+
+    journal = NodeJournal(tmp_path / "retry-journal.db")
+    journal.init()
+    transport = FlakyTransport(app.test_client())
+
+    def make_node(journal, worker):
+        return NodeClient(
+            journal, executor=executor, node_id="node-retry", credential=credential,
+            hub_url="https://hub.invalid", transport=transport, worker_id=worker,
+            clock=lambda: now[0],
+        )
+
+    node = make_node(journal, "worker-before-restart")
+    assert node.poll_once() == {"ok": True, "commands": 1, "receipts": 0}
+    if restart:
+        journal = NodeJournal(journal.path)
+        journal.init()
+        node = make_node(journal, "worker-after-restart")
+    assert node.poll_once() == {"ok": True, "commands": 0, "receipts": 1}
+    assert calls == ["cmd-retry"]
+    row = delivery.repository.get("cmd-retry")
+    assert row["status"] == "succeeded"
+    assert row["result"] == {"state": "succeeded", "result": {"written": "once"}}
+    assert journal.pending_receipts() == []
+    receipt_requests = [body for path, body, _ in transport.requests if path.endswith("/receipts")]
+    assert receipt_requests[-1]["worker_id"] == "worker-before-restart"
+    assert node.poll_once() == {"ok": True, "commands": 0, "receipts": 0}
+
+
+def test_late_node_receipt_is_acknowledged_without_replaying_or_rewriting_unknown(tmp_path):
+    app = _app(tmp_path)
+    repo = app.extensions["fleet"]["platform_repository"]
+    delivery = app.extensions["fleet"]["services"]["platform_delivery"]
+    now = [100.0]
+    delivery.repository.clock = lambda: now[0]
+    repo.upsert_node(OWNER, {"node_id": "node-late", "label": "Late node"})
+    credential = repo.provision_node_credential(
+        OWNER, "node-late", secret="l" * 40)["credential"]
+    delivery.enqueue(PlatformCommand.create(
+        command_id="cmd-late", target_node="node-late", owner_id=OWNER,
+        action="tool.workspace.write", resource_id="workspace-late",
+        arguments={"path": "result.txt", "content": "once"},
+        retry_class="manual_only", expires_at=1000,
+    ))
+    calls = []
+
+    def executor(command):
+        calls.append(command["command_id"])
+        now[0] += 2  # Execution finishes after the one-second Hub lease.
+        return {"state": "succeeded", "result": {"written": True}}
+
+    journal = NodeJournal(tmp_path / "late-journal.db")
+    journal.init()
+    node = NodeClient(
+        journal, executor=executor, node_id="node-late", credential=credential,
+        hub_url="https://hub.invalid", transport=FlaskTransport(app.test_client()),
+        worker_id="worker-late", clock=lambda: now[0],
+    )
+    assert node.poll_once(lease_s=1) == {"ok": True, "commands": 1, "receipts": 0}
+    assert delivery.repository.get("cmd-late")["status"] == "unknown"
+    assert node.poll_once() == {"ok": True, "commands": 0, "receipts": 1}
+    assert calls == ["cmd-late"]
+    assert journal.pending_receipts() == []
+    assert journal.get("cmd-late")["state"] == "succeeded"
+    assert delivery.repository.get("cmd-late")["status"] == "unknown"
+
+
 def test_worker_node_http_receipt_closes_remote_run_without_local_side_effect(tmp_path):
     app = _app(tmp_path)
     repo = app.extensions["fleet"]["platform_repository"]
@@ -118,7 +221,7 @@ def test_worker_node_http_receipt_closes_remote_run_without_local_side_effect(tm
 
     def executor(command):
         calls.append(command["command_id"])
-        return NodeToolExecutor(DirectoryBackend(workspace_root))(command)
+        return NodeToolExecutor(DirectoryBackend(workspace_root), workspace_id="remote")(command)
 
     journal = NodeJournal(tmp_path / "node-journal.db")
     journal.init()
@@ -141,14 +244,15 @@ def test_worker_node_http_receipt_closes_remote_run_without_local_side_effect(tm
             return ModelResponse(kind="final", text="node read complete")
 
     class DeliveryBridge:
-        def enqueue(self, command, *, idempotency_key=None):
-            return delivery.enqueue(command, idempotency_key=idempotency_key)
+        def enqueue(self, command, *, idempotency_key=None, timing=None):
+            return delivery.enqueue(command, idempotency_key=idempotency_key, timing=timing)
 
-        def wait_for_receipt(self, command_id, *, timeout_s=30.0):
+        def wait_for_receipt(self, command_id, *, timeout_s=30.0, should_cancel=None):
             # A real Node loop would run independently. The bridge advances
             # the injected fixture once before the Hub performs bounded wait.
             node.poll_once()
-            return delivery.wait_for_receipt(command_id, timeout_s=timeout_s, poll_interval_s=0.01)
+            return delivery.wait_for_receipt(command_id, timeout_s=timeout_s,
+                poll_interval_s=0.01, should_cancel=should_cancel)
 
     worker = LocalRunWorkerService(
         repo, app.extensions["fleet"]["services"]["run_events"],
@@ -167,6 +271,7 @@ def test_worker_node_http_receipt_closes_remote_run_without_local_side_effect(tm
     ]
     assert [path for path, _, _ in transport.requests] == [
         "/api/platform/v1/nodes/poll", "/api/platform/v1/nodes/receipts",
+        "/api/platform/v1/nodes/poll",
     ]
     command_row = delivery.repository.get("run-http:step:1")
     assert command_row["status"] == "succeeded"
@@ -235,6 +340,7 @@ def test_browser_screenshot_uses_node_ticket_and_artifact_metadata(tmp_path):
         "/api/platform/v1/nodes/browser-artifact-tickets/" +
         transport.requests[2][0].rsplit("/", 2)[-2] + "/content",
         "/api/platform/v1/nodes/receipts",
+        "/api/platform/v1/nodes/poll",
     ]
     ticket_headers = transport.requests[1][2]
     upload_headers = transport.requests[2][2]
@@ -367,17 +473,17 @@ def _browser_run_worker(app, repo, credential, tmp_path, *, driver_factory, prov
     )
 
     class DeliveryBridge:
-        def enqueue(self, command, *, idempotency_key=None):
-            return delivery.enqueue(command, idempotency_key=idempotency_key)
+        def enqueue(self, command, *, idempotency_key=None, timing=None):
+            return delivery.enqueue(command, idempotency_key=idempotency_key, timing=timing)
 
-        def enqueue_submit(self, command, *, approvals, idempotency_key=None):
+        def enqueue_submit(self, command, *, approvals, idempotency_key=None, timing=None):
             return delivery.enqueue_submit(
-                command, approvals=approvals, idempotency_key=idempotency_key)
+                command, approvals=approvals, idempotency_key=idempotency_key, timing=timing)
 
-        def wait_for_receipt(self, command_id, *, timeout_s=30.0):
+        def wait_for_receipt(self, command_id, *, timeout_s=30.0, should_cancel=None):
             node.poll_once()
             return delivery.wait_for_receipt(
-                command_id, timeout_s=timeout_s, poll_interval_s=0.01)
+                command_id, timeout_s=timeout_s, poll_interval_s=0.01, should_cancel=should_cancel)
 
     worker = LocalRunWorkerService(
         repo, app.extensions["fleet"]["services"]["run_events"],

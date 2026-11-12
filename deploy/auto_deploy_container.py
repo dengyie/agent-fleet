@@ -20,6 +20,7 @@ def verify_runtime_dependencies():
     try:
         import cryptography  # noqa: F401
         import flask  # noqa: F401
+        import jsonschema  # noqa: F401
         import websocket  # noqa: F401
         import yaml  # noqa: F401
     except ImportError as exc:

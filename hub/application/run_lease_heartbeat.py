@@ -59,6 +59,12 @@ class LeaseHeartbeat:
             self.last_success = self.clock()
             self.transient_failure = None
 
+    def check(self):
+        """Observe a heartbeat failure without renewing on a read-only poll."""
+        with self.lock:
+            if self.failure is not None:
+                raise RunLeaseLost('lease_mismatch') from self.failure
+
     def _next_wait(self):
         if self.transient_failure is None:
             return self.interval

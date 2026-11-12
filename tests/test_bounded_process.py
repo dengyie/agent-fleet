@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.processes import assert_process_exited
+from support.processes import assert_process_exited
 from fleet_core.process.bounded_process import run_bounded
 
 

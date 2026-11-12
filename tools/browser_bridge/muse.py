@@ -119,6 +119,34 @@ class MuseBridge:
         return _snapshot(self.transport.request('snapshot', **(
             {'target_id': target_id} if target_id else {})))
 
+    def initialize(self) -> str:
+        """Explicitly provision this account journal's immutable local identity."""
+        with self._store() as conn:
+            conn.execute('CREATE TABLE IF NOT EXISTS journal_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), identity TEXT NOT NULL)')
+            conn.execute('INSERT OR IGNORE INTO journal_identity VALUES(1,?)', (secrets.token_hex(32),))
+            conn.commit()
+        identity = self.journal_identity()
+        if identity is None:
+            raise MuseBridgeError('journal_identity_invalid')
+        return identity
+
+    def journal_identity(self) -> str | None:
+        """Read without creating a journal; a replacement file is a new receiver."""
+        if not self.path.exists():
+            return None
+        conn = sqlite3.connect(self.path.absolute().as_uri() + '?mode=ro', uri=True, timeout=2)
+        try:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='journal_identity' AND type='table'").fetchone() is None:
+                return None
+            rows = conn.execute('SELECT singleton,identity FROM journal_identity LIMIT 2').fetchall()
+            if len(rows) != 1 or rows[0][0] != 1 or not isinstance(rows[0][1], str) or not re.fullmatch('[0-9a-f]{64}', rows[0][1]):
+                raise MuseBridgeError('journal_identity_invalid')
+            return rows[0][1]
+        except sqlite3.Error as exc:
+            raise MuseBridgeError('journal_identity_unavailable') from exc
+        finally:
+            conn.close()
+
     def status(self):
         # No transcript or local target identifiers leave this discovery call.
         snap = self._snapshot()
@@ -137,6 +165,40 @@ class MuseBridge:
                 'input_marker': f'[FLEET_INPUT:{token}]',
                 'completion_source': 'agent_reported' if row['state'] in TERMINAL else None,
                 'url': 'https://muse.ai/'}
+
+    def lookup(self, task_id: str, prompt: str, *, scope: str = 'local') -> dict[str, Any] | None:
+        """Read the original journal under the existing cross-platform lock."""
+        from fleet_core.locking import try_lock, unlock_and_close
+
+        _identity(task_id)
+        _identity(scope, 'scope_invalid')
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > MAX_PROMPT:
+            raise MuseBridgeError('prompt_invalid')
+        if not self.path.exists():
+            return None
+        handle = None
+        conn = None
+        try:
+            handle = open(str(self.path) + '.lock', 'r+b')
+            if not try_lock(handle):
+                handle.close()
+                handle = None
+                raise MuseBridgeError('journal_lookup_unavailable')
+            conn = sqlite3.connect(self.path.absolute().as_uri() + '?mode=ro', uri=True, timeout=2)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute('SELECT task_id,scope,prompt_hash,marker,state,reply,error FROM tasks WHERE task_id=?', (task_id,)).fetchone()
+            if row is None:
+                return None
+            if (row['scope'], row['prompt_hash']) != (scope, _digest(prompt)):
+                raise MuseBridgeError('task_conflict')
+            return self._public(row)
+        except (OSError, sqlite3.Error) as exc:
+            raise MuseBridgeError('journal_lookup_unavailable') from exc
+        finally:
+            if conn is not None:
+                conn.close()
+            if handle is not None:
+                unlock_and_close(handle)
 
     def submit(self, task_id, prompt, *, scope='local'):
         _identity(task_id)

@@ -1,4 +1,4 @@
-"""Run official plugins as the intended VM OS user: python -m tools.plugins.node."""
+"""Run registered plugins and optional Workflow tests: python -m tools.plugins.node."""
 from __future__ import annotations
 
 import argparse
@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from fleet_core.locking import LockBusy, OwnedLock
 from fleet_core.plugins import OFFICIAL_PLUGINS
 from tools.platform.node_runtime import NodeRuntime, NodeRuntimeConfig
+from tools.platform.node_registration import workflow_test_settings
 
 
 class PluginNodeRuntime(NodeRuntime):
@@ -76,20 +77,23 @@ def load_runtime(path, *, transport=None):
         raise ValueError('invalid_node_config')
     data = json.loads(raw)
     required = {'node_id', 'hub_url', 'credential_file', 'public_key_file', 'state_directory', 'plugins'}
-    if not isinstance(data, dict) or set(data) - (required | {'poll_interval_s'}) or not required <= set(data):
+    if not isinstance(data, dict) or set(data) - (required | {'poll_interval_s', 'workflow_test'}) or not required <= set(data):
         raise ValueError('invalid_node_config')
     valid_origin(data['hub_url'])
     interval = data.get('poll_interval_s', 2)
     if type(interval) not in (int, float) or not math.isfinite(interval) or not 1 <= interval <= 60:
         raise ValueError('poll_interval_invalid')
     state = Path(data['state_directory']).expanduser()
-    if not state.is_absolute() or not isinstance(data['plugins'], dict) or not data['plugins']:
+    if (not state.is_absolute() or not isinstance(data['plugins'], dict)
+            or not data['plugins'] and 'workflow_test' not in data):
         raise ValueError('invalid_node_config')
+    workflow_settings = workflow_test_settings(data['workflow_test']) if 'workflow_test' in data else {}
     credential = Path(data['credential_file']).expanduser().read_text(encoding='utf-8').strip()
     public = base64.b64decode(Path(data['public_key_file']).expanduser().read_text(encoding='utf-8').strip(), validate=True)
     config = NodeRuntimeConfig(
         node_id=data['node_id'], credential=credential, hub_url=data['hub_url'], public_key=public,
-        workspace_root=state / 'unused-workspace', journal_path=state / 'commands.db', plugins=data['plugins'])
+        workspace_root=state / 'unused-workspace', journal_path=state / 'commands.db',
+        plugins=data['plugins'] or None, **workflow_settings)
     lock = OwnedLock(state / 'node.lock', purpose='official-plugin-node').acquire()
     try:
         return PluginNodeRuntime(config, lock, transport=transport), interval
@@ -99,6 +103,8 @@ def load_runtime(path, *, transport=None):
 
 
 def announce(runtime):
+    if runtime.plugin_executor is None:
+        return True
     try:
         status, _ = runtime.client._post('/api/platform/v1/nodes/plugins',
                                          {'plugins': runtime.manifest().get('plugins', [])})
@@ -136,9 +142,14 @@ def main(argv=None):
         return 2
     stopped = threading.Event()
     previous = {}
+
+    def request_stop(*_args):
+        stopped.set()
+        runtime.request_stop()
+
     if threading.current_thread() is threading.main_thread():
         for sig in (signal.SIGTERM, signal.SIGINT):
-            previous[sig] = signal.signal(sig, lambda *_: stopped.set())
+            previous[sig] = signal.signal(sig, request_stop)
     try:
         if args.manifest:
             print(json.dumps(runtime.manifest(), ensure_ascii=False))

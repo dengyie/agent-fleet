@@ -56,7 +56,7 @@ class PersistentAssistantWorker(AssistantWorker):
             )
             # The full answer belongs to runs.result_text. Lifecycle events
             # carry metadata only, independent of UTF-8/JSON expansion.
-            self._append_event("run_finished", {
+            self._append_event("run_waiting_node" if result.state == 'waiting_node' else "run_finished", {
                 "run_id": run_id, "state": result.state,
                 "steps": result.steps,
                 "usage": result.usage.as_dict(),
@@ -89,4 +89,15 @@ class PersistentAssistantWorker(AssistantWorker):
             self._worker_id = None
 
 
-__all__ = ["AssistantWorker", "PersistentAssistantWorker"]
+def start_workflow_coordinator(coordinator, *, logger):
+    """Start an explicitly assembled coordinator with entrypoint diagnostics."""
+    from hub.diagnostics import log_failure
+
+    def report(error):
+        log_failure(logger, "workflow_coordinator_tick_failed", error,
+                    worker_id=coordinator.worker_id, workflow_id=error.workflow_id)
+
+    return coordinator.start(on_error=report)
+
+
+__all__ = ["AssistantWorker", "PersistentAssistantWorker", "start_workflow_coordinator"]

@@ -19,14 +19,16 @@ from hub.infrastructure.platform_db_conversations import PlatformConversationMix
 from hub.infrastructure.platform_db_legacy_tasks import PlatformLegacyTaskMixin
 from hub.infrastructure.platform_db_node_auth import (  # noqa: F401 - re-exported API
     NODE_AUTH_FAILURE_WINDOW_S, NODE_AUTH_LIMITER_MAX_KEYS, NODE_AUTH_MAX_FAILURES,
-    NODE_LAST_USED_WRITE_INTERVAL_S, PlatformNodeAuthMixin,
+    NODE_LAST_USED_WRITE_INTERVAL_S, PlatformNodeAuthMixin, node_credential_is_current,
 )
+from hub.infrastructure.runtime_checkpoint import RuntimeCheckpointMixin
 from hub.infrastructure.platform_db_runs import PlatformRunMixin
 from hub.infrastructure.platform_db_workers import PlatformWorkerMixin
 from hub.infrastructure.sqlite import connect as sqlite_connect
 from platform_schema import PlatformValidationError  # noqa: F401 - re-exported API
 
 SCHEMA_VERSION = 3
+MAX_READER_VERSION = 4
 
 
 class PlatformRepository(
@@ -35,6 +37,7 @@ class PlatformRepository(
     PlatformConversationMixin,
     PlatformLegacyTaskMixin,
     PlatformRunMixin,
+    RuntimeCheckpointMixin,
     PlatformWorkerMixin,
 ):
     SCHEMA_VERSION = SCHEMA_VERSION
@@ -63,8 +66,15 @@ class PlatformRepository(
                     stored_version = int(version["value"]) if version else 0
                 except (TypeError, ValueError):
                     raise PlatformRepositoryError("invalid_schema_version") from None
-                if stored_version > SCHEMA_VERSION:
+                if stored_version > MAX_READER_VERSION:
                     raise PlatformRepositoryError("unsupported_schema_version")
+            from hub.domain.mcp_catalog import MCPCatalogError
+            from hub.infrastructure.mcp_catalog_schema import inspect_catalog_schema
+
+            try:
+                inspect_catalog_schema(conn)
+            except MCPCatalogError as exc:
+                raise PlatformRepositoryError(exc.code) from exc
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS meta (
                     key TEXT PRIMARY KEY, value TEXT NOT NULL
@@ -204,6 +214,9 @@ class PlatformRepository(
                 CREATE INDEX IF NOT EXISTS idx_platform_schedule_triggers_recent
                     ON platform_schedule_triggers(owner_id, schedule_id, scheduled_at DESC);
             """)
+            # Serialize schema inspection and every additive migration together.
+            # executescript commits implicitly, so acquire this lock afterwards.
+            conn.execute("BEGIN IMMEDIATE")
             # Additive columns keep a platform.db created by an early M1 build
             # readable without touching any legacy database.
             for table, column, ddl in (
@@ -234,7 +247,6 @@ class PlatformRepository(
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
             # An explicit per-conversation sequence survives equal clocks,
             # UUID ordering and VACUUM. Migrate existing arrival order once.
-            conn.execute("BEGIN IMMEDIATE")
             columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
             if "turn_sequence" not in columns:
                 conn.execute("ALTER TABLE messages ADD COLUMN turn_sequence INTEGER NOT NULL DEFAULT 0")
@@ -282,15 +294,33 @@ class PlatformRepository(
                          "ON messages(conversation_id, turn_sequence)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_owner_conversation "
                          "ON runs(owner_id, conversation_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_owner_trigger "
+                         "ON runs(owner_id, trigger_message_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_owner_archive "
                          "ON conversations(owner_id, archived_at, conversation_id)")
+            if 'runtime_checkpoint' not in {row[1] for row in conn.execute('PRAGMA table_info(runs)')}:
+                conn.execute('ALTER TABLE runs ADD COLUMN runtime_checkpoint TEXT')
+            if 'runtime_resume_at' not in {row[1] for row in conn.execute('PRAGMA table_info(runs)')}:
+                conn.execute('ALTER TABLE runs ADD COLUMN runtime_resume_at REAL')
+            if 'runtime_wait_command_id' not in {row[1] for row in conn.execute('PRAGMA table_info(runs)')}:
+                conn.execute('ALTER TABLE runs ADD COLUMN runtime_wait_command_id TEXT')
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_native_wait_owner "
+                         "ON runs(owner_id) WHERE runtime_wait_command_id IS NOT NULL")
             # claim_run seeks (owner_id, state) per claimable state; retention
             # selects terminal runs by (state, updated_at). Additive only.
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_owner_state_created "
                          "ON runs(owner_id, state, created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_state_updated "
                          "ON runs(state, updated_at)")
-            conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+            try:
+                inspect_catalog_schema(conn)
+            except MCPCatalogError as exc:
+                raise PlatformRepositoryError(exc.code) from exc
+            current = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+            version = max(SCHEMA_VERSION, int(current[0]) if current is not None else SCHEMA_VERSION)
+            if version > MAX_READER_VERSION:
+                raise PlatformRepositoryError("unsupported_schema_version")
+            conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('schema_version', ?)", (str(version),))
             conn.execute("COMMIT")
         except PlatformRepositoryError:
             raise

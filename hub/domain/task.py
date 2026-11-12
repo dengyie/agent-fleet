@@ -58,7 +58,15 @@ _PAUSABLE_STATES = frozenset(PAUSABLE_STATES)
 _LEASE_HOLDING_STATES = frozenset(LEASE_HOLDING_STATES)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
+class TaskStopObservation:
+    task_id: str | None
+    attempt_id: str | None
+    state: str
+    stopped: bool
+
+
+@dataclass
 class DomainError(ValueError):
     """Stable, bounded validation error for an application/HTTP adapter."""
 

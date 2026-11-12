@@ -1,6 +1,7 @@
 /* Platform assistant API. Network access stays in api/client.js. */
 import { apiPath } from '../routes.js';
 import { platformRequest } from './client.js';
+import { parseWorkflowTemplates, parseWorkflowPage, parseWorkflowDetail, parseWorkflowEvents, parseWorkflowOperation } from './contracts.js';
 
 function object(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(label + ' response is invalid');
@@ -9,9 +10,40 @@ function object(value, label) {
 function segment(value) { return typeof value === 'string' ? value : ''; }
 function json(method, body) { return { method: method, headers: { 'Content-Type': 'application/json' }, body: body || {} }; }
 
+export async function getWorkflowTemplates(options) {
+  return parseWorkflowTemplates(await platformRequest(apiPath('platform', 'v1', 'workflow-templates'), options));
+}
+export async function createWorkflow(payload) {
+  var result = await platformRequest(apiPath('platform', 'v1', 'workflows'), json('POST', payload));
+  return parseWorkflowPage({ok: result.ok, workflows: [result.workflow], next_cursor: null}).workflows[0];
+}
+export async function listWorkflows(limit, cursor, options) {
+  var bounded = typeof limit === 'number' && isFinite(limit) ? Math.max(1, Math.min(100, Math.floor(limit))) : 50;
+  var query = '?limit=' + encodeURIComponent(String(bounded));
+  if (typeof cursor === 'string' && cursor) query += '&cursor=' + encodeURIComponent(cursor);
+  return parseWorkflowPage(await platformRequest(apiPath('platform', 'v1', 'workflows') + query, options));
+}
+export async function getWorkflow(workflowId, options) {
+  return parseWorkflowDetail(await platformRequest(apiPath('platform', 'v1', 'workflows', segment(workflowId)), options));
+}
+export async function getWorkflowEvents(workflowId, after, limit, options) {
+  var bounded = typeof limit === 'number' && isFinite(limit) ? Math.max(1, Math.min(100, Math.floor(limit))) : 100;
+  var cursor = typeof after === 'number' && isFinite(after) ? Math.max(0, Math.floor(after)) : 0;
+  return parseWorkflowEvents(await platformRequest(apiPath('platform', 'v1', 'workflows', segment(workflowId), 'events') + '?after=' + encodeURIComponent(String(cursor)) + '&limit=' + encodeURIComponent(String(bounded)), options));
+}
+export async function controlWorkflow(workflowId, action, expectedRevision, clientToken) {
+  return parseWorkflowOperation(await platformRequest(apiPath('platform', 'v1', 'workflows', segment(workflowId), action), json('POST', {expected_revision: expectedRevision, client_token: clientToken})));
+}
+export async function controlWorkflowStep(workflowId, stepKey, action, payload) {
+  return parseWorkflowOperation(await platformRequest(apiPath('platform', 'v1', 'workflows', segment(workflowId), 'steps', segment(stepKey), action), json('POST', payload)));
+}
+export async function acceptWorkflow(workflowId, payload) {
+  return parseWorkflowOperation(await platformRequest(apiPath('platform', 'v1', 'workflows', segment(workflowId), 'acceptance'), json('POST', payload)));
+}
+
 export async function getPlatformDefaults() { return object(await platformRequest(apiPath('platform', 'v1', 'defaults')), 'defaults'); }
 export async function getPlatformModels() { return object(await platformRequest(apiPath('platform', 'v1', 'models')), 'models'); }
-export async function getPlatformWorkspaces() { return object(await platformRequest(apiPath('platform', 'v1', 'workspaces')), 'workspaces'); }
+export async function getPlatformWorkspaces(options) { return object(await platformRequest(apiPath('platform', 'v1', 'workspaces'), options), 'workspaces'); }
 export async function getPlatformNodes() { return object(await platformRequest(apiPath('platform', 'v1', 'nodes')), 'nodes'); }
 export async function getPlatformArtifacts(workspaceId, limit) {
   var bounded = typeof limit === 'number' && isFinite(limit)
@@ -97,7 +129,13 @@ export async function getConversations(limit, archived) {
   if (archived === true) path += '&archived=true';
   return object(await platformRequest(path), 'conversations');
 }
-export async function getConversation(conversationId) { return object(await platformRequest(apiPath('platform', 'v1', 'conversations', segment(conversationId))), 'conversation'); }
+export async function getConversation(conversationId, options = {}) {
+  var path = apiPath('platform', 'v1', 'conversations', segment(conversationId));
+  var params = new URLSearchParams();
+  if (options.limit !== undefined) params.set('limit', String(options.limit));
+  if (options.beforeSequence !== undefined && options.beforeSequence !== null) params.set('before_sequence', String(options.beforeSequence));
+  return object(await platformRequest(path + (params.size ? '?' + params : '')), 'conversation');
+}
 export async function renameConversation(conversationId, title) { return object(await platformRequest(apiPath('platform', 'v1', 'conversations', segment(conversationId)), json('PATCH', { title: title })), 'rename conversation'); }
 export async function archiveConversation(conversationId) { return object(await platformRequest(apiPath('platform', 'v1', 'conversations', segment(conversationId), 'archive'), json('POST')), 'archive conversation'); }
 export async function restoreConversation(conversationId) { return object(await platformRequest(apiPath('platform', 'v1', 'conversations', segment(conversationId), 'restore'), json('POST')), 'restore conversation'); }

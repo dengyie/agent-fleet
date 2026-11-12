@@ -16,6 +16,7 @@ import {
   closeExecutionWindow, getExecutionWindowEvents,
 } from '../api/platform.js';
 
+import { mountWorkflowPanel } from './assistant/workflow.js';
 import { mountInspector } from './assistant/workspace.js';
 import { el, clear, showError, renderMessages, renderEvents, renderExecutionWindow, renderArtifacts, renderLegacyProjection, renderUnknownCommands, memoryReference, renderMemoryItems, renderSelectedMemoryItems } from './assistant/panels.js';
 function token() { if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID(); return 'turn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2); }
@@ -38,7 +39,7 @@ export function mountAssistant(target, options) {
   var selectedMemoryHost = el('div', 'assistant-memory-selected-list'); memorySection.appendChild(el('h3', 'assistant-memory-subtitle', '已选记忆')); memorySection.appendChild(selectedMemoryHost);
   var memoryBudget = el('div', 'assistant-memory-budget meta'); memorySection.appendChild(memoryBudget); root.appendChild(memorySection);
   var historySection = el('section', 'assistant-history-section'); var historyHeading = el('div', 'assistant-history-heading'); historyHeading.appendChild(el('h2', 'assistant-section-title', '最近对话')); var newConversation = document.createElement('a'); newConversation.className = 'button-secondary'; newConversation.href = pagePath('assistant'); newConversation.textContent = '新对话'; historyHeading.appendChild(newConversation); historySection.appendChild(historyHeading); var historyHost = el('div', 'assistant-history'); historySection.appendChild(historyHost);
-  var messageHost = el('div', 'assistant-messages'); var artifactSection = el('section', 'assistant-artifact-section'); artifactSection.appendChild(el('h2', 'assistant-section-title', '工作区产物')); var artifactHost = el('div', 'assistant-artifacts'); artifactSection.appendChild(artifactHost); var eventHost = el('div', 'assistant-events');
+  var messageHost = el('div', 'assistant-messages'); var workflowSection = el('section', 'assistant-workflow-section'); var workflowHost = el('div', 'assistant-workflow-host'); workflowSection.appendChild(workflowHost); var artifactSection = el('section', 'assistant-artifact-section'); artifactSection.appendChild(el('h2', 'assistant-section-title', '工作区产物')); var artifactHost = el('div', 'assistant-artifacts'); artifactSection.appendChild(artifactHost); var eventHost = el('div', 'assistant-events');
   var windowSection = el('section', 'assistant-execution-window'); windowSection.appendChild(el('h2', 'assistant-section-title', '默认执行窗口')); var windowHost = el('div', 'assistant-window-host'); windowSection.appendChild(windowHost);
   var legacySection = el('section', 'assistant-legacy-section'); legacySection.appendChild(el('h2', 'assistant-section-title', '关联旧任务')); var legacyToggle = document.createElement('button'); legacyToggle.type = 'button'; legacyToggle.className = 'button-secondary'; legacyToggle.textContent = '打开旧任务关联'; legacySection.appendChild(legacyToggle); var legacyForm = el('div', 'assistant-legacy-form'); legacyForm.hidden = true;
   function legacyField(label, type, maxLength) { var wrapper = el('label', 'assistant-legacy-field'); wrapper.appendChild(el('span', null, label)); var field = document.createElement(type === 'textarea' ? 'textarea' : 'input'); if (type !== 'textarea') field.type = type; if (maxLength) field.maxLength = maxLength; field.required = true; wrapper.appendChild(field); legacyForm.appendChild(wrapper); return field; }
@@ -59,7 +60,9 @@ export function mountAssistant(target, options) {
     chip.appendChild(el('strong', null, item[1])); chip.appendChild(el('span', null, item[2]));
     chip.addEventListener('click', function () { if (!input.readOnly) { input.value = item[3]; input.dispatchEvent(new Event('input')); input.focus(); } }); suggestions.appendChild(chip);
   });
-  intro.appendChild(suggestions); thread.appendChild(intro); thread.appendChild(messageHost);
+  var earlierHistory = el('button', 'button-secondary assistant-earlier-history', '加载更早消息'); earlierHistory.type = 'button'; earlierHistory.hidden = true;
+  var historyStatus = el('p', 'assistant-history-status meta'); historyStatus.setAttribute('role', 'status');
+  intro.appendChild(suggestions); thread.appendChild(intro); thread.appendChild(earlierHistory); thread.appendChild(historyStatus); thread.appendChild(messageHost);
   var scrollAnchor = el('auto-scroll-anchor'); thread.appendChild(scrollAnchor);
   var transcript = el('div', 'assistant-transcript'); transcript.appendChild(thread); chat.appendChild(transcript);
   var prompt = el('chat-prompt-input'); composer.insertBefore(prompt, input); prompt.appendChild(input);
@@ -81,11 +84,14 @@ export function mountAssistant(target, options) {
   contextSections.push(disclosure(historySection, '最近对话', true));
   if (canAdminister) contextSections.push(disclosure(legacySection, '关联任务', false));
   clear(root); root.appendChild(heading); root.appendChild(chat); root.appendChild(inspector); target.appendChild(root);
-  var inspectorUi = mountInspector(root, heading, inspector, [
+  var workflowTeardown = null;
+  var inspectorGroups = [
     {id: 'artifacts', title: '产物', sections: [artifactSection]},
     {id: 'activity', title: '运行', sections: executionSections},
     {id: 'context', title: '上下文', sections: contextSections}
-  ]);
+  ];
+  if (canAdminister) inspectorGroups.push({id: 'workflows', title: '流程', sections: [workflowSection], hidden: true});
+  var inspectorUi = mountInspector(root, heading, inspector, inspectorGroups);
   var conversationId = options.conversationId || null; var conversationWorkspaceId = null; var conversationArchived = false; var activeRunId = null; var latestRunId = null; var cursor = 0; var polling = false; var windowEventCursor = 0; var windowPolling = false; var windowState = { loading: false, error: null, window: null, mode: 'disconnected', events: [], holderId: token(), leaseToken: null, leaseExpiresAt: 0 };
   var disposed = false; var suspended = false; var timers = new Set(); var windowPollTimer = null; var resumeWindowPoll = false;
   // A cached (suspended) route view must not poll runs or renew the writer lease.
@@ -449,16 +455,58 @@ export function mountAssistant(target, options) {
       renderEvents(eventHost, events); cursor = next;
     }
   }
+  var visibleMessages = new Map(), visibleRuns = new Map(), historyPage = null, historyLoading = false, contextWindow = null;
+  function mergeConversationPage(conversation, earlier) {
+    var incomingUsers = (conversation.messages || []).filter(function (item) { return item.role === 'user'; });
+    var existingSequences = Array.from(visibleMessages.values()).map(function (item) { return item.turn_sequence; }).filter(Number.isFinite);
+    if (!earlier && incomingUsers.length && existingSequences.length && incomingUsers[0].turn_sequence > Math.max.apply(null, existingSequences) + 1) {
+      visibleMessages.clear(); visibleRuns.clear(); historyPage = null;
+    }
+    (conversation.messages || []).forEach(function (item) { visibleMessages.set(item.message_id, item); });
+    (conversation.runs || []).forEach(function (item) { visibleRuns.set(item.run_id, item); });
+    if (conversation.history && (earlier || !historyPage)) historyPage = conversation.history;
+    if (conversation.context_window) contextWindow = conversation.context_window;
+    var messages = Array.from(visibleMessages.values()).sort(function (a, b) {
+      if (!Number.isFinite(a.turn_sequence) || !Number.isFinite(b.turn_sequence)) return 0;
+      return (a.turn_sequence - b.turn_sequence) || (a.role === b.role ? 0 : a.role === 'user' ? -1 : 1);
+    });
+    var sequence = new Map(messages.map(function (item) { return [item.message_id, item.turn_sequence]; }));
+    var runs = Array.from(visibleRuns.values()).sort(function (a, b) { return sequence.get(a.trigger_message_id) - sequence.get(b.trigger_message_id); });
+    renderMessages(messageHost, messages, runs);
+    earlierHistory.hidden = !historyPage || !historyPage.has_more;
+    earlierHistory.disabled = historyLoading;
+    if (contextWindow && contextWindow.omitted_turns > 0) {
+      historyStatus.textContent = '本次模型使用最近完整消息（最多 32 回合 / 64 KiB）；较早 ' + contextWindow.omitted_turns + ' 回合仍保存在历史中。';
+    } else historyStatus.textContent = '';
+  }
+  earlierHistory.addEventListener('click', async function () {
+    if (disposed || suspended || historyLoading || !historyPage || !historyPage.has_more) return;
+    historyLoading = true; earlierHistory.disabled = true; earlierHistory.textContent = '正在加载更早消息…';
+    var before = historyPage.before_sequence;
+    var height = thread.scrollHeight, top = thread.scrollTop;
+    try {
+      var data = await getConversation(conversationId, {beforeSequence: before});
+      if (disposed) return;
+      mergeConversationPage(data.conversation || {}, true);
+      thread.scrollTop = top + thread.scrollHeight - height;
+    } catch (error) {
+      if (!disposed) historyStatus.textContent = '更早消息读取失败，请重试。';
+    } finally {
+      historyLoading = false;
+      if (!disposed) { earlierHistory.disabled = false; earlierHistory.textContent = '加载更早消息'; }
+    }
+  });
   async function refreshConversation() {
     if (!conversationId) return;
     var data = await getConversation(conversationId);
+    if (disposed) return;
     var conversation = data.conversation || {};
     conversationArchived = Boolean(conversation.archived_at);
     lockPendingTurn();
     var firstMessage = (Array.isArray(conversation.messages) ? conversation.messages : []).find(function (message) { return message.role === 'user'; });
-    conversationTitle.textContent = conversation.title || (firstMessage && firstMessage.content ? firstMessage.content.slice(0, 60) : '当前对话');
+    conversationTitle.textContent = conversation.title || conversation.first_message_preview || (firstMessage && firstMessage.content ? firstMessage.content.slice(0, 60) : '当前对话');
     conversationTitle.title = conversationTitle.textContent;
-    renderMessages(messageHost, conversation.messages, conversation.runs || []); startRequestClock(); scrollAnchor.setAttribute('is-streaming', ''); intro.hidden = Boolean(conversation.messages && conversation.messages.length);
+    mergeConversationPage(conversation, false); startRequestClock(); scrollAnchor.setAttribute('is-streaming', ''); intro.hidden = Boolean(conversation.messages && conversation.messages.length);
     var nextWorkspaceId = typeof conversation.workspace_id === 'string' ? conversation.workspace_id : null;
     if (conversationWorkspaceId !== nextWorkspaceId) {
       conversationWorkspaceId = nextWorkspaceId;
@@ -577,6 +625,12 @@ export function mountAssistant(target, options) {
     try {
       var data = await getPlatformDefaults();
       if (disposed) return;
+      if (canAdminister && data.workflows && data.workflows.enabled === true && typeof data.workflows.scope === 'string') {
+        inspectorUi.setVisible('workflows', true);
+        if (!workflowTeardown) workflowTeardown = mountWorkflowPanel(workflowHost, {canAccept: true, scope: data.workflows.scope});
+      } else if (workflowTeardown) {
+        workflowTeardown(); workflowTeardown = null; clear(workflowHost); inspectorUi.setVisible('workflows', false);
+      }
       var defaults = data.defaults || {};
       modelCatalog = Array.isArray(data.models) ? data.models : [];
       fill(model, data.models, 'profile_id', 'model');
@@ -610,6 +664,7 @@ export function mountAssistant(target, options) {
     disposed = true;
     document.removeEventListener('visibilitychange', onVisibilityChange);
     pauseWindowPoll();
+    if (workflowTeardown) workflowTeardown();
     inspectorUi.dispose();
     timers.forEach(clearTimeout);
     timers.clear();
@@ -617,6 +672,7 @@ export function mountAssistant(target, options) {
   teardown.suspend = function () {
     if (disposed || suspended) return;
     suspended = true;
+    if (workflowTeardown) workflowTeardown.suspend();
     pauseWindowPoll();
     resumeWindowPoll = false;
     timers.forEach(clearTimeout);
@@ -626,6 +682,7 @@ export function mountAssistant(target, options) {
   teardown.resume = function () {
     if (disposed || !suspended) return;
     suspended = false;
+    if (workflowTeardown) workflowTeardown.resume();
     if (activeRunId) { poll(); startRequestClock(); }
     if (windowState.window && windowState.window.state !== 'closed' && windowState.window.state !== 'expired') scheduleWindowPoll(0);
   };

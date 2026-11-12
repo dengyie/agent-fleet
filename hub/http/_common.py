@@ -17,19 +17,39 @@ __all__ = [
 ]
 
 _INVALID_JSON = ("invalid_json", "请求体必须是 JSON 对象", 400)
+_MAX_JSON_DEPTH = 128
+
+
+def _check_json_depth(value):
+    if not isinstance(value, (dict, list)):
+        return
+    stack = [iter(value.values() if isinstance(value, dict) else value)]
+    while stack:
+        try:
+            child = next(stack[-1])
+        except StopIteration:
+            stack.pop()
+            continue
+        if isinstance(child, (dict, list)):
+            if len(stack) >= _MAX_JSON_DEPTH:
+                raise ApplicationError(*_INVALID_JSON)
+            stack.append(iter(child.values() if isinstance(child, dict) else child))
 
 
 def request_json(*, silent: bool = True, force: bool = False):
     """``request.get_json(...)``，深层嵌套 JSON 也归为 invalid_json。
 
-    ``silent=True`` 只吞 ``ValueError``；超深嵌套的数组/对象在解码时抛
-    ``RecursionError``，否则会变成 500。这里只在 JSON 解码这一步转换，
-    不会掩盖业务代码里的真实递归错误。参数语义与 ``get_json`` 一致。
+    解码时的 ``RecursionError`` 转为 invalid_json；解码成功后也拒绝超过
+    128 层的数组和对象，以保持不同 Python 版本的行为一致。深度检查在
+    解码后执行，不限制解析阶段的资源消耗，也不掩盖业务代码中的递归错误。
+    参数语义与 ``get_json`` 一致。
     """
     try:
-        return request.get_json(silent=silent, force=force)
+        body = request.get_json(silent=silent, force=force)
     except RecursionError:
         raise ApplicationError(*_INVALID_JSON) from None
+    _check_json_depth(body)
+    return body
 
 
 _request_json = request_json

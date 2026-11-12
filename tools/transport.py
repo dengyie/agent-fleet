@@ -30,8 +30,10 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import math
 import re
 import time
+from contextlib import contextmanager
 import urllib.error
 import urllib.request
 from typing import Any, Callable
@@ -181,13 +183,16 @@ class Transport:
     # -- 多跳调度 -----------------------------------------------------------
 
     def _post(self, req: urllib.request.Request, timeout: float,
-              raw_limit: int | None = None):
+              raw_limit: int | None = None, *, deadline: float | None = None,
+              should_cancel: Callable[[], bool] | None = None):
         """按模式调度路径；auto 模式下 CF 拦截/传输失败可在两路径间切换。
 
         返回 (status, payload, last_error_str)。status=0 表示两路径均传输失败。
         """
         last_err = ""
         self.last_exception = None
+        if deadline is not None and not math.isfinite(deadline):
+            raise ValueError("invalid_transport_deadline")
         if self._mode == "auto":
             # 路径优先级：sticky > alternate；首选路径失败自动回退到备用路径
             if self._preferred:
@@ -201,8 +206,17 @@ class Transport:
         for path in order:
             use_proxy = path == "proxy"
             for attempt in range(self._attempts):
+                if should_cancel is not None and should_cancel():
+                    return 0, {"error": "transport_cancelled"}, "transport_cancelled"
+                remaining = timeout if deadline is None else min(timeout, deadline - time.monotonic())
+                if remaining <= 0:
+                    return 0, {"error": "transport_deadline_exceeded"}, "transport_deadline_exceeded"
                 try:
-                    status, payload = self._one(req, use_proxy, timeout, raw_limit)
+                    status, payload = self._one(req, use_proxy, remaining, raw_limit)
+                    if should_cancel is not None and should_cancel():
+                        return 0, {"error": "transport_cancelled"}, "transport_cancelled"
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return 0, {"error": "transport_deadline_exceeded"}, "transport_deadline_exceeded"
                     if self._mode == "auto" and 200 <= status < 500:
                         self._preferred = path
                     return status, payload, ""
@@ -214,7 +228,8 @@ class Transport:
                     self.last_exception = exc
                     last_err = f"{type(exc).__name__}: {exc}"
                     if attempt + 1 < self._attempts:
-                        self._sleeper(self._retry_sleep_s)
+                        pause = self._retry_sleep_s if deadline is None else min(self._retry_sleep_s, max(0, deadline - time.monotonic()))
+                        self._sleeper(pause)
                     continue
                 except Exception as exc:  # 不可分类：不重试，换/终止路径
                     self.last_exception = exc
@@ -236,8 +251,37 @@ class Transport:
             return 0, {"error": str(exc)}
         return None
 
+    @contextmanager
+    def get_stream(self, url: str, headers: dict[str, str], *, deadline: float,
+                   should_cancel: Callable[[], bool]):
+        """One bounded streaming GET; credentials never follow a redirect.
+
+        The consumer owns chunking and whole-body integrity. A failed stream
+        is never retried here, so already-consumed bytes cannot be duplicated.
+        """
+        require_secure_url(url, allow_insecure=self._allow_insecure)
+        if not math.isfinite(deadline):
+            raise ValueError("invalid_transport_deadline")
+        if should_cancel():
+            raise OSError("transport_cancelled")
+        remaining = min(self._timeout, deadline - time.monotonic())
+        if remaining <= 0:
+            raise TimeoutError("transport_deadline_exceeded")
+        use_proxy = self._mode == "proxy" or (self._mode == "auto" and self._preferred == "proxy")
+        opener = self._opener(use_proxy)
+        request = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            response = self._open(opener, request, remaining)
+        except urllib.error.HTTPError as exc:
+            response = exc
+        try:
+            yield response
+        finally:
+            response.close()
+
     def post_bytes(self, url: str, body: bytes, headers: dict[str, str],
-                   timeout: float | None = None):
+                   timeout: float | None = None, *, deadline: float | None = None,
+                   should_cancel: Callable[[], bool] | None = None):
         """POST binary data using the configured transport policy."""
         if not isinstance(body, bytes):
             raise TypeError("body must be bytes")
@@ -251,11 +295,73 @@ class Transport:
         eff_timeout = self._timeout if timeout is None else float(timeout)
         if eff_timeout <= 0:
             eff_timeout = self._timeout
-        status, payload, _ = self._post(req, eff_timeout)
+        status, payload, _ = self._post(req, eff_timeout, deadline=deadline, should_cancel=should_cancel)
         return status, payload
 
+    def request_bounded_json(self, method: str, url: str, body: bytes | None,
+                             headers: dict[str, str], *, deadline: float,
+                             should_cancel: Callable[[], bool],
+                             max_response_bytes: int = 65536) -> tuple[int, dict[str, Any]]:
+        """One fixed request, no redirects or hidden retries, with bounded JSON.
+
+        The caller owns idempotence and reconciliation after a lost response.
+        ``read1`` returns available data so a trickling peer cannot postpone
+        deadline/cancellation checks until the entire response has arrived.
+        """
+        require_secure_url(url, allow_insecure=self._allow_insecure)
+        if (method not in {"GET", "POST", "PUT"} or (body is not None and type(body) is not bytes)
+                or type(max_response_bytes) is not int or not 1 <= max_response_bytes <= 65536
+                or not math.isfinite(deadline)):
+            raise ValueError("invalid_bounded_request")
+        def check() -> float:
+            if should_cancel():
+                raise OSError("transport_cancelled")
+            remaining = min(self._timeout, deadline - time.monotonic())
+            if remaining <= 0:
+                raise TimeoutError("transport_deadline_exceeded")
+            return remaining
+        remaining = check()
+        use_proxy = self._mode == "proxy" or (self._mode == "auto" and self._preferred == "proxy")
+        opener = self._opener(use_proxy)
+        request = urllib.request.Request(url, data=body, headers=headers, method=method)
+        try:
+            response = self._open(opener, request, remaining)
+        except urllib.error.HTTPError as exc:
+            response = exc
+        try:
+            check()
+            status = response.status
+            if 300 <= status < 400:
+                return status, {"error": "transport_redirect_forbidden"}
+            if response.headers.get("Content-Encoding") or response.headers.get("Transfer-Encoding"):
+                raise ValueError("invalid_bounded_response")
+            length = response.headers.get("Content-Length")
+            if length is not None and (not length.isascii() or not length.isdecimal()
+                    or int(length) > max_response_bytes):
+                raise ValueError("transport_response_too_large")
+            content = bytearray()
+            read = getattr(response, "read1", response.read)
+            while True:
+                check()
+                chunk = read(min(65536, max_response_bytes + 1 - len(content)))
+                check()
+                if not chunk:
+                    break
+                content.extend(chunk)
+                if len(content) > max_response_bytes:
+                    raise ValueError("transport_response_too_large")
+            if length is not None and len(content) != int(length):
+                raise ValueError("invalid_bounded_response")
+            payload = json.loads(content.decode("utf-8"))
+            if type(payload) is not dict:
+                raise ValueError("invalid_bounded_response")
+            return status, payload
+        finally:
+            response.close()
+
     def post_json(self, url: str, body: Any | None, headers: dict[str, str],
-                  timeout: float | None = None):
+                  timeout: float | None = None, *, deadline: float | None = None,
+                  should_cancel: Callable[[], bool] | None = None):
         """POST JSON（body=None 时无请求体）。返回 (status, payload)。
 
         网络层完全失败返回 (0, {"error": ...})；hub 业务 4xx/5xx 原样透传。
@@ -270,7 +376,7 @@ class Transport:
         eff_timeout = self._timeout if timeout is None else float(timeout)
         if eff_timeout <= 0:
             eff_timeout = self._timeout
-        status, payload, _ = self._post(req, eff_timeout)
+        status, payload, _ = self._post(req, eff_timeout, deadline=deadline, should_cancel=should_cancel)
         return status, payload
 
 

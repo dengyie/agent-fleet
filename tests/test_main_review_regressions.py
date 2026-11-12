@@ -17,7 +17,7 @@ from hub.config import FleetConfig
 from tools.adapters.base import BaseAdapter
 from fleet_core.process.bounded_process import run_streamed
 from tools.probe import discovery
-from tests.support.processes import assert_process_exited
+from support.processes import assert_process_exited
 
 
 @pytest.mark.parametrize('abort', [False, True])

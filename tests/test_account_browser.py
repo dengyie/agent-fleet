@@ -14,6 +14,25 @@ from hub.config import FleetConfig
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize(('provider', 'failure'), [
+    ('disabled', 'error'), ('hcaptcha', 'error'), ('hcaptcha', 'timeout'),
+    ('turnstile', 'error'), ('both', 'error'),
+])
+def test_account_captcha_browser(tmp_path, provider, failure):
+    if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
+        pytest.skip('Set FLEET_PLAYWRIGHT_MODULE for browser acceptance')
+    options = {'enabled': True, 'origin': 'http://127.0.0.1', 'registration': 'open',
+               'sender': lambda *args: None}
+    for name in ('hcaptcha', 'turnstile'):
+        if provider in (name, 'both'):
+            options.update({name + '_sitekey': name + '-fixture', name + '_secret': 'fixture-secret'})
+    app = create_app(FleetConfig.from_root(tmp_path, frontend_dir=ROOT / 'frontend', accounts=options))
+    app.config['HCAPTCHA_VERIFIER'] = lambda token, *_, **kwargs: token == 'hcaptcha-solved'
+    app.config['TURNSTILE_VERIFIER'] = lambda token, *_, **kwargs: token == 'turnstile-solved'
+    from test_workflow_browser import _browser_acceptance
+    _browser_acceptance(app, 'account_captcha_browser.cjs', provider, failure)
+
+
 def test_account_browser(tmp_path):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE for browser acceptance')
