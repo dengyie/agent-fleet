@@ -38,6 +38,9 @@ MAX_REQUEST_BYTES = 8 * 1024 * 1024
 MAX_AUDIO_INPUTS = 4
 MAX_AUDIO_ITEM_BYTES = 2 * 1024 * 1024
 MAX_AUDIO_INPUT_BYTES = 4 * 1024 * 1024
+MAX_VIDEO_INPUTS = 4
+MAX_VIDEO_ITEM_BYTES = 2 * 1024 * 1024
+MAX_VIDEO_INPUT_BYTES = 4 * 1024 * 1024
 MAX_TEXT_CHARS = 128 * 1024
 MAX_SSE_EVENTS = 4096
 TRANSIENT_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
@@ -369,6 +372,29 @@ def _message_content(value: Any, *, audio_budget: list[int] | None = None) -> st
             raise ProviderUnavailable("provider_message_invalid")
         if part.get("type") == "text" and set(part) == {"type", "text"} and isinstance(part["text"], str):
             parts.append({"type": "text", "text": part["text"][:MAX_TEXT_CHARS]})
+            continue
+        video = part.get("video_url")
+        if part.get("type") == "video_url":
+            if (set(part) != {"type", "video_url"} or not isinstance(video, Mapping)
+                    or set(video) != {"url"} or type(video["url"]) is not str
+                    or not video["url"].startswith("data:video/mp4;base64,")):
+                raise ProviderUnavailable("provider_message_invalid")
+            encoded = video["url"][len("data:video/mp4;base64,"):]
+            if not encoded or len(encoded) > ((MAX_VIDEO_ITEM_BYTES + 2) // 3) * 4:
+                raise ProviderUnavailable("provider_message_invalid")
+            try:
+                decoded = base64.b64decode(encoded, validate=True)
+            except (ValueError, TypeError) as exc:
+                raise ProviderUnavailable("provider_message_invalid") from exc
+            if (not decoded or len(decoded) > MAX_VIDEO_ITEM_BYTES
+                    or base64.b64encode(decoded).decode("ascii") != encoded):
+                raise ProviderUnavailable("provider_message_invalid")
+            budget = audio_budget if audio_budget is not None else [0, 0]
+            budget[0] += 1
+            budget[1] += len(decoded)
+            if budget[0] > MAX_VIDEO_INPUTS or budget[1] > MAX_VIDEO_INPUT_BYTES:
+                raise ProviderUnavailable("provider_message_invalid")
+            parts.append({"type": "video_url", "video_url": dict(video)})
             continue
         audio = part.get("input_audio")
         if part.get("type") == "input_audio" and set(part) == {"type", "input_audio"} and isinstance(audio, Mapping):

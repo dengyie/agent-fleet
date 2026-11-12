@@ -2692,7 +2692,25 @@
         "tests/test_mcp_registration.py::test_corrupt_durable_registration_is_store_unavailable_not_bad_input",
         "tests/test_mcp_catalog_admin_browser.py::test_mcp_connection_registration_and_explicit_discovery_in_real_browser",
         "tests/test_mcp_registration.py::test_attached_scope_only_decodes_called_authority_and_keeps_revocation",
-        "tests/test_mcp_registration.py::test_peer_scope_still_attaches_new_registration_after_an_original_tool_call"
+        "tests/test_mcp_registration.py::test_peer_scope_still_attaches_new_registration_after_an_original_tool_call",
+        "tests/test_workflow_native_video_inputs.py::test_native_video_freezes_only_metadata_and_sends_complete_video",
+        "tests/test_workflow_native_video_inputs.py::test_provider_preserves_complete_video_and_text_order",
+        "tests/test_workflow_native_video_inputs.py::test_video_domain_roundtrip_uses_schema_seven_and_exact_reference",
+        "tests/test_workflow_native_video_inputs.py::test_ready_video_checkpoint_rereads_artifact_after_restart",
+        "tests/test_workflow_native_video_inputs.py::test_video_provider_pending_recovery_never_reopens_or_resends",
+        "tests/test_workflow_native_video_inputs.py::test_video_read_rechecks_current_execution_before_provider_creation",
+        "tests/test_workflow_native_video_inputs.py::test_video_reference_is_required_by_history_and_reader_fifteen_gate",
+        "tests/test_workflow_native_video_inputs.py::test_video_backup_restore_preserves_original_binding_metadata_and_clip",
+        "tests/test_workflow_native_video_inputs.py::test_video_rejected_admission_creates_no_run_message_or_reader_upgrade",
+        "tests/test_workflow_native_video_inputs.py::test_repeated_video_positions_read_once_per_attempt_and_preserve_order",
+        "tests/test_workflow_native_video_inputs.py::test_malformed_video_parts_fail_before_provider_transport",
+        "tests/test_workflow_native_video_inputs.py::test_video_wire_budgets_apply_across_messages_before_transport",
+        "tests/test_workflow_native_video_inputs.py::test_video_snapshot_rejects_invalid_versions_empty_refs_and_extra_bytes",
+        "tests/test_workflow_native_video_inputs.py::test_native_video_worker_posts_complete_mp4_over_actual_http",
+        "tests/test_workflow_native_video_inputs.py::test_video_request_total_serialized_budget_fails_before_transport",
+        "tests/test_workflow_native_video_inputs.py::test_video_authorization_and_complete_stream_reject_mismatches",
+        "tests/test_workflow_native_video_inputs.py::test_video_older_reader_rejects_history_even_without_dispatch_gate",
+        "tests/test_workflow_native_video_inputs.py::test_video_corrupt_history_rejects_startup_and_backup"
       ]
     },
     {

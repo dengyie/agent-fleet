@@ -58,7 +58,7 @@ def _row(connection: sqlite3.Connection, token: str) -> dict[str, Any] | None:
 def _text_reference_closure(connection: sqlite3.Connection,
                             saved: list[tuple[dict[str, Any], NativeWorkflowMemory | None]]) -> None:
     """Match original input refs with one indexed query per bounded page."""
-    selected = [(row, snapshot) for row, snapshot in saved if snapshot is not None and (snapshot.texts or snapshot.codes or snapshot.media or snapshot.audio)]
+    selected = [(row, snapshot) for row, snapshot in saved if snapshot is not None and (snapshot.texts or snapshot.codes or snapshot.media or snapshot.audio or snapshot.video)]
     if not selected:
         return
     identities = [tuple(row[key] for key in ("owner_id", "workspace_id", "workflow_id", "step_key", "generation"))
@@ -74,6 +74,9 @@ def _text_reference_closure(connection: sqlite3.Connection,
     expected.update(identity + ("input:" + audio.ref_key, audio.reference.artifact_id,
                 audio.reference.sha256, audio.reference.size)
                 for identity, (_row_value, snapshot) in zip(identities, selected) for audio in snapshot.audio)
+    expected.update(identity + ("input:" + video.ref_key, video.reference.artifact_id,
+                video.reference.sha256, video.reference.size)
+                for identity, (_row_value, snapshot) in zip(identities, selected) for video in snapshot.video)
     placeholders = ",".join("(?,?,?,?,?)" for _identity in identities)
     query = (
         "WITH selected(owner_id,workspace_id,workflow_id,step_key,generation) AS (VALUES " + placeholders + ") "
@@ -157,7 +160,7 @@ def _saved(row: dict[str, Any], expected: ResolvedContract | None = None) -> Nat
         capabilities = provider.get("capabilities") if type(provider) is dict else None
         if (type(mode) is not dict or set(mode) != {"revision"} or type(mode["revision"]) is not int
                 or mode["revision"] != 1 or not resolved.contract.input_refs or type(capabilities) is not dict
-                or not any(capabilities.get(name) is True for name in ("image_input", "audio_input"))):
+                or not any(capabilities.get(name) is True for name in ("image_input", "audio_input", "video_input"))):
             raise WorkflowValidationError("invalid_native_media_mode")
     if row["step_kind"] != "native_run" or not (resolved.contract.context_refs or text_required or code_required or media_required):
         if NATIVE_MEMORY_MARKER in config or text_required or code_required or media_required:
@@ -166,7 +169,7 @@ def _saved(row: dict[str, Any], expected: ResolvedContract | None = None) -> Nat
     if canonical_json(config).decode("utf-8") != row["config_snapshot"]:
         raise WorkflowValidationError("invalid_native_memory_run")
     snapshot = parse_native_memory(config.get(NATIVE_MEMORY_MARKER), resolved)
-    required_reader = 14 if snapshot.uses_audio else (13 if media_required else (12 if code_required else (9 if text_required else 7)))
+    required_reader = 15 if snapshot.uses_video else (14 if snapshot.uses_audio else (13 if media_required else (12 if code_required else (9 if text_required else 7))))
     if type(row["minimum_reader_version"]) is not int or row["minimum_reader_version"] < required_reader:
         raise WorkflowValidationError("invalid_native_memory_reader")
     provider_snapshot = config.get("provider_snapshot")
@@ -174,7 +177,8 @@ def _saved(row: dict[str, Any], expected: ResolvedContract | None = None) -> Nat
     if type(capabilities) is not dict:
         raise WorkflowValidationError("invalid_native_media_mode")
     if ((snapshot.uses_media and capabilities.get("image_input") is not True)
-            or (snapshot.uses_audio and capabilities.get("audio_input") is not True)):
+            or (snapshot.uses_audio and capabilities.get("audio_input") is not True)
+            or (snapshot.uses_video and capabilities.get("video_input") is not True)):
         raise WorkflowValidationError("invalid_native_media_mode")
     if snapshot.summaries and row["minimum_reader_version"] < 11:
         raise WorkflowValidationError("invalid_native_memory_reader")
@@ -184,7 +188,7 @@ def _saved(row: dict[str, Any], expected: ResolvedContract | None = None) -> Nat
         raise WorkflowValidationError("invalid_native_text_mode")
     if bool(snapshot.codes) != code_required:
         raise WorkflowValidationError("invalid_native_code_mode")
-    if (snapshot.uses_media or snapshot.uses_audio) != media_required:
+    if (snapshot.uses_media or snapshot.uses_audio or snapshot.uses_video) != media_required:
         raise WorkflowValidationError("invalid_native_media_mode")
     if (resolved.owner_id, resolved.workspace_id, resolved.digest) != (row["owner_id"], row["workspace_id"], row["payload_hash"]):
         raise WorkflowValidationError("native_memory_mismatch")
@@ -223,10 +227,10 @@ class WorkflowNativeMemoryRepository:
     def prepare(self, claim: dict[str, Any], *, now: float) -> NativeWorkflowMemory | None:
         try:
             snapshot, resolved = self._prepare(claim, now=_time(now))
-            if snapshot is None or not (snapshot.texts or snapshot.codes or snapshot.media or snapshot.audio):
+            if snapshot is None or not (snapshot.texts or snapshot.codes or snapshot.media or snapshot.audio or snapshot.video):
                 return snapshot
             if self.clock is None or resolved is None:
-                code = "native_audio_guard_unavailable" if snapshot.audio else ("native_media_guard_unavailable" if snapshot.media else ("native_code_guard_unavailable" if snapshot.codes else "native_text_guard_unavailable"))
+                code = "native_video_guard_unavailable" if snapshot.video else ("native_audio_guard_unavailable" if snapshot.audio else ("native_media_guard_unavailable" if snapshot.media else ("native_code_guard_unavailable" if snapshot.codes else "native_text_guard_unavailable")))
                 raise WorkflowValidationError(code)
             if snapshot.texts:
                 if self.text_inputs is None:
@@ -250,6 +254,11 @@ class WorkflowNativeMemoryRepository:
                     raise WorkflowValidationError("native_audio_guard_unavailable")
                 capabilities = (claim.get("config_snapshot", {}).get("provider_snapshot", {}) or {}).get("capabilities", {})
                 self.media_inputs.authorize(resolved, snapshot.audio, capabilities=capabilities)
+            if snapshot.video:
+                if self.media_inputs is None:
+                    raise WorkflowValidationError("native_video_guard_unavailable")
+                capabilities = (claim.get("config_snapshot", {}).get("provider_snapshot", {}) or {}).get("capabilities", {})
+                self.media_inputs.authorize(resolved, snapshot.video, capabilities=capabilities)
             current, current_resolved = self._prepare(claim, now=_time(self.clock()))
             if current != snapshot or current_resolved != resolved:
                 raise WorkflowValidationError("native_memory_mismatch")
@@ -304,6 +313,34 @@ class WorkflowNativeMemoryRepository:
             capabilities = (claim.get("config_snapshot", {}).get("provider_snapshot", {}) or {}).get("capabilities", {})
             parts = self.media_inputs.load_audio(resolved, snapshot.audio, capabilities=capabilities)
             self.media_inputs.authorize(resolved, snapshot.audio, capabilities=capabilities)
+            current, current_resolved = self._prepare(claim, now=_time(self.clock()))
+            if current != snapshot or current_resolved != resolved:
+                raise WorkflowValidationError("native_memory_mismatch")
+            return parts
+        except WorkflowNativeMemoryError:
+            raise
+        except (WorkflowValidationError, WorkflowPersistenceError, WorkflowSchemaError, sqlite3.Error,
+                KeyError, TypeError, ValueError, OSError) as exc:
+            code = getattr(exc, "code", "native_memory_unavailable")
+            raise WorkflowNativeMemoryError(code) from exc
+
+    def load_video(self, claim: dict[str, Any], snapshot: NativeWorkflowMemory, *,
+                   now: float) -> tuple[dict[str, Any], ...]:
+        """Read bounded video outside SQL and recheck its immutable binding afterward."""
+        try:
+            current, resolved = self._prepare(claim, now=_time(now))
+            if current != snapshot or not snapshot.uses_video or resolved is None:
+                raise WorkflowValidationError("invalid_native_video_run")
+            trigger = claim.get("message")
+            if (type(trigger) is not dict or
+                    (trigger.get("message_id"), trigger.get("role"), trigger.get("content")) !=
+                    (claim.get("trigger_message_id"), "user", resolved.snapshot.decode("utf-8"))):
+                raise WorkflowValidationError("native_memory_mismatch")
+            if self.media_inputs is None or self.clock is None:
+                raise WorkflowValidationError("native_video_guard_unavailable")
+            capabilities = (claim.get("config_snapshot", {}).get("provider_snapshot", {}) or {}).get("capabilities", {})
+            parts = self.media_inputs.load_video(resolved, snapshot.video, capabilities=capabilities)
+            self.media_inputs.authorize(resolved, snapshot.video, capabilities=capabilities)
             current, current_resolved = self._prepare(claim, now=_time(self.clock()))
             if current != snapshot or current_resolved != resolved:
                 raise WorkflowValidationError("native_memory_mismatch")

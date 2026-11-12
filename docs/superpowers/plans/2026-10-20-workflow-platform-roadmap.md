@@ -324,7 +324,8 @@ Hub 子集的实际边界见[产物契约 §6.4](../specs/2026-10-20-artifact-ca
 - [x] 外部 Agent 的 Node capability requirements 已接入不可变 target/configuration 快照，并在 admission 前按 adapter 显式 `id/revision` 匹配；不匹配稳定返回 `external_capability_unavailable`，旧 target 快照和空能力 canonical bytes 保持兼容。受控外部回归证据见 [外部派发计划](2026-10-25-external-agent-workflow-dispatch.md)。
 - [x] 本地Native Run有界PNG/JPEG/WebP图片输入切片已实现，默认关闭、schema5/reader13、attempt内构造provider图片、持久元数据不含base64；本机边界与恢复证据见[图片输入计划](2026-11-12-native-binary-media-inputs.md)。真实vision模型和最终发布仍待验收。
 - [x] 本地Native Run有界WAV/MP3音频输入已接入schema6/reader14；按固定provider audio capability授权，attempt内读取后序列化为`input_audio`，不持久化base64。受控传输/恢复和边界证据见[音频输入计划](2026-11-12-native-audio-inputs.md)；真实音频模型和最终发布仍待验收。
-- [ ] 视频与CLI/评审/测试/远程 context 媒体输入、其余集成配置仍未实现；当前不声明这些执行能力。
+- [x] 本地Native完整MP4输入已接原媒体reader、schema7/reader15、固定video capability和attempt-only `video_url`序列化；独立实施与验收范围见[视频计划](2026-11-13-native-video-inputs.md)。真实视频模型及正式发布由自己的证据证明。
+- [ ] CLI/评审/测试/远程 context 媒体输入、其余集成配置仍未实现；当前不声明这些执行能力。
 - [x] Muse受控适配器正常启动文件登记、原journal身份校验/显式离线初始化、与coding-delivery共存及gate-off原任务恢复，见[部署入口](../../platform/workflow-platform/muse-startup.md)。实际账号/远程浏览器/其他context与生产验收仍开放。
 - [ ] 真实 session 标识、断网/休眠、接收与完成区分、重复消息、artifact 导出和账号撤销均有证据；原生 Muse 登录/审批边界保持独立。
 

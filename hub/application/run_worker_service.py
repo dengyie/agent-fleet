@@ -343,10 +343,12 @@ class LocalRunWorkerService:
                 source_view_context = code_view_context
             media_parts = ()
             media_transform = None
-            if native_memory is not None and (native_memory.uses_media or native_memory.uses_audio):
+            if native_memory is not None and (native_memory.uses_media or native_memory.uses_audio or native_memory.uses_video):
                 if remote or self.workflow_memory_guard is None:
                     raise WorkflowNativeMemoryError("native_media_guard_unavailable")
-                if native_memory.uses_audio:
+                if native_memory.uses_video:
+                    media_parts = self.workflow_memory_guard.load_video(claim, native_memory, now=float(self.clock()))
+                elif native_memory.uses_audio:
                     media_parts = self.workflow_memory_guard.load_audio(claim, native_memory, now=float(self.clock()))
                 else:
                     media_parts = self.workflow_memory_guard.load_media(claim, native_memory, now=float(self.clock()))

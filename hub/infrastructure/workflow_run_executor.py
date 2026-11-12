@@ -19,7 +19,7 @@ from hub.domain.workflow_identity import canonical_digest, canonical_json, valid
 from hub.domain.workflow_json import decode_snapshot
 from hub.domain.workflow_review import ReviewAdapterSpec
 from hub.domain.workflow_native_memory import NATIVE_CODE_MODE_MARKER, NATIVE_MEDIA_MODE_MARKER, NATIVE_MEMORY_MARKER, NATIVE_TEXT_MODE_MARKER, NativeWorkflowMemory, build_native_memory
-from hub.domain.workflow_media_inputs import WorkflowAudioInput, WorkflowMediaInput, artifact_media_references
+from hub.domain.workflow_media_inputs import WorkflowAudioInput, WorkflowMediaInput, WorkflowVideoInput, artifact_media_references
 from hub.domain.workflow_summary import validate_context_selection
 from hub.domain.workflow_text_inputs import WorkflowTextInput, text_artifact_references
 from hub.domain.remote_workflow_test import REMOTE_TEST_MARKER
@@ -151,7 +151,7 @@ class RegisteredRunTarget:
                 or self.source_repository_id is not None or self.remote_test or "memory_context" in config
                 or config.get("execution_node_id") not in (None, "", "local", "hub", "host")
                 or not _valid_provider_snapshot(provider)
-                or not any(provider["capabilities"].get(name) is True for name in ("image_input", "audio_input"))):
+                or not any(provider["capabilities"].get(name) is True for name in ("image_input", "audio_input", "video_input"))):
             raise WorkflowValidationError("unsupported_media_input_target")
 
     def hub_input_target(self) -> HubInputTarget | None:
@@ -326,7 +326,7 @@ class RunStepExecutor:
                     raise WorkflowDispatchError("media_inputs_too_large", uncertain=False)
                 provider = config.get("provider_snapshot")
                 if type(provider) is not dict or not any(provider.get("capabilities", {}).get(name) is True
-                        for name in ("image_input", "audio_input")):
+                        for name in ("image_input", "audio_input", "video_input")):
                     raise WorkflowDispatchError("media_input_unsupported", uncertain=False)
             if codes:
                 try:
@@ -385,7 +385,7 @@ class RunStepExecutor:
             raise WorkflowDispatchError("dispatch_conflict", uncertain=False)
         if code_required and (memory is None or memory.codes != codes):
             raise WorkflowDispatchError("dispatch_conflict", uncertain=False)
-        if media_required and (memory is None or not (memory.uses_media or memory.uses_audio)):
+        if media_required and (memory is None or not (memory.uses_media or memory.uses_audio or memory.uses_video)):
             raise WorkflowDispatchError("dispatch_conflict", uncertain=False)
         config, request = self._request(resolved, capability_binding=pinned.binding if pinned is not None else None, memory=memory, target=target)
         expected = decode_snapshot(config)
@@ -441,6 +441,7 @@ class RunStepExecutor:
             media_required = target.inline_media_inputs and bool(resolved.contract.input_refs)
             media: tuple = ()
             audio_mode = False
+            video_mode = False
             if code_required or text_required or media_required:
                 with self.repository.transaction(write=False) as connection:
                     existing = self._existing(connection, token, payload_hash, resolved, target=target)
@@ -473,7 +474,8 @@ class RunStepExecutor:
                     raise WorkflowDispatchError("dispatch_conflict", uncertain=False)
                 audio_mode = bool(media) and all(type(item) is WorkflowAudioInput for item in media)
                 image_mode = bool(media) and all(type(item) is WorkflowMediaInput for item in media)
-                if not (audio_mode or image_mode):
+                video_mode = bool(media) and all(type(item) is WorkflowVideoInput for item in media)
+                if not (audio_mode or image_mode or video_mode):
                     raise WorkflowDispatchError("media_input_unsupported", uncertain=False)
             with self.repository.transaction() as connection:
                 now = _time(self.clock())
@@ -524,11 +526,12 @@ class RunStepExecutor:
                         tuple(named.reference for named in summary_refs), connection=connection)
                     memory = build_native_memory(resolved, items, texts=texts,
                         summaries=tuple((named.ref_key, item) for named, item in zip(summary_refs, summary_items)),
-                        codes=code_refs if code_required else (), media=media if not audio_mode else (),
-                        media_mode=media_required and not audio_mode,
-                        audio=media if audio_mode else (), audio_mode=audio_mode)
+                        codes=code_refs if code_required else (), media=media if not (audio_mode or video_mode) else (),
+                        media_mode=media_required and not (audio_mode or video_mode),
+                        audio=media if audio_mode else (), audio_mode=audio_mode,
+                        video=media if video_mode else (), video_mode=video_mode)
                     config, request = self._request(resolved, memory=memory, target=target)
-                    reader_version = 14 if audio_mode else (13 if media_required else 12 if code_required else 11 if summary_items else 9 if texts else 7)
+                    reader_version = 15 if video_mode else (14 if audio_mode else (13 if media_required else 12 if code_required else 11 if summary_items else 9 if texts else 7))
                     connection.execute("UPDATE workflow_schema_meta SET minimum_reader_version=max(minimum_reader_version,?) WHERE singleton=1",
                                        (reader_version,))
                 conversation = connection.execute(

@@ -304,6 +304,16 @@ Worker在当前Run、lease、dispatch/binding/generation、截止、workspace和
 
 Run创建、worker授权和每次真实attempt均重新核对owner/workspace manifest、MIME、大小、长度和SHA-256。音频只存在于有界attempt内存及发送请求；安全 `ready` checkpoint恢复重新读取原不可变引用，`pending` provider调用仍保持unknown且不重发。provider序列化器严格验证part字段、base64、格式、4引用/4MiB上限及8MiB请求体上限。该切片仅覆盖受控Native本机传输证据，不包含真实音频模型、CLI/review/test/remote context或生产验收；计划见[Native音频输入](../plans/2026-11-12-native-audio-inputs.md)。
 
+### 5.4.4 本地 Native Run 的完整 MP4 视频输入
+
+视频复用可信`inline_media_inputs=True`本地provider-backed Native目标，额外要求固定`provider_snapshot.capabilities.video_input=True`。仅允许`video/mp4`，完整原视频序列化为`{"type":"video_url","video_url":{"url":"data:video/mp4;base64,..."}}`；格式依据[vLLM当前多模态Chat Completions示例](https://docs.vllm.ai/en/stable/examples/generate/multimodal/)。图片或音频能力不授予视频能力；本实现不抽帧、转摘要或假定所有OpenAI-compatible模型接受视频。视频单独使用一个媒体模式，不混用图片/音频、Memory/summary、text/code inline或Node capability context。
+
+沿用2MiB/单引用、4个逻辑引用、4MiB原始字节和8MiB序列化请求界限。重复位置保持完整顺序和逻辑计费，每attempt对同一不可变artifact只读取一次。原Run事务只保存`workflow_memory`schema7的有序`video_inputs`元数据`{ref_key,artifact_id,sha256,size,content_type}`，原`workflow_media_mode={revision:1}`不变，并把minimum reader提升至15；无视频的schema1–6、reader1–14和图片/音频wire保持不变。
+
+Run创建、worker读取及读取后的授权复核沿用owner/workspace/manifest/hash/size、lease、binding/generation、取消/暂停和deadline的原权威。完整视频字节、base64与data URL只存在于本次attempt及provider请求中，不进入Run持久快照、checkpoint或事件。安全ready恢复重新读取原引用，pending-provider仍unknown且不重发。gate关闭、旧reader、损坏输入闭包及普通/加密备份按原历史规则校验，不用新空输入替代历史视频。
+
+这完成本地Native MP4传输合同；真实视频模型、CLI/review/fixed-test/remote媒体context、Muse能力及生产业务验收仍须独立实现或验收。见[视频实施计划](../plans/2026-11-13-native-video-inputs.md)。
+
 ### 5.5 Hub 本地消费者与 Node 输入位置
 
 传输 gate 启用时，输入位置按可信执行目标确定。固定命令评审、固定测试及 `inline_text_inputs=True` 的本地 Native Run 复用原 Hub worker/reader，不生成 `artifact.receive`。普通 reference-only Native、Legacy Task、远程 Node 和缺登记目标仍遵循原 Node 接收准入，不从 ArtifactRef 的存在推断已在目标机器就绪。

@@ -108,6 +108,7 @@ jobs:
           tests/test_workflow_setup.py
           tests/test_workflow_native_setup.py tests/test_integration_identity_registration.py
           tests/test_mcp_registration.py
+          tests/test_workflow_native_video_inputs.py
           tests/test_artifact_capacity.py::test_download_pool_is_shared_across_reopened_directories_and_nodes
           tests/test_artifact_capacity.py::test_download_processes_compete_for_one_last_slot
           tests/test_artifact_capacity.py::test_download_process_death_releases_native_pool

@@ -33,7 +33,7 @@ def manifest(mode="text"):
         "bindings": [{"step_key": "develop", "target_key": "native-a",
             "conversation_id": "native-chat", "model_profile_id": "local",
             "provider_snapshot": {"provider": "deterministic", "model": "local",
-                "provider_config": {}, "capabilities": {"image_input": True, "audio_input": True},
+                "provider_config": {}, "capabilities": {"image_input": True, "audio_input": True, "video_input": True},
                 "secret_ref": "env://NATIVE_A"}, "input_mode": mode}],
     }]}
 
@@ -99,6 +99,7 @@ def test_normal_provider_snapshot_is_accepted_by_native_target(tmp_path, mode):
     ("text", "text/plain", "部署文本 🥭".encode(), "text"),
     ("media", "image/png", b"\x89PNG\r\n\x1a\nimage", "image_url"),
     ("media", "audio/wav", b"RIFF\x04\x00\x00\x00WAVE", "input_audio"),
+    ("media", "video/mp4", b"\x00\x00\x00\x18ftypmp42video", "video_url"),
 ])
 def test_file_registered_native_consumes_inputs_and_restores_original_run(
         tmp_path, monkeypatch, mode, content_type, raw, part):
@@ -161,7 +162,7 @@ def test_file_registered_native_consumes_inputs_and_restores_original_run(
         user = next(message for message in captured[0] if message["role"] == "user")
         last = user["content"][-1]
         assert last["type"] == part
-        if part == "image_url":
+        if part in ("image_url", "video_url"):
             assert last[part]["url"].endswith(base64.b64encode(raw).decode())
         else:
             assert last[part] == {"data": base64.b64encode(raw).decode(), "format": "wav"}

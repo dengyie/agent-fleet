@@ -1,4 +1,4 @@
-"""Bounded image and audio references shared by explicit Native Workflow consumers."""
+"""Bounded image, audio and video references for explicit Native consumers."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,6 +14,7 @@ MAX_MEDIA_ITEM_BYTES = 2 * 1024 * 1024
 MAX_MEDIA_INPUT_BYTES = 4 * 1024 * 1024
 IMAGE_CONTENT_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
 AUDIO_CONTENT_TYPES = frozenset({"audio/wav", "audio/mpeg"})
+VIDEO_CONTENT_TYPES = frozenset({"video/mp4"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +26,13 @@ class WorkflowMediaInput:
 
 @dataclass(frozen=True, slots=True)
 class WorkflowAudioInput:
+    ref_key: str
+    reference: ArtifactReference
+    content_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowVideoInput:
     ref_key: str
     reference: ArtifactReference
     content_type: str
@@ -95,4 +103,33 @@ def parse_audio_inputs(value: object) -> tuple[WorkflowAudioInput, ...]:
             raise WorkflowValidationError("invalid_audio_inputs")
         inputs.append(WorkflowAudioInput(item["ref_key"],
             ArtifactReference(item["artifact_id"], item["sha256"], item["size"]), item["content_type"]))
+    return tuple(inputs)
+
+
+def video_input_value(expected: tuple[str, ArtifactReference], actual: WorkflowVideoInput) -> dict[str, Any]:
+    if type(actual) is not WorkflowVideoInput or (actual.ref_key, actual.reference) != expected:
+        raise WorkflowValidationError("video_input_mismatch")
+    key, reference = expected
+    validate_reference(key)
+    if (type(reference) is not ArtifactReference or type(reference.size) is not int
+            or not 0 < reference.size <= MAX_MEDIA_ITEM_BYTES):
+        raise WorkflowValidationError("video_input_too_large")
+    if type(actual.content_type) is not str or actual.content_type not in VIDEO_CONTENT_TYPES:
+        raise WorkflowValidationError("video_input_unsupported")
+    return {"ref_key": key, "artifact_id": reference.artifact_id, "sha256": reference.sha256,
+            "size": reference.size, "content_type": actual.content_type}
+
+
+def parse_video_inputs(value: object) -> tuple[WorkflowVideoInput, ...]:
+    if type(value) is not list or len(value) > MAX_MEDIA_INPUTS:
+        raise WorkflowValidationError("invalid_video_inputs")
+    inputs = []
+    for item in value:
+        if (type(item) is not dict or set(item) != {"ref_key", "artifact_id", "sha256", "size", "content_type"}
+                or type(item["size"]) is not int):
+            raise WorkflowValidationError("invalid_video_inputs")
+        video = WorkflowVideoInput(item["ref_key"],
+            ArtifactReference(item["artifact_id"], item["sha256"], item["size"]), item["content_type"])
+        video_input_value((video.ref_key, video.reference), video)
+        inputs.append(video)
     return tuple(inputs)

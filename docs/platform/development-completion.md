@@ -1,5 +1,23 @@
 # 文档开发总账
 
+## Native 完整视频输入增量（2026-11-13）
+
+本地Native目标现支持完整MP4 ArtifactRef，复用原`inline_media_inputs`、verified descriptor、Run事务和worker；必须固定`video_input=True`。使用文档确认的`video_url`data URL传递完整视频，不抽帧或转摘要。快照schema7/reader15只保存有序hash/size/MIME引用；旧图片/音频schema和wire保持。两帧16×16真实MP4为1103bytes、SHA-256 `10df2ff54573bdd08f65e7f7775bf4a3c2c457e0e58f5cffec3e1e9bc710e6b2`，本机ffprobe确认2帧，测试不依赖ffmpeg安装。
+
+原缺口3failed已留证；首次关联91passed/1failed暴露已提交Run查回遗漏video模式，已修复。随后149passed/1failed属于真实HTTP夹具未使用完整provider路径，修正夹具后162passed。最后20模块关联 **652passed、2passing subtests、零failure/error/skip、67.52秒**，覆盖完整MP4真实本机HTTP传输、读取期间取消/暂停/deadline/manifest变化、重复引用仅读一次、ready恢复重新读原视频、pending保持unknown且零重发、损坏历史/旧reader/gate-off拒绝、明文/加密恢复、正常file启动及固定provider能力、图片/音频/文本/源码/摘要兼容、备份/打包/部署契约。Windows原job已增加实际视频模块。
+
+原报告在私有verification根 `native-video-20261113/`，关联命令与边界见[视频计划](../superpowers/plans/2026-11-13-native-video-inputs.md)和[执行合同§5.4.4](../superpowers/specs/2026-10-20-workflow-execution-contract.md#544-本地-native-run-的完整-mp4-视频输入)。此后续增量须独立提交/CI，不属于下方PR44完整门禁；真实视频模型、CLI/review/test/remote媒体context、自动摘要/其余配置/长期归档及生产实际任务仍开放。
+
+## PR44 最终 CI 与实际使用条件（2026-11-13）
+
+最新公开候选 `6ea7e09083299c755862131dfe8db2aebf978410` / [PR44](https://github.com/dengyie/agent-fleet/pull/44) 的 [CI43292358951](https://github.com/dengyie/agent-fleet/actions/runs/43292358951) 已终态 success。下载原 Linux 工件后，在同 revision 的干净公开 checkout 执行原发布核验器，通过 **7605 JUnit cases、46 journeys、2560 selectors、77 张有效 PNG**，零 failure/error/skip；suite 的7809包含204passing subtests。Windows334cases为332passed/2POSIXskips，零failure/error，含55项MCP登记用例。此前初版CI被新版并发规则取消，不能记为完整通过。PR44已转为ready，base仍为PR43。
+
+同候选本地预检bundle7200581bytes、SHA-256 `d4d940c5c6af3759577d21f923c5c941d3ea3fb274fc35ca38b1af254525e99b` 通过真实生产receiver的check，退出0；前后LIVE inode、RELEASE_ORIGIN、gates/hosts摘要、pending/maintenance状态相同。它不是官方CI发布包，feature package/deploy按原规则跳过。最新公网healthz、首页、登录、manifest均200，main/manifest仍为301e259。未合并、切换或重启。
+
+实际生产账号只读inventory显示4个启用且已配secret的模型、3个启用且目录存在的workspace；两台登记Node均无120秒内心跳。容器mango当前Python无pytest、PATH无bwrap；实际 `unshare --user --map-root-user --mount --pid --fork --net /bin/true` 退出1/Operation not permitted。因此生产本地固定测试执行环境仍不可用，不能只装bwrap便声称就绪。持久gate文件仅platform/worker/scheduler开启，Workflow登记和dispatch等未配置；这不推断进程环境覆盖。正式试运行还需工作流登记、可用执行节点和实际生产开发→评审→测试→下载→恢复证据。
+
+原报告在私有verification根 `mcp-registration-20261113/pr44-final-linux/`、`pr44-final-windows/`、`publication-checks/final-*-verification.json`及 `online-readiness-mcp-20261113/`。完整功能TODO、真实模型/MCP/Muse/Node及邮件验收继续开放。
+
 ## MCP 页面接入发布与目录查询修正（2026-11-13）
 
 页面接入已建立[独立 PR44](https://github.com/dengyie/agent-fleet/pull/44)，base 为 PR43。初始公开 `5d9e2f88818e89058501faa76b685fc13cbb9a37` 与开发 `0ec239cee2fcb2489bcca5bb7fea6d80bea7bfa4` 完整 tree 相同，均为 `193df0f5b26d565599cab34250b8ccfa6600ec2a`；原 pre-push 保护保留。初次 CI43288542639 的 Windows 原工件已下载核对：330cases，328passed/2POSIXskips，零 failure/error；Linux 尚在运行。这个结果不代替后续修正的新版本完整 CI。
@@ -408,12 +426,12 @@ Linux同版快照已复制至既有SG测试机私有目录 `full-gate-depth-d7d8
 
 | 项目 | 已实现边界与尚缺证据 |
 | --- | --- |
-| Linux及Windows验收 | 最新51f71614修复当前Python路径被拒绝；真实SG固定测试passed/failed/lost/unknown四场景4 passed，原outbox恢复不重跑；同冻结Linux十模块172 passed、Windows运行时/控制/期限/进程子集102 passed，无失败/skip，1146源码三端不变。更早0d11d8b4原生Linux288 passed，Windows289 passed/2 POSIX skip；a9da2c29原生NTFS收发131 passed、实际两机窄交接1 passed及独立固定测试2 passed分别保留。旧68-failure广范围报告不被这些子集替代。完整Linux/浏览器、全WF-04/05和真实CLI/model仍开放。 |
+| Linux及Windows验收 | 最新公开PR44/6ea7e09官方Linux/browser完整7605cases、46journeys/2560selectors通过，Windows332passed/2POSIXskips；原工件已独立核验。更早跨机固定测试、NTFS收发/窄交接与原失败报告保留各自范围。后续视频增量需自己的完整CI；生产WF-04/05、模型/Node业务证据仍不由CI代填。 |
 | 当前真实能力生命周期 | cd7019aa/1149源码冻结：home-win与SG Linux共20 passed/0skip，含8项自动协调器/原worker场景及12项独立held/isolated postcheck场景；本机原矩阵10 passed、关联417 passed分别记录。20份Hub数据库与两端journal/file独立核验，106份原生证据大小/hash一致，三端源码不变/checkout clean。没有真实商业模型或完整Workflow交付声明。 |
-| 原生模型步恢复 | 2026-11-11已接原生持久检查点并完成独立冻结6921-pass全仓；后续remote_wait释放worker、工作区预约及原命令恢复已纳入4f4b6478的Linux关键子集240-pass验证。完整Linux门禁与真实跨机仍缺；Node控制后续改动须绑定新冻结。 |
+| 原生模型步恢复 | 原生持久检查点、remote_wait释放worker、工作区预约、Node控制及原命令恢复已包含在PR44精确完整CI中；新视频的ready/pending恢复有652项关联证据，其正式门禁独立待验。实际生产重启和跨机业务仍待自己的证据。 |
 | 停止与保留策略 | Node workspace进程/固定测试已接可协商的控制观察、原截止内续租与本机停止；245项关联、336项额外集成分别通过。任意外部adapter的停止、长期归档及取消围栏退休仍开放；Hub旧unknown不被本机停止结果覆盖。 |
 | F0/F3/F5真实链路 | 私有macOS单个真实Codex/所选模型的开发→独立评审→固定测试及UI恢复已通过，停在等待人工验收。生产sandbox、其他CLI/模型、外部MCP/Muse、邮件与候选部署仍未验收；本试点不代填MODEL-LIVE或完整发布。 |
-| F5后续输入与配置 | 显式 operator 版本summary已接独立权威和Native/外部消费，三端摘要/备份96项及4a3e15f1全仓证据见[摘要计划](../superpowers/plans/2026-11-11-versioned-summary-context.md)。Native固定代码包本机输入已完成主要实现；代码输入37 passed，含混合文本/源码、六项manifest字段绑定、UTF-8/路径/特殊归档条目拒绝、篡改包尾、聚合字节/文件/引用上限、异常清理、已提交Run不重读、安全checkpoint response/receipt/ready 恢复、pending unknown、明文/加密冻结备份恢复及reader12 gate-off拒绝；关联十六模块708 passed。129 Run×16引用历史闭包、页边界10种损坏及明文/加密恢复已独立验证，完整发布门禁仍开放，见[计划](../superpowers/plans/2026-11-11-native-code-package-inputs.md)。自动摘要、二进制媒体、其他执行context、外部能力要求及其余集成配置仍开放；Muse cancel/export仍unsupported。 |
+| F5后续输入与配置 | 显式operator版本summary、Native固定源码/图片/音频、外部能力要求、Native初始化、Fleet身份及MCP登记页面已进入PR43/44官方完整CI，保留各自历史与备份证据。Native完整MP4为后续独立增量，见[视频计划](../superpowers/plans/2026-11-13-native-video-inputs.md)。自动摘要生成、CLI/评审/测试/远程媒体context、其余集成配置和真实模型/MCP/Muse试点仍开放；Muse cancel/export仍unsupported。 |
 | F6后续扩展 | 保留Flask/SQLite WAL；当前样本不要求新增数据库或队列。实际Node/模型、人工干预/返工数据仍待测；DAG与专业adapter遵守至少两个真实用例或测得瓶颈的前提。 |
 
 - 2026-11-11：Native固定源码包输入按独立计划完成本机实现：默认关闭的可信本地target、schema4/reader12、owner/workspace/hash/size/MIME授权、完整source stream解包校验、只读list/read工具、私有attempt视图和安全ready checkpoint恢复。先修复Native文本进程恢复测试夹具的`collect(..., references=...)`接口漂移，关联十模块315 passed；代码输入模块12 passed，真实provider读取及进程中断后恢复验证包含在内。尚未完成专属frozen backup/gate-off历史矩阵、完整Linux/browser发布门禁与全项目剩余TODO；不以本机切片宣称已发布。计划：[Native代码包输入](../superpowers/plans/2026-11-11-native-code-package-inputs.md)。
