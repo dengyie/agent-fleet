@@ -278,6 +278,8 @@ def me():
                 features[feature] = True
         if services.get('workflow_summaries'):
             features['workflow_summary_management'] = True
+        if getattr(services.get('mcp_catalog_admin'), 'registration_enabled', False):
+            features['mcp_catalog_registration'] = True
     return jsonify(user=g.account, sessions=store().sessions(g.account['id'], request.cookies.get(cookie_name(), '')),
                    **({'features': features} if features else {}))
 

@@ -149,14 +149,18 @@ def _build_conversations(p, config, repositories):
         validate_mcp_workspaces(mcp_connectors, p.platform_repository)
     if config.platform_mcp_connectors_enabled and p.mcp_catalog is None:
         from hub.application.connector_catalog import ConnectorCatalog
+        from hub.application.mcp_registration import attach_durable_mcp_connections
         from hub.infrastructure.mcp_catalog_repository import MCPCatalogRepository
+        from hub.platform.connectors.registration import connector_from_config
 
         p.mcp_catalog_repository = MCPCatalogRepository(config.platform_db)
         p.mcp_catalog_repository.init()
         p.mcp_catalog = ConnectorCatalog(enabled=True, store=p.mcp_catalog_repository,
-                                        clock=repositories.get("mcp_clock", __import__("time").time))
+            clock=repositories.get("mcp_clock", __import__("time").time),
+            registration_factory=connector_from_config if config.platform_mcp_catalog_registration_enabled else None)
         for connector in mcp_connectors:
             p.mcp_catalog.register(connector)
+        attach_durable_mcp_connections(p.mcp_catalog)
     p.conversation_service = ConversationService(
         p.platform_repository, p.platform_service, mcp_catalog=p.mcp_catalog,
         mcp_enabled=config.platform_mcp_connectors_enabled)

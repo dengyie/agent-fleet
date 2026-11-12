@@ -2,6 +2,24 @@
 
 本入口补齐 [F5 集成](../../superpowers/plans/2026-10-24-f5-integrations.md)的部署装配，复用原持久目录、Run 授权固定及[目录管理页面](../../superpowers/plans/2026-10-25-mcp-catalog-administration.md)。返回[平台索引](README.md)；实现与证据见[启动登记计划](../../superpowers/plans/2026-11-12-mcp-startup-registration.md)。
 
+## 从账号页面登记连接
+
+页面登记与显式发现属于后续独立增量，发布状态及验证范围见[实施计划](../../superpowers/plans/2026-11-13-mcp-connection-registration.md)和[开发总账](../development-completion.md)。需要同时开启平台、MCP 及页面登记开关：
+
+```ini
+AGENT_FLEET_PLATFORM_ENABLED=1
+AGENT_FLEET_PLATFORM_MCP_CONNECTORS_ENABLED=1
+AGENT_FLEET_PLATFORM_MCP_CATALOG_REGISTRATION_ENABLED=1
+```
+
+管理员在账号设置的 MCP 集成区选择“登记连接”，填写已有 owner/workspace、唯一连接标识、完整 HTTPS 服务地址、环境凭据引用、选定的工具名称及请求/结果/发现数量上限。默认归属为当前账号 ID；所选工作区必须实际属于填写的身份且处于启用状态。每行填写一个工具名；页面使用与下方配置文件相同的字段、限制和只读策略。访问令牌在 Hub 进程环境中配置，页面仅填写 `env://MCP_API_KEY` 这样的引用。
+
+登记写入原持久目录并附着原适配器，不访问外部服务或读取凭据。成功后先是 `registered`，尚无可调用的工具版本；关闭登记窗口，再选择“发现工具”。首次成功发现按原 CLI 合同成为 active；以后服务信息或工具定义发生变化会进入 pending，需在原页面审阅和批准。旧 Run 的固定版本不随新发现或批准改变。该入口不启动模型任务。
+
+连接定义不可原地修改。相同定义重复登记返回原记录，保留原时间和 active/pending/禁用状态；地址、凭据引用、归属、工具或限额变化须使用新的连接标识。丢失登记响应时，“核对并重试原登记”只使用已锁定的原配置；冲突时关闭窗口后重新读取原记录。发现响应不确定时先重新读取目录，页面不会自动重发发现请求。离开页面、关闭窗口或切换账号只停止本次浏览器观察，不能据此判断服务端请求已取消。
+
+页面登记开关开启时，普通 Hub 启动离线附着数据库中未禁用的登记，不要求另写配置文件；已运行的另一 Hub 会在原 scope 工具查询/调用或显式发现时附着新登记。原目录总数仍限制为128。已通过受信文件附着的 transport/private aliases 保留。关闭页面登记开关后回到原文件装配方式；连接库继续保留，未通过文件附着的连接不获得运行适配器。撤销或备份恢复导入的禁用记录不会因重复登记、重新加载或重启而启用。
+
 ## 配置文件
 
 在 Hub 宿主的持久配置目录保存 UTF-8 JSON 文件。文件必须使用绝对路径，最多 256 KiB、128 个唯一 connector_id；不能将真实 token 放入文件。示例的地址、归属、工作区及工具名须换成已核实值：

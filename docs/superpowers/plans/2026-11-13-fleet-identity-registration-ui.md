@@ -60,9 +60,9 @@
 **Files:** modify `.github/workflows/ci.yml`; use the existing isolated publication checkout.
 
 - [x] Add the actual Native setup and Fleet registration modules and an existing-Node version check to the Windows CI selection without adding runtime installation. Preserve all prior selectors and the main-only package/deploy conditions; actual Windows execution remains part of the terminal CI check below.
-- [ ] Export only the current tree delta onto a separate publication branch rooted at the reviewed PR42 head, retain the pre-push hook, and verify its complete Git tree equals the development candidate before publishing.
-- [ ] Create and attach a draft PR with the reviewed publication branch as its base. Dispatch the existing CI on this new feature branch; branch dispatch executes tests and skips package/deploy. Inspect the actual run state and leave full CI/production acceptance open until terminal evidence proves them.
-- [ ] Inspect new-source Linux/browser and Windows terminal evidence; retain actual failures and rerun only after evidence-backed fixes. Production merge/deploy and actual external client acceptance still require their own evidence and authorization.
+- [x] Export only the current tree delta onto a separate publication branch rooted at the reviewed PR42 head, retain the pre-push hook, and verify its complete Git tree equals the development candidate before publishing. Public `f09ef3e81764f17436d0be3044226032fa1194e1` and development `fd037464375aba05823c533bafa119b97068c833` both have tree `650b60d7c5dfd41b1a413a473d09a2155f2128c9`.
+- [x] Create and attach a draft PR with the reviewed publication branch as its base. [PR43](https://github.com/dengyie/agent-fleet/pull/43) targets `codex/workflow-platform-release`; [exact-head CI43272902162](https://github.com/dengyie/agent-fleet/actions/runs/43272902162) was dispatched separately and skips main-only package/deploy.
+- [x] Inspect new-source Linux/browser and Windows terminal evidence. CI completed successfully; the downloaded Linux JUnit has 7541 cases, zero failure/error/skip, 61 PNGs, and the original verifier independently confirms 46 journeys/2529 selectors/exact revision. Windows has 279 cases: 277 passed and two POSIX skips, zero failure/error. PR43 was moved to ready for review; production merge/deploy and external client acceptance remain open.
 
 ## Local verification — 2026-11-13
 
@@ -74,5 +74,9 @@
 - Full collection resolves 2529 selectors across 46 journeys and 7541 cases. All 26 latest PNGs passed header/chunk CRC/decompression/row checks; mobile configuration and token delivery screenshots were visually inspected, with generated token fields masked in evidence.
 - CI-required Ruff rules, JavaScript syntax, Python 3.10 grammar, UTF-8/no-BOM, YAML selection/main-only release conditions and `git diff --check` passed. Intermediate test-fixture failures (workspace name limit, missing browser window shim, and expecting three tools after selecting two permissions) remain in the original reports.
 - Private raw evidence: verification root `identity-registration-20261113/`; authoritative completed reports are `backend-verified.xml`, `registration-exact-final.xml`, `browser-delivery-final.xml`, `regression-final.xml`, `ci-contract-final.xml`, `collection-final.log` and `local-verification.json`. This is local evidence; new full Linux/Windows CI, publication, production and global TODO states stay distinct.
+
+## Exact publication CI — 2026-11-13
+
+Public revision `f09ef3e81764f17436d0be3044226032fa1194e1`, [run43272902162](https://github.com/dengyie/agent-fleet/actions/runs/43272902162), is successful. Original downloaded artifacts are `pr43-linux/results.xml`, `pr43-linux/journeys.json`, 61 PNGs, and `pr43-windows/windows-results.xml` under the same private evidence root. Linux executes 7541 cases with no failures/errors/skips; Windows executes 279 cases with 277 passes and two POSIX skips. The original release verifier was rerun against the clean publication checkout and exact public revision, confirming all 46 journeys and 2529 selectors. All five external checks remain `not_run`; no package/deploy or production task is claimed. Later MCP registration development is a separate increment and is not covered by this CI.
 
 Return to [operator instructions](../../platform/workflow-platform/integration-setup.md#从账号页面登记), [Workflow entry](../../platform/workflow-platform/README.md), and [development ledger](../../platform/development-completion.md#fleet-身份页面登记开发增量2026-11-13独立于公开-pr42).

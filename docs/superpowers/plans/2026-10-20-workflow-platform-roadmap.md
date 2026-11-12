@@ -300,6 +300,7 @@ Hub 子集的实际边界见[产物契约 §6.4](../specs/2026-10-20-artifact-ca
 - [x] 本机验证恶意描述、完整 discovery 变化、伪造 readOnlyHint、SSRF/redirect、错误结果、超时与输出脱敏。
 - [x] 目录持久登记/待审与批准版本、跨进程 CAS/撤销、返回对象隔离、独立平台 reader 4 及禁用恢复；无 rediscovery 的默认 bootstrap/原生 Run/HTTPS 路径已有证据，见[目录持久化计划](2026-10-25-mcp-catalog-persistence.md)。
 - [x] 账户管理员的 MCP 目录管理界面：脱敏分页、完整定义审阅、精确 epoch/revision 审批/撤销、未决响应读回及页面/身份隔离，见[目录管理计划](2026-10-25-mcp-catalog-administration.md)。
+- [x] MCP 页面登记与显式发现的本机关联实现：原不可变目录、同事务工作区校验、环境凭据引用、正常启动和跨进程附着、原版本发现/待审、固定重试与桌面/手机交互已验证。独立发布和完整 CI 状态见[接入计划](2026-11-13-mcp-connection-registration.md)；真实外部服务与其他集成界面仍开放。
 - [ ] 其余集成配置 UI、真实只读 MCP 服务和实际账号/策略试点。
 - [x] 正常 Hub 从受信文件挂载 MCP 适配器，支持环境/gates/显式空值优先级；独立 CLI 离线预览、显式单连接器发现、重启复用原目录，见[部署入口](../../platform/workflow-platform/mcp-startup.md)。真实外部服务及其余 UI 继续开放。
 

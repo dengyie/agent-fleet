@@ -1,5 +1,25 @@
 # 文档开发总账
 
+## 首批线上试运行判断（2026-11-13）
+
+首批候选为 PR42 + PR43，公开 HEAD `f09ef3e81764f17436d0be3044226032fa1194e1`。其官方 Linux/browser 与 Windows CI 已成功，真实 CLI 开发、独立评审、固定测试、下载及重登恢复证据见下文。适合进入线上自用试运行准备，尚未完成生产 Workflow 验收。
+
+本次从干净公开 checkout 使用原打包脚本生成候选后端、前端及 bundle；明确为本地预检包，不是官方 CI package。bundle 为 7181665 bytes，SHA-256 `bc4e59ab3fc02206f37693c0eca39f441e603a067872848c4ab50ecf681c8e97`。实际生产 receiver 的 `check` 返回 `checked`、精确 SHA/run、退出 0；前后 LIVE inode、RELEASE_ORIGIN、gates/hosts 摘要和无 pending/维护标记状态一致。没有合并、应用切换或重启。证据位于私有 verification 根 `online-readiness-pr43-20261113/`。
+
+公网 healthz、首页、登录页及 manifest 均为 200，manifest 与实际 RELEASE_ORIGIN 仍为 `301e259000a7d1027181ee716b29d5dd5fa9b951`。实际生产 `fleet-gates.conf` 中平台、worker、worker scheduler 为 1；Workflow、dispatch、Workflow 登记文件、remote execution、MCP connectors 及 Fleet MCP 字段均未配置。这只描述该文件，不推断运行进程环境覆盖值。容器以 mango 执行的当前 Python 无 pytest，当前 PATH 和 `/usr/bin/bwrap` 无 bubblewrap；本地固定测试仍需准备实际执行环境，远程 Node 使用其自己的执行环境。
+
+发布顺序应保持候选依赖：整合 PR42/PR43，并让最终 main 的正式 test/package/deploy 产生同次发布证据；配置实际工作区、模型、执行器和持久 manifest，检查模板后开启 dispatch，完成生产真实任务、下载及重启恢复。保留原受控部署、备份和回滚链路。当前用户询问部署可用性，不作为已经执行合并或部署的事实。
+
+后续 MCP 页面登记源码属于独立增量。最新后端/MCP 管理/Fleet 身份浏览器组合报告 `browser-final.xml` 为 **80 passed、零 failure/error/skip**；另有原备份/架构关联报告与实际 HTTPS peer、跨进程附着和恢复禁用证据。390px 表单截图已抽查，工具字段实际 hit-test 通过。提交前原13模块关联复验 **504 passed、2passing subtests、零 failure/error/skip**；前端发布清单的初次遗漏失败已保留并显式补齐新模块，WF-06新增29selectors，当前收集46journeys/2558selectors/7601tests全部可解析。CI必需Ruff、Python3.10语法、JS语法、UTF-8无BOM和diff检查通过。独立发布与完整CI以自己的终态证据为准，不包含在本节首批PR43候选中。Obsidian vault 当前处于无关 rebase 的 detached HEAD，依照 master 编辑规则暂不更新其笔记，不干预该 rebase。
+
+## PR43 完整 CI 与后续 MCP 页面接入（2026-11-13）
+
+[PR43](https://github.com/dengyie/agent-fleet/pull/43) 的公开 HEAD `f09ef3e81764f17436d0be3044226032fa1194e1` 与开发候选 `fd037464375aba05823c533bafa119b97068c833` 完整 tree 相同，均为 `650b60d7c5dfd41b1a413a473d09a2155f2128c9`。[官方 CI43272902162](https://github.com/dengyie/agent-fleet/actions/runs/43272902162) 已成功：原 Linux JUnit **7541 cases、零 failure/error/skip**，原发布核验器在干净公开 checkout 上确认 **46 journeys、2529 selectors、精确 revision**；61 张 PNG 包含在原工件。Windows 原 JUnit **279 cases：277 passed、2 POSIX skips、零 failure/error**，其中 Native setup22 项、Fleet 登记31 项。PR43 已附到当前任务并转为 ready for review；其 base 仍为 PR42 分支。
+
+原证据在本机私有 verification 根 `identity-registration-20261113/pr43-linux/` 和 `pr43-windows/`。feature dispatch 按原规则不打包/部署，五项外部验收仍 `not_run`。main/生产尚未合并此增量；生产模板登记、执行环境、真实模型/Node任务及下载恢复仍须自己的证据。
+
+后续 MCP 页面接入已有独立[实施计划](../superpowers/plans/2026-11-13-mcp-connection-registration.md)：原缺口33项失败已保存，登记/发现、原目录存储、正常 Hub 装配和实际浏览器关联实现已有上述80项最终组合及504项提交前关联验证。独立发布、完整 CI 和真实外部服务以其后续证据为准。此后续增量不属于上述 PR43 门禁，完整项目 TODO 保持开放。
+
 ## Fleet 身份页面登记开发增量（2026-11-13，独立于公开 PR42）
 
 账号页现在可以创建 Fleet MCP 集成身份：填写原 owner/integration、模板/工作区列表、三工具权限及预算，浏览器生成令牌并仅提交摘要；原身份仓库在同一写事务中验证新登记的工作区和 admission。相同定义重复登记保持原时间、撤销和恢复禁用，定义/token 冲突拒绝；原 CLI/bootstrap 默认合同不变，正常 Hub 无需重启即可使用新凭据。
@@ -8,15 +28,15 @@
 
 后端/身份/CLI/Fleet MCP/明文与加密备份七模块 **247 passed、零失败/错误/跳过**；两个集成管理浏览器模块 **20 passed、零跳过**，含桌面/390px 创建、权限选择、实际原 MCP 认证、丢响应固定重试、关窗、账号切换和精确 UTF-8 标识。最新登记专属 **31 passed**；共享管理边界、账号矩阵、前端合同、架构、打包和门禁八模块 **351 passed、零跳过**。这几组报告独立保存，不标为全仓门禁。
 
-原证据位于本机私有 verification 根 `identity-registration-20261113/`。26张最新PNG完整校验并抽查配置/令牌视图；46条journey/2529selectors/7541实例收集齐全。Windows CI新增两个实际模块（Native setup与Fleet登记），复用runner已有Node，不新增运行时安装；该配置变更后164项CI/打包/架构关联复验通过，尚无新Windows终态结果。操作与范围见 [页面登记说明](workflow-platform/integration-setup.md#从账号页面登记)及 [实施计划](../superpowers/plans/2026-11-13-fleet-identity-registration-ui.md)。当前尚未进入 PR42/生产；新的完整 Linux/browser/Windows 门禁和正式发布仍须单独验证。其余 MCP/外部集成配置 UI、自动摘要、视频/其他执行 context、真实外部试点及完整 TODO 继续开放。
+原证据位于本机私有 verification 根 `identity-registration-20261113/`。26张本机PNG完整校验并抽查配置/令牌视图；Windows CI新增两个实际模块（Native setup与Fleet登记），复用runner已有Node，不新增运行时安装；配置变更后164项本机关联复验通过。该增量现已进入PR43，完整Linux/browser/Windows官方结果见上节，未进入PR42或生产。操作与范围见 [页面登记说明](workflow-platform/integration-setup.md#从账号页面登记)及 [实施计划](../superpowers/plans/2026-11-13-fleet-identity-registration-ui.md)。其余 MCP/外部集成配置 UI、自动摘要、视频/其他执行 context、真实外部试点及完整 TODO 继续开放。
 
-## Native 初始化开发增量（2026-11-13，未进入公开候选）
+## Native 初始化开发增量（2026-11-13，已进入PR43、未上线）
 
 原 `hub.workflow_setup` 仅初始化 coding-delivery 的三个独立会话，Native-only manifest 无法通过该入口准备普通 Hub 所需对象。开发分支现复用启动登记的纯 parser，支持 Native 1–8 step、精确 `--template` 选择及共享会话去重；沿用原只读 preview 和 create-only 写事务。模型及 secret 单独配置，初始化不派发任务。错误定义、歧义、超限 target 和不合法 model profile 在建库前拒绝；既有对象、归档冲突、插入回滚和两个 CLI 同时 apply 均有实际存储断言。
 
 原缺口 6 failed、边界补充 3 failed 的报告保留。最终 setup/startup 集合 **81 passed**，扩展到 Native 文本/代码/图片/音频/Memory/恢复、明文与加密备份、架构边界的 14 模块 **390 passed、零失败/错误/跳过**；门禁关联 **134 passed、零跳过**，CI 必需 Ruff 规则、Python 3.10 语法、UTF-8 无 BOM 与 diff 检查通过。46 条 journey、2516 个 selector 全部对应当前收集的 7504 个实例，仅证明收集完整。原报告位于本机私有 verification 根 `native-workflow-setup-20261113/`。首次 green 命令因引用不存在的模块退出 4、未执行测试，未计入通过结果。
 
-这组结果只覆盖本地开发增量，**不属于公开 PR42 / db4c7ff 的官方 CI 或候选包**，也不代替新版本完整 Linux/browser/Windows 门禁及生产验收。实施细节见 [Native 初始化计划](../superpowers/plans/2026-11-13-native-workflow-setup.md)，操作示例见 [工作区和会话初始化](workflow-platform/startup-registration.md#工作区和会话初始化)。
+这组本机结果**不属于公开 PR42 / db4c7ff 的官方 CI 或候选包**；增量已经进入PR43，其完整官方门禁见本页上节，生产验收仍开放。实施细节见 [Native 初始化计划](../superpowers/plans/2026-11-13-native-workflow-setup.md)，操作示例见 [工作区和会话初始化](workflow-platform/startup-registration.md#工作区和会话初始化)。
 
 ## 公开候选 CI 与生产包预检（2026-11-13）
 

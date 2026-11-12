@@ -12,16 +12,17 @@ from typing import Any, Callable, Protocol
 from hub.domain.mcp_catalog import MAX_CONNECTORS, MCPCatalogRecord
 from hub.domain.mcp_tool_pins import MCPToolPin
 from hub.domain.workflow_identity import canonical_digest
-from hub.platform.connectors.mcp import MCPCallResult, MCPConnector, MCPConnectorError, MCPDiscovery, MCPTool
+from hub.platform.connectors.mcp import MCPCallResult, MCPConnector, MCPConnectorConfig, MCPConnectorError, MCPDiscovery, MCPTool
 from hub.platform.connectors.snapshots import decode_config, decode_discovery, encode_config, encode_discovery
 
 MAX_EXPOSED_TOOLS = 20
 
 
 class MCPCatalogStore(Protocol):
-    def register(self, config_snapshot: bytes, *, now: float) -> MCPCatalogRecord: ...
+    def register(self, config_snapshot: bytes, *, now: float, require_available_workspace: bool = False) -> MCPCatalogRecord: ...
     def get_many(self, connector_ids: tuple[str, ...]) -> tuple[MCPCatalogRecord, ...]: ...
     def list_page(self, after: str | None = None, limit: int = 8) -> tuple[tuple[MCPCatalogRecord, ...], str | None]: ...
+    def get_scope(self, owner_id: str, workspace_id: str) -> tuple[MCPCatalogRecord, ...]: ...
     def publish(self, connector_id: str, *, expected_epoch: int, discovery_snapshot: bytes, now: float) -> MCPCatalogRecord: ...
     def admit(self, connector_id: str, *, expected_revision: int, now: float, expected_epoch: int | None = None) -> MCPCatalogRecord: ...
     def revoke(self, connector_id: str, *, expected_digest: str, now: float, expected_epoch: int | None = None) -> MCPCatalogRecord: ...
@@ -79,9 +80,11 @@ def _validate_pins(pins: tuple[MCPToolPin, ...]) -> None:
 
 class ConnectorCatalog:
     def __init__(self, *, enabled: bool = False, store: MCPCatalogStore | None = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time,
+                 registration_factory: Callable[[MCPConnectorConfig], MCPConnector] | None = None) -> None:
         self.enabled = bool(enabled)
         self.store, self.clock = store, clock
+        self.registration_factory = registration_factory
         self._connectors: dict[str, MCPConnector] = {}
         self._entries: dict[str, CatalogEntry] = {}
         self._revisions: dict[str, int] = {}
@@ -98,6 +101,18 @@ class ConnectorCatalog:
     def attached_ids(self) -> frozenset[str]:
         with self._lock:
             return frozenset(self._connectors)
+
+    def attach_persisted(self, records: tuple[MCPCatalogRecord, ...]) -> None:
+        if self.registration_factory is None:
+            return
+        for record in records:
+            if record.disabled or record.connector_id in self.attached_ids():
+                continue
+            self.register(self.registration_factory(decode_config(record.config_snapshot)))
+
+    def _attach_scope(self, owner_id: str, workspace_id: str) -> None:
+        if self.registration_factory is not None and self.store is not None:
+            self.attach_persisted(self.store.get_scope(owner_id, workspace_id))
 
     def register(self, connector: MCPConnector) -> None:
         self._enabled()
@@ -160,6 +175,7 @@ class ConnectorCatalog:
                           pins: tuple[MCPToolPin, ...] | None = None) -> dict[str, CatalogEntry]:
         if pins is not None:
             _validate_pins(pins)
+        self._attach_scope(owner_id, workspace_id)
         with self._lock:
             if self.store is None:
                 return dict(self._entries)
@@ -251,6 +267,7 @@ class ConnectorCatalog:
              workspace_id: str, expected_revision: int | None = None,
              expected_pin: MCPToolPin | None = None) -> MCPCallResult:
         self._enabled()
+        self._attach_scope(owner_id, workspace_id)
         with self._lock:
             key = self._by_name.get(public_name)
             entries = dict(self._entries) if self.store is None else {}
@@ -275,8 +292,15 @@ class ConnectorCatalog:
         self._enabled()
         return pinned.call(entry.tool_name, arguments)
 
-    def refresh(self, connector_id: str) -> MCPDiscovery:
+    def refresh(self, connector_id: str, *, expected_epoch: int | None = None) -> MCPDiscovery:
         self._enabled()
+        if self.registration_factory is not None and self.store is not None:
+            records = self.store.get_many((connector_id,))
+            if records and records[0].disabled:
+                raise MCPConnectorError("connector_revoked")
+            if records and expected_epoch is not None and (type(expected_epoch) is not int or records[0].epoch != expected_epoch):
+                raise MCPConnectorError("connector_revision_changed")
+            self.attach_persisted(records)
         with self._lock:
             connector = self._connectors.get(connector_id)
             if connector is None:
@@ -288,6 +312,8 @@ class ConnectorCatalog:
             if not records:
                 raise MCPConnectorError("connector_not_found")
             record = records[0]
+            if expected_epoch is not None and (type(expected_epoch) is not int or record.epoch != expected_epoch):
+                raise MCPConnectorError("connector_revision_changed")
             if record.disabled:
                 raise MCPConnectorError("connector_revoked")
             if record.config_snapshot != encode_config(connector.config):

@@ -1,10 +1,12 @@
 # Agent Fleet 深度优化开发入口
 
-Fleet 身份页面登记已在独立开发分支补齐：原库新增身份、不可变重复登记、正常 Hub 重启和真实 MCP 凭据使用已有证据；后端关联247项、两个集成浏览器模块20项、其他关联351项通过。见 [操作说明](integration-setup.md#从账号页面登记)、[实施计划](../../superpowers/plans/2026-11-13-fleet-identity-registration-ui.md)及[开发总账](../development-completion.md#fleet-身份页面登记开发增量2026-11-13独立于公开-pr42)。此增量尚未进入 PR42/生产，新版本完整门禁和其余 TODO 仍开放。
+首批线上自用试运行候选为 PR42 + PR43 / `f09ef3e`；本次原打包脚本生成的候选包已通过实际生产 receiver `check`，生产与配置未切换。线上仍为 `301e259`，Workflow 持久登记、实际执行环境及生产任务/下载/恢复须在发布过程中完成。最新未发布的 MCP 页面登记增量不包含在此首批候选中。见[部署判断与精确证据](../development-completion.md#首批线上试运行判断2026-11-13)。
+
+Fleet 身份页面登记与Native初始化已进入独立[PR43](https://github.com/dengyie/agent-fleet/pull/43)：[官方CI43272902162](https://github.com/dengyie/agent-fleet/actions/runs/43272902162) Linux7541项、46流程、2529selectors全部通过，Windows277通过/2平台跳过；原报告与精确版本已独立核对。见 [操作说明](integration-setup.md#从账号页面登记)、[实施计划](../../superpowers/plans/2026-11-13-fleet-identity-registration-ui.md)及[开发总账](../development-completion.md#pr43-完整-ci-与后续-mcp-页面接入2026-11-13)。未合并/上线；后续[MCP页面接入](../../superpowers/plans/2026-11-13-mcp-connection-registration.md)、正式生产配置、真实业务验收及其余TODO仍开放。
 
 > 当前状态（2026-11-13）：公开候选 `db4c7ff` 的 PR42 官方 CI 已通过：Linux7482项、0失败/跳过、46/46流程、2508selectors；Windows224通过/2平台跳过。真实CLI试点完成开发/独立评审/31固定测试/5产物下载和重登恢复，仍待人工接受；实际跨机Node四场景通过。生产receiver的候选包check已过，未合并/部署，main/现网仍为 `301e259`。正式CI打包部署、生产模型/新鲜Node的实际任务与恢复、完整WF-04/05及其余F5/F6 TODO仍开放。详见[最新开发总账](../development-completion.md#公开候选-ci-与生产包预检2026-11-13)。
 
-> 2026-11-13独立开发增量：Native workspace/conversation 现在可通过同一 preview/apply CLI 初始化，支持精确模板选择、1–8 step 和共用会话去重；原对象保留及事务不变。14模块关联390项通过。该改动尚未进入公开PR42，不混用旧候选的官方CI或部署证据，完整新版本门禁仍开放。见 [初始化操作](startup-registration.md#工作区和会话初始化)与 [实施计划](../../superpowers/plans/2026-11-13-native-workflow-setup.md)。
+> 2026-11-13独立增量：Native workspace/conversation 可通过同一 preview/apply CLI 初始化，支持精确模板选择、1–8 step和共用会话去重；原对象保留及事务不变。此改动已进入PR43并通过上方官方门禁，不混用PR42或生产证据。见 [初始化操作](startup-registration.md#工作区和会话初始化)与 [实施计划](../../superpowers/plans/2026-11-13-native-workflow-setup.md)。
 
 > 2026-11-12功能补齐：外部 Agent 合同的 `capability_requirements` 必须与已登记 adapter 显式声明的能力 revision 匹配，并随不可变 target/configuration digest 固定；不匹配在 admission 前稳定拒绝。旧空能力 target 快照保持兼容。受控外部 Workflow 回归 427 项通过；真实外部账号与生产试点仍按原边界单独验收。
 

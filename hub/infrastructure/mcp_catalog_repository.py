@@ -166,7 +166,21 @@ class MCPCatalogRepository:
             raise MCPCatalogError("connector_not_found")
         return _decode(row)
 
-    def register(self, config_snapshot: bytes, *, now: float) -> MCPCatalogRecord:
+    def get_scope(self, owner_id: str, workspace_id: str) -> tuple[MCPCatalogRecord, ...]:
+        with self._transaction() as connection:
+            self._require_schema(connection)
+            rows = connection.execute(f"SELECT {_COLUMNS} FROM mcp_catalog_connectors "
+                "WHERE json_extract(CAST(config_snapshot AS TEXT),'$.owner_id')=? "
+                "AND json_extract(CAST(config_snapshot AS TEXT),'$.workspace_id')=? "
+                "ORDER BY connector_id LIMIT 129", (owner_id, workspace_id)).fetchall()
+            if len(rows) > MAX_CONNECTORS:
+                raise MCPCatalogError("too_many_connectors")
+            return tuple(_decode(row) for row in rows)
+
+    def register(self, config_snapshot: bytes, *, now: float,
+                 require_available_workspace: bool = False) -> MCPCatalogRecord:
+        if type(require_available_workspace) is not bool:
+            raise MCPCatalogError("invalid_mcp_registration_command")
         config, now = decode_config(config_snapshot), _time(now)
         digest = hashlib.sha256(config_snapshot).hexdigest()
         with self._transaction(write=True) as connection:
@@ -177,6 +191,10 @@ class MCPCatalogRepository:
                 if record.config_snapshot != config_snapshot:
                     raise MCPCatalogError("connector_registration_conflict")
                 return record
+            if require_available_workspace and connection.execute(
+                    "SELECT 1 FROM workspaces WHERE owner_id=? AND workspace_id=? AND enabled=1",
+                    (config.owner_id, config.workspace_id)).fetchone() is None:
+                raise MCPCatalogError("mcp_registration_workspace_unavailable")
             rows = connection.execute("SELECT config_snapshot FROM mcp_catalog_connectors LIMIT 129").fetchall()
             if len(rows) >= MAX_CONNECTORS:
                 raise MCPCatalogError("too_many_connectors")

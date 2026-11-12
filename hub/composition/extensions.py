@@ -70,7 +70,8 @@ def register_fleet_extension(app, config, repositories, core, platform, sessions
         if (config.platform_mcp_connectors_enabled and p.mcp_catalog is not None
                 and getattr(p.mcp_catalog, "enabled", False) and getattr(p.mcp_catalog, "store", None) is not None):
             from hub.application.mcp_catalog_admin import MCPCatalogAdminService
-            services["mcp_catalog_admin"] = MCPCatalogAdminService(p.mcp_catalog)
+            services["mcp_catalog_admin"] = MCPCatalogAdminService(p.mcp_catalog,
+                registration_enabled=config.platform_mcp_catalog_registration_enabled)
         if p.mcp_catalog_repository is not None:
             repos["mcp_catalog"] = p.mcp_catalog_repository
         if p.service_health is not None:

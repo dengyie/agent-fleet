@@ -90,6 +90,7 @@ class ReleaseLayoutTests(unittest.TestCase):
         allowed.update({'assets/app.js', 'THIRD_PARTY.md'})
         allowed.update({'assets/api/integrations.js', 'assets/api/integration-identities.js',
                         'assets/views/account/integrations.js', 'assets/views/account/identities.js'})
+        allowed.add('assets/views/account/mcp-registration.js')
         allowed.update({'assets/api/workflow-summaries.js',
                         'assets/views/account/workflow-summaries.js'})
         allowed.update({'assets/views/session-handoff.js', 'assets/views/session-questions.js',

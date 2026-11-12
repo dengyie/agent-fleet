@@ -134,6 +134,7 @@ class FleetConfig:
     platform_workflow_dispatch_enabled: bool = False
     platform_workflow_registration_file: Path | None = None
     platform_mcp_connectors_enabled: bool = False
+    platform_mcp_catalog_registration_enabled: bool = False
     platform_mcp_registration_file: Path | None = None
     platform_capability_routing_enabled: bool = False
     platform_external_agents_enabled: bool = False
@@ -223,6 +224,7 @@ class FleetConfig:
         platform_workflow_dispatch_enabled: bool = False,
         platform_workflow_registration_file: str | Path | None = None,
         platform_mcp_connectors_enabled: bool = False,
+        platform_mcp_catalog_registration_enabled: bool = False,
         platform_mcp_registration_file: str | Path | None = None,
         platform_capability_routing_enabled: bool = False,
         platform_external_agents_enabled: bool = False,
@@ -453,6 +455,8 @@ class FleetConfig:
             platform_workflow_registration_file=(Path(platform_workflow_registration_file).expanduser()
                                                  if platform_workflow_registration_file else None),
             platform_mcp_connectors_enabled=bool(platform_enabled and platform_mcp_connectors_enabled),
+            platform_mcp_catalog_registration_enabled=bool(
+                platform_enabled and platform_mcp_connectors_enabled and platform_mcp_catalog_registration_enabled),
             platform_mcp_registration_file=(Path(platform_mcp_registration_file).expanduser()
                                             if platform_mcp_registration_file else None),
             platform_capability_routing_enabled=bool(platform_enabled and platform_workflows_enabled and platform_capability_routing_enabled),

@@ -14,7 +14,7 @@ from hub.bootstrap import create_app
 from hub.config import FleetConfig
 from hub.domain.mcp_catalog import MCPCatalogError
 from test_account_http import PASSWORD
-from test_mcp_catalog_admin import AdminSetup, ROOT, admin_setup
+from test_mcp_catalog_admin import AdminSetup, ROOT, admin_setup  # noqa: F401 - registers the shared pytest fixture
 from test_mcp_catalog_persistence import _connector, _messages
 from test_mcp_connector import response
 from test_workflow_browser import _browser_acceptance
@@ -77,3 +77,46 @@ def test_mcp_admin_feature_discovery_in_real_browser(tmp_path: Path, mode: str) 
         repositories=repositories)
     app.extensions["accounts"].bootstrap_admin("admin@example.test", PASSWORD)
     _browser_acceptance(app, "integrations_browser.cjs", "empty" if mode == "empty" else "hidden", "desktop")
+
+
+@pytest.mark.parametrize("mode,viewport", [("create", "desktop"), ("create", "mobile"),
+    ("retry", "desktop"), ("cancel", "desktop"), ("lifecycle", "desktop"),
+    ("discovery-recovery", "desktop"), ("exact-owner", "desktop"),
+    ("disabled-repeat", "desktop"), ("active-repeat", "desktop")])
+def test_mcp_connection_registration_and_explicit_discovery_in_real_browser(tmp_path, monkeypatch, mode, viewport):
+    from test_mcp_registration import build_setup, install_peer
+    from test_account_http import signup
+    setup = build_setup(tmp_path, monkeypatch)
+    setup.app.config["ACCOUNT_COOKIE_SECURE"] = False
+    owner = "\ufefftenant" if mode == "exact-owner" else "owner"
+    if owner != "owner":
+        setup.platform.upsert_workspace(owner, {"workspace_id": "workspace", "root_path": str(tmp_path)})
+    ordinary = setup.app.test_client()
+    assert signup(ordinary, setup.mail, "ordinary@example.test").status_code == 200
+    calls = install_peer(monkeypatch)
+    if mode in {"disabled-repeat", "active-repeat"}:
+        from test_mcp_connector import config
+        from hub.platform.connectors.registration import connector_from_config
+        setup.catalog.register(connector_from_config(config(connector_id="browser-mcp", secret_ref="env://MCP_TEST_TOKEN",
+            timeout_s=10, result_limit_bytes=65536)))
+        if mode == "active-repeat":
+            setup.catalog.discover("browser-mcp")
+            calls.clear()
+        else:
+            prior = setup.catalog.store.get_many(("browser-mcp",))[0]
+            setup.catalog.store.revoke("browser-mcp", expected_digest=prior.config_digest, now=prior.updated_at + 1)
+    _browser_acceptance(setup.app, "mcp_registration_browser.cjs", mode, viewport)
+    if mode in {"cancel", "lifecycle"}:
+        assert calls == []
+        assert setup.catalog.store.get_many(("browser-mcp",)) == ()
+    elif mode in {"disabled-repeat", "active-repeat"}:
+        record = setup.catalog.store.get_many(("browser-mcp",))[0]
+        assert calls == []
+        assert (record.revoked_at is not None) == (mode == "disabled-repeat")
+        assert (record.active_snapshot is not None) == (mode == "active-repeat")
+    else:
+        record = setup.catalog.store.get_many(("browser-mcp",))[0]
+        assert record.active_snapshot is not None
+        assert calls == ["server/discover", "tools/list"]
+        result = setup.catalog.call("mcp.browser-mcp.weather", {"city": "Singapore"}, owner_id=owner, workspace_id="workspace")
+        assert result.state == "succeeded" and result.structured_content == {"temperature": 24}

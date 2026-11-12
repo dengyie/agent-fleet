@@ -52,7 +52,8 @@ export function mountAccount(root) {
     }
     button(sessions, '退出所有会话', async () => { await accountRequest('sessions/revoke', {}); redirectToLogin(); }); root.append(sessions);
     if (data.user.role === 'admin' && data.features?.mcp_catalog_management === true) {
-      integrationViews.push(mountMCPIntegrations(root, {suspended}));
+      integrationViews.push(mountMCPIntegrations(root, {suspended,
+        registrationEnabled: data.features?.mcp_catalog_registration === true, ownerId: data.user.id}));
     }
     if (data.user.role === 'admin' && data.features?.fleet_identity_management === true) {
       integrationViews.push(mountIntegrationIdentities(root, {suspended}));

@@ -8,10 +8,11 @@ from hub.domain.mcp_administration import (
     MCPAdminCommand, MCPAdminDiscovery, MCPAdminState, MCPAdminTool, MCPConnectorDetail,
     MCPConnectorPage, MCPConnectorSummary, catalog_page, connector_identifier,
 )
-from hub.domain.mcp_catalog import MCPCatalogError, MCPCatalogRecord
+from hub.domain.mcp_catalog import MAX_CATALOG_INTEGER, MCPCatalogError, MCPCatalogRecord
 from hub.platform.connectors.mcp import MCPDiscovery
 from hub.platform.connectors.snapshots import decode_config, decode_discovery, discovery_digest
 from .connector_catalog import ConnectorCatalog, MCPCatalogStore
+from .mcp_registration import MCPRegistrationCommand, register_mcp_connection
 
 
 def _utc(value: float) -> str:
@@ -57,11 +58,34 @@ def _detail(record: MCPCatalogRecord, attached: frozenset[str]) -> MCPConnectorD
 
 
 class MCPCatalogAdminService:
-    def __init__(self, catalog: ConnectorCatalog) -> None:
+    def __init__(self, catalog: ConnectorCatalog, *, registration_enabled: bool = False) -> None:
         if catalog.store is None:
             raise MCPCatalogError("mcp_catalog_persistence_required")
         self.catalog = catalog
         self.store: MCPCatalogStore = catalog.store
+        self.registration_enabled = bool(registration_enabled)
+
+    def _registration(self) -> None:
+        self._enabled()
+        if not self.registration_enabled:
+            raise MCPCatalogError("mcp_registration_disabled")
+
+    def register(self, command: MCPRegistrationCommand) -> MCPConnectorDetail:
+        self._registration()
+        record = register_mcp_connection(self.catalog, command)
+        return _detail(record, self.catalog.attached_ids())
+
+    def discover(self, connector_id: str, expected_epoch: int) -> MCPConnectorDetail:
+        self._registration()
+        connector_id = connector_identifier(connector_id)
+        if type(expected_epoch) is not int or not 1 <= expected_epoch <= MAX_CATALOG_INTEGER:
+            raise MCPCatalogError("invalid_catalog_command")
+        try:
+            self.catalog.refresh(connector_id, expected_epoch=expected_epoch)
+        except MCPCatalogError as exc:
+            if exc.code != "connector_revision_pending":
+                raise
+        return self.detail(connector_id)
 
     def _enabled(self) -> None:
         if not self.catalog.enabled:

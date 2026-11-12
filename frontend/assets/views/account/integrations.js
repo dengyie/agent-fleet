@@ -1,4 +1,5 @@
-import {listMCPConnectors, getMCPConnector, manageMCPConnector} from '../../api/integrations.js';
+import {listMCPConnectors, getMCPConnector, manageMCPConnector, discoverMCPConnector} from '../../api/integrations.js';
+import {openMCPRegistration} from './mcp-registration.js';
 
 const stateLabels = {registered: '待发现', active: '已批准', pending: '有待审版本', revoked: '已撤销', restore_disabled: '恢复后禁用'};
 function node(tag, text, className) {
@@ -12,27 +13,31 @@ function button(text, action) {
   element.addEventListener('click', action); return element;
 }
 
-export function mountMCPIntegrations(root, {suspended: initiallySuspended = false} = {}) {
+export function mountMCPIntegrations(root, {suspended: initiallySuspended = false, registrationEnabled = false, ownerId = ''} = {}) {
   const section = node('section', undefined, 'panel account-panel mcp-management');
   section.setAttribute('aria-label', 'MCP 集成管理');
   const heading = node('h2', 'MCP 集成管理');
   const status = node('p', '', 'mcp-status'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
   const reload = button('重新读取目录', () => readPage(true));
+  const create = registrationEnabled ? button('登记 MCP 连接', () => openRegistration()) : null;
   const toolbar = node('div', undefined, 'mcp-toolbar'); toolbar.append(heading, reload);
+  if (create) toolbar.insertBefore(create, reload);
   const list = node('div', undefined, 'mcp-list'); list.setAttribute('aria-label', 'MCP 连接目录');
   const more = button('加载更多连接', () => readPage(false)); more.hidden = true;
   const listColumn = node('div'); listColumn.append(list, more);
   const inspector = node('section', undefined, 'mcp-inspector'); inspector.setAttribute('aria-label', 'MCP 连接详情');
   const layout = node('div', undefined, 'mcp-layout'); layout.append(listColumn, inspector);
-  section.append(toolbar, node('p', '审阅已登记的只读工具、批准待审版本或撤销连接。地址、密钥与运行时适配器由管理员可信配置管理。', 'meta'), status, layout);
+  section.append(toolbar, node('p', registrationEnabled ? '登记只读连接、显式发现选定工具、审阅待审版本或撤销连接。' :
+    '审阅已登记的只读工具、批准待审版本或撤销连接。地址、密钥与运行时适配器由管理员可信配置管理。', 'meta'), status, layout);
   root.append(section);
   const rows = new Map();
   let disposed = false, suspended = initiallySuspended, generation = 0, busy = false, cursor = null;
-  let selected = null, detail = null, dialog = null, controller = null;
+  let selected = null, detail = null, dialog = null, controller = null, registrationDialog = null;
   let actionButtons = [];
 
   function sync() {
     reload.disabled = busy; more.disabled = busy; more.hidden = cursor === null;
+    if (create) create.disabled = busy;
     for (const element of list.querySelectorAll('button')) element.disabled = busy;
     for (const element of actionButtons) element.disabled = busy;
     section.setAttribute('aria-busy', String(busy));
@@ -92,6 +97,10 @@ export function mountMCPIntegrations(root, {suspended: initiallySuspended = fals
     inspector.append(metadata, node('p', '以下是外部服务提供的定义文本。请核对协议、服务身份、描述、schema 与 annotations 后再批准。', 'meta'),
       snapshot('已批准版本', detail.active), snapshot('待审版本', detail.pending, true));
     const actions = node('div', undefined, 'mcp-actions');
+    if (registrationEnabled && item.adapter_attached && !['revoked', 'restore_disabled'].includes(item.state)) {
+      actionButtons.push(button(item.active_revision === null ? '发现工具' : '重新发现工具', () => discover(item)));
+      inspector.append(node('p', '首次发现会启用选定的只读工具；后续定义变化进入待审，已有运行保留原版本。', 'meta'));
+    }
     if (item.state === 'pending') actionButtons.push(button('批准待审版本', event => confirm('admit', detail, event.currentTarget)));
     if (!['revoked', 'restore_disabled'].includes(item.state)) actionButtons.push(button('撤销连接', event => confirm('revoke', detail, event.currentTarget)));
     actions.append(...actionButtons); inspector.append(actions); sync();
@@ -115,7 +124,8 @@ export function mountMCPIntegrations(root, {suspended: initiallySuspended = fals
       for (const item of page.connectors) rows.set(item.connector_id, item);
       cursor = page.next_cursor; drawList();
       if (record) applyDetail(record);
-      status.textContent = rows.size ? '已读取 ' + rows.size + ' 条连接登记' : '尚无连接登记；请通过可信配置登记';
+      status.textContent = rows.size ? '已读取 ' + rows.size + ' 条连接登记' :
+        registrationEnabled ? '尚无连接登记；可登记新连接' : '尚无连接登记；请通过可信配置登记';
     });
   }
   async function readDetail(connectorId, message = '') {
@@ -126,10 +136,25 @@ export function mountMCPIntegrations(root, {suspended: initiallySuspended = fals
     });
   }
   function closeDialog() {
+    registrationDialog?.(); registrationDialog = null;
     if (dialog) dialog.close();
   }
+  function openRegistration() {
+    if (!create || disposed || suspended || busy || dialog || registrationDialog) return;
+    const current = generation;
+    registrationDialog = openMCPRegistration(section, {ownerId, opener: create,
+      isCurrent: () => !disposed && !suspended && generation === current,
+      onClose: () => { registrationDialog = null; },
+      onRegistered: result => {
+        rows.set(result.connector.summary.connector_id, result.connector.summary);
+        applyDetail(result);
+        const item = result.connector.summary;
+        status.textContent = ['revoked', 'restore_disabled'].includes(item.state) ? '原连接登记已禁用' :
+          item.active_revision !== null ? '原连接登记已核对，保留已有工具版本' : '连接已登记，尚未发现工具';
+      }});
+  }
   function confirm(action, original, opener) {
-    if (busy || disposed || suspended || dialog) return;
+    if (busy || disposed || suspended || dialog || registrationDialog) return;
     const item = original.summary; const admission = action === 'admit';
     const modal = node('dialog', undefined, 'mcp-confirm'); dialog = modal;
     const title = admission ? '批准待审版本' : '撤销连接';
@@ -163,6 +188,19 @@ export function mountMCPIntegrations(root, {suspended: initiallySuspended = fals
       conflict = error.status === 409;
       status.textContent = conflict ? '目录状态已变化，正在读取当前定义…' :
         '操作结果待核对，请重新读取目录。请勿重复提交。';
+    });
+    if (conflict) await readDetail(item.connector_id, '目录状态已变化，已读取当前定义，请重新审阅');
+  }
+  async function discover(item) {
+    let conflict = false;
+    status.textContent = '正在发现选定工具…';
+    await run(signal => discoverMCPConnector(item.connector_id, item.epoch, {signal}), result => {
+      applyDetail(result);
+      status.textContent = result.connector.summary.state === 'pending' ? '新定义已发现，请审阅待审版本' :
+        ['revoked', 'restore_disabled'].includes(result.connector.summary.state) ? '连接已禁用，已读取当前状态' : '选定工具已发现';
+    }, error => {
+      detail = null; drawDetail(); conflict = error.status === 409;
+      status.textContent = conflict ? '目录状态已变化，正在读取当前定义…' : '发现结果待核对，请重新读取目录。请勿重复提交。';
     });
     if (conflict) await readDetail(item.connector_id, '目录状态已变化，已读取当前定义，请重新审阅');
   }

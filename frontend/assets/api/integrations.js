@@ -118,3 +118,50 @@ export async function manageMCPConnector(connectorId, action, payload, options =
   return parseMCPDetail(await platformRequest(recordPath(action, connectorId), {...options,
     method: 'POST', headers: {'Content-Type': 'application/json'}, body: payload}));
 }
+
+export function parseMCPRegistrationCommand(payload) {
+  try {
+    exact(payload, ['connector']); object(payload.connector);
+    const row = {...payload.connector};
+    if (!Object.hasOwn(row, 'max_tools')) row.max_tools = 100;
+    exact(row, ['connector_id', 'owner_id', 'workspace_id', 'endpoint', 'secret_ref', 'selected_tools',
+      'risk', 'retry_class', 'timeout_s', 'result_limit_bytes', 'max_tools']);
+    identifier(row.connector_id); reference(row.owner_id); reference(row.workspace_id);
+    text(row.endpoint, 2048); requireValue(!/[\x00-\x20\x7f-\uffff\\]/.test(row.endpoint));
+    const endpoint = new URL(row.endpoint);
+    requireValue(endpoint.protocol === 'https:' && endpoint.hostname && !endpoint.username && !endpoint.password && !endpoint.hash && endpoint.port !== '0');
+    requireValue(typeof row.secret_ref === 'string' && /^env:\/\/[A-Z0-9_]{1,128}$/.test(row.secret_ref));
+    requireValue(Array.isArray(row.selected_tools) && row.selected_tools.length >= 1 && row.selected_tools.length <= 20);
+    row.selected_tools.forEach(identifier); requireValue(new Set(row.selected_tools).size === row.selected_tools.length);
+    requireValue(row.risk === 'read_only' && row.retry_class === 'read_only');
+    requireValue(typeof row.timeout_s === 'number' && Number.isFinite(row.timeout_s) && row.timeout_s > 0 && row.timeout_s <= 30);
+    integer(row.result_limit_bytes); requireValue(row.result_limit_bytes <= 262144);
+    integer(row.max_tools); requireValue(row.max_tools <= 100);
+    row.selected_tools = [...row.selected_tools].sort(); boundedJSON(row, 8192);
+    return {connector: row};
+  } catch (_) {
+    throw new ContractError('invalid_mcp_registration', 'MCP 登记配置无效，请核对地址、归属、凭据引用、工具和限额');
+  }
+}
+
+export async function registerMCPConnector(payload, options = {}) {
+  const command = parseMCPRegistrationCommand(payload);
+  const result = parseMCPDetail(await platformRequest(apiPath('platform', 'v1', 'integrations', 'mcp', 'register'),
+    {...options, method: 'POST', headers: {'Content-Type': 'application/json'}, body: command}));
+  const row = command.connector, item = result.connector.summary;
+  const authority = /^[^:]+:\/\/([^/?#]+)/.exec(row.endpoint);
+  requireValue(authority && item.endpoint_origin === 'https://' + authority[1]);
+  requireValue(item.connector_id === row.connector_id && item.owner_id === row.owner_id && item.workspace_id === row.workspace_id);
+  requireValue(item.selected_tools.join('\0') === row.selected_tools.join('\0') && item.risk === row.risk && item.retry_class === row.retry_class);
+  requireValue(item.timeout_s === row.timeout_s && item.result_limit_bytes === row.result_limit_bytes);
+  return result;
+}
+
+export async function discoverMCPConnector(connectorId, expectedEpoch, options = {}) {
+  integer(expectedEpoch);
+  const result = parseMCPDetail(await platformRequest(recordPath('discover', connectorId),
+    {...options, timeoutMs: 60000, method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: {expected_epoch: expectedEpoch}}));
+  requireValue(result.connector.summary.connector_id === connectorId && result.connector.summary.epoch >= expectedEpoch);
+  return result;
+}
