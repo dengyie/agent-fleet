@@ -58,7 +58,9 @@ class ReleaseLayoutTests(unittest.TestCase):
                     'assets/views/account/integrations.js', 'assets/views/account/identities.js', 'assets/styles/integrations.css',
                     'assets/realtime/sse.js', 'assets/state/store.js', 'assets/views/fleet.js',
                     'assets/views/machine.js', 'assets/views/task.js', 'assets/views/session.js',
-                    'assets/views/assistant.js', 'assets/views/monitoring.js', 'assets/views/account.js',
+                    'assets/views/assistant.js', 'assets/views/assistant/service.js',
+                    'assets/views/assistant/conversation-state.js',
+                    'assets/views/monitoring.js', 'assets/views/account.js',
                     'assets/views/muse.js', 'assets/views/muse/cards.js', 'assets/views/muse/model.js', 'assets/api/muse.js', 'assets/styles/muse.css')
         for relative in required:
             self.assertTrue((FRONTEND_DIR / relative).is_file(), relative)

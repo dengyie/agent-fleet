@@ -1,6 +1,5 @@
 import { renderRequestMetadata, tickRequestMetadata } from './request-metadata.js';
 import { uiIcon, pagePath } from '../../routes.js';
-import { getPlatformArtifactContentUrl, getExecutionWindowFrameUrl } from '../../api/platform.js';
 
 export function el(tag, className, text) { var node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
 export function clear(node) { while (node && node.firstChild) node.removeChild(node.firstChild); }
@@ -134,7 +133,7 @@ export function renderExecutionWindow(host, state, actions) {
       var retry = document.createElement('button'); retry.type = 'button'; retry.className = 'button-secondary';
       retry.textContent = '重试加载'; retry.addEventListener('click', actions.onRetryFrame); frame.appendChild(retry);
     } else {
-      var frameSrc = getExecutionWindowFrameUrl(
+      var frameSrc = actions.getFrameUrl(
         state.window.window_id, state.frame.artifact_id, state.frameRetryKey,
       );
       var reuseImage = previousSrc === frameSrc && previousImage;
@@ -161,7 +160,7 @@ function formatArtifactSize(size) {
 function previewableContentType(contentType) {
   return ['text/plain', 'text/markdown', 'text/csv', 'application/json'].indexOf(contentType) !== -1;
 }
-export function renderArtifacts(host, state, onPreview) {
+export function renderArtifacts(host, state, onPreview, getContentUrl) {
   clear(host);
   if (state.loading) { host.appendChild(el('div', 'assistant-artifact-status meta', '加载中')); return; }
   if (state.error) { host.appendChild(el('div', 'assistant-artifact-status err', state.error)); return; }
@@ -176,7 +175,7 @@ export function renderArtifacts(host, state, onPreview) {
   artifacts.forEach(function (artifact) {
     if (!artifact || typeof artifact !== 'object' || typeof artifact.artifact_id !== 'string' || !artifact.artifact_id || typeof artifact.name !== 'string' || !artifact.name) return;
     var href;
-    try { href = getPlatformArtifactContentUrl(artifact.artifact_id, state.workspaceId); } catch (error) { return; }
+    try { if (typeof getContentUrl !== 'function') return; href = getContentUrl(artifact.artifact_id, state.workspaceId); } catch (error) { return; }
     var row = el('div', 'assistant-artifact');
     var copy = el('div', 'assistant-artifact-copy');
     var artifactTitle = el('div', 'assistant-artifact-title'); artifactTitle.appendChild(uiIcon('code', {size: 16})); artifactTitle.appendChild(el('strong', null, artifact.name)); copy.appendChild(artifactTitle);

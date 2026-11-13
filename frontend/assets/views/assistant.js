@@ -1,21 +1,8 @@
 import { updateRunRequests, tickMessageRequests } from './assistant/panels.js';
 /* Persistent assistant workspace: bounded DOM rendering and cursor recovery. */
 import { uiIcon, pagePath } from '../routes.js';
-import {
-  getPlatformDefaults, getConversations,
-  getPlatformArtifacts,
-  getPlatformArtifactPreview,
-  getPlatformMemories, searchPlatformMemories,
-  createConversation, getConversation,
-  appendConversationTurn, getRun, getRunEvents, cancelRun, getUnknownCommands,
-  createPlatformLegacyTask, getPlatformLegacyTask,
-  submitCommandReconcile, requestCommandPostcheck, getCommandPostcheck,
-  createExecutionWindow, listExecutionWindows, getExecutionWindow, reconnectExecutionWindow,
-  attachExecutionWindow, acquireExecutionWindowWriter,
-  renewExecutionWindowWriter, releaseExecutionWindowWriter,
-  closeExecutionWindow, getExecutionWindowEvents,
-} from '../api/platform.js';
-
+import { createAssistantService } from './assistant/service.js';
+import { createConversationState, mergeConversationPage as mergeConversationState } from './assistant/conversation-state.js';
 import { mountWorkflowPanel } from './assistant/workflow.js';
 import { mountInspector } from './assistant/workspace.js';
 import { el, clear, showError, renderMessages, renderEvents, renderExecutionWindow, renderArtifacts, renderLegacyProjection, renderUnknownCommands, memoryReference, renderMemoryItems, renderSelectedMemoryItems } from './assistant/panels.js';
@@ -23,6 +10,7 @@ function token() { if (typeof crypto !== 'undefined' && crypto.randomUUID) retur
 
 export function mountAssistant(target, options) {
   options = options || {}; clear(target);
+  var service = options.service || createAssistantService();
   // The shell supplies its verified identity; legacy operators have no account.
   var canAdminister = !options.account || options.account.role === 'admin';
   var root = el('div', 'assistant-view');
@@ -49,7 +37,7 @@ export function mountAssistant(target, options) {
   var chat = el('section', 'assistant-chat');
   var thread = el('div', 'assistant-thread'); thread.setAttribute('data-chat-scroll', ''); thread.setAttribute('aria-label', '对话消息'); thread.tabIndex = 0;
   var initializationHost = el('div', 'assistant-initialization panel'); initializationHost.hidden = true; initializationHost.setAttribute('role', 'alert'); thread.appendChild(initializationHost);
-  var intro = el('div', 'assistant-intro'); intro.appendChild(uiIcon('sparkles', {size: 30})); intro.appendChild(el('p', 'assistant-welcome-label', '你的想法，从这里开始')); intro.appendChild(el('h2', null, '今天，我们一起完成什么？')); intro.appendChild(el('p', null, '从一个问题到一份交付，把想法变成进展。'));
+  var intro = el('div', 'assistant-intro'); intro.appendChild(uiIcon('sparkles', {size: 24})); intro.appendChild(el('h2', null, '今天，我们一起完成什么？')); intro.appendChild(el('p', null, '从一个问题开始，逐步推进到可交付的结果。'));
   var suggestions = el('div', 'assistant-suggestions');
   [
     ['code', '了解一个项目', '梳理结构，快速进入工作状态', '梳理工作区文件，生成一份项目摘要'],
@@ -57,7 +45,7 @@ export function mountAssistant(target, options) {
     ['layers', '整理工作成果', '把最近的进展变成交付说明', '整理最近的工作，生成交付说明']
   ].forEach(function (item) {
     var chip = el('button', 'assistant-suggestion'); chip.type = 'button'; chip.appendChild(uiIcon(item[0], {size: 19}));
-    chip.appendChild(el('strong', null, item[1])); chip.appendChild(el('span', null, item[2]));
+    chip.setAttribute('aria-label', item[1] + '：' + item[2]); chip.appendChild(el('strong', null, item[1]));
     chip.addEventListener('click', function () { if (!input.readOnly) { input.value = item[3]; input.dispatchEvent(new Event('input')); input.focus(); } }); suggestions.appendChild(chip);
   });
   var earlierHistory = el('button', 'button-secondary assistant-earlier-history', '加载更早消息'); earlierHistory.type = 'button'; earlierHistory.hidden = true;
@@ -136,7 +124,9 @@ export function mountAssistant(target, options) {
   var pendingTurn = null; var submitting = false; var catalogReady = false; var modelCatalog = [];
   var artifactState = { loading: false, error: null, artifacts: [], workspaceId: null, previewById: {} };
   var memoryState = { loading: false, error: null, items: [], selected: {}, order: [], maxItems: 8, maxBytes: 8192, query: '' }; var memoryRequestSequence = 0;
-  renderArtifacts(artifactHost, artifactState); renderMemoryItems(memoryHost, memoryState, toggleMemory); renderSelectedMemoryItems(selectedMemoryHost, memoryState, removeMemory); renderWindow();
+  renderArtifacts(artifactHost, artifactState, previewArtifact, function (artifactId, workspaceId) {
+    return service.getArtifactContentUrl(artifactId, workspaceId);
+  }); renderMemoryItems(memoryHost, memoryState, toggleMemory); renderSelectedMemoryItems(selectedMemoryHost, memoryState, removeMemory); renderWindow();
   function setStatus(text) {
     var names = {queued: '排队中', running: '运行中', waiting_node: '等待节点', waiting_approval: '等待审批', waiting_task: '等待任务', cancelling: '正在取消', succeeded: '已完成', failed: '执行失败', unknown: '结果待确认', cancelled: '已取消'};
     status.textContent = names[text] || text;
@@ -171,7 +161,10 @@ export function mountAssistant(target, options) {
       onTakeControl: takeControl,
       onReleaseControl: returnControl,
       onRetryFrame: retryWindowFrame,
-      onFrameError: markFrameError
+      onFrameError: markFrameError,
+      getFrameUrl: function (windowId, artifactId, retryKey) {
+        return service.getExecutionWindowFrameUrl(windowId, artifactId, retryKey);
+      }
     });
   }
   function windowError(error) {
@@ -182,7 +175,7 @@ export function mountAssistant(target, options) {
     windowPolling = true;
     try {
       var windowId = windowState.window.window_id;
-      var currentWindow = (await getExecutionWindow(windowId)).window;
+      var currentWindow = (await service.getExecutionWindow(windowId)).window;
       if (currentWindow && ['closed', 'expired'].indexOf(currentWindow.state) !== -1) {
         setWindowState({ window: currentWindow, mode: currentWindow.state, leaseToken: null });
         return;
@@ -190,7 +183,7 @@ export function mountAssistant(target, options) {
       if (currentWindow && currentWindow.state !== windowState.window.state) {
         setWindowState({ window: currentWindow });
       }
-      var data = await getExecutionWindowEvents(windowId, windowEventCursor, 100);
+      var data = await service.getExecutionWindowEvents(windowId, windowEventCursor, 100);
       var events = Array.isArray(data.events) ? data.events : [];
       if (events.length) {
         windowEventCursor = typeof data.next_cursor === 'number' ? data.next_cursor : (events[events.length - 1].sequence || windowEventCursor);
@@ -206,7 +199,7 @@ export function mountAssistant(target, options) {
       }
       if (windowState.mode === 'writable' && windowState.leaseToken) {
         try {
-          var renewed = await renewExecutionWindowWriter(windowId, { holder_id: windowState.holderId, lease_token: windowState.leaseToken, ttl_s: 60 });
+          var renewed = await service.renewExecutionWindowWriter(windowId, { holder_id: windowState.holderId, lease_token: windowState.leaseToken, ttl_s: 60 });
           if (!renewed.lease) throw new Error('writer_lease_invalid');
         } catch (renewError) {
           if (renewError && renewError.code === 'lease_conflict') setWindowState({ mode: 'read-only', leaseToken: null });
@@ -244,19 +237,19 @@ export function mountAssistant(target, options) {
       frame: null, frameError: null, frameRetryKey: '', leaseToken: null });
     windowEventCursor = 0;
     try {
-      var created = create ? await createExecutionWindow(runId, { metadata: { surface: 'assistant' } }) : null;
+      var created = create ? await service.createExecutionWindow(runId, { metadata: { surface: 'assistant' } }) : null;
       var current = created && created.window;
       var ticket = created && created.attach_ticket;
       if (!current) {
-        var listed = await listExecutionWindows(runId, 20);
+        var listed = await service.listExecutionWindows(runId, 20);
         current = Array.isArray(listed.windows) && listed.windows.length ? listed.windows[0] : null;
         if (!current) { setWindowState({ loading: false, window: null, mode: 'disconnected' }); return; }
-        var reconnected = await reconnectExecutionWindow(current.window_id, { ttl_s: 300 });
+        var reconnected = await service.reconnectExecutionWindow(current.window_id, { ttl_s: 300 });
         current = reconnected.window || current;
         ticket = reconnected.attach_ticket;
       }
       if (ticket) {
-        var attached = await attachExecutionWindow(current.window_id, ticket);
+        var attached = await service.attachExecutionWindow(current.window_id, ticket);
         current = attached.window || current;
       }
       setWindowState({ loading: false, window: current, mode: 'attached' });
@@ -272,7 +265,7 @@ export function mountAssistant(target, options) {
     if (!current || !current.window_id || windowState.controlPending) return;
     setWindowState({ controlPending: true, controlError: null });
     try {
-      var acquired = await acquireExecutionWindowWriter(current.window_id, {
+      var acquired = await service.acquireExecutionWindowWriter(current.window_id, {
         holder_id: windowState.holderId, ttl_s: 60
       });
       setWindowState({ mode: 'writable', leaseToken: acquired.lease_token || null,
@@ -292,7 +285,7 @@ export function mountAssistant(target, options) {
     if (!current || !current.window_id || !windowState.leaseToken || windowState.controlPending) return;
     setWindowState({ controlPending: true, controlError: null });
     try {
-      await releaseExecutionWindowWriter(current.window_id, {
+      await service.releaseExecutionWindowWriter(current.window_id, {
         holder_id: windowState.holderId, lease_token: windowState.leaseToken
       });
       setWindowState({ mode: 'attached', leaseToken: null, leaseExpiresAt: 0, controlError: null });
@@ -316,9 +309,9 @@ export function mountAssistant(target, options) {
     setWindowState({ mode: 'closing', error: null });
     try {
       if (windowState.leaseToken) {
-        await releaseExecutionWindowWriter(current.window_id, { holder_id: windowState.holderId, lease_token: windowState.leaseToken });
+        await service.releaseExecutionWindowWriter(current.window_id, { holder_id: windowState.holderId, lease_token: windowState.leaseToken });
       }
-      var closed = await closeExecutionWindow(current.window_id);
+      var closed = await service.closeExecutionWindow(current.window_id);
       setWindowState({ loading: false, window: closed.window || Object.assign({}, current, { state: 'closed' }), mode: 'closed', leaseToken: null });
     } catch (error) { setWindowState({ mode: 'error', error: windowError(error) }); }
   }
@@ -348,7 +341,7 @@ export function mountAssistant(target, options) {
     memorySearch.disabled = true;
     memoryState = Object.assign({}, memoryState, { loading: true, error: null, query: value }); renderMemoryState();
     try {
-      var data = value ? await searchPlatformMemories(value, 20) : await getPlatformMemories(50);
+      var data = value ? await service.searchMemories(value, 20) : await service.getMemories(50);
       if (sequence !== memoryRequestSequence) return;
       memorySearch.disabled = false;
       var references = (Array.isArray(data.memories) ? data.memories : []).map(memoryReference).filter(Boolean);
@@ -375,10 +368,15 @@ export function mountAssistant(target, options) {
     });
   }
   async function refreshConversationHistory() {
-    try { var data = await getConversations(50); renderConversationHistory(data.conversations); }
+    try { var data = await service.getConversations(50); renderConversationHistory(data.conversations); }
     catch (error) { clear(historyHost); historyHost.appendChild(el('div', 'assistant-history-empty err', (error && (error.detail || error.message || error.code)) || '历史对话不可用')); }
   }
-  function setArtifactState(next) { artifactState = Object.assign({}, artifactState, next); renderArtifacts(artifactHost, artifactState, previewArtifact); }
+  function setArtifactState(next) {
+    artifactState = Object.assign({}, artifactState, next);
+    renderArtifacts(artifactHost, artifactState, previewArtifact, function (artifactId, workspaceId) {
+      return service.getArtifactContentUrl(artifactId, workspaceId);
+    });
+  }
   async function previewArtifact(artifactId) {
     var current = artifactState.previewById && artifactState.previewById[artifactId];
     var nextPreviews = Object.assign({}, artifactState.previewById || {});
@@ -387,7 +385,7 @@ export function mountAssistant(target, options) {
     setArtifactState({ previewById: nextPreviews });
     var workspaceId = artifactState.workspaceId;
     try {
-      var response = await getPlatformArtifactPreview(artifactId, workspaceId);
+      var response = await service.getArtifactPreview(artifactId, workspaceId);
       if (artifactState.workspaceId !== workspaceId) return;
       nextPreviews = Object.assign({}, artifactState.previewById || {});
       nextPreviews[artifactId] = { open: true, loading: false, error: null, data: response.preview || null };
@@ -403,7 +401,7 @@ export function mountAssistant(target, options) {
     if (!workspaceId) { setArtifactState({ loading: false, error: null, artifacts: [], workspaceId: null, previewById: {} }); return; }
     setArtifactState({ loading: true, error: null, artifacts: [], workspaceId: workspaceId, previewById: {} });
     try {
-      var data = await getPlatformArtifacts(workspaceId, 100);
+      var data = await service.getArtifacts(workspaceId, 100);
       if (conversationWorkspaceId !== workspaceId) return;
       setArtifactState({ loading: false, error: null, artifacts: data.artifacts || [], workspaceId: workspaceId, previewById: {} });
     } catch (error) {
@@ -414,16 +412,16 @@ export function mountAssistant(target, options) {
   async function refreshUnknownCommands() {
     if (!canAdminister) return;
     try {
-      var data = await getUnknownCommands(50); var commands = data.commands || [];
+      var data = await service.getUnknownCommands(50); var commands = data.commands || [];
       unknownSection.hidden = commands.length === 0;
       renderUnknownCommands(unknownHost, commands, async function (commandId, outcome, button) {
         button.disabled = true;
         try {
           if (outcome === 'postcheck') {
-            await requestCommandPostcheck(commandId);
+            await service.requestCommandPostcheck(commandId);
             var latest = null;
             for (var attempt = 0; attempt < 8; attempt += 1) {
-              latest = (await getCommandPostcheck(commandId)).postcheck;
+              latest = (await service.getCommandPostcheck(commandId)).postcheck;
               if (latest && latest.state !== 'pending') break;
               await new Promise(function (resolve) { setTimeout(resolve, 500); });
             }
@@ -432,21 +430,21 @@ export function mountAssistant(target, options) {
             await refreshUnknownCommands();
             return;
           }
-          await submitCommandReconcile(commandId, { outcome: outcome, evidence: { source: 'operator', reference: 'assistant-ui:' + commandId } });
+          await service.submitCommandReconcile(commandId, { outcome: outcome, evidence: { source: 'operator', reference: 'assistant-ui:' + commandId } });
           setStatus('已记录人工证据（命令仍为未知）'); await refreshUnknownCommands();
         } catch (error) { showError(eventHost, error); button.disabled = false; }
       });
     } catch (error) { showError(eventHost, error); }
   }
   function fill(select, rows, valueKey, labelKey) { clear(select); (Array.isArray(rows) ? rows : []).filter(function (row) { return row.enabled !== false; }).forEach(function (row) { var option = document.createElement('option'); option.value = row[valueKey] || ''; option.textContent = row[labelKey] || option.value; select.appendChild(option); }); }
-  async function refreshLegacy(runId) { if (!runId || legacyForm.hidden) return; try { var data = await getPlatformLegacyTask(runId); var link = data.legacy_task || data; legacyStatus.textContent = '状态：' + (link.state || 'unknown') + (link.task_state ? ' · ' + link.task_state : '') + (link.task_id ? ' · task ' + link.task_id : ''); renderLegacyProjection(legacyDetails, link); if (link.session_id) { var session = document.createElement('a'); session.href = pagePath('session', link.session_id); session.textContent = '打开会话'; legacyDetails.appendChild(session); } } catch (error) { legacyStatus.textContent = (error && error.code === 'legacy_task_not_found') ? '尚未关联旧任务' : ((error && (error.detail || error.message)) || '旧任务状态不可用'); clear(legacyDetails); } }
+  async function refreshLegacy(runId) { if (!runId || legacyForm.hidden) return; try { var data = await service.getLegacyTask(runId); var link = data.legacy_task || data; legacyStatus.textContent = '状态：' + (link.state || 'unknown') + (link.task_state ? ' · ' + link.task_state : '') + (link.task_id ? ' · task ' + link.task_id : ''); renderLegacyProjection(legacyDetails, link); if (link.session_id) { var session = document.createElement('a'); session.href = pagePath('session', link.session_id); session.textContent = '打开会话'; legacyDetails.appendChild(session); } } catch (error) { legacyStatus.textContent = (error && error.code === 'legacy_task_not_found') ? '尚未关联旧任务' : ((error && (error.detail || error.message)) || '旧任务状态不可用'); clear(legacyDetails); } }
   async function refreshRunEvents(runId) {
     if (!runId) return;
     clear(eventHost); cursor = 0;
     // Terminal runs no longer poll. Read all persisted pages here, including
     // the final refresh of a run that just finished while this view was open.
     while (!disposed) {
-      var eventData = await getRunEvents(runId, cursor);
+      var eventData = await service.getRunEvents(runId, cursor);
       if (disposed) return;
       var events = eventData.events || [];
       if (!events.length) return;
@@ -455,28 +453,15 @@ export function mountAssistant(target, options) {
       renderEvents(eventHost, events); cursor = next;
     }
   }
-  var visibleMessages = new Map(), visibleRuns = new Map(), historyPage = null, historyLoading = false, contextWindow = null;
+  var conversationState = createConversationState(), historyPage = null, historyLoading = false;
   function mergeConversationPage(conversation, earlier) {
-    var incomingUsers = (conversation.messages || []).filter(function (item) { return item.role === 'user'; });
-    var existingSequences = Array.from(visibleMessages.values()).map(function (item) { return item.turn_sequence; }).filter(Number.isFinite);
-    if (!earlier && incomingUsers.length && existingSequences.length && incomingUsers[0].turn_sequence > Math.max.apply(null, existingSequences) + 1) {
-      visibleMessages.clear(); visibleRuns.clear(); historyPage = null;
-    }
-    (conversation.messages || []).forEach(function (item) { visibleMessages.set(item.message_id, item); });
-    (conversation.runs || []).forEach(function (item) { visibleRuns.set(item.run_id, item); });
-    if (conversation.history && (earlier || !historyPage)) historyPage = conversation.history;
-    if (conversation.context_window) contextWindow = conversation.context_window;
-    var messages = Array.from(visibleMessages.values()).sort(function (a, b) {
-      if (!Number.isFinite(a.turn_sequence) || !Number.isFinite(b.turn_sequence)) return 0;
-      return (a.turn_sequence - b.turn_sequence) || (a.role === b.role ? 0 : a.role === 'user' ? -1 : 1);
-    });
-    var sequence = new Map(messages.map(function (item) { return [item.message_id, item.turn_sequence]; }));
-    var runs = Array.from(visibleRuns.values()).sort(function (a, b) { return sequence.get(a.trigger_message_id) - sequence.get(b.trigger_message_id); });
-    renderMessages(messageHost, messages, runs);
+    conversationState = mergeConversationState(conversationState, conversation, earlier);
+    historyPage = conversationState.history;
+    renderMessages(messageHost, conversationState.orderedMessages, conversationState.orderedRuns);
     earlierHistory.hidden = !historyPage || !historyPage.has_more;
     earlierHistory.disabled = historyLoading;
-    if (contextWindow && contextWindow.omitted_turns > 0) {
-      historyStatus.textContent = '本次模型使用最近完整消息（最多 32 回合 / 64 KiB）；较早 ' + contextWindow.omitted_turns + ' 回合仍保存在历史中。';
+    if (conversationState.contextWindow && conversationState.contextWindow.omitted_turns > 0) {
+      historyStatus.textContent = '本次模型使用最近完整消息（最多 32 回合 / 64 KiB）；较早 ' + conversationState.contextWindow.omitted_turns + ' 回合仍保存在历史中。';
     } else historyStatus.textContent = '';
   }
   earlierHistory.addEventListener('click', async function () {
@@ -485,7 +470,7 @@ export function mountAssistant(target, options) {
     var before = historyPage.before_sequence;
     var height = thread.scrollHeight, top = thread.scrollTop;
     try {
-      var data = await getConversation(conversationId, {beforeSequence: before});
+      var data = await service.getConversation(conversationId, {beforeSequence: before});
       if (disposed) return;
       mergeConversationPage(data.conversation || {}, true);
       thread.scrollTop = top + thread.scrollHeight - height;
@@ -498,7 +483,7 @@ export function mountAssistant(target, options) {
   });
   async function refreshConversation() {
     if (!conversationId) return;
-    var data = await getConversation(conversationId);
+    var data = await service.getConversation(conversationId);
     if (disposed) return;
     var conversation = data.conversation || {};
     conversationArchived = Boolean(conversation.archived_at);
@@ -533,12 +518,12 @@ export function mountAssistant(target, options) {
     polling = true;
     var runId = activeRunId;
     try {
-      var runData = await getRun(runId);
+      var runData = await service.getRun(runId);
       if (disposed) return;
       var run = runData.run || runData;
       showRunModel(run); setStatus(run.state || 'unknown');
       updateRunRequests(messageHost, run); startRequestClock();
-      var eventData = await getRunEvents(runId, cursor);
+      var eventData = await service.getRunEvents(runId, cursor);
       if (disposed) return;
       var events = eventData.events || [];
       if (events.length) {
@@ -570,16 +555,17 @@ export function mountAssistant(target, options) {
     var text = input.value.trim();
     if (!pendingTurn && !text) return;
     if (!pendingTurn) {
-      var payload = { text: text, client_token: token() };
-      if (model.value) payload.overrides = { model_profile_id: model.value };
       var selectedIds = selectedMemoryIds();
-      if (canAdminister && memoryEnabled.checked && selectedIds.length) {
-        payload.memory_context = {
-          enabled: true, memory_ids: selectedIds,
-          revisions: selectedIds.reduce(function (result, id) { result[id] = memoryState.selected[id].revision; return result; }, {}),
-          max_items: memoryState.maxItems, max_bytes: memoryState.maxBytes
-        };
-      }
+      var revisions = selectedIds.reduce(function (result, id) { result[id] = memoryState.selected[id].revision; return result; }, {});
+      var payload = service.createTurnRequest({
+        text: text,
+        clientToken: token(),
+        modelProfileId: model.value,
+        memoryContext: canAdminister && memoryEnabled.checked && selectedIds.length ? {
+          memoryIds: selectedIds, revisions: revisions,
+          maxItems: memoryState.maxItems, maxBytes: memoryState.maxBytes
+        } : null
+      });
       pendingTurn = { payload: payload, workspaceId: workspace.value || undefined };
     }
     // An uncertain response keeps the exact token AND payload. A second
@@ -587,11 +573,11 @@ export function mountAssistant(target, options) {
     clearActionError(); submitting = true; lockPendingTurn(); setStatus('提交中');
     try {
       if (!conversationId) {
-        var created = await createConversation({ workspace_id: pendingTurn.workspaceId });
+        var created = await service.createConversation({ workspace_id: pendingTurn.workspaceId });
         conversationId = created.conversation.conversation_id;
         if (window.history && window.history.replaceState) window.history.replaceState({}, '', pagePath('conversation', conversationId));
       }
-      var turn = await appendConversationTurn(conversationId, pendingTurn.payload);
+      var turn = await service.appendTurn(conversationId, pendingTurn.payload);
       pendingTurn = null; input.value = '';
       activeRunId = turn.run.run_id; latestRunId = activeRunId;
       showRunModel(turn.run); cursor = 0; cancel.hidden = false;
@@ -612,9 +598,9 @@ export function mountAssistant(target, options) {
       }
     } finally { submitting = false; lockPendingTurn(); }
   });
-  cancel.addEventListener('click', async function () { if (!activeRunId) return; clearActionError(); cancel.disabled = true; try { var result = await cancelRun(activeRunId); setStatus(result.state || 'cancelling'); } catch (error) { showActionError(error); } finally { cancel.disabled = false; } });
+  cancel.addEventListener('click', async function () { if (!activeRunId) return; clearActionError(); cancel.disabled = true; try { var result = await service.cancelRun(activeRunId); setStatus(result.state || 'cancelling'); } catch (error) { showActionError(error); } finally { cancel.disabled = false; } });
   legacyToggle.addEventListener('click', function () { legacyForm.hidden = !legacyForm.hidden; legacyToggle.textContent = legacyForm.hidden ? '打开旧任务关联' : '收起旧任务关联'; if (!legacyForm.hidden) refreshLegacy(latestRunId || activeRunId); });
-  legacySubmit.addEventListener('click', async function () { var runId = activeRunId || latestRunId; if (!runId) { legacyStatus.textContent = '请先提交一次主助手运行'; return; } legacySubmit.disabled = true; legacyStatus.textContent = '提交中'; try { var result = await createPlatformLegacyTask(runId, { machine: legacyMachine.value.trim(), agent_type: legacyAgent.value.trim(), project: legacyProject.value.trim(), instruction: legacyInstruction.value.trim(), confirm: legacyConfirm.checked }); var link = result.legacy_task || result; legacyStatus.textContent = '已关联：' + (link.state || 'pending') + (link.task_id ? ' · ' + link.task_id : ''); renderLegacyProjection(legacyDetails, link); } catch (error) { legacyStatus.textContent = (error && (error.detail || error.message || error.code)) || '提交失败'; } finally { legacySubmit.disabled = false; } });
+  legacySubmit.addEventListener('click', async function () { var runId = activeRunId || latestRunId; if (!runId) { legacyStatus.textContent = '请先提交一次主助手运行'; return; } legacySubmit.disabled = true; legacyStatus.textContent = '提交中'; try { var result = await service.createLegacyTask(runId, { machine: legacyMachine.value.trim(), agent_type: legacyAgent.value.trim(), project: legacyProject.value.trim(), instruction: legacyInstruction.value.trim(), confirm: legacyConfirm.checked }); var link = result.legacy_task || result; legacyStatus.textContent = '已关联：' + (link.state || 'pending') + (link.task_id ? ' · ' + link.task_id : ''); renderLegacyProjection(legacyDetails, link); } catch (error) { legacyStatus.textContent = (error && (error.detail || error.message || error.code)) || '提交失败'; } finally { legacySubmit.disabled = false; } });
   lockPendingTurn();
   // Authentication, catalog loading and conversation recovery are distinct
   // failure states. Do not enable submission until the saved state is known.
@@ -623,11 +609,11 @@ export function mountAssistant(target, options) {
     catalogReady = false; setStatus('加载中');
     var failureStatus = '平台配置加载失败';
     try {
-      var data = await getPlatformDefaults();
+      var data = await service.getDefaults();
       if (disposed) return;
       if (canAdminister && data.workflows && data.workflows.enabled === true && typeof data.workflows.scope === 'string') {
         inspectorUi.setVisible('workflows', true);
-        if (!workflowTeardown) workflowTeardown = mountWorkflowPanel(workflowHost, {canAccept: true, scope: data.workflows.scope});
+        if (!workflowTeardown) workflowTeardown = mountWorkflowPanel(workflowHost, {canAccept: true, scope: data.workflows.scope, service: service});
       } else if (workflowTeardown) {
         workflowTeardown(); workflowTeardown = null; clear(workflowHost); inspectorUi.setVisible('workflows', false);
       }
@@ -664,7 +650,7 @@ export function mountAssistant(target, options) {
   window.addEventListener('fleet-settings-updated', onSettingsUpdated);
   async function refreshSettingsCatalog() {
     try {
-      var data = await getPlatformDefaults();
+      var data = await service.getDefaults();
       if (disposed) return;
       var previousModel = model.value, previousWorkspace = workspace.value;
       modelCatalog = Array.isArray(data.models) ? data.models : [];

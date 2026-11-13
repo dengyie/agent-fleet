@@ -46,6 +46,17 @@
 .mobile-menu { display: none; }
 .loading-state { padding: 50px; text-align: center; color: var(--text-2); }
 body[data-page=assistant] .page-heading { display: none; }
+body[data-page=settings] .page-heading { display: none; }
+body[data-page=settings] .console-sidebar { display: none; }
+body[data-page=settings] .console-main { margin-left: 0; }
+body[data-page=settings] .topbar-workspace,
+body[data-page=settings] .breadcrumb-separator,
+body[data-page=settings] .desktop-menu,
+body[data-page=settings] .mobile-menu { display: none; }
+.settings-back { display: none; align-items: center; gap: 9px; color: var(--text-2); font-size: 13px; text-decoration: none; }
+body[data-page=settings] .settings-back { display: inline-flex; }
+body[data-page=settings] .settings-back:hover { color: var(--text); text-decoration: none; }
+body[data-page=settings] .settings-back svg { width: 17px; height: 17px; }
 body[data-page=monitoring] .monitoring-heading h1,body[data-page=monitoring] .monitoring-heading p { display: none; }
 @media (max-width: 1439px) { .console-content { padding: 28px 24px; } .fleet-layout { grid-template-columns: minmax(0, 1fr) 250px; gap: 18px; } }
 @media (max-width: 1100px) { .fleet-layout { grid-template-columns: minmax(0, 1fr); } .healthbar { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
