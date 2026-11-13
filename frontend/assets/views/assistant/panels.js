@@ -4,7 +4,7 @@ import { uiIcon, pagePath } from '../../routes.js';
 export function el(tag, className, text) { var node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
 export function clear(node) { while (node && node.firstChild) node.removeChild(node.firstChild); }
 export function showError(host, error) { var text = (error && (error.detail || error.message || error.code)) || '平台请求失败'; if (error && error.requestId) text += ' · 请求编号 ' + error.requestId; host.appendChild(el('div', 'err', text)); }
-export function renderMessages(host, messages, runs = []) {
+export function renderMessages(host, messages, runs = [], options = {}) {
   if (!host._messageRows) host._messageRows = new Map();
   const source = Array.isArray(messages) ? messages : [];
   const replies = new Map(source.filter(m => m.role !== 'user').map(m => [m.message_id, m]));
@@ -32,23 +32,38 @@ export function renderMessages(host, messages, runs = []) {
       copy.addEventListener('click', async function () { try { await navigator.clipboard.writeText(row._content || ''); copy.setAttribute('aria-label', '已复制'); copy.title = '已复制'; } catch (_) { copy.title = '复制失败，请手动选择文本'; } });
       row.appendChild(copy);
       const requests = el('div', 'message-requests'); row.appendChild(requests);
-      row._parts = {body, copy, requests}; host._messageRows.set(key, row);
+      const progress = el('p', 'assistant-message-progress meta'); progress.setAttribute('role', 'status'); progress.hidden = true; row.appendChild(progress);
+      row._parts = {body, copy, requests, progress}; host._messageRows.set(key, row);
     }
-    row._runId = run?.run_id;
     const content = message.content || '';
     if (row._content !== content) {
       row._content = content; row._parts.body.textContent = content; row._parts.body.setAttribute('content', content);
     }
     row._parts.copy.hidden = !content;
-    if (run) renderRequestMetadata(row._parts.requests, run.requests);
+    if (run) {
+      renderRequestMetadata(row._parts.requests, run.requests);
+      const states = {submitting: '正在发送…', submission_unknown: '原消息已保留，提交结果待确认', queued: '已发送，等待助手…', running: '助手正在处理…', waiting_node: '正在等待执行节点…', waiting_approval: '等待审批', waiting_task: '任务执行中…', cancelling: '正在取消…', unknown: '运行结果待确认，原请求不会自动重发', failed: '运行失败', cancelled: '已取消'};
+      row._parts.progress.textContent = states[run.state] || '';
+      row._parts.progress.hidden = !states[run.state];
+      row._parts.progress.setAttribute('data-state', run.state);
+      if (run.state === 'unknown' && typeof options.onRefresh === 'function') {
+        if (!row._parts.refresh) {
+          row._parts.refresh = document.createElement('button');
+          row._parts.refresh.type = 'button';
+          row._parts.refresh.className = 'button-secondary assistant-run-refresh';
+          row._parts.refresh.textContent = '重新读取状态';
+          row._parts.refresh.addEventListener('click', async function () {
+            row._parts.refresh.disabled = true;
+            try { await options.onRefresh(run); } finally { row._parts.refresh.disabled = false; }
+          });
+          row.appendChild(row._parts.refresh);
+        }
+        row._parts.refresh.hidden = false;
+      } else if (row._parts.refresh) row._parts.refresh.hidden = true;
+    }
     if (host.children[index] !== row) host.insertBefore(row, host.children[index] || null);
   });
   host._messageRows.forEach((row, key) => { if (!keep.has(key)) { host.removeChild(row); host._messageRows.delete(key); } });
-}
-export function updateRunRequests(host, run) {
-  host._messageRows?.forEach(row => {
-    if (row._runId === run.run_id) renderRequestMetadata(row._parts.requests, run.requests);
-  });
 }
 export function tickMessageRequests(host) {
   let active = false;

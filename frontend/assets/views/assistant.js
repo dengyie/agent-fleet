@@ -1,4 +1,4 @@
-import { updateRunRequests, tickMessageRequests } from './assistant/panels.js';
+import { tickMessageRequests } from './assistant/panels.js';
 /* Persistent assistant workspace: bounded DOM rendering and cursor recovery. */
 import { uiIcon, pagePath } from '../routes.js';
 import { createAssistantService } from './assistant/service.js';
@@ -454,10 +454,27 @@ export function mountAssistant(target, options) {
     }
   }
   var conversationState = createConversationState(), historyPage = null, historyLoading = false;
+  function renderConversation() {
+    var messages = conversationState.orderedMessages || [];
+    var runs = conversationState.orderedRuns || [];
+    if (pendingTurn) {
+      messages = messages.concat([pendingTurn.message]);
+      runs = runs.concat([pendingTurn.run]);
+    }
+    renderMessages(messageHost, messages, runs, {onRefresh: async function (run) {
+      clearActionError();
+      try {
+        var data = await service.getRun(run.run_id);
+        if (!disposed) mergeConversationPage({runs: [data.run || data]}, false);
+      } catch (error) { if (!disposed) showActionError(error); }
+    }});
+    intro.hidden = messages.length > 0;
+    scrollAnchor.setAttribute('is-streaming', '');
+  }
   function mergeConversationPage(conversation, earlier) {
     conversationState = mergeConversationState(conversationState, conversation, earlier);
     historyPage = conversationState.history;
-    renderMessages(messageHost, conversationState.orderedMessages, conversationState.orderedRuns);
+    renderConversation();
     earlierHistory.hidden = !historyPage || !historyPage.has_more;
     earlierHistory.disabled = historyLoading;
     if (conversationState.contextWindow && conversationState.contextWindow.omitted_turns > 0) {
@@ -491,7 +508,7 @@ export function mountAssistant(target, options) {
     var firstMessage = (Array.isArray(conversation.messages) ? conversation.messages : []).find(function (message) { return message.role === 'user'; });
     conversationTitle.textContent = conversation.title || conversation.first_message_preview || (firstMessage && firstMessage.content ? firstMessage.content.slice(0, 60) : '当前对话');
     conversationTitle.title = conversationTitle.textContent;
-    mergeConversationPage(conversation, false); startRequestClock(); scrollAnchor.setAttribute('is-streaming', ''); intro.hidden = Boolean(conversation.messages && conversation.messages.length);
+    mergeConversationPage(conversation, false); startRequestClock();
     var nextWorkspaceId = typeof conversation.workspace_id === 'string' ? conversation.workspace_id : null;
     if (conversationWorkspaceId !== nextWorkspaceId) {
       conversationWorkspaceId = nextWorkspaceId;
@@ -522,7 +539,7 @@ export function mountAssistant(target, options) {
       if (disposed) return;
       var run = runData.run || runData;
       showRunModel(run); setStatus(run.state || 'unknown');
-      updateRunRequests(messageHost, run); startRequestClock();
+      mergeConversationPage({runs: [run]}, false); startRequestClock();
       var eventData = await service.getRunEvents(runId, cursor);
       if (disposed) return;
       var events = eventData.events || [];
@@ -566,21 +583,32 @@ export function mountAssistant(target, options) {
           maxItems: memoryState.maxItems, maxBytes: memoryState.maxBytes
         } : null
       });
-      pendingTurn = { payload: payload, workspaceId: workspace.value || undefined };
+      var localId = 'pending_' + payload.client_token;
+      var sequence = Math.max(0, ...Array.from(conversationState.messages.values()).map(function (message) { return message.turn_sequence || 0; })) + 1;
+      pendingTurn = {
+        payload: payload, workspaceId: workspace.value || undefined,
+        message: {message_id: localId, role: 'user', content: payload.text, turn_sequence: sequence},
+        run: {run_id: localId, trigger_message_id: localId, state: 'submitting'}
+      };
+      input.value = '';
+      if (!conversationId) conversationTitle.textContent = payload.text.slice(0, 60);
     }
     // An uncertain response keeps the exact token AND payload. A second
     // submit must reconcile the original operation, not create another Run.
-    clearActionError(); submitting = true; lockPendingTurn(); setStatus('提交中');
+    clearActionError(); submitting = true; pendingTurn.run.state = 'submitting'; renderConversation(); lockPendingTurn(); setStatus('提交中');
     try {
       if (!conversationId) {
         var created = await service.createConversation({ workspace_id: pendingTurn.workspaceId });
+        if (disposed) return;
         conversationId = created.conversation.conversation_id;
         if (window.history && window.history.replaceState) window.history.replaceState({}, '', pagePath('conversation', conversationId));
       }
       var turn = await service.appendTurn(conversationId, pendingTurn.payload);
+      if (disposed) return;
       pendingTurn = null; input.value = '';
+      mergeConversationPage({messages: [turn.message], runs: [turn.run]}, false);
       activeRunId = turn.run.run_id; latestRunId = activeRunId;
-      showRunModel(turn.run); cursor = 0; cancel.hidden = false;
+      showRunModel(turn.run); setStatus(turn.run.state); cursor = 0; clear(eventHost); cancel.hidden = false;
       // Run tracking starts independently of optional presentation requests.
       poll();
       connectExecutionWindow(activeRunId, true);
@@ -588,12 +616,16 @@ export function mountAssistant(target, options) {
       // Conversation recovery runs in the tracker, so it cannot reset the
       // event cursor concurrently with an in-flight event request.
     } catch (error) {
+      if (disposed) return;
       showActionError(error);
       if (activeRunId) setStatus('已提交，状态刷新失败');
       else {
         // An explicit validation/auth rejection did not accept this request.
         // Network, timeout, parse and 5xx failures leave acceptance uncertain.
-        if (error && error.kind === 'http' && error.status >= 400 && error.status < 500) pendingTurn = null;
+        if (error && error.kind === 'http' && error.status >= 400 && error.status < 500) {
+          input.value = pendingTurn.payload.text; pendingTurn = null;
+        } else if (pendingTurn) pendingTurn.run.state = 'submission_unknown';
+        renderConversation();
         setStatus(pendingTurn ? '提交结果待确认，请重试原请求' : '提交失败');
       }
     } finally { submitting = false; lockPendingTurn(); }
