@@ -18,7 +18,7 @@
 
 ## 最新更新
 
-2026-11-13：助手发送后立即显示消息和运行状态；新对话先进入会话页面；模型结果待确认时可重新读取原运行状态。完整历史见 [Release Notes](docs/releases/release-notes.md)。
+2026-11-14：修复新聊天与后台提交的路由串用；发送后定位到新消息并收起空输入框；手机模型报错保留对话视图；设置账号切换隔离旧表单和晚到的保存响应。完整历史见 [Release Notes](docs/releases/release-notes.md)。
 
 ## Why Agent Fleet?
 

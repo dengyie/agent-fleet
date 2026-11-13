@@ -19,6 +19,9 @@ export function mountCatalog(root, kind) {
   context.append(summary, scopeForm); root.prepend(context);
   async function load() {
     const ticket = ++sequence;
+    catalog = null;
+    content.replaceChildren();
+    status.textContent = '正在加载…';
     content.inert = true;
     try {
       const data = await getSettings(currentOwner);
@@ -30,6 +33,7 @@ export function mountCatalog(root, kind) {
     finally { if (!disposed && ticket === sequence) content.inert = false; }
   }
   function renderDefaults() {
+    const ticket = sequence, formOwner = currentOwner;
     const section = panel(content, '新对话默认配置', '只影响之后解析的运行配置。已有对话的覆盖配置和已提交任务保持原有绑定。');
     const form = el('form', null, 'settings-form'); section.append(form);
     const controls = {};
@@ -42,13 +46,15 @@ export function mountCatalog(root, kind) {
     form.addEventListener('submit', async event => {
       event.preventDefault(); submit.disabled = true;
       try {
-        await saveDefaults(Object.fromEntries(Object.entries(controls).map(([key, control]) => [key, control.value || null])), catalog.defaults.revision, currentOwner);
+        await saveDefaults(Object.fromEntries(Object.entries(controls).map(([key, control]) => [key, control.value || null])), catalog.defaults.revision, formOwner);
+        if (disposed || ticket !== sequence || !form.isConnected) return;
         if (await load()) status.textContent = '默认配置已保存';
-      } catch (error) { status.textContent = errorText(error); }
+      } catch (error) { if (!disposed && ticket === sequence && form.isConnected) status.textContent = errorText(error); }
       finally { submit.disabled = false; }
     });
   }
   function renderCatalog() {
+    const ticket = sequence, formOwner = currentOwner;
     const [title, addLabel, idKey, idTitle] = info[kind];
     const section = panel(content, title, kind === 'models' ? 'API URL、模型与凭据在此管理；保存影响未来任务。已排队任务及登记工作流使用已冻结的配置，登记模板需重新发布才会切换模型源。' : kind === 'nodes' ? '登记已有 VM 或物理机的执行节点及能力。节点进程连接 Hub 并上报心跳后才可执行；登记不会创建或启动云主机。' : '设置工作目录和默认执行节点；路径位于实际执行节点。保存不会创建、搬迁或删除目录。');
     const toolbar = el('div', null, 'settings-toolbar'); section.append(toolbar);
@@ -104,8 +110,8 @@ export function mountCatalog(root, kind) {
           if (!window.confirm('轮换后节点必须使用新凭据重新连接，确认继续？')) return;
           event.currentTarget.disabled = true;
           try {
-            const issued = await provisionNode(row.node_id, currentOwner);
-            if (disposed || !form.isConnected) return;
+            const issued = await provisionNode(row.node_id, formOwner);
+            if (disposed || ticket !== sequence || !form.isConnected) return;
             result.textContent = '接入凭据仅显示一次，请保存到节点配置：' + issued.credential;
           } catch (error) { result.textContent = errorText(error); }
           finally { if (form.isConnected) event.target.disabled = false; }
@@ -121,10 +127,10 @@ export function mountCatalog(root, kind) {
             value = {provider: controls.provider.value, model: controls.model.value.trim(), provider_config, capabilities: jsonValue(controls.capabilities)};
           } else if (kind === 'nodes') value = {label: controls.label.value.trim(), capabilities: jsonValue(controls.capabilities)};
           else value = {name: controls.name.value.trim(), root_path: controls.root_path.value.trim(), backend: row?.backend || 'directory', default_node_id: controls.node.value || null};
-          await saveSetting(kind, id.value.trim(), {expected_digest: row?.digest || '', value: {...value, enabled: enabled.checked}, ...(controls.api_key?.value ? {api_key: controls.api_key.value} : {})}, currentOwner);
-          if (disposed) return;
+          await saveSetting(kind, id.value.trim(), {expected_digest: row?.digest || '', value: {...value, enabled: enabled.checked}, ...(controls.api_key?.value ? {api_key: controls.api_key.value} : {})}, formOwner);
+          if (disposed || ticket !== sequence || !form.isConnected) return;
           if (await load()) status.textContent = '配置已保存，将用于之后的新任务';
-        } catch (error) { if (!disposed) result.textContent = errorText(error) + (error.status === 409 ? '；请点击重新加载，核对后再编辑。' : ''); }
+        } catch (error) { if (!disposed && ticket === sequence && form.isConnected) result.textContent = errorText(error) + (error.status === 409 ? '；请点击重新加载，核对后再编辑。' : ''); }
         finally { submit.disabled = false; }
       });
       form.scrollIntoView({block: 'nearest'});

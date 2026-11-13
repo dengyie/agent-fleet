@@ -27,6 +27,7 @@ class Element {
   get textContent() { return this._text + this.children.map(c => c.textContent).join(''); }
   setAttribute(key, value) { this.attributes[key] = value; }
   addEventListener(key, fn) { this.listeners[key] = fn; }
+  dispatchEvent(event) { this.listeners[event.type]?.(event); return true; }
 }
 globalThis.document = {
   createElement: tag => new Element(tag), createElementNS: (_, tag) => new Element(tag),
@@ -92,7 +93,8 @@ if (scenario === 'existing-optimistic') {
   conversationId = (await response.json()).conversation.conversation_id;
 }
 const root = new Element('main');
-const teardown = mountAssistant(root, conversationId ? {conversationId} : {});
+const teardown = mountAssistant(root, {conversationId,
+  onConversationCreated: id => window.history.replaceState(null, '', '/conversation/' + id)});
 function find(predicate, node = root) {
   if (predicate(node)) return node;
   for (const child of node.children) { const result = find(predicate, child); if (result) return result; }

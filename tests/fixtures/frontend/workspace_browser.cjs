@@ -16,7 +16,7 @@ const [origin, scenario] = process.argv.slice(2);
       models:[{profile_id:'default-a',model:'Model A'}, {profile_id:'actual-b',model:'Model B',enabled:false}],
       workspaces:[{workspace_id:'workspace',name:'Review workspace'}]}}));
     await page.route('**/api/platform/v1/conversations/review-model', r => r.fulfill({json:{ok:true,conversation:{
-      conversation_id:'review-model',workspace_id:'workspace',messages:[{role:'user',content:'用 Model B 分析项目'},
+      conversation_id:'review-model',workspace_id:'workspace',messages:[{message_id:'review-message',role:'user',content:'用 Model B 分析项目'},
         {role:'assistant',content:Array.from({length:50}, (_,i) => `段落 ${i+1}：工作区检查结果。`).join('\n\n')}],runs:[run()]}}}));
     await page.route('**/api/platform/v1/runs/review-run', r => r.fulfill({json:{ok:true,run:run()}}));
     await page.route('**/api/platform/v1/runs/review-run/events*', r => r.fulfill({json:{ok:true,events:[],next_cursor:0}}));
@@ -25,8 +25,83 @@ const [origin, scenario] = process.argv.slice(2);
       await page.goto(origin + '/conversation/review-model', {waitUntil: 'domcontentloaded'});
       await page.waitForFunction(() => {
         const model = document.querySelector('#assistant-model');
-        return model && model.options.length > 0 && model.value !== '';
+        const send = document.querySelector('[aria-label="发送任务"]');
+        return model && model.options.length > 0 && model.value !== '' && send && !send.disabled;
       });
+    }
+    if (scenario === 'new-chat-route' || scenario === 'background-create') {
+      await page.goto(origin + '/assistant');
+      await page.getByText('就绪',{exact:true}).waitFor();
+      let releaseCreate;
+      const heldCreate = new Promise(resolve => {releaseCreate = resolve;});
+      await page.route('**/api/platform/v1/conversations', async r => {
+        if (r.request().method() !== 'POST') return r.continue();
+        if (scenario === 'background-create') await heldCreate;
+        return r.fulfill({json:{ok:true,conversation:{conversation_id:'review-model'}}});
+      });
+      let releaseTurn;
+      const heldTurn = new Promise(resolve => {releaseTurn = resolve;});
+      let turnStarted = false;
+      await page.route('**/api/platform/v1/conversations/review-model/turns', async r => {
+        turnStarted = true; await heldTurn;
+        return r.fulfill({json:{ok:true,message:{message_id:'review-message',role:'user',content:'保留原提交',turn_sequence:1},run:run()}});
+      });
+      await input.fill('保留原提交'); await input.press('Enter');
+      await page.getByText('正在发送…',{exact:true}).waitFor();
+      if (scenario === 'background-create') {
+        await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate',{detail:{path:'/settings/appearance'}})));
+        await page.getByRole('heading',{name:'外观主题',exact:true}).waitFor();
+        const started = page.waitForRequest('**/conversations/review-model/turns');
+        releaseCreate(); await started;
+        assert.equal(new URL(page.url()).pathname,'/settings/appearance','late conversation creation must not change the visible settings route');
+      } else {
+        await page.waitForURL('**/conversation/review-model');
+        await page.locator('.new-conversation').click();
+        await page.waitForURL('**/assistant');
+        assert.equal(await page.locator('.assistant-intro').isVisible(),true,'new chat must mount a fresh view after first conversation creation');
+        assert.equal(await page.locator('.assistant-message.user').count(),0,'the previous conversation must not remain in new chat');
+      }
+      await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate',{detail:{path:'/conversation/review-model'}})));
+      await page.waitForURL('**/conversation/review-model');
+      await page.locator('.assistant-message.user').getByText('保留原提交',{exact:true}).waitFor();
+      assert.equal(await input.evaluate(n => n.readOnly),true,'returning to the accepted conversation must reuse its pending submission');
+      assert.equal(turnStarted,true);
+      releaseTurn();
+      await page.locator('.assistant-run-status[data-state="succeeded"]').waitFor();
+    }
+    if (scenario === 'send-viewport') {
+      await openHistory();
+      for (const width of [1440,390]) {
+        await page.setViewportSize({width,height:900});
+        await input.fill('多行消息\n'.repeat(30));
+        assert.ok(await input.evaluate(n => n.getBoundingClientRect().height)>100);
+        await page.locator('[data-chat-scroll]').evaluate(n => {n.scrollTop=0;n.dispatchEvent(new Event('scroll'));});
+        await page.getByRole('button',{name:'滚动到最新消息',exact:true}).waitFor();
+        let release;
+        const held = new Promise(resolve=>{release=resolve;});
+        await page.route('**/api/platform/v1/conversations/review-model/turns',async r=>{
+          await held;
+          return r.fulfill({status:400,json:{error:'invalid_message',detail:'fixture rejection'}});
+        });
+        await input.press('Enter');
+        await page.getByText('正在发送…',{exact:true}).waitFor();
+        await page.waitForFunction(()=>{const n=document.querySelector('[data-chat-scroll]');return n.scrollHeight-n.scrollTop-n.clientHeight<72;});
+        assert.ok(await input.evaluate(n=>n.getBoundingClientRect().height)<=60,'empty composer must shrink after programmatic clearing');
+        release();await page.getByText('提交失败',{exact:true}).waitFor();
+        assert.ok(await input.evaluate(n=>n.getBoundingClientRect().height)>100,'rejected multiline text must restore its editor height');
+        await page.unroute('**/api/platform/v1/conversations/review-model/turns');
+      }
+    }
+    if (scenario === 'mobile-failure') {
+      runState = 'unknown';
+      await page.setViewportSize({width:390,height:844});
+      await openHistory();
+      await page.locator('.assistant-run-status[data-state="unknown"]').waitFor();
+      assert.equal(await page.locator('dialog:modal').count(),0,'a model error must not cover the conversation with an automatic modal');
+      const refresh = page.getByRole('button',{name:'重新读取状态',exact:true});
+      await refresh.click();
+      await page.getByRole('button',{name:'工作面板',exact:true}).click();
+      assert.equal(await page.getByRole('tab',{name:'运行',exact:true}).getAttribute('aria-selected'),'true');
     }
     if (scenario === 'action-errors') {
       await page.goto(origin + '/assistant', {waitUntil: 'domcontentloaded'});

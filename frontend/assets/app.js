@@ -1,5 +1,6 @@
 import {accountRequest} from './api/accounts.js';
 import {mountSettings} from './views/settings.js';
+import {pagePath} from './routes.js';
 /* Composition only: authenticate before mounting any feature or stream. */
 import * as api from './api/client.js';
 import * as platform from './api/platform.js';
@@ -82,12 +83,32 @@ function protectConsole() {
     redirecting = true; disposeView();
     redirectToLogin();
   }
+  function adoptConversation(view, conversationId) {
+    if (routeViews.get(view.key) !== view) return;
+    const nextRoute = {page: 'assistant', id: conversationId};
+    const key = routeKey(nextRoute);
+    const previous = routeViews.get(key);
+    if (previous && previous !== view) destroyRouteView(previous);
+    routeViews.delete(view.key);
+    view.key = key;
+    view.host.dataset.routeCacheEntry = key;
+    routeViews.set(key, view);
+    // A background submission may finish after the user opens another page.
+    // Update its cache identity without navigating away from that page.
+    if (activeRouteView !== view) return;
+    route = nextRoute;
+    window.history.replaceState(null, '', pagePath('conversation', conversationId));
+    disposeNavigation?.updateRoute?.(route);
+  }
   function mountRoute(view) {
     const target = view.host;
     const mountEntity = {machine: mountMachine, task: mountTask, session: mountSession};
     if (route.page === 'settings') view.teardown = mountSettings(target, {section: route.id, account});
     else if (route.page === 'fleet') view.teardown = mountFleet(target, store, client);
-    else if (route.page === 'assistant') view.teardown = mountAssistant(target, {conversationId: route.id, account});
+    else if (route.page === 'assistant') view.teardown = mountAssistant(target, {
+      conversationId: route.id, account,
+      onConversationCreated: id => adoptConversation(view, id),
+    });
     else if (route.page === 'muse') view.teardown = mountMuse(target);
     else if (route.page === 'monitoring') view.teardown = mountMonitoring(target, client);
     else if (route.page === 'plugins') view.teardown = mountPlugins(target);
