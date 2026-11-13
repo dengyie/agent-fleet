@@ -112,7 +112,7 @@ async function capture(page, name) {
         const readPattern = '**/integrations/mcp/record?connector_id=weather';
         await page.route(readPattern, route => { held = route; signalRead(); });
         await panel.getByRole('button', {name: '重新读取目录', exact: true}).click(); await arrived;
-        await page.locator('a[data-nav="assistant"]').click(); await page.waitForURL('**/assistant');
+        await page.getByRole('link', {name: '返回应用', exact: true}).click(); await page.waitForURL('**/assistant');
         await held.abort('failed'); await page.unroute(readPattern);
         await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate', {detail: {path: '/settings/integrations'}})));
         await inspector.getByText('待审版本 3', {exact: true}).waitFor();
