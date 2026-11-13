@@ -37,7 +37,12 @@ function updateRequest(root, request) {
   root._request = request;
   root._elapsed = typeof elapsed_ms === 'number' ? elapsed_ms : 0;
   root._received = performance.now();
-  const signature = JSON.stringify(stable);
+  // SSE and polling can serialize the same DTO with different object key order.
+  // Compare values canonically so unchanged snapshots retain their child nodes.
+  const signature = JSON.stringify(stable, (_, value) =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]]))
+      : value);
   if (root._signature === signature) return;
   root._signature = signature;
   root.setAttribute('data-request-id', request.request_id);

@@ -87,11 +87,20 @@ const [origin, conversation] = process.argv.slice(2);
       const observer = new MutationObserver(() => {}); observer.observe(host,{subtree:true,childList:true,attributes:true,characterData:true});
       const update = performance.now(); renderRequestMetadata(host,rows); const updateMs=performance.now()-update;
       const changes=observer.takeRecords().length; observer.disconnect();
-      return {requests:host.children.length,renderMs,updateMs,changes,idleClock:tickRequestMetadata(host)};
+      const icons = Array.from(host.querySelectorAll('svg'));
+      const reordered = rows.map(row => Object.fromEntries(Object.entries(row).reverse().map(([key,value]) =>
+        [key, key === 'usage' ? Object.fromEntries(Object.entries(value).reverse()) : value])));
+      observer.observe(host,{subtree:true,childList:true,attributes:true,characterData:true});
+      renderRequestMetadata(host,reordered);
+      const reorderedChanges=observer.takeRecords().length; observer.disconnect();
+      const retainedIcons=Array.from(host.querySelectorAll('svg')).every((icon,index) => icon === icons[index]);
+      return {requests:host.children.length,renderMs,updateMs,changes,reorderedChanges,retainedIcons,idleClock:tickRequestMetadata(host)};
     });
     assert.equal(performanceEvidence.requests,120);
     // No-op updates and idle timers must do no DOM work, independent of CPU speed.
     assert.equal(performanceEvidence.changes,0);
+    assert.equal(performanceEvidence.reorderedChanges,0,'SSE and polling key order must not rebuild metadata');
+    assert.equal(performanceEvidence.retainedIcons,true,'equivalent snapshots preserve icon identity');
     assert.equal(performanceEvidence.idleClock,false);
     assert.deepEqual(errors,[]);
     console.log(JSON.stringify({requests:2,liveClock:true,historyReads:conversationReads,restored:true,mobile:true,reducedMotion:true,performanceEvidence,errors}));
