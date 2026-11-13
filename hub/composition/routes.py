@@ -38,6 +38,8 @@ def _register_blueprints(app, config, platform, sessions, control):
     app.register_blueprint(tasks_bp)
     app.register_blueprint(commands_bp)
     app.register_blueprint(pages_bp)
+    from hub.http.settings_routes import bp as settings_bp
+    app.register_blueprint(settings_bp)
     # 版本化 /api/v1 兼容表面：复用旧 view，旧 /api/* 仍权威。
     app.register_blueprint(observe_v1_bp)
     app.register_blueprint(tasks_v1_bp)

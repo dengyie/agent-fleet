@@ -27,7 +27,7 @@ const templateIds = mode === 'exact-ids' ? [' fixture ', '\ufeffnative'] : ['fix
     page.on('request', request => {
       if (request.url() === prefix + '/register') posted.push(JSON.parse(request.postData()));
     });
-    await page.goto(origin + '/account', {waitUntil: 'domcontentloaded'});
+    await page.goto(origin + '/settings/integrations', {waitUntil: 'domcontentloaded'});
     const panel = page.getByRole('region', {name: 'Fleet 集成身份管理', exact: true});
     await panel.getByRole('button', {name: '登记新身份', exact: true}).click();
     const dialog = page.getByRole('dialog', {name: '登记 Fleet 集成身份', exact: true});

@@ -99,11 +99,12 @@ class MCPCatalogRepository:
         with self._transaction(write=True) as connection:
             if not inspect_catalog_schema(connection):
                 version = connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-                if version is None or version[0] not in ("3", "4"):
+                if version is None or version[0] not in ("3", "4", "5"):
                     raise MCPCatalogError("unsupported_mcp_platform_reader")
                 for statement in STATEMENTS:
                     connection.execute(statement)
-                connection.execute("UPDATE meta SET value='4' WHERE key='schema_version'")
+                connection.execute("UPDATE meta SET value=CAST(MAX(CAST(value AS INTEGER),4) AS TEXT) WHERE key='schema_version'")
+                connection.execute("INSERT OR REPLACE INTO meta VALUES ('mcp_catalog_initialized','1')")
         with self._transaction() as connection:
             self.validate_snapshot(connection)
 

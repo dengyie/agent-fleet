@@ -557,7 +557,7 @@ if (fixture === 'task_reject') {
   const nav = await import(process.env.FLEET_NAVIGATION_URL);
   const user = { id: 'u', role: 'user' };
   const admin = { id: 'a', role: 'admin' };
-  const expected = ['assistant', 'account', 'usage', 'muse'];
+  const expected = ['assistant', 'settings', 'usage', 'muse'];
   if (JSON.stringify(Array.from(nav.ACCOUNT_PAGES)) === JSON.stringify(expected) && Object.isFrozen(nav.ACCOUNT_PAGES)) ok('account_pages.list');
   else fail('account_pages.list', JSON.stringify(nav.ACCOUNT_PAGES));
   for (const page of expected) {

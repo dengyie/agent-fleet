@@ -36,7 +36,8 @@ def inspect_catalog_schema(connection: sqlite3.Connection) -> bool:
     if not tables:
         if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone() is not None:
             version = connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-            if version is not None and version[0] == "4":
+            marker = connection.execute("SELECT value FROM meta WHERE key='mcp_catalog_initialized'").fetchone()
+            if (version is not None and version[0] == "4") or marker is not None:
                 raise MCPCatalogError("incomplete_mcp_catalog_schema")
         return False
     if not set(TABLE_COLUMNS).issubset(tables):
@@ -61,6 +62,6 @@ def inspect_catalog_schema(connection: sqlite3.Connection) -> bool:
         row = connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
     except sqlite3.Error as exc:
         raise MCPCatalogError("incomplete_platform_schema", cause=exc) from exc
-    if row is None or type(row[0]) is not str or row[0] != "4":
+    if row is None or type(row[0]) is not str or row[0] not in ("4", "5"):
         raise MCPCatalogError("unsupported_mcp_platform_reader")
     return True

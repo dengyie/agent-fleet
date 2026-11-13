@@ -3031,6 +3031,20 @@
         "tests/test_workflow_repository.py::test_isolated_reservation_counts_for_fixed_target_capacity",
         "tests/test_workflow_control.py::test_isolated_reservation_blocks_new_generation"
       ]
+    },
+    {
+      "id": "SETTINGS-01",
+      "layer": "browser",
+      "acceptance": "Administrator edits model URL/credentials, VM execution nodes, workspaces and defaults in one settings page; reload and conflicts preserve persisted state, cached assistant refreshes, runtime file changes require restart and never call an external model. Ordinary users cannot access administrator configuration.",
+      "tests": [
+        "tests/test_settings_browser.py::test_settings_save_reload_and_navigation",
+        "tests/test_settings.py::test_model_edit_secret_preservation_rotation_and_restart",
+        "tests/test_settings.py::test_settings_admin_boundary_and_catalog_ownership",
+        "tests/test_settings.py::test_runtime_edit_is_atomic_conflict_fenced_and_requires_restart",
+        "tests/test_settings.py::test_settings_model_is_ready_via_the_existing_readiness_check",
+        "tests/test_settings.py::test_file_settings_are_consumed_by_the_real_startup_loader",
+        "tests/test_settings.py::test_runtime_settings_remain_accessible_before_platform_enabled"
+      ]
     }
   ],
   "external_checks": [

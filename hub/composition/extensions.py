@@ -32,6 +32,8 @@ def register_fleet_extension(app, config, repositories, core, platform, sessions
     repos = fleet["repositories"]
     services = fleet["services"]
     p = platform
+    from hub.application.runtime_settings import RuntimeSettings
+    services["runtime_settings"] = RuntimeSettings(config, app.config)
     if p.platform_repository is not None:
         fleet["platform_repository"] = p.platform_repository
         fleet["platform_commands"] = p.command_repository
@@ -45,6 +47,9 @@ def register_fleet_extension(app, config, repositories, core, platform, sessions
         repos["platform_scheduler"] = p.platform_scheduler_repository
     if p.platform_service is not None:
         services["platform_defaults"] = p.platform_service
+        from hub.application.settings_service import SettingsService
+        services["model_secrets"] = p.model_secrets
+        services["settings"] = SettingsService(p.platform_repository, p.model_secrets)
         services["conversations"] = p.conversation_service
         services["runs"] = p.run_service
         if p.submit_approval_service is not None:

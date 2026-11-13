@@ -37,7 +37,7 @@ globalThis.document = {
 };
 globalThis.DOMParser = class { parseFromString() { return {documentElement: new Element('svg')}; } };
 const [origin, modulePath, scenario] = process.argv.slice(2);
-globalThis.window = { dispatchEvent() {}, FleetConfig: {apiBaseUrl: origin + '/api'}, history: {replaceState() {}} };
+globalThis.window = Object.assign(new EventTarget(), {FleetConfig: {apiBaseUrl: origin + '/api'}, history: {replaceState() {}}});
 const realFetch = globalThis.fetch;
 const requests = [];
 const replies = [];

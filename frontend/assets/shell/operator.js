@@ -7,7 +7,7 @@ export function safeReturnPath(value) {
   if (typeof value !== 'string' || value.length > 2048) return pagePath('assistant');
   try {
     const url = new URL(value, window.location.origin);
-    const known = /^\/(?:index\.html|account|assistant|monitoring|(?:machine|task|session|conversation)\/[^/]+)?$/;
+    const known = /^\/(?:index\.html|account|settings(?:\/[a-z-]+)?|assistant|monitoring|(?:machine|task|session|conversation)\/[^/]+)?$/;
     if (url.origin === window.location.origin && known.test(url.pathname)) {
       return url.pathname + url.search + url.hash;
     }

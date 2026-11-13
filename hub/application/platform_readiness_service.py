@@ -25,7 +25,7 @@ def check_platform_readiness(fleet, owner_id):
         if model['provider'] != 'deterministic' and not config.platform_provider_network_enabled:
             issues.append('provider_network_disabled')
         try:
-            ProviderFactory(allow_network=False)(model)  # builds only; never completes a request
+            ProviderFactory(secret_broker=services.get("model_secrets"), allow_network=False)(model)  # builds only; never completes a request
         except ProviderUnavailable as exc:
             issues.append(exc.diagnostic()['provider_error'])
     if not workspace or not workspace['enabled']:

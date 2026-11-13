@@ -71,3 +71,34 @@ Production review regressions in `tests/test_account_review_regressions.py` cove
 `tests/test_account_recovery.py` covers password rotation with pending/in-flight reset grants, delayed mail, ineligible registration attempts, concurrent deliveries and quota rollover. The account assistant browser fixture exercises ordinary and administrator sessions against a real disposable Hub: task completion, reload recovery, artifact preview, cancellation, and the absence of administrator requests/controls for ordinary users.
 
 `tests/test_account_public_responses.py` compares registration/reset responses across known, unknown, disabled and invited addresses, including cooldown, daily quota and sender failures; it also verifies safe diagnostics and independent IP/configuration errors. `tests/test_account_credential_limits.py` covers reset/change after login lockout, isolation of unrelated limits, failed/expired verification and complete credential-transaction rollback.
+
+## Central settings
+
+The console's **设置** entry opens `/settings`. Configuration lives in ten sections:
+
+| Section | What can be configured |
+| --- | --- |
+| Models and API | OpenAI compatible model name, API Base URL or chat-completions endpoint, API Key, timeout (1–600 seconds), retry count (0–5), streaming, ordinary headers, pricing and capability flags; local deterministic test models are also supported |
+| Defaults | Default model, workspace and execution node for future resolution |
+| VM and execution nodes | Register existing VM/physical execution nodes, edit labels and capability declarations, enable/disable, view heartbeat and issue/rotate a one-time node credential |
+| Workspaces and storage | Directory backend, absolute path on the execution node, default node and enabled state |
+| Node display and heartbeat | Existing `hosts.yaml`: display order, descriptions and stale TTL; saving does not launch or create VMs |
+| Integrations and workflows | Existing MCP connections, Fleet integration identities and Workflow summaries, including explicit summary generation |
+| Plugins | Existing plugin enablement, node enrollment and plugin contributions |
+| System and runtime | Explicit feature gates, worker concurrency/interval/lease, history retention, Komari URL/sync, probe settings, allowed origins, sandbox argv and registration file locations |
+| Account and access | Profile, password, sessions, invitations, account policy and account IDs |
+| Appearance | Per-browser theme, synchronized with the sidebar picker |
+
+`/account` opens the account section of the same settings shell. Ordinary users see account and appearance only. Catalog and system administration retain administrator authentication. An administrator can explicitly select another account ID in catalog sections to provision that user's resources/defaults; it never copies the administrator's catalog automatically. Account IDs are shown in account administration.
+
+### Persistence and application
+
+`GET /api/platform/v1/settings` returns the caller's catalogs with edit digests. `PUT /settings/{models|workspaces|nodes}/{id}` requires `expected_digest` (empty for a new entry), `value`, and an optional model `api_key`. A compare-and-write transaction rejects concurrent edits with 409. A successful edit updates the existing platform database, rather than a second UI-only store. Catalog and default saves refresh the cached assistant's selectors on return; per-conversation choices and submitted Runs retain their existing binding.
+
+Keys entered in settings are immutable files in `<state_dir>/model-secrets/`; references alone are stored in model records and private Run snapshots. Empty Key inputs preserve the existing binding. Rotation creates a new file so previously queued snapshots continue resolving the earlier key. Key values and references are omitted from settings responses. Existing `env://` bindings continue resolving through the existing environment broker. Include this directory with platform database backups and migrations; do not delete old credential files merely because a newer credential exists. No provider request is made by loading or saving a model. Registered Workflow templates keep their own frozen provider snapshots and must be republished to adopt a new binding.
+
+The first managed credential binding raises the platform database reader version to 5 in the same transaction as the model edit. Earlier releases refuse that database instead of starting a worker that cannot resolve its credentials. Existing databases keep their version until this feature is used. MCP initialization preserves version 5 and its catalog-presence marker; backup/restore recognizes both features. Downgrading after use requires a compatible code version or a coordinated database/credential restore, with newer writes preserved separately according to the deployment rollback procedure.
+
+`GET/PUT /settings/runtime` and `/settings/hosts` use SHA preconditions and a shared file lock. Saving creates a private exact-file backup and atomically replaces `fleet-gates.conf` or `hosts.yaml`, preserving unrelated gate-file lines. The UI shows current effective values separately from saved values and marks environment overrides. These writes **require a controlled Hub restart**; they never mutate live workers or restart production automatically. Explicit startup arguments and environment overrides remain higher priority. Registration paths identify existing manifests; changing a path does not create a manifest. Root/database/artifact paths are shown as read-only deployment information because changing them requires data migration. Arbitrary cloud VM lifecycle operations are not implemented.
+
+`tests/test_settings.py` exercises key persistence and rotation, real worker broker resolution, owner boundaries, concurrent writes, runtime startup consumption, host validation and file conflict handling. `tests/test_settings_browser.py` exercises desktop/mobile model and directory save/reload, stale-write recovery, assistant catalog refresh and restart-time settings using disposable local stores and no external models.

@@ -659,8 +659,30 @@ export function mountAssistant(target, options) {
       initializationHost.appendChild(action);
     }
   }
+  var settingsDirty = false;
+  function onSettingsUpdated() { settingsDirty = true; }
+  window.addEventListener('fleet-settings-updated', onSettingsUpdated);
+  async function refreshSettingsCatalog() {
+    try {
+      var data = await getPlatformDefaults();
+      if (disposed) return;
+      var previousModel = model.value, previousWorkspace = workspace.value;
+      modelCatalog = Array.isArray(data.models) ? data.models : [];
+      fill(model, data.models, 'profile_id', 'model');
+      fill(workspace, data.workspaces, 'workspace_id', 'name');
+      var desiredModel = conversationId ? previousModel : data.defaults?.model_profile_id;
+      var desiredWorkspace = conversationId ? previousWorkspace : data.defaults?.workspace_id;
+      if (Array.from(model.options).some(option => option.value === desiredModel)) model.value = desiredModel;
+      if (Array.from(workspace.options).some(option => option.value === desiredWorkspace)) workspace.value = desiredWorkspace;
+      catalogReady = !!model.value && !!workspace.value;
+      settingsDirty = false; lockPendingTurn();
+    } catch (error) {
+      if (!disposed) showActionError(error);
+    }
+  }
   initialize();
   function teardown() {
+    window.removeEventListener('fleet-settings-updated', onSettingsUpdated);
     disposed = true;
     document.removeEventListener('visibilitychange', onVisibilityChange);
     pauseWindowPoll();
@@ -682,6 +704,7 @@ export function mountAssistant(target, options) {
   teardown.resume = function () {
     if (disposed || !suspended) return;
     suspended = false;
+    if (settingsDirty) refreshSettingsCatalog();
     if (workflowTeardown) workflowTeardown.resume();
     if (activeRunId) { poll(); startRequestClock(); }
     if (windowState.window && windowState.window.state !== 'closed' && windowState.window.state !== 'expired') scheduleWindowPoll(0);

@@ -12,7 +12,7 @@ const [origin, mode, screenshot] = process.argv.slice(2);
     const page = await context.newPage(); page.setDefaultTimeout(10000);
     const posts = [];
     page.on('request', request => { if (request.method() === 'POST' && request.url().includes('/workflow-summary-generations')) posts.push(request); });
-    await page.goto(origin + '/account', {waitUntil: 'domcontentloaded'});
+    await page.goto(origin + '/settings/integrations', {waitUntil: 'domcontentloaded'});
     const generator = page.getByRole('region', {name: '模型摘要生成', exact: true});
     await generator.getByLabel('生成摘要 ID', {exact: true}).fill('generated-' + mode);
     await generator.getByLabel('生成摘要标题', {exact: true}).fill('实际使用摘要');

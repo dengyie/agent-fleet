@@ -1,11 +1,8 @@
 import {accountRequest} from '../api/accounts.js';
 import {redirectToLogin} from '../shell/operator.js';
-import {mountMCPIntegrations} from './account/integrations.js';
-import {mountIntegrationIdentities} from './account/identities.js';
-import {mountWorkflowSummaries} from './account/workflow-summaries.js';
 
 export function mountAccount(root) {
-  let disposed = false, integrationViews = [], suspended = false;
+  let disposed = false;
   const node = (tag, text) => { const el = document.createElement(tag); if (text) el.textContent = text; return el; };
   const status = node('p'); status.setAttribute('role', 'status');
   root.append(status);
@@ -34,9 +31,9 @@ export function mountAccount(root) {
   }
   async function load() {
     const data = await accountRequest('me'); if (disposed) return;
-    for (const view of integrationViews) view(); integrationViews = [];
     root.replaceChildren(status); status.textContent = '';
     root.append(node('p', data.user.email + ' · ' + (data.user.role === 'admin' ? '管理员' : '普通用户')));
+    root.append(node('p', '账号 ID：' + data.user.id));
     const profile = form(root, '个人资料', [['name', '昵称']], '保存昵称', async values => {
       await accountRequest('profile', values); status.textContent = '昵称已保存';
     }); profile.name.value = data.user.name; profile.name.maxLength = 80;
@@ -51,16 +48,6 @@ export function mountAccount(root) {
       button(row, '退出此会话', async () => { await accountRequest('sessions/revoke', {session_id: session.id}); if (session.current) redirectToLogin(); else await load(); }); sessions.append(row);
     }
     button(sessions, '退出所有会话', async () => { await accountRequest('sessions/revoke', {}); redirectToLogin(); }); root.append(sessions);
-    if (data.user.role === 'admin' && data.features?.mcp_catalog_management === true) {
-      integrationViews.push(mountMCPIntegrations(root, {suspended,
-        registrationEnabled: data.features?.mcp_catalog_registration === true, ownerId: data.user.id}));
-    }
-    if (data.user.role === 'admin' && data.features?.fleet_identity_management === true) {
-      integrationViews.push(mountIntegrationIdentities(root, {suspended}));
-    }
-    if (data.user.role === 'admin' && data.features?.workflow_summary_management === true) {
-      integrationViews.push(mountWorkflowSummaries(root, {suspended, ownerId: data.user.id}));
-    }
     if (data.user.role === 'admin') await mountAdmin();
   }
   async function mountAdmin() {
@@ -102,6 +89,7 @@ export function mountAccount(root) {
       for (const user of result.users) {
         const row = node('div'); row.className = 'account-row';
         row.append(node('span', user.email + ' · ' + (user.role === 'admin' ? '管理员' : '用户') + (user.active ? '' : ' · 已停用')));
+        row.append(node('code', 'ID: ' + user.id));
         button(row, user.active ? '停用' : '启用', async () => {
           if (!window.confirm((user.active ? '停用' : '启用') + user.email + '？此操作会撤销该账号的登录会话。')) return;
           await updateUser(user, {active: !user.active});
@@ -117,8 +105,6 @@ export function mountAccount(root) {
     const more = button(section, '加载更多账号', users); await users();
   }
   action(load);
-  const dispose = () => { disposed = true; for (const view of integrationViews) view(); integrationViews = []; };
-  dispose.suspend = () => { suspended = true; for (const view of integrationViews) view.suspend(); };
-  dispose.resume = () => { suspended = false; for (const view of integrationViews) view.resume(); };
+  const dispose = () => { disposed = true; };
   return dispose;
 }

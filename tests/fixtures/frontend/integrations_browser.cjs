@@ -27,8 +27,8 @@ async function capture(page, name) {
     const errors = []; const requests = [];
     page.on('pageerror', error => errors.push(error.message));
     page.on('request', request => { if (request.url().startsWith(prefix)) requests.push({url: request.url(), method: request.method()}); });
-    await page.goto(origin + '/account', {waitUntil: 'domcontentloaded'});
-    await page.getByRole('heading', {name: '个人资料', exact: true}).waitFor();
+    await page.goto(origin + '/settings/integrations', {waitUntil: 'domcontentloaded'});
+    await page.getByRole('navigation', {name: '设置分类', exact: true}).waitFor();
     const panel = page.getByRole('region', {name: 'MCP 集成管理', exact: true});
     if (mode === 'hidden') {
       assert.equal(await panel.count(), 0); assert.equal(requests.length, 0);
@@ -104,7 +104,7 @@ async function capture(page, name) {
         await approve.click();
         await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate', {detail: {path: '/assistant'}})));
         await page.waitForURL('**/assistant'); assert.equal(await page.getByRole('dialog').count(), 0);
-        await page.locator('a[data-nav="account"]').click();
+        await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate', {detail: {path: '/settings/integrations'}})));
         await inspector.getByText('待审版本 3', {exact: true}).waitFor();
         assert.equal(requests.filter(value => value.method === 'POST').length, 0);
         let held, signalRead;
@@ -114,7 +114,7 @@ async function capture(page, name) {
         await panel.getByRole('button', {name: '重新读取目录', exact: true}).click(); await arrived;
         await page.locator('a[data-nav="assistant"]').click(); await page.waitForURL('**/assistant');
         await held.abort('failed'); await page.unroute(readPattern);
-        await page.locator('a[data-nav="account"]').click();
+        await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate', {detail: {path: '/settings/integrations'}})));
         await inspector.getByText('待审版本 3', {exact: true}).waitFor();
         assert.equal(requests.filter(value => value.method === 'POST').length, 0);
         assert.equal((await context.request.post(origin + '/api/accounts/logout', {data: {}, headers: {Origin: origin}})).status(), 200);

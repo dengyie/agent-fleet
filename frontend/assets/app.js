@@ -1,5 +1,5 @@
 import {accountRequest} from './api/accounts.js';
-import {mountAccount} from './views/account.js';
+import {mountSettings} from './views/settings.js';
 /* Composition only: authenticate before mounting any feature or stream. */
 import * as api from './api/client.js';
 import * as platform from './api/platform.js';
@@ -85,7 +85,7 @@ function protectConsole() {
   function mountRoute(view) {
     const target = view.host;
     const mountEntity = {machine: mountMachine, task: mountTask, session: mountSession};
-    if (route.page === 'account') view.teardown = mountAccount(target);
+    if (route.page === 'settings') view.teardown = mountSettings(target, {section: route.id, account});
     else if (route.page === 'fleet') view.teardown = mountFleet(target, store, client);
     else if (route.page === 'assistant') view.teardown = mountAssistant(target, {conversationId: route.id, account});
     else if (route.page === 'muse') view.teardown = mountMuse(target);
@@ -223,7 +223,7 @@ function protectConsole() {
         return;
       }
       account = nextAccount;
-      document.querySelector('[data-nav="account"]').hidden = !account;
+      document.querySelector('[data-nav="settings"]').hidden = false;
       if (account && account.role !== "admin") {
         document.querySelector('[data-nav="fleet"]').hidden = true;
         document.querySelector('[data-nav="monitoring"]').hidden = true;

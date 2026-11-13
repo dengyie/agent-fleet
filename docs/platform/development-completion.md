@@ -474,3 +474,10 @@ Linux同版快照已复制至既有SG测试机私有目录 `full-gate-depth-d7d8
 
 - 2026-11-11：显式版本摘要权威已接 operator 发布/有界列表/精确读取/启停，完整不可变来源/hash、CAS幂等、Native3/外部prompt3/metadata4及Workflow reader11；原事务/当前授权/恢复历史闭包与明文/加密frozen备份覆盖。最初31项权威缺失、16项消费缺失，以及停用竞态和gate-off损坏均保留失败证据。首次ebd91052冻结本机关联831 passed、全仓7041 passed/1旧远程事件断言failed/5平台skip；Linux830 passed/1真实性能failed。SQLite3.40.1 tuple-IN仅用三列索引，1500版本闭包21600指令，改为VALUES驱动精确四列主键查询后selected/closure为3100/3600（100指令采样），原4000上限不变。
 - 2026-11-11：修正4a3e15f1冻结Linux23模块832 passed/0skip/346.992s，本机完整7043 passed/零失败错误/5平台skip/204 subtests/911.90s，43/44旅程、2071 selectors、46完整PNG，1156源码前后不变、checkout clean；原核验器仍退出1/journey_incomplete。原远程验收测试保留准确两种事件时序及2模型请求/1节点命令，额外52项通过。随后Windows摘要64 passed/6备份failed，实际单文件fsync复现Bad file descriptor；owned暂存文件在Windows改用可写描述符，保留失败关闭与暂存数据。新b44fe1bc冻结三端相同四模块各96 passed/0skip（macOS8.58s、Windows76.234s、Linux38.856s），不假定NTFS目录掉电耐久。原packager1080后端文件逐项hash一致，包6628994 bytes；最终矩阵44条/2073selectors、7050实例全部收集。完整证据、原失败、源码bundle与边界见[摘要计划](../superpowers/plans/2026-11-11-versioned-summary-context.md#verified-results--2026-11-11)及 `/Users/mango/.cache/agent-fleet/verification/summary-context-20261111/`。无提交/推送/部署或真实CLI/model调用，完整Linux/browser及全局todo继续开放。
+
+
+## 2026-11-13 统一设置页
+
+已在功能分支实现 `/settings` 分类入口，聚合模型源API URL/Key/超时重试、账号默认值、VM执行节点/能力/接入凭据、目录工作区、hosts心跳清单、MCP/身份/摘要、插件、系统参数和账号/外观。复用原PlatformRepository及集成服务；模型Key采用持久化版本引用并被Worker/readiness共用。模型目录/默认值保存后返回助手会刷新选择器；runtime/hosts文件版本检查、原文件备份、原子替换，需受控重启。平台尚未启用时系统配置入口仍可用。配置支持范围、生效方式及备份边界见[账号与统一设置](../account-management.md#central-settings)，任务与验证见[设置页计划](../superpowers/plans/2026-11-13-central-settings.md)。
+
+首轮完整本地Chrome为7733 passed、204 subtests、12平台skip、5failed：发布前端清单与最小DOM夹具4项已修复，原账号切换held-feature-401项独立复跑通过。此记录不等于完整CI全绿；新增SETTINGS-01必需流程后，发布以同一提交的CI完整报告为准。未创建/销毁云VM，不触发真实模型请求或自动重启线上服务。

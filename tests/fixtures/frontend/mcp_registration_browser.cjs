@@ -30,7 +30,7 @@ async function capture(page, name) {
     page.on('request', request => {
       if (request.url().startsWith(prefix) && request.method() === 'POST') posts.push({url: request.url(), body: request.postDataJSON()});
     });
-    await page.goto(origin + '/account', {waitUntil: 'domcontentloaded'});
+    await page.goto(origin + '/settings/integrations', {waitUntil: 'domcontentloaded'});
     const panel = page.getByRole('region', {name: 'MCP 集成管理', exact: true});
     await panel.getByRole('button', {name: '登记 MCP 连接', exact: true}).click();
     const dialog = page.getByRole('dialog', {name: '登记 MCP 连接', exact: true});

@@ -15,8 +15,8 @@ const password = 'safe-password-123!';
     const summaryResponses = [];
     page.on('response', response => { if (response.url().startsWith(prefix)) summaryResponses.push([response.status(), response.url()]); });
     page.on('request', request => { if (request.url().startsWith(prefix) && request.method() === 'POST') mutations.push(request.url()); });
-    await page.goto(origin + '/account', {waitUntil: 'domcontentloaded'});
-    await page.getByRole('heading', {name: '个人资料', exact: true}).waitFor();
+    await page.goto(origin + '/settings/integrations', {waitUntil: 'domcontentloaded'});
+    await page.getByRole('navigation', {name: '设置分类', exact: true}).waitFor();
     const panel = page.getByRole('region', {name: '工作流摘要管理', exact: true});
     if (mode === 'user') {
       assert.equal(await panel.count(), 0);

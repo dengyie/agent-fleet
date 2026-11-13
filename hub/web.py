@@ -287,14 +287,14 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         komari_network_enabled, env=_KOMARI_NETWORK_ENABLE_ENV)
     komari_sync_on = _feature_on(
         komari_sync_enabled, env=_KOMARI_SYNC_ENABLE_ENV)
-    komari_base_url = _optional_setting(
+    komari_base_url = _file_setting(
         komari_base_url, env=_KOMARI_BASE_URL_ENV)
-    komari_nodes_path = _optional_setting(
+    komari_nodes_path = _file_setting(
         komari_nodes_path, env=_KOMARI_NODES_PATH_ENV)
     komari_token = _optional_setting(komari_token, env=_KOMARI_TOKEN_ENV)
     komari_node_mapping = _node_mapping(komari_node_mapping)
     komari_sync_interval = _bounded_float(
-        _optional_setting(komari_sync_interval_s, env=_KOMARI_SYNC_INTERVAL_ENV),
+        _file_setting(komari_sync_interval_s, env=_KOMARI_SYNC_INTERVAL_ENV),
         default=60.0, lower=5.0, upper=3600.0)
     http_probe_on = _feature_on(http_probe_enabled, env=_HTTP_PROBE_ENABLE_ENV)
     http_probe_network_on = _feature_on(
@@ -302,9 +302,9 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
     http_probe_sync_on = _feature_on(
         http_probe_sync_enabled, env=_HTTP_PROBE_SYNC_ENABLE_ENV)
     http_probe_sync_interval = _bounded_float(
-        _optional_setting(http_probe_sync_interval_s, env=_HTTP_PROBE_SYNC_INTERVAL_ENV),
+        _file_setting(http_probe_sync_interval_s, env=_HTTP_PROBE_SYNC_INTERVAL_ENV),
         default=60.0, lower=5.0, upper=3600.0)
-    http_probe_allowed = _optional_setting(
+    http_probe_allowed = _file_setting(
         http_probe_allowed_origins, env=_HTTP_PROBE_ALLOWED_ORIGINS_ENV)
     if isinstance(http_probe_allowed, str):
         http_probe_allowed = [item.strip() for item in http_probe_allowed.split(",") if item.strip()]
@@ -320,14 +320,14 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
     platform_worker_scheduler_on = _feature_on(
         platform_worker_scheduler_enabled, env=_PLATFORM_WORKER_SCHEDULER_ENABLE_ENV)
     platform_worker_interval = _bounded_float(
-        _optional_setting(platform_worker_interval_s, env=_PLATFORM_WORKER_INTERVAL_ENV),
+        _file_setting(platform_worker_interval_s, env=_PLATFORM_WORKER_INTERVAL_ENV),
         default=1.0, lower=0.1, upper=60.0)
     platform_worker_lease = _bounded_float(
-        _optional_setting(platform_worker_lease_s, env=_PLATFORM_WORKER_LEASE_ENV),
+        _file_setting(platform_worker_lease_s, env=_PLATFORM_WORKER_LEASE_ENV),
         default=60.0, lower=5.0, upper=3600.0)
-    sandbox_launcher = _optional_setting(
+    sandbox_launcher = _file_setting(
         platform_sandbox_launcher, env="AGENT_FLEET_PLATFORM_SANDBOX_LAUNCHER")
-    if sandbox_launcher is None:
+    if sandbox_launcher is None or sandbox_launcher == "":
         sandbox_launcher = ()
     elif isinstance(sandbox_launcher, str):
         try:
@@ -335,10 +335,10 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         except ValueError:
             raise ValueError("AGENT_FLEET_PLATFORM_SANDBOX_LAUNCHER must be a JSON argv list") from None
     platform_worker_max_concurrency = _bounded_int(
-        _optional_setting(platform_worker_max_concurrency, env=_PLATFORM_WORKER_MAX_CONCURRENCY_ENV),
+        _file_setting(platform_worker_max_concurrency, env=_PLATFORM_WORKER_MAX_CONCURRENCY_ENV),
         default=1, lower=1, upper=64)
     platform_worker_max_workspace_concurrency = _bounded_int(
-        _optional_setting(platform_worker_max_workspace_concurrency,
+        _file_setting(platform_worker_max_workspace_concurrency,
                           env=_PLATFORM_WORKER_MAX_WORKSPACE_CONCURRENCY_ENV),
         default=1, lower=1, upper=64)
     platform_provider_network_on = _feature_on(
@@ -351,7 +351,7 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
     platform_browser_network_on = _feature_on(
         platform_browser_network_enabled, env=_PLATFORM_BROWSER_NETWORK_ENABLE_ENV)
     platform_browser_submit_on = _feature_on(platform_browser_submit_enabled, env=_PLATFORM_BROWSER_SUBMIT_ENABLE_ENV)
-    platform_browser_origins = _optional_setting(
+    platform_browser_origins = _file_setting(
         platform_browser_allowed_origins, env=_PLATFORM_BROWSER_ORIGINS_ENV)
     if isinstance(platform_browser_origins, str):
         platform_browser_origins = [item.strip() for item in platform_browser_origins.split(",") if item.strip()]
@@ -363,7 +363,7 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         platform_memory_context_enabled,
         env=_PLATFORM_MEMORY_CONTEXT_ENABLE_ENV)
     history_retention = _bounded_float(
-        _optional_setting(history_retention_days, env=_HISTORY_RETENTION_DAYS_ENV),
+        _file_setting(history_retention_days, env=_HISTORY_RETENTION_DAYS_ENV),
         default=90.0, lower=7.0, upper=3650.0)
     # Adoption audits to the session transcript store. ``from_root`` only
     # derives that path when the session gate is on; ``create_app`` then

@@ -28,7 +28,7 @@ from hub.infrastructure.sqlite import connect as sqlite_connect
 from platform_schema import PlatformValidationError  # noqa: F401 - re-exported API
 
 SCHEMA_VERSION = 3
-MAX_READER_VERSION = 4
+MAX_READER_VERSION = 5
 
 
 class PlatformRepository(

@@ -10,6 +10,7 @@ class PlatformComponents:
 
     platform_service: Any = None
     platform_repository: Any = None
+    model_secrets: Any = None
     platform_delivery: Any = None
     command_repository: Any = None
     command_inspection: Any = None
@@ -94,6 +95,8 @@ def _build_command_plane(p, config, repositories):
     if p.platform_repository is None:
         p.platform_repository = PlatformRepository(config.platform_db)
         p.platform_repository.init()
+    from hub.infrastructure.model_secrets import ModelSecrets
+    p.model_secrets = ModelSecrets(config.state_dir / "model-secrets")
     p.usage_repository = repositories.get("platform_usage")
     if p.usage_repository is None:
         p.usage_repository = UsageRepository(
@@ -224,6 +227,7 @@ def _build_worker(p, config):
     from hub.application.run_worker_service import LocalRunWorkerService
     p.platform_worker_service = LocalRunWorkerService(
         p.platform_repository, p.run_event_service,
+        secret_broker=p.model_secrets,
         lease_s=getattr(config, "platform_worker_lease_s", 60.0),
         sandbox_launcher=getattr(config, "platform_sandbox_launcher", ()),
         artifact_store=p.artifact_store, diagnostics=p.diagnostic_service,

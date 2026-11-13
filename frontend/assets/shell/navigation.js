@@ -5,7 +5,7 @@ import {
 } from '../api/platform.js';
 const labels = {
   plugins: ['插件中心', '插件中心', '管理官方插件及其在各节点上的运行状态。', 'PLUGINS'],
-  account: ['账号设置', '账号设置', '管理个人资料、密码与登录会话。', 'ACCOUNT'],
+  settings: ['设置', '设置', '管理模型源、VM、工作区、集成与系统参数。', 'SETTINGS'],
   fleet: ['总览', '集群总览', '节点、任务与服务状态，一处掌握。', 'WORKSPACE OVERVIEW'],
   assistant: ['主助手', '主助手', '从一个想法开始，让助手把工作推进到完成。', 'ASSISTANT'],
   muse: ['Muse', 'Muse', '连接 Muse，管理你的对话和任务。', 'MUSE'],
@@ -18,7 +18,7 @@ const labels = {
 };
 // The single allow-list of pages a non-admin account may open. Click/history
 // navigation and the post-login guard both consult it, so they cannot drift.
-export const ACCOUNT_PAGES = Object.freeze(['assistant', 'account', 'usage', 'muse']);
+export const ACCOUNT_PAGES = Object.freeze(['assistant', 'settings', 'usage', 'muse']);
 export function isPageAllowedForAccount(page, account) {
   return !account || account.role === 'admin' || ACCOUNT_PAGES.includes(page);
 }
@@ -35,6 +35,7 @@ export function resolveRoute(location = window.location) {
   } else if (id) {
     try { id = decodeURIComponent(id); } catch (_) { return {page: 'invalid', id: null}; }
   }
+  if (page === 'account') return {page: 'settings', id: 'account'};
   if (page === 'conversation') return {page: 'assistant', id};
   return {page: labels[page] ? page : 'invalid', id,
     sequence: page === 'session' ? query.get('sequence') : null};

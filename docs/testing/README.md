@@ -159,3 +159,8 @@ main 的 `deploy` 依赖 `test`、`launch-policy-windows` 与 `package`，通过
 ## 维护矩阵
 
 新增/删除功能时同时更新矩阵、用例、本文或外部验收文档。不要为了让门禁变绿删除失败 selector 或降低预期。改变协议时同步审查独立对端的规范依据；模型 fixture 是协议验证器，不是模型能力评测。外部服务失败必须保留具体失败项和 Run ID；它不应被误归为本地自动化已经验证。
+
+
+### 集中设置流程 SETTINGS-01
+
+`/settings` 的桌面／手机浏览器流程验证模型源URL与Key保存、刷新读回、旧版本冲突、VM节点与目录工作区登记、默认值选择、返回缓存助手后的目录刷新和需要重启的系统参数。后端补验实际Worker/readiness共用Key解析、Key轮换后旧快照恢复、owner隔离、并发写入和平台未启用时的配置入口。过程使用临时数据库、文件及浏览器，无外部模型调用、云VM生命周期操作或生产配置修改。具体selector见 [journeys.json](journeys.json) 的 SETTINGS-01。

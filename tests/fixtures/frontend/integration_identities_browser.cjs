@@ -33,8 +33,8 @@ async function capture(page, name) {
     const errors = [], requests = [];
     page.on('pageerror', error => errors.push(error.message));
     page.on('request', request => { if (request.url().startsWith(prefix)) requests.push({url: request.url(), method: request.method()}); });
-    await page.goto(origin + '/account', {waitUntil: 'domcontentloaded'});
-    await page.getByRole('heading', {name: '个人资料', exact: true}).waitFor();
+    await page.goto(origin + '/settings/integrations', {waitUntil: 'domcontentloaded'});
+    await page.getByRole('navigation', {name: '设置分类', exact: true}).waitFor();
     const panel = page.getByRole('region', {name: 'Fleet 集成身份管理', exact: true});
     if (mode === 'hidden') {
       assert.equal(await panel.count(), 0); assert.equal(requests.length, 0);
@@ -46,7 +46,7 @@ async function capture(page, name) {
         const mcp = page.getByRole('region', {name: 'MCP 集成管理', exact: true});
         await mcp.getByText('尚无连接登记', {exact: true}).waitFor();
         await page.locator('a[data-nav="assistant"]').click(); await page.waitForURL('**/assistant', {waitUntil: 'domcontentloaded'});
-        await page.locator('a[data-nav="account"]').click();
+        await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate', {detail: {path: '/settings/integrations'}})));
         await panel.getByText('尚无身份登记', {exact: true}).waitFor();
         await mcp.getByText('尚无连接登记', {exact: true}).waitFor();
         assert.equal(requests.length, 2);
@@ -112,14 +112,14 @@ async function capture(page, name) {
         await revoke.click();
         await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate', {detail: {path: '/assistant'}})));
         await page.waitForURL('**/assistant', {waitUntil: 'domcontentloaded'}); assert.equal(await page.getByRole('dialog').count(), 0);
-        await page.locator('a[data-nav="account"]').click(); await inspector.getByRole('heading', {name: '../记录?x#', exact: true}).waitFor();
+        await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate', {detail: {path: '/settings/integrations'}}))); await inspector.getByRole('heading', {name: '../记录?x#', exact: true}).waitFor();
         let held, signalRead; const arrived = new Promise(resolve => { signalRead = resolve; });
         const readPattern = '**/integrations/fleet/record?**';
         await page.route(readPattern, route => { held = route; signalRead(); });
         await panel.getByRole('button', {name: '重新读取身份', exact: true}).click(); await arrived;
         await page.locator('a[data-nav="assistant"]').click(); await page.waitForURL('**/assistant', {waitUntil: 'domcontentloaded'});
         await held.abort('failed'); await page.unroute(readPattern);
-        await page.locator('a[data-nav="account"]').click(); await inspector.getByRole('heading', {name: '../记录?x#', exact: true}).waitFor();
+        await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate', {detail: {path: '/settings/integrations'}}))); await inspector.getByRole('heading', {name: '../记录?x#', exact: true}).waitFor();
         assert.equal(requests.filter(item => item.method === 'POST').length, 0);
         assert.equal((await context.request.post(origin + '/api/accounts/logout', {data: {}, headers: {Origin: origin}})).status(), 200);
         assert.equal((await context.request.post(origin + '/api/accounts/login', {data: {email: 'ordinary@example.test', password}, headers: {Origin: origin}})).status(), 200);
