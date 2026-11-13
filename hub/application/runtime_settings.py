@@ -97,7 +97,7 @@ def _value(spec, value):
     if kind in {'number', 'integer'}:
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not spec[3] <= value <= spec[4] or (kind == 'integer' and int(value) != value):
             raise ValueError()
-        return str(value)
+        return str(int(value)) if kind == 'integer' else str(value)
     if kind == 'array':
         if not isinstance(value, list) or len(value) > 64 or any(not isinstance(v, str) or len(v) > 2048 or '\x00' in v for v in value):
             raise ValueError()
@@ -219,7 +219,7 @@ class RuntimeSettings:
             for key in ('high_load', 'disk_high_pct'):
                 if key in thresholds and (isinstance(thresholds[key], bool) or not isinstance(thresholds[key], (int, float)) or not math.isfinite(thresholds[key]) or thresholds[key] < 0):
                     raise ValueError()
-        except (ValueError, TypeError, yaml.YAMLError, RecursionError):
+        except (ValueError, TypeError, OverflowError, yaml.YAMLError, RecursionError):
             raise ApplicationError('invalid_settings', '节点清单需要唯一名称、ingest 传输和有效的 stale_after_s', 400) from None
         backup = self._write(self.config.hosts_file, body['digest'], lambda _: raw)
         return {**self.hosts(), 'backup_path': backup}

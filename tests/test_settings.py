@@ -124,6 +124,29 @@ def test_file_settings_are_consumed_by_the_real_startup_loader(tmp_path, monkeyp
     assert config.platform_sandbox_launcher == ('sandbox', '--run')
 
 
+def test_integral_json_number_round_trips_through_runtime_startup(setup, monkeypatch):
+    from hub import web
+
+    _app, client, _owner, root, _ = setup
+    initial = get(client, '/runtime').json
+    response = put(client, '/runtime', {'digest': initial['digest'], 'values': {
+        'AGENT_FLEET_PLATFORM_ENABLED': True,
+        'AGENT_FLEET_PLATFORM_WORKER_MAX_CONCURRENCY': 3.0}})
+    assert response.status_code == 200
+    monkeypatch.setattr(web, 'FLEET_HOME', root)
+    restarted = web.make_app(ingest_token='test-ingest')
+    assert restarted.extensions['fleet']['config'].platform_worker_max_concurrency == 3
+
+
+def test_hosts_nonfinite_ttl_is_rejected_without_server_error(setup):
+    _app, client, _owner, root, _ = setup
+    initial = get(client, '/hosts').json
+    response = put(client, '/hosts', {'digest': initial['digest'],
+        'content': 'hosts:\n  - name: vm-a\n    stale_after_s: .inf\n'})
+    assert response.status_code == 400
+    assert not (root / 'hosts.yaml').exists()
+
+
 def test_catalog_compare_and_write_is_atomic_between_writers(setup):
     from concurrent.futures import ThreadPoolExecutor
 
