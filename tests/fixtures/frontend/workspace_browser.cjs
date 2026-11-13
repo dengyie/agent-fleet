@@ -25,7 +25,8 @@ const [origin, scenario] = process.argv.slice(2);
       await page.goto(origin + '/conversation/review-model', {waitUntil: 'domcontentloaded'});
       await page.waitForFunction(() => {
         const model = document.querySelector('#assistant-model');
-        return model && model.options.length > 0 && model.value !== '';
+        const send = document.querySelector('[aria-label="发送任务"]');
+        return model && model.options.length > 0 && model.value !== '' && send && !send.disabled;
       });
     }
     if (scenario === 'new-chat-route' || scenario === 'background-create') {
