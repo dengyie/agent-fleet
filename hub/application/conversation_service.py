@@ -199,6 +199,7 @@ class ConversationService:
             "created": result["created"],
             "conversation_id": conversation_id,
             "message_id": result["message"]["message_id"],
+            "message": result["message"],
             "run": run.public(),
         }
 
