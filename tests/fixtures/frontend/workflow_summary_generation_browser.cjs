@@ -22,6 +22,12 @@ const [origin, mode, screenshot] = process.argv.slice(2);
     assert.equal(await generator.locator('input[data-source-run="newer-run-20"]').isChecked(), true,
       'Loading an older page must preserve the existing selection');
     await generator.locator('input[data-source-run="newer-run-20"]').uncheck();
+    const sourceLabel = generator.locator('input[data-source-run="source-run-a"]').locator('..');
+    assert.match(await sourceLabel.textContent(), /完整成功结果/,
+      'Source selection must show the successful result rather than the internal Native contract');
+    assert.match(await sourceLabel.textContent(), /source-run-a/,
+      'The original Run must remain identifiable when results have the same preview');
+    assert.doesNotMatch(await sourceLabel.textContent(), /adapter_ref/);
     await generator.locator('input[data-source-run="source-run-a"]').check();
     await generator.getByLabel('摘要模型', {exact: true}).selectOption('model-a');
     await generator.getByRole('button', {name: '生成摘要候选', exact: true}).click();

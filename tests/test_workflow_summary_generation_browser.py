@@ -35,7 +35,8 @@ def test_model_summary_generation_and_publication_in_real_desktop_and_mobile_bro
     platform.upsert_workspace(owner, {"workspace_id": "workspace-b", "root_path": str(tmp_path)})
     platform.upsert_model(owner, {"profile_id": "model-a", "provider": "deterministic", "model": "摘要模型"})
     platform.create_conversation(owner, "source-chat", title="来源对话", workspace_id=WORKSPACE)
-    platform.append_turn(owner, "source-chat", "source-message-a", "source-run-a", text="完整用户输入 🌱\n",
+    platform.append_turn(owner, "source-chat", "source-message-a", "source-run-a",
+        text='{"adapter_ref":{"id":"native","revision":1},"contract":{"objective":"完整用户输入 🌱"}}',
         client_token="source-token", config_snapshot={"workspace_id": WORKSPACE}, now=99)
     platform.set_run_state(owner, "source-run-a", "succeeded", now=100, result_text="完整成功结果 🌱\n")
     for index in range(21):

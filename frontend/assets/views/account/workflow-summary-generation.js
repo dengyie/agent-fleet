@@ -109,14 +109,15 @@ export function mountWorkflowSummaryGeneration(root, {ownerId = '', suspended: i
     const sourceId = conversation.input.value, cursor = append ? beforeSequence : null;
     await run(signal => getConversation(sourceId, {signal, limit: 20, beforeSequence: cursor}), value => {
       if (sourceId !== conversation.input.value) return;
-      const data = value.conversation || {}, messages = new Map((data.messages || []).map(message => [message.message_id, message]));
+      const data = value.conversation || {};
       beforeSequence = data.history?.has_more ? data.history.before_sequence : null;
       for (const empty of choices.querySelectorAll('p')) empty.remove();
       for (const source of data.runs || []) {
         if (source.state !== 'succeeded') continue;
         const label = node('label'), checkbox = node('input'); checkbox.type = 'checkbox'; checkbox.dataset.sourceRun = source.run_id;
-        const text = messages.get(source.trigger_message_id)?.content || source.run_id;
-        label.append(checkbox, node('span', text.trim().slice(0, 100))); label.style.overflowWrap = 'anywhere';
+        const preview = typeof source.result_text === 'string' ? source.result_text.trim().slice(0, 100) : '';
+        label.append(checkbox, node('span', preview ? preview + ' · ' + source.run_id : source.run_id));
+        label.style.overflowWrap = 'anywhere';
         choices.append(label);
       }
       if (!choices.children.length) choices.append(node('p', beforeSequence === null ? '此对话没有成功运行，请选择其他对话。' : '本页没有成功运行，可加载较早来源运行。', 'meta'));

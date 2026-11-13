@@ -7,6 +7,8 @@
 - 测试：22模块458passed/2passing subtests，部署回滚48passed，集合独立记录。覆盖真实桌面/390px页面、原provider/worker、检查点、owner隔离、CAS、备份和第129条历史损坏。完整当前CI及生产验收待实际结果。
 - 废弃内容：仅移除确认无读取者的变量、重复更新及未使用导入，不保留兼容空壳。
 
+2026-11-13线上补验：main `c17c517`的正式CI43332417353、打包和受限部署已成功，原Linux7739cases/204subtests、46journeys/2616selectors/79PNG及Windows457passed/2POSIXskips已核验。线上1169个后端文件和74个前端文件逐字节同main，五库integrity=ok/FK=0。四模型原生Workflow均成功且各一次请求，API与真实页面摘要生成/重复发布/旧终态加回执丢失恢复、取消禁止发布、公开产物下载通过；受控重启后11个原Run与4个Workflow的状态、结果摘要和请求数不变。页面发现的来源识别问题见最后一项，修复后仍需自身正式main流水线和页面复验。上述验收不等价于生产代码交付Runner/独立评审/固定测试Node验收。
+
 返回[开发账](../platform/development-completion.md)、[Workflow入口](../platform/workflow-platform/README.md)及[摘要计划](../superpowers/plans/2026-11-13-model-summary-generation.md)。
 
 # Findings
@@ -107,12 +109,25 @@
 * 需要补充的测试：逐行模拟验证码先到、URL先到，读取中间持久化状态并断言仍为`starting`，完整提示后才能进入等待授权。两项先红后绿，插件相关44项通过。
 * 是否阻塞合并：修复前阻塞正式发布，须由修复后的main重新通过完整CI。
 
+## [P3] 成功来源选择器展示内部任务输入，无法辨认结果（已修复）
+
+* 文件与位置：`frontend/assets/views/account/workflow-summary-generation.js::loadTurns`。
+* 所属维度：功能可用性、接口语义。
+* 问题：选择“成功的来源运行”时，标签读取trigger message输入；Native Workflow的输入是内部序列化任务合同。
+* 触发条件：线上成功Native Workflow被用作摘要来源，输入以`adapter_ref/contract/budget`JSON开头。
+* 实际影响：来源标签展示预算/协议字段，相同输入的多个成功Run无法从选项辨认实际结果。
+* 根本原因：将输入消息文本误当作成功结果的用户可读标识。
+* 最小修改方案：读取原Run的成功结果作短预览，并附原Run标识；生成提交仍仅使用原Run ID，完整输入和输出冻结规则保持。
+* 需要补充的测试：真实浏览器选取序列化Native输入的成功来源，断言显示结果预览和原Run标识、不显示`adapter_ref`；同时验证更早来源分页、选择保持、生成、发布和移动端布局。
+* 是否阻塞合并：不阻塞此前后端使用；按本轮要求修复并完成自身发布门禁后交付。
+
 # Delete List
 
 * `workflow-summaries.js`的`pendingPublish`：只有赋值、无读取，已删除。
 * release layout重复`allowed.update`：前一条已加入相同条目，已删除。
 * 回滚测试未使用的`Path`导入：静态检查确认无调用，已删除。
 * 旧内部`schema_version` helper：两个调用迁移到完整fingerprint，没有兼容包装。
+* 来源选择器`messages` Map：原输入标签读取已替换为结果预览，没有其它读取者，直接删除该重复投影。
 
 没有确认应删除的历史迁移或公共兼容API。
 
