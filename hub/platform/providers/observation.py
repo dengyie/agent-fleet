@@ -10,6 +10,34 @@ if TYPE_CHECKING:
     from .openai_compatible import ProviderError
 
 
+class TextObservation:
+    """Bounded public narration, flushed immediately first and then in batches."""
+    def __init__(self, observer, index):
+        self.observer, self.index = observer, index
+        self.offset, self.bytes = 0, 0
+        self.pending = ''
+        self.last = time.monotonic()
+
+    def append(self, text):
+        if self.observer is None:
+            return
+        text = text.encode('utf-8')[:max(0, 24576 - self.bytes)].decode('utf-8', errors='ignore')
+        if not text:
+            return
+        self.bytes += len(text.encode('utf-8'))
+        self.pending += text
+        if self.offset == 0 or len(self.pending) >= 256 or time.monotonic() - self.last >= .05:
+            self.flush()
+
+    def flush(self):
+        while self.pending:
+            text, self.pending = self.pending[:1024], self.pending[1024:]
+            self.observer('assistant_text_delta', {
+                'text': text, 'offset': self.offset, 'request_index': self.index})
+            self.offset += len(text)
+        self.last = time.monotonic()
+
+
 class RequestObservation:
     def __init__(self, observer: RequestObserver | None, *, model: str, provider: str,
                  index: int = 1, parameters: RequestParameters | None = None,

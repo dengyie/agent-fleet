@@ -16,7 +16,7 @@ const [origin, conversation] = process.argv.slice(2);
     assert.equal(await requests.count(),2,'both 429 and pending retry must be visible');
     assert.equal(await page.locator('parsererror').count(),0,'icon geometry must be valid XML');
     const iconSizes = await requests.locator('summary svg').evaluateAll(nodes => nodes.map(n => n.getBoundingClientRect().height));
-    assert.ok(iconSizes.length >= 14 && iconSizes.every(height => height > 0 && height <= 24),'metadata icons stay compact');
+    assert.ok(iconSizes.length >= 14 && iconSizes.every(height => height > 0 && height <= 24),'metadata icons stay compact: ' + JSON.stringify(iconSizes));
     assert.match(await requests.first().textContent(),/请求失败/);
     const active = requests.nth(1);
     await active.locator('summary').focus(); await page.keyboard.press('Enter');

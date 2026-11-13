@@ -17,7 +17,18 @@ export function mergeConversationPage(state, conversation, earlier) {
   const runs = hasGap ? new Map() : new Map(state.runs);
 
   incomingMessages.forEach(message => messages.set(message.message_id, message));
-  incomingRuns.forEach(run => runs.set(run.run_id, run));
+  incomingRuns.forEach(run => {
+    const current = runs.get(run.run_id);
+    if (current) {
+      const sequence = current.progress?.sequence || 0;
+      const incoming = run.progress?.sequence || 0;
+      if (sequence > incoming) return;
+      if (sequence === incoming && ['succeeded','failed','unknown','cancelled'].includes(current.state) &&
+          !['succeeded','failed','unknown','cancelled'].includes(run.state)) return;
+      if (sequence === incoming && current.cancel_requested && !run.cancel_requested) return;
+    }
+    runs.set(run.run_id, run);
+  });
 
   const orderedMessages = Array.from(messages.values()).sort((a, b) => {
     if (!Number.isFinite(a.turn_sequence) || !Number.isFinite(b.turn_sequence)) return 0;

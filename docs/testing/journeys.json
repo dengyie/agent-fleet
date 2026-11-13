@@ -68,10 +68,11 @@
       "id": "ASSIST-01",
       "title": "浏览器到模型与产物的完整流程",
       "layer": "browser",
-      "acceptance": "真实账号Cookie/调度器/模型HTTP/四步工具调用；关闭标签后恢复回复；下载字节正确；502可见；退出后拒绝访问",
+      "acceptance": "真实账号Cookie/调度器/模型HTTP/四步工具调用；关闭标签后恢复回复；下载字节正确；502可见；退出后拒绝访问；模型结束前流式正文、工具状态和自动重试可见，刷新恢复且最终回复不重复",
       "boundary": "real browser + Hub + HTTP adapter; only model service scripted",
       "tests": [
-        "tests/test_full_flow_browser.py::test_browser_account_model_tool_artifact_and_failure_journey"
+        "tests/test_full_flow_browser.py::test_browser_account_model_tool_artifact_and_failure_journey",
+        "tests/test_frontend_browser.py::test_assistant_live_model_stream_retry_and_reload"
       ]
     },
     {
@@ -97,7 +98,17 @@
         "tests/test_native_run_checkpoints.py::test_os_process_exit_resumes_persisted_tool_receipt",
         "tests/test_native_run_checkpoints.py::test_checkpoint_survives_backup_and_conversation_deletion_removes_it",
         "tests/test_native_run_checkpoints.py::test_corrupt_checkpoint_never_replays_started_run",
-        "tests/test_native_run_checkpoints.py::test_saved_completion_does_not_reopen_provider_or_workspace"
+        "tests/test_native_run_checkpoints.py::test_saved_completion_does_not_reopen_provider_or_workspace",
+        "tests/test_assistant_live_feedback.py::test_text_delta_is_observed_before_upstream_finishes",
+        "tests/test_assistant_live_feedback.py::test_transient_retries_are_visible_before_wait_and_keep_one_payload",
+        "tests/test_assistant_live_feedback.py::test_narration_is_persisted_before_tool_and_survives_later_provider_failure",
+        "tests/test_assistant_live_feedback.py::test_public_progress_is_bounded_and_idempotent",
+        "tests/test_assistant_live_feedback.py::test_run_stream_is_owner_scoped_and_releases_capacity",
+        "tests/test_assistant_live_feedback.py::test_partial_stream_failure_flushes_pending_text_without_replaying",
+        "tests/test_assistant_live_feedback.py::test_cancel_during_retry_does_not_dispatch_again",
+        "tests/test_assistant_live_feedback.py::test_cancel_during_stream_preserves_text_and_closes_body",
+        "tests/test_assistant_live_feedback.py::test_run_stream_delivers_updates_after_initial_snapshot",
+        "tests/test_assistant_live_feedback.py::test_retry_notice_remains_visible_during_the_retry_request"
       ]
     },
     {

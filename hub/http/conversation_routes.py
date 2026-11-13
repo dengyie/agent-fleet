@@ -187,4 +187,19 @@ def get_browser_approval(run_id: str, approval_id: str):
     return _call(lambda: jsonify(_approvals().get(g.operator, run_id, approval_id)))
 
 
+@bp.get('/runs/<run_id>/stream')
+@require_operator
+def get_run_stream(run_id):
+    from hub.http.run_stream import stream_run
+
+    def connect():
+        try:
+            after = int(request.args.get('after', request.headers.get('Last-Event-ID', '0')))
+        except (ValueError, TypeError):
+            raise ApplicationError('invalid_cursor', '游标不合法', 400) from None
+        _, runs, events = _services()
+        return stream_run(g.operator, run_id, runs, events, after=after)
+    return _call(connect)
+
+
 __all__ = ["bp"]

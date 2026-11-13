@@ -21,6 +21,7 @@ from hub.infrastructure.platform_db_base import (
 )
 from hub.infrastructure.run_capacity import workspace_capacity_filter
 from hub.infrastructure.runtime_checkpoint import resumable_checkpoint, decode_checkpoint
+from hub.domain.run_progress import PROGRESS_KINDS, project_progress
 from platform_schema import PlatformValidationError, validate_id, validate_owner_id
 
 
@@ -34,6 +35,7 @@ class PlatformRunMixin:
                 "attempt": int(row["attempt"] or 0),
                 "lease_expires_at": row["lease_expires_at"],
                 "result_text": row["result_text"] or "",
+                "progress": _decode(row["progress_summary"]),
                 "usage": {
                     "input_tokens": int(row["usage_input_tokens"] or 0),
                     "output_tokens": int(row["usage_output_tokens"] or 0),
@@ -376,7 +378,7 @@ class PlatformRunMixin:
         try:
             conn = self._connect()
             conn.execute("BEGIN IMMEDIATE")
-            run = conn.execute("SELECT run_id,state,lease_id,lease_owner,lease_expires_at FROM runs WHERE owner_id=? AND run_id=?", (owner_id, run_id)).fetchone()
+            run = conn.execute("SELECT run_id,state,lease_id,lease_owner,lease_expires_at,progress_summary FROM runs WHERE owner_id=? AND run_id=?", (owner_id, run_id)).fetchone()
             if not run:
                 conn.execute("ROLLBACK")
                 raise PlatformRepositoryError("run_not_found")
@@ -390,6 +392,9 @@ class PlatformRunMixin:
             encoded = _json(payload or {})
             conn.execute("INSERT INTO run_events(run_id,sequence,kind,payload,created_at) VALUES(?,?,?,?,?)", (run_id, sequence, kind, encoded, float(now)))
             conn.execute("UPDATE runs SET updated_at=? WHERE owner_id=? AND run_id=?", (float(now), owner_id, run_id))
+            if kind in PROGRESS_KINDS:
+                progress = project_progress(_decode(run['progress_summary']), kind, payload or {}, sequence)
+                conn.execute('UPDATE runs SET progress_summary=? WHERE run_id=?', (_json(progress), run_id))
             if kind in REQUEST_EVENT_KINDS and run["state"] in TERMINAL_STATES:
                 # A late request event must not leave the frozen copy stale.
                 freeze_run_request_summary(conn, run_id, run["state"])

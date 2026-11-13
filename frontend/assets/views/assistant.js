@@ -534,16 +534,40 @@ export function mountAssistant(target, options) {
     }
     if (latestRunId) refreshLegacy(latestRunId);
   }
+  var runStream = null, runStreamId = null;
+  function stopRunStream() {
+    if (runStream) runStream.abort();
+    runStream = null; runStreamId = null;
+  }
+  function ensureRunStream(runId) {
+    if (!service.streamRun || disposed || suspended || runStreamId === runId) return;
+    stopRunStream();
+    const controller = new AbortController();
+    runStream = controller; runStreamId = runId;
+    service.streamRun(runId, {signal:controller.signal, onRun: function (run) {
+      if (disposed || suspended || controller.signal.aborted || activeRunId !== runId) return;
+      mergeConversationPage({runs:[run]}, false);
+      run = conversationState.runs.get(runId);
+      showRunModel(run); setStatus(run.state); startRequestClock();
+    }}).catch(function () {
+      // Existing bounded polling stays active during disconnects.
+    }).finally(function () {
+      if (runStream === controller) {runStream = null; runStreamId = null;}
+    });
+  }
   async function poll() {
     if (disposed || suspended || polling || !activeRunId) return;
     polling = true;
     var runId = activeRunId;
+    ensureRunStream(runId);
     try {
       var runData = await service.getRun(runId);
-      if (disposed) return;
+      if (disposed || suspended || activeRunId !== runId) return;
       var run = runData.run || runData;
+      mergeConversationPage({runs: [run]}, false);
+      run = conversationState.runs.get(runId);
       showRunModel(run); setStatus(run.state || 'unknown');
-      mergeConversationPage({runs: [run]}, false); startRequestClock();
+      startRequestClock();
       var eventData = await service.getRunEvents(runId, cursor);
       if (disposed) return;
       var events = eventData.events || [];
@@ -552,6 +576,7 @@ export function mountAssistant(target, options) {
         renderEvents(eventHost, events);
       }
       if (['succeeded', 'failed', 'unknown', 'cancelled'].indexOf(run.state) !== -1) {
+        stopRunStream();
         cancel.hidden = true;
         // Keep the tracking identity until the durable answer is recovered.
         // A transient conversation GET failure must remain retryable.
@@ -705,6 +730,7 @@ export function mountAssistant(target, options) {
   }
   initialize();
   function teardown() {
+    stopRunStream();
     window.removeEventListener('fleet-settings-updated', onSettingsUpdated);
     disposed = true;
     document.removeEventListener('visibilitychange', onVisibilityChange);
@@ -717,6 +743,7 @@ export function mountAssistant(target, options) {
   teardown.suspend = function () {
     if (disposed || suspended) return;
     suspended = true;
+    stopRunStream();
     if (workflowTeardown) workflowTeardown.suspend();
     pauseWindowPoll();
     resumeWindowPoll = false;

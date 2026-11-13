@@ -136,6 +136,7 @@ class ConversationService:
                     result_text=run.get("result_text", ""),
                     usage=run.get("usage") or {},
                     requests=run.get("requests") or [],
+                    progress=run.get("progress") or {},
                 ).public()
                 for run in row.get("runs", [])
             ]
@@ -193,6 +194,7 @@ class ConversationService:
             config_snapshot=result["run"]["config_snapshot"],
             cancel_requested=result["run"]["cancel_requested"],
             result_text=result["run"].get("result_text", ""),
+            progress=result["run"].get("progress") or {},
         )
         return {
             "ok": True,
@@ -300,6 +302,7 @@ class RunService:
                 result_text=row.get("result_text", ""),
                 usage=row.get("usage", {}),
                 requests=row.get("requests", []),
+                progress=row.get("progress") or {},
             ).public() | {"ok": True}
         except ApplicationError:
             raise
@@ -325,6 +328,7 @@ class RunService:
                 result_text=row.get("result_text", ""),
                 usage=row.get("usage", {}),
                 requests=row.get("requests", []),
+                progress=row.get("progress") or {},
             ).public() | {"ok": True}
         except Exception as exc:
             if isinstance(exc, ApplicationError):

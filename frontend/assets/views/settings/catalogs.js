@@ -88,8 +88,8 @@ export function mountCatalog(root, kind) {
         advanced.append(el('summary', '高级参数'));
         form.append(advanced);
         controls.timeout = field(advanced, 'timeout', '请求超时（秒）', config.timeout_s ?? 60, {type: 'number'}); controls.timeout.min = 1; controls.timeout.max = 600;
-        controls.retries = field(advanced, 'retries', '最大重试次数', config.max_retries ?? 0, {type: 'number', help: '建议保持 0；不确定是否已受理的请求不会自动重放。'}); controls.retries.min = 0; controls.retries.max = 5;
-        controls.stream = field(advanced, 'stream', '启用流式响应', config.stream === true, {type: 'checkbox'});
+        controls.retries = field(advanced, 'retries', '最大重试次数', config.max_retries ?? 3, {type: 'number', help: '建议 3 次；503、限流等临时错误会自动重试，并实时显示进度。已执行的工具不会重放。'}); controls.retries.min = 0; controls.retries.max = 5;
+        controls.stream = field(advanced, 'stream', '启用流式响应', config.stream !== false, {type: 'checkbox'});
         controls.headers = field(advanced, 'headers', '附加请求头（JSON）', JSON.stringify(config.headers || {}, null, 2), {type: 'textarea', help: '支持 user-agent、accept-language、x-client-name、openai-organization；认证信息使用 API Key。'});
         controls.pricing = field(advanced, 'pricing', '用量单价（JSON，可留空）', config.pricing ? JSON.stringify(config.pricing, null, 2) : '', {type: 'textarea', help: 'USD / 百万 token，示例：{"currency":"USD","input":"1","output":"2","cache_read":"0","cache_write":"0"}。'});
         controls.capabilities = field(advanced, 'capabilities', '能力声明（JSON）', JSON.stringify(row?.capabilities || {}, null, 2), {type: 'textarea', help: '例如 {"streaming": true, "tools": true}。'});

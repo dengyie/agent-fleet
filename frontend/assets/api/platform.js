@@ -1,5 +1,10 @@
 /* Platform assistant API. Network access stays in api/client.js. */
 import { apiPath } from '../routes.js';
+import { platformStream } from './client.js';
+
+export function streamRun(runId, options) {
+  return platformStream(apiPath('platform', 'v1', 'runs', segment(runId), 'stream'), options);
+}
 import { platformRequest } from './client.js';
 import { parseWorkflowTemplates, parseWorkflowPage, parseWorkflowDetail, parseWorkflowEvents, parseWorkflowOperation } from './contracts.js';
 

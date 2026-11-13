@@ -25,6 +25,9 @@ class ProviderBoundaryUnknown(RuntimeError):
         self.diagnostic = diagnostic or {}
 
 
+class _RunCancelled(Exception):
+    """Stop consuming narration or dispatching retries after user cancellation."""
+
 
 class NativeAssistantRuntime:
     def __init__(self, provider, broker, *, limits: RuntimeLimits | None = None,
@@ -91,9 +94,19 @@ class NativeAssistantRuntime:
                     except UsageLimitExceeded:
                         return finish("failed", "模型预算已用尽。", step - 1, input_tokens, output_tokens, measured_total_tokens, provider_requests)
                 persist('provider_pending', step)
+                def observe_request(kind, data):
+                    # Check before dispatch, but retain any text already received.
+                    if kind == 'provider_request_started' and should_cancel is not None and should_cancel():
+                        raise _RunCancelled()
+                    event_sink(kind, {**data, 'step': step, 'attempt': attempt})
+                    if kind in {'assistant_text_delta', 'provider_retry_scheduled'} and should_cancel is not None and should_cancel():
+                        raise _RunCancelled()
                 try:
-                    response = self.provider.complete(request_messages, tools, request_observer=lambda kind, data:
-                        event_sink(kind, {**data, 'step': step, 'attempt': attempt}))
+                    response = self.provider.complete(request_messages, tools, request_observer=observe_request)
+                except _RunCancelled:
+                    if reservation is not None:
+                        self._settle_unknown(reservation, run_id=run_id, step=step, attempt=attempt)
+                    return finish('cancelled', '运行已取消。', step)
                 except Exception as exc:
                     diagnostic = exc.diagnostic() if isinstance(exc, ProviderError) else {'provider_error': 'provider_exception'}
                     diagnostic.update({'step': step, 'attempt': attempt, 'phase': 'provider_call'})
@@ -117,6 +130,13 @@ class NativeAssistantRuntime:
                 measured_total_tokens += usage["total_tokens"]
                 total_tokens = measured_total_tokens
                 persist('response', step, response=asdict(response))
+            # Publish the committed response before crossing any tool boundary.
+            # The projection replaces by step, so checkpoint recovery is idempotent.
+            event_sink('assistant_response', {
+                'step': step, 'attempt': attempt,
+                'text': response.text.encode('utf-8')[:24576].decode('utf-8', errors='ignore'),
+                'response_kind': response.kind,
+            })
             if (not progress or progress['phase'] not in {'receipt', 'remote_wait'}) and should_cancel is not None and should_cancel():
                 return finish("cancelled", "运行已取消。", step, input_tokens, output_tokens, measured_total_tokens, provider_requests)
             if total_tokens > self.limits.max_tokens:

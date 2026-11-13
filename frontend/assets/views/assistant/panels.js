@@ -1,4 +1,5 @@
 import { renderRequestMetadata, tickRequestMetadata } from './request-metadata.js';
+import { renderProgress } from './progress.js';
 import { uiIcon, pagePath } from '../../routes.js';
 
 export function el(tag, className, text) { var node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
@@ -27,13 +28,14 @@ export function renderMessages(host, messages, runs = [], options = {}) {
     if (!row) {
       row = el('article', 'assistant-message ' + (message.role === 'user' ? 'user' : 'assistant'));
       row.appendChild(el('span', 'assistant-message-role', message.role === 'user' ? '你' : 'Agent Fleet'));
+      const activity = el('div', 'assistant-message-activity'); row.appendChild(activity);
       const body = el('stream-markdown'); row.appendChild(body);
       const copy = el('button', 'message-copy'); copy.type = 'button'; copy.title = '复制消息'; copy.setAttribute('aria-label', '复制消息'); copy.appendChild(uiIcon('copy', {size: 14}));
       copy.addEventListener('click', async function () { try { await navigator.clipboard.writeText(row._content || ''); copy.setAttribute('aria-label', '已复制'); copy.title = '已复制'; } catch (_) { copy.title = '复制失败，请手动选择文本'; } });
       row.appendChild(copy);
       const requests = el('div', 'message-requests'); row.appendChild(requests);
       const progress = el('p', 'assistant-message-progress meta'); progress.setAttribute('role', 'status'); progress.hidden = true; row.appendChild(progress);
-      row._parts = {body, copy, requests, progress}; host._messageRows.set(key, row);
+      row._parts = {body, copy, requests, progress, activity}; host._messageRows.set(key, row);
     }
     const content = message.content || '';
     if (row._content !== content) {
@@ -41,10 +43,14 @@ export function renderMessages(host, messages, runs = [], options = {}) {
     }
     row._parts.copy.hidden = !content;
     if (run) {
+      const retryStatus = renderProgress(row._parts.activity, run);
+      const active = !['succeeded','failed','unknown','cancelled'].includes(run.state);
+      row.setAttribute('aria-busy',String(active));
+      row._parts.body.toggleAttribute('is-streaming',active);
       renderRequestMetadata(row._parts.requests, run.requests);
       const states = {submitting: '正在发送…', submission_unknown: '原消息已保留，提交结果待确认', queued: '已发送，等待助手…', running: '助手正在处理…', waiting_node: '正在等待执行节点…', waiting_approval: '等待审批', waiting_task: '任务执行中…', cancelling: '正在取消…', unknown: '运行结果待确认，原请求不会自动重发', failed: '运行失败', cancelled: '已取消'};
-      row._parts.progress.textContent = states[run.state] || '';
-      row._parts.progress.hidden = !states[run.state];
+      row._parts.progress.textContent = retryStatus || states[run.state] || '';
+      row._parts.progress.hidden = !(retryStatus || states[run.state]);
       row._parts.progress.setAttribute('data-state', run.state);
       if (run.state === 'unknown' && typeof options.onRefresh === 'function') {
         if (!row._parts.refresh) {
@@ -72,7 +78,7 @@ export function tickMessageRequests(host) {
 }
 export function renderEvents(host, events) {
   (Array.isArray(events) ? events : []).forEach(function (event) {
-    if (event.kind === 'provider_request_started' || event.kind === 'provider_request_finished') return;
+    if (['provider_request_started','provider_request_finished','assistant_text_delta','assistant_response','provider_retry_scheduled'].includes(event.kind)) return;
     var payload = event.payload || {};
     if (event.kind === 'tool_call' || event.kind === 'tool_result') {
       var card = Array.from(host.children).find(function (node) { return node.getAttribute('data-command-id') === payload.command_id; });

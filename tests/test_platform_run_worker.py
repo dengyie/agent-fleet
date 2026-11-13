@@ -54,7 +54,7 @@ def test_worker_claims_and_finishes_local_run_with_events(tmp_path):
     client = app.test_client()
     assert client.get(f"/api/platform/v1/runs/{run['run_id']}").get_json()["state"] == "succeeded"
     events = client.get(f"/api/platform/v1/runs/{run['run_id']}/events").get_json()["events"]
-    assert [event["kind"] for event in events] == ["run_started", "provider_request_started", "provider_request_finished", "tool_call", "tool_result", "provider_request_started", "provider_request_finished", "run_finished"]
+    assert [event["kind"] for event in events] == ["run_started", "provider_request_started", "provider_request_finished", "assistant_response", "tool_call", "tool_result", "provider_request_started", "provider_request_finished", "assistant_response", "run_finished"]
 
 
 def test_queued_run_keeps_provider_credential_binding_after_profile_edit(tmp_path):
@@ -518,7 +518,7 @@ def test_remote_run_uses_node_delivery_without_local_filesystem(tmp_path):
     assert [command.action for command in delivery.commands] == ["tool.workspace.read"]
     assert not (tmp_path / "workspace" / "assistant-report.md").exists()
     kinds = [event["kind"] for event in app.extensions["fleet"]["services"]["run_events"].list(OWNER, "run-remote")["events"]]
-    assert kinds == ["run_started", "tool_call", "node_command_queued", "node_receipt", "tool_result", "run_finished"]
+    assert kinds == ["run_started", "assistant_response", "tool_call", "node_command_queued", "node_receipt", "tool_result", "assistant_response", "run_finished"]
 
 
 def test_remote_unknown_receipt_finishes_run_unknown_without_replay(tmp_path):
