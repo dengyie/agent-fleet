@@ -66,7 +66,7 @@ def test_assistant_event_history_pagination(tmp_path, completed):
 
 
 @pytest.mark.parametrize('scenario', ['action-errors', 'modal', 'scroll', 'model', 'optimistic',
-                                      'new-chat-route', 'background-create', 'send-viewport', 'mobile-failure'])
+                                      'new-chat-route', 'background-create', 'active-create-collision', 'send-viewport', 'mobile-failure'])
 def test_assistant_workspace_regressions(tmp_path, scenario):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE to run Chromium acceptance')

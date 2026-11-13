@@ -88,11 +88,16 @@ function protectConsole() {
     const nextRoute = {page: 'assistant', id: conversationId};
     const key = routeKey(nextRoute);
     const previous = routeViews.get(key);
+    const replacingActive = previous && previous !== view && activeRouteView === previous;
     if (previous && previous !== view) destroyRouteView(previous);
     routeViews.delete(view.key);
     view.key = key;
     view.host.dataset.routeCacheEntry = key;
     routeViews.set(key, view);
+    if (replacingActive) {
+      activeRouteView = view;
+      resumeRouteView(view);
+    }
     // A background submission may finish after the user opens another page.
     // Update its cache identity without navigating away from that page.
     if (activeRouteView !== view) return;
