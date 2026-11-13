@@ -33,10 +33,13 @@ class TestMemoryContextApiContractTests:
 
 class TestAssistantMemoryContextContractTests:
     def test_assistant_renders_picker_states_and_selected_references(self):
-        source = (ASSISTANT_VIEW.read_text() + (ROOT / 'frontend/assets/views/assistant/panels.js').read_text())
+        source = (ASSISTANT_VIEW.read_text() + (ROOT / 'frontend/assets/views/assistant/panels.js').read_text()
+                  + (ROOT / 'frontend/assets/views/assistant/service.js').read_text())
         for value in (
             "getPlatformMemories",
             "searchPlatformMemories",
+            "getMemories",
+            "searchMemories",
             "refreshMemoryItems",
             "assistant-memory-context",
             "记忆上下文",
@@ -54,12 +57,14 @@ class TestAssistantMemoryContextContractTests:
             assert value in source
 
     def test_assistant_memory_context_is_reference_only_and_dom_safe(self):
-        source = (ASSISTANT_VIEW.read_text() + (ROOT / 'frontend/assets/views/assistant/panels.js').read_text())
-        assert "innerHTML" not in source
-        assert "fetch(" not in source
-        assert "textContent" in source
-        assert "createElement" in source
-        assert "payload.memory_context = {" in source
-        payload = source.split("payload.memory_context = {", 1)[1].split("};", 1)[0]
-        assert "content:" not in payload
-        assert "var references = (Array.isArray(data.memories) ? data.memories : []).map(memoryReference).filter(Boolean);" in source
+        view_source = (ASSISTANT_VIEW.read_text() + (ROOT / 'frontend/assets/views/assistant/panels.js').read_text())
+        service_source = (ROOT / 'frontend/assets/views/assistant/service.js').read_text()
+        assert "innerHTML" not in view_source
+        assert "fetch(" not in view_source
+        assert "api/platform" not in view_source
+        assert "textContent" in view_source
+        assert "createElement" in view_source
+        assert "payload.memory_context = {" in service_source
+        assert "memory_ids: memoryContext.memoryIds.slice()" in service_source
+        assert "content:" not in service_source
+        assert "var references = (Array.isArray(data.memories) ? data.memories : []).map(memoryReference).filter(Boolean);" in view_source

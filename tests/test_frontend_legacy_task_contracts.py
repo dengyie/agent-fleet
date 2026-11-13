@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 API = ROOT / "frontend" / "assets" / "api" / "platform.js"
 VIEW = ROOT / "frontend" / "assets" / "views" / "assistant.js"
+SERVICE = ROOT / "frontend" / "assets" / "views" / "assistant" / "service.js"
 
 
 def test_platform_api_uses_bounded_platform_request_for_legacy_task():
@@ -20,9 +21,12 @@ def test_platform_api_uses_bounded_platform_request_for_legacy_task():
 
 def test_assistant_requires_explicit_legacy_control_and_uses_dom_safe_projection():
     source = (VIEW.read_text() + (ROOT / 'frontend/assets/views/assistant/panels.js').read_text())
+    service = SERVICE.read_text()
     assert "打开旧任务关联" in source
-    assert "createPlatformLegacyTask" in source
-    assert "getPlatformLegacyTask" in source
+    assert "service.createLegacyTask" in source
+    assert "service.getLegacyTask" in source
+    assert "createPlatformLegacyTask" in service
+    assert "getPlatformLegacyTask" in service
     assert "legacyMachine.value.trim()" in source
     assert "legacyProject.value.trim()" in source
     assert "legacyInstruction.value.trim()" in source

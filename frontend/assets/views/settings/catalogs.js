@@ -8,11 +8,15 @@ const info = {
 };
 export function mountCatalog(root, kind) {
   let disposed = false, catalog, currentOwner = '', sequence = 0;
-  const context = panel(root, '配置归属', '配置按账号隔离。默认为当前管理员；为其他账号配置时，填写该账号 ID 后加载。');
-  const owner = field(context, 'owner', '账号 ID（留空为自己）');
+  const context = document.createElement('details'); context.className = 'settings-owner-scope';
+  const summary = el('summary', '为其他账号配置');
+  const scopeForm = el('div', null, 'settings-owner-form');
+  const owner = field(scopeForm, 'owner', '账号 ID');
   const status = el('p', '正在加载…'); status.setAttribute('role', 'status'); root.append(status);
   const content = el('div', null, 'settings-catalog'); root.append(content);
-  context.append(button('加载此账号配置', () => { currentOwner = owner.value.trim(); load(); }));
+  scopeForm.prepend(el('p', '默认配置当前管理员账号。切换账号不会复制或迁移配置。', 'settings-description'));
+  scopeForm.append(button('加载账号配置', () => { currentOwner = owner.value.trim(); load(); }));
+  context.append(summary, scopeForm); root.prepend(context);
   async function load() {
     const ticket = ++sequence;
     content.inert = true;
@@ -74,11 +78,15 @@ export function mountCatalog(root, kind) {
         const config = row?.provider_config || {};
         controls.base_url = field(form, 'url', 'API URL', config.endpoint || config.base_url || '', {type: 'url', help: '填写 API Base URL（如 https://api.example.com/v1），或完整的 /chat/completions 地址。'});
         controls.api_key = field(form, 'api_key', 'API Key', '', {type: 'password', help: row?.secret_configured ? '已配置。留空保留原凭据；填写新值即轮换。' : '首次接入请填写；保存后不会回显。'});
-        controls.timeout = field(form, 'timeout', '请求超时（秒）', config.timeout_s ?? 60, {type: 'number'}); controls.timeout.min = 1; controls.timeout.max = 600;
-        controls.retries = field(form, 'retries', '最大重试次数', config.max_retries ?? 0, {type: 'number', help: '建议保持 0；不确定是否已受理的请求不会自动重放。'}); controls.retries.min = 0; controls.retries.max = 5;
-        controls.stream = field(form, 'stream', '启用流式响应', config.stream === true, {type: 'checkbox'});
-        controls.headers = field(form, 'headers', '附加请求头（JSON）', JSON.stringify(config.headers || {}, null, 2), {type: 'textarea', help: '支持 user-agent、accept-language、x-client-name、openai-organization；认证信息使用 API Key。'});
-        controls.pricing = field(form, 'pricing', '用量单价（JSON，可留空）', config.pricing ? JSON.stringify(config.pricing, null, 2) : '', {type: 'textarea', help: 'USD / 百万 token，示例：{"currency":"USD","input":"1","output":"2","cache_read":"0","cache_write":"0"}。'});
+        const advanced = el('details', null, 'settings-advanced');
+        advanced.append(el('summary', '高级参数'));
+        form.append(advanced);
+        controls.timeout = field(advanced, 'timeout', '请求超时（秒）', config.timeout_s ?? 60, {type: 'number'}); controls.timeout.min = 1; controls.timeout.max = 600;
+        controls.retries = field(advanced, 'retries', '最大重试次数', config.max_retries ?? 0, {type: 'number', help: '建议保持 0；不确定是否已受理的请求不会自动重放。'}); controls.retries.min = 0; controls.retries.max = 5;
+        controls.stream = field(advanced, 'stream', '启用流式响应', config.stream === true, {type: 'checkbox'});
+        controls.headers = field(advanced, 'headers', '附加请求头（JSON）', JSON.stringify(config.headers || {}, null, 2), {type: 'textarea', help: '支持 user-agent、accept-language、x-client-name、openai-organization；认证信息使用 API Key。'});
+        controls.pricing = field(advanced, 'pricing', '用量单价（JSON，可留空）', config.pricing ? JSON.stringify(config.pricing, null, 2) : '', {type: 'textarea', help: 'USD / 百万 token，示例：{"currency":"USD","input":"1","output":"2","cache_read":"0","cache_write":"0"}。'});
+        controls.capabilities = field(advanced, 'capabilities', '能力声明（JSON）', JSON.stringify(row?.capabilities || {}, null, 2), {type: 'textarea', help: '例如 {"streaming": true, "tools": true}。'});
       } else if (kind === 'nodes') {
         controls.label = field(form, 'label', '节点名称', row?.label, {required: true});
       } else {
@@ -86,7 +94,7 @@ export function mountCatalog(root, kind) {
         controls.root_path = field(form, 'root_path', '工作目录绝对路径', row?.root_path, {required: true});
         controls.node = field(form, 'default_node_id', '默认执行节点', row?.default_node_id, {options: [['', '使用账号默认节点'], ...catalog.nodes.filter(n => n.enabled).map(n => [n.node_id, n.label])]});
       }
-      if (kind !== 'workspaces') controls.capabilities = field(form, 'capabilities', '能力声明（JSON）', JSON.stringify(row?.capabilities || {}, null, 2), {type: 'textarea', help: kind === 'nodes' ? '例如 {"workspace.exec": true}。只填写节点实际支持的能力。' : '例如 {"streaming": true, "tools": true}。'});
+      if (kind === 'nodes') controls.capabilities = field(form, 'capabilities', '能力声明（JSON）', JSON.stringify(row?.capabilities || {}, null, 2), {type: 'textarea', help: '例如 {"workspace.exec": true}。只填写节点实际支持的能力。'});
       const enabled = field(form, 'enabled', '启用此配置', row?.enabled ?? true, {type: 'checkbox'});
       const submit = el('button', '保存配置', 'button-primary'); submit.type = 'submit';
       const result = el('p'); result.setAttribute('role', 'status');

@@ -15,6 +15,28 @@ ROOT = Path(__file__).resolve().parents[1]
 OWNER = 'owner@example.test'
 
 
+def test_assistant_service_boundary():
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node.js required to execute browser modules')
+    result = subprocess.run([
+        node, str(ROOT / 'tests/fixtures/frontend/assistant_service.mjs'),
+        str(ROOT / 'frontend/assets/views/assistant/service.js'),
+    ], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_assistant_conversation_state_merges_pages_without_dom():
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node.js required to execute browser modules')
+    result = subprocess.run([
+        node, str(ROOT / 'tests/fixtures/frontend/assistant_conversation_state.mjs'),
+        str(ROOT / 'frontend/assets/views/assistant/conversation-state.js'),
+    ], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize('scenario', ['retry', 'model'])
 def test_assistant_submission_uses_selected_model_and_stable_request(tmp_path, scenario):
     node = shutil.which('node')

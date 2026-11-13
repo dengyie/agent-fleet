@@ -1,4 +1,3 @@
-import { getWorkflowTemplates, createWorkflow, listWorkflows, getWorkflow, getWorkflowEvents, controlWorkflow, controlWorkflowStep, acceptWorkflow, getPlatformArtifactContentUrl } from '../../api/platform.js';
 import { el, clear, showError } from './panels.js';
 
 const ACTIVE = new Set(['queued', 'running', 'waiting_node', 'waiting_external', 'waiting_approval', 'paused']);
@@ -37,6 +36,8 @@ function restoreFocus(container, previous) {
 }
 
 export function mountWorkflowPanel(target, options = {}) {
+  const service = options.service;
+  if (!service) throw new TypeError('Workflow panel requires an assistant service');
   clear(target);
   const root = el('section', 'assistant-workflow-panel'); root.setAttribute('aria-label', '工作流');
   const heading = el('div', 'assistant-workflow-heading'); heading.appendChild(el('h2', 'assistant-section-title', '工作流交付'));
@@ -109,7 +110,7 @@ export function mountWorkflowPanel(target, options = {}) {
   function download(reference, label) {
     const link = el('a', 'assistant-workflow-download', label);
     link.dataset.workflowFocus = label + ':' + reference.artifact_id;
-    link.href = getPlatformArtifactContentUrl(reference.artifact_id, current.workspace_id); link.download = ''; return link;
+    link.href = service.getArtifactContentUrl(reference.artifact_id, current.workspace_id); link.download = ''; return link;
   }
   function renderDetail() {
     const focused = detail.contains(document.activeElement) ? document.activeElement : null;
@@ -171,10 +172,10 @@ export function mountWorkflowPanel(target, options = {}) {
     try {
       const p = operation.payload;
       if (operation.type === 'create') {
-        const created = await createWorkflow(p); if (disposed) return; selected = created.workflow_id; eventCursor = 0; recentEvents = [];
-      } else if (operation.type === 'acceptance') await acceptWorkflow(operation.workflow, p);
-      else if (operation.type === 'step') await controlWorkflowStep(operation.workflow, operation.step, operation.action, p);
-      else await controlWorkflow(operation.workflow, operation.action, p.expected_revision, p.client_token);
+        const created = await service.createWorkflow(p); if (disposed) return; selected = created.workflow_id; eventCursor = 0; recentEvents = [];
+      } else if (operation.type === 'acceptance') await service.acceptWorkflow(operation.workflow, p);
+      else if (operation.type === 'step') await service.controlWorkflowStep(operation.workflow, operation.step, operation.action, p);
+      else await service.controlWorkflow(operation.workflow, operation.action, p.expected_revision, p.client_token);
       if (disposed) return;
       pending = null; save(); notice.textContent = '操作已记录，等待执行回执。'; await refreshDetail();
     } catch (error) {
@@ -222,10 +223,10 @@ export function mountWorkflowPanel(target, options = {}) {
     if (!selected || disposed || disabled) { if (!selected) setReadError('detail'); renderDetail(); return; }
     const id = selected, version = ++detailVersion; activeRead?.abort(); activeRead = new AbortController(); const signal = activeRead.signal;
     try {
-      const data = await getWorkflow(id, {signal});
+      const data = await service.getWorkflow(id, {signal});
       if (disposed || version !== detailVersion || id !== selected) return;
       current = data.workflow; renderDetail();
-      const events = await getWorkflowEvents(id, eventCursor, 100, {signal});
+      const events = await service.getWorkflowEvents(id, eventCursor, 100, {signal});
       if (disposed || version !== detailVersion || id !== selected) return;
       eventCursor = events.next_cursor === null ? eventCursor : events.next_cursor;
       recentEvents = recentEvents.concat(events.events).slice(-100); setReadError('detail'); save(); renderDetail();
@@ -239,7 +240,7 @@ export function mountWorkflowPanel(target, options = {}) {
     if (disposed || suspended || disabled || listing || busy) { schedule(); return; }
     listing = true; const version = ++listVersion;
     try {
-      const data = await listWorkflows(100);
+      const data = await service.listWorkflows(100);
       if (disposed || version !== listVersion) return;
       workflows = data.workflows;
       setReadError('list');
@@ -253,7 +254,7 @@ export function mountWorkflowPanel(target, options = {}) {
   }
   async function loadTemplates() {
     try {
-      const data = await getWorkflowTemplates(); if (disposed || disabled) return;
+      const data = await service.getWorkflowTemplates(); if (disposed || disabled) return;
       setReadError('templates');
       templates = data.templates; clear(template);
       templates.forEach((item, index) => { const option = el('option', null, item.template_id + ' · v' + item.revision); option.value = String(index); template.appendChild(option); });

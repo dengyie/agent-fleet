@@ -30,9 +30,13 @@ class TestArtifactApiContractTests:
 
 class TestAssistantArtifactViewContractTests:
     def test_assistant_renders_workspace_artifacts_and_downloads(self):
-        source = (ASSISTANT_VIEW.read_text() + (ROOT / 'frontend/assets/views/assistant/panels.js').read_text())
-        assert "getPlatformArtifacts" in source
-        assert "getPlatformArtifactContentUrl" in source
+        view_source = (ASSISTANT_VIEW.read_text() + (ROOT / 'frontend/assets/views/assistant/panels.js').read_text())
+        service_source = (ROOT / 'frontend/assets/views/assistant/service.js').read_text()
+        source = view_source + service_source
+        assert "getPlatformArtifacts" in service_source
+        assert "getPlatformArtifactContentUrl" in service_source
+        assert "getArtifacts" in view_source
+        assert "getArtifactContentUrl" in view_source
         assert "assistant-artifacts" in source
         assert "download" in source
         assert "工作区产物" in source
@@ -40,9 +44,9 @@ class TestAssistantArtifactViewContractTests:
         assert "暂无产物" in source
         assert "refreshRunEvents" in source
         # Pagination and completion are exercised by the real browser suite.
-        assert "getRunEvents(" in source
+        assert "service.getRunEvents(" in source
         assert "if (type !== 'textarea') field.type = type;" in source
-        assert "getPlatformArtifactPreview" in source
+        assert "getPlatformArtifactPreview" in service_source
         assert "el('pre'" in source
         assert "truncated" in source
 
@@ -50,6 +54,7 @@ class TestAssistantArtifactViewContractTests:
         source = (ASSISTANT_VIEW.read_text() + (ROOT / 'frontend/assets/views/assistant/panels.js').read_text())
         assert "innerHTML" not in source
         assert "fetch(" not in source
+        assert "api/platform" not in source
         assert "textContent" in source
         assert "createElement" in source
         assert "workspace_id" in source

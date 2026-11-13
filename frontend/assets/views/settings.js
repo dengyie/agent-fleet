@@ -1,4 +1,4 @@
-import {pagePath} from '../routes.js';
+import {navigatePage, pagePath} from '../routes.js';
 import {accountRequest} from '../api/accounts.js';
 import {mountAccount} from './account.js';
 import {mountMCPIntegrations} from './account/integrations.js';
@@ -8,18 +8,25 @@ import {mountPlugins} from './plugins.js';
 import {mountCatalog} from './settings/catalogs.js';
 import {mountRuntime} from './settings/runtime.js';
 import {el, field, panel} from './settings/forms.js';
+import {uiIcon} from '../routes.js';
 
 const SECTIONS = [
-  ['models', '模型源与 API', 'API URL 模型 Key 超时 重试 协议'],
-  ['defaults', '默认配置', '模型 工作区 节点 默认'],
-  ['nodes', 'VM 与执行节点', '虚拟机 节点 能力 接入 凭据'],
-  ['workspaces', '工作区与存储', '目录 路径 执行位置'],
-  ['hosts', '节点展示与心跳', 'VM 清单 YAML TTL'],
-  ['integrations', '集成与工作流', 'MCP 身份 摘要 工作流'],
-  ['plugins', '插件管理', 'GitHub CLI 官方插件 接入'],
-  ['runtime', '系统与运行参数', '开关 并发 网络 浏览器 Komari 沙盒 保留时间'],
-  ['account', '账号与访问', '资料 密码 登录 会话 邀请 用户 权限'],
-  ['appearance', '外观', '主题 浅色 深色 系统'],
+  ['models', '模型源与 API', 'API URL 模型 Key 超时 重试 协议', 'brain'],
+  ['defaults', '默认配置', '模型 工作区 节点 默认', 'check-circle'],
+  ['nodes', 'VM 与执行节点', '虚拟机 节点 能力 接入 凭据', 'cpu'],
+  ['workspaces', '工作区与存储', '目录 路径 执行位置', 'layers'],
+  ['hosts', '节点展示与心跳', 'VM 清单 YAML TTL', 'globe'],
+  ['integrations', '集成与工作流', 'MCP 身份 摘要 工作流', 'git-branch'],
+  ['plugins', '插件管理', 'GitHub CLI 官方插件 接入', 'box'],
+  ['runtime', '系统与运行参数', '开关 并发 网络 浏览器 Komari 沙盒 保留时间', 'tool'],
+  ['account', '账号与访问', '资料 密码 登录 会话 邀请 用户 权限', 'lock'],
+  ['appearance', '外观', '主题 浅色 深色 系统', 'sun'],
+];
+const GROUPS = [
+  ['工作空间', ['models', 'defaults', 'nodes', 'workspaces', 'hosts']],
+  ['连接与扩展', ['integrations', 'plugins']],
+  ['系统', ['runtime']],
+  ['个人设置', ['account', 'appearance']],
 ];
 export function mountSettings(root, {section = 'models', account = null} = {}) {
   let disposed = false, suspended = false, views = [], epoch = 0;
@@ -28,21 +35,43 @@ export function mountSettings(root, {section = 'models', account = null} = {}) {
   const selected = allowed.some(([id]) => id === section) ? section : allowed[0][0];
   root.classList.add('settings-page');
   const nav = document.createElement('nav'); nav.className = 'settings-navigation'; nav.setAttribute('aria-label', '设置分类');
-  const search = field(nav, 'search', '搜索设置', '', {type: 'search'}); search.placeholder = '搜索模型、VM、API…';
+  const navHeader = el('div', null, 'settings-nav-header');
+  navHeader.append(el('strong', '设置'), el('span', '配置与偏好'));
+  nav.append(navHeader);
+  const search = field(nav, 'search', '搜索设置', '', {type: 'search'}); search.placeholder = '搜索设置';
+  search.closest('label').classList.add('settings-search-field');
+  const navList = el('div', null, 'settings-nav-list');
   const links = [];
-  for (const [id, title, keywords] of allowed) {
-    const link = el('a', title); link.href = pagePath('settings', id);
-    if (id === selected) link.setAttribute('aria-current', 'page');
-    nav.append(link); links.push({link, text: title + ' ' + keywords});
+  for (const [groupTitle, ids] of GROUPS) {
+    const entries = allowed.filter(([id]) => ids.includes(id));
+    if (!entries.length) continue;
+    const group = el('div', null, 'settings-nav-group');
+    group.append(el('h2', groupTitle, 'settings-nav-group-title'));
+    for (const [id, title, keywords, icon] of entries) {
+      const link = el('a'); link.href = pagePath('settings', id); link.dataset.section = id;
+      const glyph = el('span'); glyph.className = 'settings-nav-icon'; glyph.append(uiIcon(icon, {size: 17}));
+      link.append(glyph, el('span', title));
+      if (id === selected) link.setAttribute('aria-current', 'page');
+      group.append(link); links.push({link, text: title + ' ' + keywords});
+    }
+    navList.append(group);
   }
+  nav.append(navList);
+  const mobileSection = field(nav, 'mobile-section', '设置分类', selected, {
+    options: allowed.map(([id, title]) => [id, title]),
+  });
+  mobileSection.classList.add('settings-mobile-section');
+  mobileSection.addEventListener('change', () => navigatePage(pagePath('settings', mobileSection.value)));
   const noResults = el('p', '没有匹配的设置', 'settings-description'); noResults.hidden = true; nav.append(noResults);
   search.addEventListener('input', () => {
     const query = search.value.trim().toLocaleLowerCase();
     links.forEach(({link, text}) => { link.hidden = !text.toLocaleLowerCase().includes(query); });
+    for (const group of nav.querySelectorAll('.settings-nav-group')) {
+      group.hidden = !group.querySelector('a:not([hidden])');
+    }
     noResults.hidden = links.some(({link}) => !link.hidden);
   });
   const body = el('div', null, 'settings-content');
-  body.append(el('p', '所有配置集中在这里。日常任务仍在主助手和工作页面完成。', 'settings-intro'));
   root.append(nav, body);
   if (['models', 'nodes', 'workspaces', 'defaults'].includes(selected)) views.push(mountCatalog(body, selected));
   else if (['runtime', 'hosts'].includes(selected)) views.push(mountRuntime(body, selected));
