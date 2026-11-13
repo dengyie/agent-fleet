@@ -21,7 +21,7 @@ def test_settings_save_reload_and_navigation(tmp_path, viewport):
     _browser_acceptance(app, 'settings_browser.cjs', viewport)
 
 
-@pytest.mark.parametrize('scenario', ['failed-switch', 'inflight-save'])
+@pytest.mark.parametrize('scenario', ['failed-switch', 'inflight-save', 'inflight-editor'])
 def test_settings_owner_switch_failure_and_inflight_save(tmp_path, scenario):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE to run Chromium acceptance')

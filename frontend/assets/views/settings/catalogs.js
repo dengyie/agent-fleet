@@ -47,9 +47,9 @@ export function mountCatalog(root, kind) {
       event.preventDefault(); submit.disabled = true;
       try {
         await saveDefaults(Object.fromEntries(Object.entries(controls).map(([key, control]) => [key, control.value || null])), catalog.defaults.revision, formOwner);
-        if (disposed || ticket !== sequence) return;
+        if (disposed || ticket !== sequence || !form.isConnected) return;
         if (await load()) status.textContent = '默认配置已保存';
-      } catch (error) { if (!disposed && ticket === sequence) status.textContent = errorText(error); }
+      } catch (error) { if (!disposed && ticket === sequence && form.isConnected) status.textContent = errorText(error); }
       finally { submit.disabled = false; }
     });
   }
@@ -128,9 +128,9 @@ export function mountCatalog(root, kind) {
           } else if (kind === 'nodes') value = {label: controls.label.value.trim(), capabilities: jsonValue(controls.capabilities)};
           else value = {name: controls.name.value.trim(), root_path: controls.root_path.value.trim(), backend: row?.backend || 'directory', default_node_id: controls.node.value || null};
           await saveSetting(kind, id.value.trim(), {expected_digest: row?.digest || '', value: {...value, enabled: enabled.checked}, ...(controls.api_key?.value ? {api_key: controls.api_key.value} : {})}, formOwner);
-          if (disposed || ticket !== sequence) return;
+          if (disposed || ticket !== sequence || !form.isConnected) return;
           if (await load()) status.textContent = '配置已保存，将用于之后的新任务';
-        } catch (error) { if (!disposed && ticket === sequence) result.textContent = errorText(error) + (error.status === 409 ? '；请点击重新加载，核对后再编辑。' : ''); }
+        } catch (error) { if (!disposed && ticket === sequence && form.isConnected) result.textContent = errorText(error) + (error.status === 409 ? '；请点击重新加载，核对后再编辑。' : ''); }
         finally { submit.disabled = false; }
       });
       form.scrollIntoView({block: 'nearest'});

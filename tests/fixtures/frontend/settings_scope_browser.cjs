@@ -39,14 +39,16 @@ const [origin,scenario]=process.argv.slice(2);
   });
   await page.getByRole('button',{name:'保存配置',exact:true}).click();
   await committed;
-  await page.getByLabel('账号 ID',{exact:true}).fill('');
-  await page.getByRole('button',{name:'加载账号配置',exact:true}).click();
+  if(scenario!=='inflight-editor') {
+   await page.getByLabel('账号 ID',{exact:true}).fill('');
+   await page.getByRole('button',{name:'加载账号配置',exact:true}).click();
+  }
   await page.getByRole('button',{name:/相同节点/}).click();
   await page.getByLabel('节点名称',{exact:true}).fill('当前账号尚未保存');
   const receipt=page.waitForResponse(r=>r.request().method()==='PUT');
   releaseSave(); await receipt;
   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
-  assert.equal(await page.getByLabel('节点名称',{exact:true}).inputValue(),'当前账号尚未保存','a stale save receipt must not reload and erase the new owner editor');
+  assert.equal(await page.getByLabel('节点名称',{exact:true}).inputValue(),'当前账号尚未保存','a stale save receipt must not reload and erase a newer editor');
   assert.deepEqual(errors,[]);
   console.log('PASS: owner failure isolation and late-save fence');
  }finally{await browser.close();}
