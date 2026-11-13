@@ -29,14 +29,14 @@ const [origin, scenario] = process.argv.slice(2);
         return model && model.options.length > 0 && model.value !== '' && send && !send.disabled;
       });
     }
-    if (scenario === 'new-chat-route' || scenario === 'background-create') {
+    if (['new-chat-route','background-create','active-create-collision'].includes(scenario)) {
       await page.goto(origin + '/assistant');
       await page.getByText('就绪',{exact:true}).waitFor();
       let releaseCreate;
       const heldCreate = new Promise(resolve => {releaseCreate = resolve;});
       await page.route('**/api/platform/v1/conversations', async r => {
         if (r.request().method() !== 'POST') return r.continue();
-        if (scenario === 'background-create') await heldCreate;
+        if (scenario !== 'new-chat-route') await heldCreate;
         return r.fulfill({json:{ok:true,conversation:{conversation_id:'review-model'}}});
       });
       let releaseTurn;
@@ -54,6 +54,14 @@ const [origin, scenario] = process.argv.slice(2);
         const started = page.waitForRequest('**/conversations/review-model/turns');
         releaseCreate(); await started;
         assert.equal(new URL(page.url()).pathname,'/settings/appearance','late conversation creation must not change the visible settings route');
+      } else if (scenario === 'active-create-collision') {
+        // A focus/history refresh can expose the committed conversation before
+        // its original create receipt arrives, mounting the same ID separately.
+        await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate',{detail:{path:'/conversation/review-model'}})));
+        await page.locator('.assistant-message.user').getByText('用 Model B 分析项目',{exact:true}).waitFor();
+        const started = page.waitForRequest('**/conversations/review-model/turns');
+        releaseCreate(); await started;
+        await page.locator('.assistant-message.user').getByText('保留原提交',{exact:true}).waitFor();
       } else {
         await page.waitForURL('**/conversation/review-model');
         await page.locator('.new-conversation').click();
