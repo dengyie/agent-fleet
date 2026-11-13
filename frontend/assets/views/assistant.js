@@ -461,9 +461,12 @@ export function mountAssistant(target, options) {
       messages = messages.concat([pendingTurn.message]);
       runs = runs.concat([pendingTurn.run]);
     }
-    renderMessages(messageHost, messages, runs, {onRefresh: async function () {
+    renderMessages(messageHost, messages, runs, {onRefresh: async function (run) {
       clearActionError();
-      try { await refreshConversation(); } catch (error) { if (!disposed) showActionError(error); }
+      try {
+        var data = await service.getRun(run.run_id);
+        if (!disposed) mergeConversationPage({runs: [data.run || data]}, false);
+      } catch (error) { if (!disposed) showActionError(error); }
     }});
     intro.hidden = messages.length > 0;
     scrollAnchor.setAttribute('is-streaming', '');

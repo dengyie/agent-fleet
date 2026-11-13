@@ -10,7 +10,7 @@ const [origin, scenario] = process.argv.slice(2);
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     let runState = 'succeeded';
-    const run = () => ({run_id:'review-run', state:runState, config:{model_profile_id:'actual-b'}});
+    const run = () => ({run_id:'review-run', trigger_message_id:'review-message', state:runState, config:{model_profile_id:'actual-b'}});
     await page.route('**/api/platform/v1/defaults', r => r.fulfill({json:{ok:true,
       defaults:{model_profile_id:'default-a', workspace_id:'workspace'},
       models:[{profile_id:'default-a',model:'Model A'}, {profile_id:'actual-b',model:'Model B',enabled:false}],
@@ -50,7 +50,7 @@ const [origin, scenario] = process.argv.slice(2);
         turns.push(r.request().postDataJSON());
         return r.fulfill(turns.length === 1
           ? {status:503,json:{ok:false,error:'unavailable',detail:'提交响应暂时不可用',request_id:'review-503'}}
-          : {json:{ok:true,run:run()}});
+          : {json:{ok:true,message:{message_id:run().trigger_message_id,role:'user',content:turns[0].text,turn_sequence:1},run:run()}});
       });
       await page.setViewportSize({width:390,height:844});
       await page.getByRole('button',{name:'发送任务'}).click();
@@ -73,6 +73,38 @@ const [origin, scenario] = process.argv.slice(2);
       rejectCancel = false;
       await page.getByRole('button',{name:'取消运行',exact:true}).click();
       await page.waitForFunction(() => document.querySelector('.assistant-action-error').hidden);
+    }
+    if (scenario === 'optimistic') {
+      // Hold the acceptance response independently of model execution. The
+      // user message and route must be visible while this promise is pending.
+      for (const width of [1440, 390]) {
+        await page.setViewportSize({width,height:900});
+        await page.goto(origin + '/assistant');
+        await page.getByText('就绪',{exact:true}).waitFor();
+        let release;
+        const held = new Promise(resolve => {release = resolve;});
+        let accepted = false;
+        await page.route('**/api/platform/v1/conversations', r => r.request().method() === 'POST'
+          ? r.fulfill({json:{ok:true,conversation:{conversation_id:'review-model'}}}) : r.continue());
+        await page.route('**/api/platform/v1/conversations/review-model/turns', async r => {
+          await held; accepted = true;
+          return r.fulfill({json:{ok:true,message:{message_id:'review-message',role:'user',content:'即时反馈 '+width,turn_sequence:1},run:run()}});
+        });
+        runState = 'running';
+        await input.fill('即时反馈 '+width);
+        await input.press('Enter');
+        await page.locator('.assistant-message.user').getByText('即时反馈 '+width,{exact:true}).waitFor();
+        await page.getByText('正在发送…',{exact:true}).waitFor();
+        await page.waitForURL('**/conversation/review-model');
+        assert.equal(accepted,false,'message and conversation route precede acceptance response');
+        assert.equal(await input.inputValue(),'');
+        assert.equal(await page.locator('.assistant-intro').isVisible(),false);
+        release();
+        await page.getByText('助手正在处理…',{exact:true}).waitFor();
+        assert.equal(await page.locator('.assistant-message.user').count(),1);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),true);
+        await page.unroute('**/api/platform/v1/conversations/review-model/turns');
+      }
     }
     if (scenario === 'modal') {
       await page.setViewportSize({width:390,height:844});
