@@ -32,7 +32,8 @@ export function renderMessages(host, messages, runs = [], options = {}) {
       copy.addEventListener('click', async function () { try { await navigator.clipboard.writeText(row._content || ''); copy.setAttribute('aria-label', '已复制'); copy.title = '已复制'; } catch (_) { copy.title = '复制失败，请手动选择文本'; } });
       row.appendChild(copy);
       const requests = el('div', 'message-requests'); row.appendChild(requests);
-      row._parts = {body, copy, requests}; host._messageRows.set(key, row);
+      const progress = el('p', 'assistant-message-progress meta'); progress.setAttribute('role', 'status'); progress.hidden = true; row.appendChild(progress);
+      row._parts = {body, copy, requests, progress}; host._messageRows.set(key, row);
     }
     row._runId = run?.run_id;
     const content = message.content || '';
@@ -42,6 +43,10 @@ export function renderMessages(host, messages, runs = [], options = {}) {
     row._parts.copy.hidden = !content;
     if (run) {
       renderRequestMetadata(row._parts.requests, run.requests);
+      const states = {submitting: '正在发送…', submission_unknown: '提交结果待确认，请重试原请求', queued: '已发送，等待助手…', running: '助手正在处理…', waiting_node: '正在等待执行节点…', waiting_approval: '等待审批', waiting_task: '任务执行中…', cancelling: '正在取消…', unknown: '运行结果待确认，原请求不会自动重发', failed: '运行失败', cancelled: '已取消'};
+      row._parts.progress.textContent = states[run.state] || '';
+      row._parts.progress.hidden = !states[run.state];
+      row._parts.progress.setAttribute('data-state', run.state);
       if (run.state === 'unknown' && typeof options.onRefresh === 'function') {
         if (!row._parts.refresh) {
           row._parts.refresh = document.createElement('button');
@@ -52,7 +57,7 @@ export function renderMessages(host, messages, runs = [], options = {}) {
             row._parts.refresh.disabled = true;
             try { await options.onRefresh(run); } finally { row._parts.refresh.disabled = false; }
           });
-          row._parts.requests.appendChild(row._parts.refresh);
+          row.appendChild(row._parts.refresh);
         }
         row._parts.refresh.hidden = false;
       } else if (row._parts.refresh) row._parts.refresh.hidden = true;

@@ -54,6 +54,18 @@ globalThis.fetch = async (url, options) => {
     if (body.run) body.run.state = 'running'; else body.state = 'running';
     return new Response(JSON.stringify(body), {status: response.status, headers: response.headers});
   }
+  if (scenario === 'provider-503' && /\/runs\/[^/?]+(\?|$)/.test(String(url)) && response.ok) {
+    const body = await response.json();
+    body.state = 'unknown'; body.result_text = '模型调用结果待确认：transient_http（HTTP 503）';
+    return new Response(JSON.stringify(body), {status: 200, headers: response.headers});
+  }
+  if (scenario === 'provider-503' && /\/conversations\/[^/?]+(\?|$)/.test(String(url)) && response.ok) {
+    const body = await response.json();
+    for (const run of body.conversation?.runs || []) {
+      run.state = 'unknown'; run.result_text = '模型调用结果待确认：transient_http（HTTP 503）';
+    }
+    return new Response(JSON.stringify(body), {status: 200, headers: response.headers});
+  }
   if (String(url).endsWith('/turns')) {
     requests.push(JSON.parse(options.body));
     const body = await response.clone().json();
@@ -61,6 +73,9 @@ globalThis.fetch = async (url, options) => {
     if (scenario === 'retry' && requests.length === 1) {
       await response.text();
       throw new Error('connection lost after Hub committed');
+    }
+    if (scenario === 'retry-503' && requests.length === 1) {
+      return new Response(JSON.stringify({error: 'temporarily_unavailable'}), {status: 503});
     }
   }
   if ((scenario === 'optimistic' || scenario === 'existing-optimistic') && /\/turns$/.test(String(url))) {
@@ -99,17 +114,33 @@ input.value = 'Submit one turn';
 const submission = submit();
 if (scenario === 'optimistic' || scenario === 'existing-optimistic') {
   await sleep(40);
-  if (!root.textContent.includes('Submit one turn')) throw new Error('optimistic user message missing before submit response');
-  if (!root.textContent.includes('提交中')) throw new Error('optimistic submission status missing before submit response');
+  const messages = find(n => n.className === 'assistant-messages');
+  if (!messages.textContent.includes('Submit one turn')) throw new Error('optimistic user message missing before submit response');
+  if (!messages.textContent.includes('正在发送')) throw new Error('optimistic submission status missing in transcript before submit response');
+  if (input.value !== '') throw new Error('composer should clear immediately');
+  if (scenario === 'optimistic' && !replacedUrls.length) throw new Error('conversation route missing before append response');
 }
 await submission;
-if (scenario === 'retry') {
+if (scenario === 'retry' || scenario === 'retry-503') {
+  const messages = find(n => n.className === 'assistant-messages');
+  if (!messages.textContent.includes('Submit one turn') || !messages.textContent.includes('提交结果待确认')) throw new Error('uncertain submission should keep message and status');
   // Changes to controls while resolving uncertain acceptance must not change
   // the pending request. A real user sees these controls disabled.
   model.value = 'model-default';
   await submit();
 }
-await until(() => replies.length === (scenario === 'retry' ? 2 : 1));
+await until(() => replies.length === (scenario.startsWith('retry') ? 2 : 1));
+if (scenario === 'provider-503') {
+  await until(() => find(n => n.className === 'assistant-messages').textContent.includes('transient_http'));
+  const button = find(n => n.className === 'button-secondary assistant-run-refresh');
+  if (!button || button.hidden) throw new Error('unknown run needs read-only recovery action');
+  await button.listeners.click();
+  if (requests.length !== 1) throw new Error('refresh must never resubmit the model request');
+} else if (scenario !== 'suspend') {
+  const messages = find(n => n.className === 'assistant-messages');
+  if (messages.children.filter(n => n.className === 'assistant-message user').length !== 1) throw new Error('accepted turn should replace, not duplicate optimistic message');
+  if (!messages.textContent.includes('已发送，等待助手')) throw new Error('queued run status missing from transcript');
+}
 if (scenario === 'suspend') {
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   await until(() => runPolls.length >= 2);

@@ -37,7 +37,7 @@ def test_assistant_conversation_state_merges_pages_without_dom():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize('scenario', ['retry', 'model', 'optimistic', 'existing-optimistic'])
+@pytest.mark.parametrize('scenario', ['retry', 'retry-503', 'model', 'optimistic', 'existing-optimistic', 'provider-503'])
 def test_assistant_submission_uses_selected_model_and_stable_request(tmp_path, scenario):
     node = shutil.which('node')
     if not node:
@@ -62,13 +62,15 @@ def test_assistant_submission_uses_selected_model_and_stable_request(tmp_path, s
         server.shutdown()
         server.server_close()
         thread.join(3)
-    if scenario == 'retry':
+    if scenario.startswith('retry'):
         assert observed['requests'][0] == observed['requests'][1]
         assert observed['replies'][0]['run']['run_id'] == observed['replies'][1]['run']['run_id']
         conversation_id = observed['replies'][0]['conversation_id']
         assert len(repo.get_conversation(OWNER, conversation_id)['runs']) == 1
     assert observed['requests'][0].get('overrides', {}).get('model_profile_id') == 'model-selected'
     assert observed['replies'][-1]['run']['config']['model_profile_id'] == 'model-selected'
+    assert observed['replies'][-1]['message']['message_id'] == observed['replies'][-1]['message_id']
+    assert observed['replies'][-1]['message']['content'] == 'Submit one turn'
     assert '本次模型：model-selected' in observed['text']
     if scenario == 'optimistic':
         assert observed['replacedUrls'], 'new chat should enter its conversation route before model completion'
