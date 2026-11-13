@@ -16,6 +16,10 @@
 
 ---
 
+## 最新更新
+
+2026-11-13：助手发送后立即显示消息和运行状态；新对话先进入会话页面；模型结果待确认时可重新读取原运行状态。完整历史见 [Release Notes](docs/releases/release-notes.md)。
+
 ## Why Agent Fleet?
 
 When running autonomous AI coding agents (such as Claude Code, Codex CLI, Hermes, and ZCode) across heterogeneous development workstations, edge nodes, and cloud servers, engineers face three major challenges:

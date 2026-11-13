@@ -42,6 +42,9 @@ const realFetch = globalThis.fetch;
 const requests = [];
 const replies = [];
 const runPolls = [];
+const replacedUrls = [];
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+globalThis.window.history.replaceState = (_, __, url) => replacedUrls.push(String(url));
 globalThis.fetch = async (url, options) => {
   if (/\/runs\/[^/?]+(\/events)?(\?|$)/.test(String(url))) runPolls.push(String(url));
   const response = await realFetch(url, options);
@@ -60,11 +63,21 @@ globalThis.fetch = async (url, options) => {
       throw new Error('connection lost after Hub committed');
     }
   }
+  if ((scenario === 'optimistic' || scenario === 'existing-optimistic') && /\/turns$/.test(String(url))) {
+    await sleep(500);
+  }
   return response;
 };
 const {mountAssistant} = await import(pathToFileURL(modulePath));
+let conversationId = null;
+if (scenario === 'existing-optimistic') {
+  const response = await realFetch(origin + '/api/platform/v1/conversations', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({workspace_id: 'home'})
+  });
+  conversationId = (await response.json()).conversation.conversation_id;
+}
 const root = new Element('main');
-const teardown = mountAssistant(root);
+const teardown = mountAssistant(root, conversationId ? {conversationId} : {});
 function find(predicate, node = root) {
   if (predicate(node)) return node;
   for (const child of node.children) { const result = find(predicate, child); if (result) return result; }
@@ -83,7 +96,13 @@ const input = find(n => n.tagName === 'textarea', composer);
 const submit = () => composer.listeners.submit({preventDefault() {}});
 model.value = 'model-selected';
 input.value = 'Submit one turn';
-await submit();
+const submission = submit();
+if (scenario === 'optimistic' || scenario === 'existing-optimistic') {
+  await sleep(40);
+  if (!root.textContent.includes('Submit one turn')) throw new Error('optimistic user message missing before submit response');
+  if (!root.textContent.includes('提交中')) throw new Error('optimistic submission status missing before submit response');
+}
+await submission;
 if (scenario === 'retry') {
   // Changes to controls while resolving uncertain acceptance must not change
   // the pending request. A real user sees these controls disabled.
@@ -105,5 +124,5 @@ if (scenario === 'suspend') {
   console.log(JSON.stringify({requests, replies, text: root.textContent, whileSuspended, resumed: true}));
   process.exit(0);
 }
-console.log(JSON.stringify({requests, replies, text: root.textContent}));
+console.log(JSON.stringify({requests, replies, text: root.textContent, replacedUrls}));
 process.exit(0);

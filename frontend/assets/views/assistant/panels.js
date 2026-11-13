@@ -4,7 +4,7 @@ import { uiIcon, pagePath } from '../../routes.js';
 export function el(tag, className, text) { var node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
 export function clear(node) { while (node && node.firstChild) node.removeChild(node.firstChild); }
 export function showError(host, error) { var text = (error && (error.detail || error.message || error.code)) || '平台请求失败'; if (error && error.requestId) text += ' · 请求编号 ' + error.requestId; host.appendChild(el('div', 'err', text)); }
-export function renderMessages(host, messages, runs = []) {
+export function renderMessages(host, messages, runs = [], options = {}) {
   if (!host._messageRows) host._messageRows = new Map();
   const source = Array.isArray(messages) ? messages : [];
   const replies = new Map(source.filter(m => m.role !== 'user').map(m => [m.message_id, m]));
@@ -40,15 +40,26 @@ export function renderMessages(host, messages, runs = []) {
       row._content = content; row._parts.body.textContent = content; row._parts.body.setAttribute('content', content);
     }
     row._parts.copy.hidden = !content;
-    if (run) renderRequestMetadata(row._parts.requests, run.requests);
+    if (run) {
+      renderRequestMetadata(row._parts.requests, run.requests);
+      if (run.state === 'unknown' && typeof options.onRefresh === 'function') {
+        if (!row._parts.refresh) {
+          row._parts.refresh = document.createElement('button');
+          row._parts.refresh.type = 'button';
+          row._parts.refresh.className = 'button-secondary assistant-run-refresh';
+          row._parts.refresh.textContent = '重新读取状态';
+          row._parts.refresh.addEventListener('click', async function () {
+            row._parts.refresh.disabled = true;
+            try { await options.onRefresh(run); } finally { row._parts.refresh.disabled = false; }
+          });
+          row._parts.requests.appendChild(row._parts.refresh);
+        }
+        row._parts.refresh.hidden = false;
+      } else if (row._parts.refresh) row._parts.refresh.hidden = true;
+    }
     if (host.children[index] !== row) host.insertBefore(row, host.children[index] || null);
   });
   host._messageRows.forEach((row, key) => { if (!keep.has(key)) { host.removeChild(row); host._messageRows.delete(key); } });
-}
-export function updateRunRequests(host, run) {
-  host._messageRows?.forEach(row => {
-    if (row._runId === run.run_id) renderRequestMetadata(row._parts.requests, run.requests);
-  });
 }
 export function tickMessageRequests(host) {
   let active = false;
