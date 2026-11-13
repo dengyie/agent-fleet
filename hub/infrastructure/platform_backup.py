@@ -1,0 +1,1383 @@
+"""Offline, integrity-checked backup and restore for the platform data pair.
+
+The platform database and content-addressed artifact directory are one
+recoverable unit.  This module deliberately has no Flask, scheduler, network,
+or secret-broker dependency.  A backup is built in a sibling temporary
+directory and is published only after every file has been copied and checked.
+"""
+from __future__ import annotations
+
+import ctypes
+import errno
+import hashlib
+import json
+import math
+import os
+import re
+import secrets
+import shutil
+import sqlite3
+import sys
+import tempfile
+import time
+from contextlib import closing
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Iterator, Mapping
+
+from hub.platform.artifact_lock import artifact_snapshot_barrier
+from hub.domain.workflow_contract import parse_contract, parse_definition, parse_resolved
+from hub.domain.workflow_contract_types import ArtifactReference, CodeRevisionReference
+from hub.domain.workflow_errors import WorkflowPersistenceError, WorkflowValidationError
+from hub.domain.capability import CapabilityStoreError
+from hub.domain.integration_identity import IntegrationIdentityError
+from hub.domain.mcp_catalog import MCPCatalogError
+from hub.infrastructure.capability_repository import CapabilityRepository
+from hub.domain.workflow_json import decode_snapshot
+from hub.infrastructure.workflow_schema import CONTROL_TABLES, WorkflowSchemaError, inspect_schema
+from hub.infrastructure.artifact_transfer_repository import (
+    ArtifactTransferRepositoryError, MAX_TRANSFERS, inspect_transfer_schema,
+)
+
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+
+BACKUP_SCHEMA_VERSION = 1
+MAX_ARTIFACTS = 10_000
+MAX_TOTAL_ARTIFACT_BYTES = 10 * 1024 * 1024 * 1024
+BACKUP_FILENAME = "backup.json"
+DATABASE_FILENAME = "platform.db"
+ARTIFACTS_DIRNAME = "artifacts"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
+_MAX_MANIFEST_BYTES = 64 * 1024
+_MAX_ENVELOPE_BYTES = 4 * 1024 * 1024
+ENCRYPTED_BACKUP_SCHEMA_VERSION = 1
+ENCRYPTED_MANIFEST_FILENAME = "encrypted-backup.json"
+ENCRYPTED_PAYLOAD_DIRNAME = "payload"
+_ENCRYPTED_MANIFEST_BYTES = 4 * 1024 * 1024
+_GCM_NONCE_BYTES = 12
+_GCM_TAG_BYTES = 16
+_ENCRYPTION_CHUNK_BYTES = 1024 * 1024
+_KEY_ID_RE = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
+_ENCRYPTED_MAGIC = b"AFB1"
+_MAX_ENCRYPTED_FILES = 2 + (MAX_ARTIFACTS * 2)
+_MAX_RETENTION_KEEP = 10_000
+_MAX_RETENTION_AGE_S = 10 * 365 * 24 * 60 * 60
+_MAX_RETENTION_BYTES = 100 * 1024 * 1024 * 1024
+
+
+class BackupError(RuntimeError):
+    """Stable, secret-free backup/restore failure."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+    def __str__(self) -> str:
+        return self.code
+
+
+@dataclass(frozen=True)
+class BackupRetentionPolicy:
+    """Bounded retention inputs for encrypted backup directories."""
+
+    keep_last: int
+    max_age_s: float | None
+    max_total_bytes: int | None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.keep_last, bool) or not isinstance(self.keep_last, int):
+            _raise("invalid_retention_policy")
+        if self.keep_last < 0 or self.keep_last > _MAX_RETENTION_KEEP:
+            _raise("invalid_retention_policy")
+        if self.max_age_s is not None:
+            try:
+                age = float(self.max_age_s)
+            except (TypeError, ValueError):
+                _raise("invalid_retention_policy")
+            if not math.isfinite(age) or age < 0 or age > _MAX_RETENTION_AGE_S:
+                _raise("invalid_retention_policy")
+        if self.max_total_bytes is not None:
+            if (isinstance(self.max_total_bytes, bool)
+                    or not isinstance(self.max_total_bytes, int)
+                    or self.max_total_bytes < 0
+                    or self.max_total_bytes > _MAX_RETENTION_BYTES):
+                _raise("invalid_retention_policy")
+
+
+def _raise(code: str):
+    raise BackupError(code)
+
+
+def _regular_file(path: Path) -> Path:
+    """Require a non-symlink regular file without exposing its path."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            _raise("unsafe_path")
+    except OSError:
+        _raise("unsafe_path")
+    return path
+
+
+def _directory(path: Path, *, missing_code: str = "unsafe_path") -> Path:
+    try:
+        if path.is_symlink():
+            _raise("unsafe_path")
+        if not path.exists() or not path.is_dir():
+            _raise(missing_code)
+    except OSError:
+        _raise("unsafe_path")
+    return path
+
+
+def _sha256(path: Path) -> tuple[int, str]:
+    _regular_file(path)
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                digest.update(chunk)
+    except OSError:
+        _raise("read_failed")
+    return size, digest.hexdigest()
+
+
+def _safe_artifact_id(value: Any, *, code: str = "invalid_artifact_path") -> str:
+    if not isinstance(value, str) or not _SAFE_ID_RE.fullmatch(value):
+        _raise(code)
+    return value
+
+
+def _bounded_text(value: Any, *, limit: int, code: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > limit:
+        _raise(code)
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        _raise(code)
+    return value
+
+
+def _manifest_bytes(path: Path) -> tuple[dict[str, Any], int, str]:
+    _regular_file(path)
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        _raise("read_failed")
+    if len(raw) > _MAX_MANIFEST_BYTES:
+        _raise("manifest_too_large")
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, TypeError, ValueError):
+        _raise("invalid_manifest")
+    if not isinstance(value, dict):
+        _raise("invalid_manifest")
+    return value, len(raw), hashlib.sha256(raw).hexdigest()
+
+
+def _validate_manifest(value: Mapping[str, Any], artifact_id: str) -> tuple[int, str]:
+    if value.get("artifact_id") != artifact_id:
+        _raise("invalid_manifest")
+    for key in ("owner_id", "workspace_id", "name", "content_type"):
+        _bounded_text(value.get(key), limit=512 if key == "name" else 256, code="invalid_manifest")
+    name = value["name"]
+    if "/" in name or "\\" in name or name in {".", ".."}:
+        _raise("invalid_manifest")
+    size = value.get("size")
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        _raise("invalid_manifest")
+    version = value.get("schema_version")
+    if version is not None and (type(version) is not int or version != 2):
+        _raise("artifact_schema_unknown")
+    if value.get("ready", True) is not True:
+        _raise("artifact_transfer_incomplete")
+    if version == 2 and (type(value.get("ready")) is not bool or type(value.get("provenance_ref")) is not dict):
+        _raise("invalid_manifest")
+    if size > (256 * 1024 * 1024 if version == 2 else 10 * 1024 * 1024):
+        _raise("artifact_too_large")
+    digest = value.get("sha256")
+    if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
+        _raise("invalid_manifest")
+    created_at = value.get("created_at")
+    try:
+        created_number = float(created_at)
+    except (TypeError, ValueError):
+        _raise("invalid_manifest")
+    if not math.isfinite(created_number) or created_number < 0:
+        _raise("invalid_manifest")
+    return size, digest
+
+
+def _artifact_entry(artifact_root: Path, artifact_dir: Path) -> tuple[dict[str, Any], Path, Path]:
+    if artifact_dir.is_symlink() or not artifact_dir.is_dir():
+        _raise("unsafe_path")
+    artifact_id = _safe_artifact_id(artifact_dir.name)
+    try:
+        children = {item.name for item in artifact_dir.iterdir()}
+    except OSError:
+        _raise("read_failed")
+    if children != {"manifest.json", "content"}:
+        _raise("invalid_artifact_path")
+    manifest_path = artifact_dir / "manifest.json"
+    content_path = artifact_dir / "content"
+    manifest, _manifest_size, manifest_digest = _manifest_bytes(manifest_path)
+    expected_size, expected_digest = _validate_manifest(manifest, artifact_id)
+    actual_size, actual_digest = _sha256(content_path)
+    if actual_size != expected_size:
+        _raise("artifact_size_mismatch")
+    if actual_digest != expected_digest:
+        _raise("artifact_hash_mismatch")
+    return {
+        "artifact_id": artifact_id,
+        "path": f"{ARTIFACTS_DIRNAME}/{artifact_id}",
+        "size": actual_size,
+        "sha256": actual_digest,
+        "manifest_sha256": manifest_digest,
+    }, manifest_path, content_path
+
+
+def _read_artifact_inventory(artifact_root: Path) -> list[tuple[dict[str, Any], Path, Path]]:
+    _directory(artifact_root, missing_code="artifact_root_missing")
+    try:
+        # Dot-prefixed entries are never artifacts: ArtifactStore stages writes
+        # in ``.<artifact_id>.*`` and capture GC quarantines in ``.gc-<id>``,
+        # and hosts drop files such as ``.DS_Store``. Generated artifact ids
+        # never start with a dot, so skipping them cannot hide a real artifact.
+        # Every other entry is still validated and fails the backup closed.
+        children = sorted(
+            (item for item in artifact_root.iterdir() if not item.name.startswith(".")),
+            key=lambda item: item.name,
+        )
+    except OSError:
+        _raise("read_failed")
+    if len(children) > MAX_ARTIFACTS:
+        _raise("artifact_count_exceeded")
+    inventory: list[tuple[dict[str, Any], Path, Path]] = []
+    total = 0
+    for child in children:
+        entry, manifest_path, content_path = _artifact_entry(artifact_root, child)
+        total += int(entry["size"])
+        if total > MAX_TOTAL_ARTIFACT_BYTES:
+            _raise("artifact_bytes_exceeded")
+        inventory.append((entry, manifest_path, content_path))
+    return inventory
+
+
+def _database_integrity(path: Path) -> tuple[int | None, int, str]:
+    size, digest = _sha256(path)
+    connection = None
+    try:
+        connection = sqlite3.connect(str(path), timeout=10)
+        row = connection.execute("PRAGMA integrity_check").fetchone()
+        if not row or row[0] != "ok":
+            _raise("database_integrity_failed")
+        schema_version = None
+        try:
+            version_row = connection.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+            if version_row is not None:
+                value = version_row[0]
+                if isinstance(value, bool):
+                    _raise("invalid_database_schema")
+                schema_version = int(value)
+                if schema_version < 0:
+                    _raise("invalid_database_schema")
+        except sqlite3.OperationalError:
+            # A database without the platform meta table is still a valid
+            # SQLite file, but it is represented as an unknown platform schema.
+            schema_version = None
+        return schema_version, size, digest
+    except BackupError:
+        raise
+    except (sqlite3.Error, OSError, ValueError, TypeError):
+        _raise("database_integrity_failed")
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _workflow_rows(connection: sqlite3.Connection, table: str, columns: str) -> Iterator[tuple[Any, ...]]:
+    """Keyset batches keep offline inventories bounded as history grows."""
+    last: int | None = None
+    while True:
+        predicate = "" if last is None else " WHERE rowid>?"
+        rows = connection.execute(
+            f"SELECT rowid,{columns} FROM {table}{predicate} ORDER BY rowid LIMIT 128",
+            () if last is None else (last,),
+        ).fetchall()
+        if not rows:
+            return
+        for row in rows:
+            yield tuple(row[1:])
+        last = rows[-1][0]
+
+
+def _workflow_definition_artifacts(
+    snapshot: bytes, digest: str, owner: str, workspace: str,
+    check: Callable[[str, str, str, str, int], None], *, minimum_reader: int,
+) -> None:
+    definition = parse_definition(bytes(snapshot))
+    if hashlib.sha256(definition.snapshot).hexdigest() != digest or definition.snapshot != bytes(snapshot):
+        _raise("workflow_snapshot_invalid")
+    for step in definition.steps:
+        if step.contract.schema_version == 2 and minimum_reader < 6:
+            _raise("invalid_contract_reader")
+        for named in step.contract.input_refs:
+            ref = named.reference.source_bundle if type(named.reference) is CodeRevisionReference else named.reference
+            if type(ref) is ArtifactReference:
+                check(owner, workspace, ref.artifact_id, ref.sha256, ref.size)
+
+
+def _workflow_contract(
+    database: Path, artifact_root: Path, inventory: list[dict[str, Any]],
+) -> dict[str, int] | None:
+    """Stream the durable reference closure independently of runtime feature gates."""
+    connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
+    try:
+        _transfer_contract(connection, artifact_root, inventory)
+        from .mcp_catalog_repository import MCPCatalogRepository
+
+        MCPCatalogRepository.validate_snapshot(connection)
+        metadata = inspect_schema(connection)
+        CapabilityRepository.validate_snapshot(connection)
+        from .workflow_external_repository import ExternalWorkflowRepository
+
+        ExternalWorkflowRepository.validate_snapshot(connection)
+        from .integration_identity_repository import IntegrationIdentityRepository
+
+        IntegrationIdentityRepository.validate_snapshot(connection)
+        from .workflow_summary_repository import WorkflowSummaryRepository
+
+        WorkflowSummaryRepository.validate_snapshot(connection)
+        if metadata is None:
+            return None
+        from .workflow_native_memory_repository import validate_native_memory_runs
+
+        validate_native_memory_runs(connection)
+        by_id = {item["artifact_id"]: item for item in inventory}
+        scopes: dict[str, tuple[str, str]] = {}
+
+        def check(owner: str, workspace: str, artifact_id: str, sha256: str, size: int) -> None:
+            item = by_id.get(artifact_id)
+            if item is None:
+                _raise("workflow_artifact_missing")
+            if artifact_id not in scopes:
+                manifest, _length, _digest = _manifest_bytes(artifact_root / artifact_id / "manifest.json")
+                scopes[artifact_id] = (manifest.get("owner_id"), manifest.get("workspace_id"))
+            if (item["sha256"], item["size"], scopes[artifact_id]) != (sha256, size, (owner, workspace)):
+                _raise("workflow_artifact_conflict")
+
+        for table in ("workflow_runs", "workflow_steps", "workflow_dispatches", "workflow_events", "workflow_evidence", "workflow_artifact_refs", "workflow_budget_reservations", "capability_reservations"):
+            if connection.execute(f"PRAGMA foreign_key_check({table})").fetchone() is not None:
+                _raise("workflow_reference_invalid")
+        for table in sorted(CONTROL_TABLES):
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is None:
+                continue
+            if connection.execute(f"PRAGMA foreign_key_check({table})").fetchone() is not None:
+                _raise("workflow_reference_invalid")
+        for owner, workspace, snapshot, digest in _workflow_rows(
+            connection, "workflow_runs", "owner_id,workspace_id,definition_snapshot,definition_digest",
+        ):
+            _workflow_definition_artifacts(snapshot, digest, owner, workspace, check, minimum_reader=metadata["minimum_reader_version"])
+        for (snapshot,) in _workflow_rows(connection, "workflow_steps", "contract_snapshot"):
+            if parse_contract(bytes(snapshot)).schema_version == 2 and metadata["minimum_reader_version"] < 6:
+                _raise("invalid_contract_reader")
+        for owner, workspace, snapshot, digest in _workflow_rows(
+            connection, "workflow_steps", "owner_id,workspace_id,resolved_snapshot,resolved_digest",
+        ):
+            if snapshot is None:
+                continue
+            resolved = parse_resolved(bytes(snapshot))
+            if resolved.contract.schema_version == 2 and metadata["minimum_reader_version"] < 6:
+                _raise("invalid_contract_reader")
+            payload = decode_snapshot(bytes(snapshot))
+            if hashlib.sha256(bytes(snapshot)).hexdigest() != digest or (payload.get("owner_id"), payload.get("workspace_id")) != (owner, workspace):
+                _raise("workflow_snapshot_invalid")
+            for ref in payload["contract"]["input_refs"]:
+                artifact = ref["source_bundle"] if ref["kind"] == "code_revision" else ref
+                check(owner, workspace, artifact["artifact_id"], artifact["sha256"], artifact["size"])
+        for owner, workspace, artifact_id, digest, size in _workflow_rows(
+            connection, "workflow_artifact_refs", "owner_id,workspace_id,artifact_id,sha256,size",
+        ):
+            check(owner, workspace, artifact_id, digest, size)
+        for owner, workspace, artifact_id, digest, size in _workflow_rows(
+            connection, "workflow_evidence", "owner_id,workspace_id,report_artifact_id,report_hash,report_size",
+        ):
+            check(owner, workspace, artifact_id, digest, size)
+        return {"schema_version": metadata["schema_version"], "minimum_reader_version": metadata["minimum_reader_version"]}
+    except (WorkflowSchemaError, CapabilityStoreError, WorkflowPersistenceError, IntegrationIdentityError, MCPCatalogError) as exc:
+        raise BackupError(exc.code) from exc
+    except (WorkflowValidationError, sqlite3.Error, KeyError, TypeError, ValueError) as exc:
+        raise BackupError("workflow_snapshot_invalid") from exc
+    finally:
+        connection.close()
+
+
+def _transfer_contract(connection: sqlite3.Connection, artifact_root: Path, inventory: list[dict[str, Any]]) -> None:
+    """Require a settled, verified V2 closure; never silently omit staging."""
+    try:
+        enabled = inspect_transfer_schema(connection)
+        v2: set[str] = set()
+        for item in inventory:
+            manifest, _size, _digest = _manifest_bytes(artifact_root / item["artifact_id"] / "manifest.json")
+            if manifest.get("schema_version") == 2:
+                v2.add(item["artifact_id"])
+        if not enabled:
+            if v2:
+                _raise("artifact_transfer_reference_invalid")
+            return
+        for table in ("artifact_transfers", "artifact_transfer_parts"):
+            if connection.execute(f"PRAGMA foreign_key_check({table})").fetchone() is not None:
+                _raise("artifact_transfer_reference_invalid")
+        cursor = connection.execute(
+            "SELECT t.transfer_id,t.artifact_id,t.owner_id,t.workspace_id,t.workflow_id,t.step_key,t.generation,t.output_key,"
+            "t.command_id,t.input_digest,t.size,t.sha256,t.state,t.publication_bytes,"
+            "r.artifact_id AS ref_artifact_id,r.sha256 AS ref_sha256,r.size AS ref_size FROM artifact_transfers t "
+            "LEFT JOIN workflow_artifact_refs r ON r.owner_id=t.owner_id AND r.workspace_id=t.workspace_id "
+            "AND r.workflow_id=t.workflow_id AND r.step_key=t.step_key AND r.generation=t.generation "
+            "AND r.output_key='output:'||t.output_key ORDER BY t.transfer_id LIMIT ?", (MAX_TRANSFERS + 1,))
+        names = [item[0] for item in cursor.description]
+        count = 0
+        for values in cursor:
+            count += 1
+            if count > MAX_TRANSFERS:
+                _raise("artifact_transfer_scan_limit")
+            row = dict(zip(names, values))
+            if row["state"] != "ready" or row["publication_bytes"] != 0:
+                _raise("artifact_transfer_incomplete")
+            if row["artifact_id"] not in v2:
+                _raise("artifact_transfer_reference_invalid")
+            v2.remove(row["artifact_id"])
+            manifest, _size, _digest = _manifest_bytes(artifact_root / row["artifact_id"] / "manifest.json")
+            if any(manifest.get(key) != row[key] for key in ("artifact_id", "owner_id", "workspace_id", "size", "sha256")):
+                _raise("artifact_transfer_reference_invalid")
+            provenance = {"workflow_id": row["workflow_id"], "step_key": row["step_key"], "generation": row["generation"],
+                "output_key": row["output_key"], "producer_binding": {"command_id": row["command_id"]}, "input_subject_digest": row["input_digest"]}
+            if manifest.get("provenance_ref") != provenance:
+                _raise("artifact_transfer_reference_invalid")
+            reference = (row["ref_artifact_id"], row["ref_sha256"], row["ref_size"])
+            if reference != (row["artifact_id"], row["sha256"], row["size"]):
+                _raise("artifact_transfer_reference_invalid")
+        if v2:
+            _raise("artifact_transfer_reference_invalid")
+    except (ArtifactTransferRepositoryError, sqlite3.Error) as exc:
+        raise BackupError("artifact_transfer_schema_unknown") from exc
+
+
+def _freeze_restored_workflows(root: Path) -> dict[str, Any]:
+    """Freeze coordination and rebuild only the restored copy's integrity envelope."""
+    path = root / DATABASE_FILENAME
+    with closing(sqlite3.connect(path)) as connection:
+        from .mcp_catalog_schema import inspect_catalog_schema
+
+        metadata = inspect_schema(connection)
+        catalog = inspect_catalog_schema(connection)
+        interrupted = []
+        with connection:
+            # A backup may precede calls completed by the still-live source.
+            # Replaying its otherwise safe checkpoint could repeat effects.
+            # Ordinary same-database worker restart is resumable; restored
+            # copies require operator reconciliation, like Workflow restore.
+            columns = {row[1] for row in connection.execute('PRAGMA table_info(runs)')}
+            if 'runtime_checkpoint' in columns:
+                from .platform_db_base import freeze_run_request_summary
+
+                interrupted = connection.execute(
+                    "SELECT run_id FROM runs WHERE runtime_checkpoint IS NOT NULL "
+                    "AND state NOT IN ('succeeded','failed','unknown','cancelled')").fetchall()
+                for (run_id,) in interrupted:
+                    wait_cleanup = ('runtime_wait_command_id=NULL,runtime_resume_at=NULL,'
+                                    if 'runtime_wait_command_id' in columns else '')
+                    connection.execute(
+                        "UPDATE runs SET state='unknown',lease_id=NULL,lease_owner=NULL,lease_expires_at=NULL,"
+                        + wait_cleanup + "result_text='恢复备份后需核对原执行。' WHERE run_id=?", (run_id,))
+                    freeze_run_request_summary(connection, run_id, 'unknown')
+            if catalog:
+                connection.execute("UPDATE mcp_catalog_connectors SET restore_disabled=1")
+            if metadata is not None:
+                connection.execute("UPDATE workflow_schema_meta SET admission_mode='frozen' WHERE singleton=1")
+                from .integration_identity_schema import inspect_integration_schema
+
+                if inspect_integration_schema(connection):
+                    connection.execute("UPDATE workflow_integration_identities SET restore_disabled=1")
+                if inspect_transfer_schema(connection):
+                    # Settled artifacts are copied; obsolete upload scratch is
+                    # deliberately absent from the restored filesystem.
+                    connection.execute("UPDATE artifact_transfers SET staging_bytes=0,publication_bytes=0")
+    if metadata is None and not catalog and not interrupted:
+        return _validate_backup_files(root)
+    envelope = _json_envelope(root / BACKUP_FILENAME)
+    size, digest = _sha256(path)
+    envelope["database"] = {"filename": DATABASE_FILENAME, "size": size, "sha256": digest}
+    (root / BACKUP_FILENAME).write_text(json.dumps(envelope, ensure_ascii=True, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    return _validate_backup_files(root)
+
+
+def _json_envelope(path: Path) -> dict[str, Any]:
+    _regular_file(path)
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        _raise("read_failed")
+    if len(raw) > _MAX_ENVELOPE_BYTES:
+        _raise("backup_metadata_too_large")
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, TypeError, ValueError):
+        _raise("invalid_backup_metadata")
+    if not isinstance(value, dict):
+        _raise("invalid_backup_metadata")
+    return value
+
+
+def _validate_envelope_shape(envelope: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    version = envelope.get("schema_version")
+    if type(version) is not int or version != BACKUP_SCHEMA_VERSION:
+        _raise("unsupported_backup_schema")
+    database = envelope.get("database")
+    artifacts = envelope.get("artifacts")
+    if not isinstance(database, Mapping) or not isinstance(artifacts, list):
+        _raise("invalid_backup_metadata")
+    if len(artifacts) > MAX_ARTIFACTS:
+        _raise("artifact_count_exceeded")
+    filename = database.get("filename")
+    if filename != DATABASE_FILENAME:
+        _raise("invalid_backup_metadata")
+    db_size = database.get("size")
+    db_digest = database.get("sha256")
+    if isinstance(db_size, bool) or not isinstance(db_size, int) or db_size < 0:
+        _raise("invalid_backup_metadata")
+    if not isinstance(db_digest, str) or not _SHA256_RE.fullmatch(db_digest):
+        _raise("invalid_backup_metadata")
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    total = 0
+    for item in artifacts:
+        if not isinstance(item, Mapping):
+            _raise("invalid_backup_metadata")
+        artifact_id = _safe_artifact_id(item.get("artifact_id"))
+        if artifact_id in seen:
+            _raise("invalid_backup_metadata")
+        seen.add(artifact_id)
+        relative_path = item.get("path")
+        if relative_path != f"{ARTIFACTS_DIRNAME}/{artifact_id}":
+            _raise("invalid_artifact_path")
+        size = item.get("size")
+        digest = item.get("sha256")
+        manifest_digest = item.get("manifest_sha256")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            _raise("invalid_backup_metadata")
+        if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
+            _raise("invalid_backup_metadata")
+        if not isinstance(manifest_digest, str) or not _SHA256_RE.fullmatch(manifest_digest):
+            _raise("invalid_backup_metadata")
+        total += size
+        if total > MAX_TOTAL_ARTIFACT_BYTES:
+            _raise("artifact_bytes_exceeded")
+        normalized.append({
+            "artifact_id": artifact_id,
+            "path": relative_path,
+            "size": size,
+            "sha256": digest,
+            "manifest_sha256": manifest_digest,
+        })
+    return {"filename": filename, "size": db_size, "sha256": db_digest}, normalized
+
+
+def _validate_backup_files(backup_root: Path) -> dict[str, Any]:
+    _directory(backup_root, missing_code="backup_missing")
+    envelope = _json_envelope(backup_root / BACKUP_FILENAME)
+    database_meta, artifact_meta = _validate_envelope_shape(envelope)
+    database_path = _regular_file(backup_root / DATABASE_FILENAME)
+    schema_version, db_size, db_digest = _database_integrity(database_path)
+    if db_size != database_meta["size"] or db_digest != database_meta["sha256"]:
+        _raise("database_hash_mismatch")
+    artifacts_root = _directory(backup_root / ARTIFACTS_DIRNAME, missing_code="artifact_root_missing")
+    try:
+        actual_dirs = sorted(item.name for item in artifacts_root.iterdir())
+    except OSError:
+        _raise("read_failed")
+    expected_ids = sorted(item["artifact_id"] for item in artifact_meta)
+    if actual_dirs != expected_ids:
+        _raise("invalid_artifact_path")
+    checked_artifacts: list[dict[str, Any]] = []
+    by_id = {item["artifact_id"]: item for item in artifact_meta}
+    for artifact_id in expected_ids:
+        entry, _manifest_path, _content_path = _artifact_entry(
+            artifacts_root, artifacts_root / artifact_id
+        )
+        expected = by_id[artifact_id]
+        if entry != expected:
+            if entry["manifest_sha256"] != expected["manifest_sha256"]:
+                _raise("manifest_hash_mismatch")
+            if entry["size"] != expected["size"]:
+                _raise("artifact_size_mismatch")
+            _raise("artifact_hash_mismatch")
+        checked_artifacts.append(entry)
+    workflow = _workflow_contract(database_path, artifacts_root, checked_artifacts)
+    if envelope.get("workflow") != workflow:
+        _raise("workflow_metadata_mismatch")
+    return {
+        "schema_version": BACKUP_SCHEMA_VERSION,
+        "platform_schema_version": schema_version,
+        "database": database_meta,
+        "artifact_count": len(checked_artifacts),
+        "artifact_bytes": sum(item["size"] for item in checked_artifacts),
+        "artifacts": checked_artifacts,
+        **({"workflow": workflow} if workflow is not None else {}),
+    }
+
+
+def _fsync_path(path: Path) -> None:
+    """fsync one regular file or directory (directories are skipped on Windows)."""
+    if os.name == "nt" and Path(path).is_dir():
+        return
+    # Windows CRT fsync/_commit requires a writable handle. These are owned
+    # staged files; read-only descriptors remain sufficient on POSIX.
+    fd = os.open(path, os.O_RDWR if os.name == "nt" else os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_tree(root: Path) -> None:
+    """Make every staged file and directory entry durable before publication.
+
+    Files first, then their directories bottom-up, so a crash right after the
+    publishing rename can never expose a backup whose contents or directory
+    entries are still only in the page cache.
+    """
+    for current, dirnames, filenames in os.walk(root, topdown=False):
+        for name in filenames:
+            path = Path(current) / name
+            if not path.is_symlink():
+                _fsync_path(path)
+        _fsync_path(Path(current))
+
+
+def _publish_new_directory(stage: Path, target: Path) -> None:
+    """Publish a durable staged directory after an explicit no-overwrite check."""
+    if os.path.lexists(target):
+        _raise("destination_exists")
+    try:
+        _fsync_tree(stage)
+    except OSError:
+        _raise("publish_failed")
+    try:
+        _rename_directory_no_replace(stage, target)
+    except OSError as exc:
+        if exc.errno == errno.EEXIST:
+            _raise("destination_exists")
+        _raise("publish_failed")
+    try:
+        # The rename itself lives in the parent directory entry.
+        _fsync_path(target.parent)
+    except OSError:
+        _raise("publish_failed")
+
+
+def _rename_directory_no_replace(stage: Path, target: Path) -> None:
+    """Use the platform's atomic directory rename that refuses replacement."""
+    if os.name == "nt":
+        os.rename(stage, target)
+        return
+
+    source = os.fsencode(stage)
+    destination = os.fsencode(target)
+    libc = ctypes.CDLL(None, use_errno=True)
+
+    if sys.platform == "darwin":
+        rename = libc.renamex_np
+        rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        result = rename(source, destination, 0x00000004)  # RENAME_EXCL
+    elif sys.platform.startswith("linux"):
+        rename = getattr(libc, "renameat2", None)
+        if rename is None:
+            raise OSError(errno.ENOTSUP, "no-replace rename unavailable")
+        rename.argtypes = (
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        result = rename(-100, source, -100, destination, 0x00000001)
+    else:
+        raise OSError(errno.ENOTSUP, "no-replace rename unavailable")
+
+    if result != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), os.fspath(target))
+
+
+def _encryption_key(value: Any) -> bytes:
+    if not isinstance(value, (bytes, bytearray)) or len(value) != 32:
+        _raise("invalid_encryption_key")
+    return bytes(value)
+
+
+def _encryption_key_id(value: Any) -> str:
+    if not isinstance(value, str) or not _KEY_ID_RE.fullmatch(value):
+        _raise("invalid_key_id")
+    return value
+
+
+def _encrypted_json(path: Path) -> dict[str, Any]:
+    _regular_file(path)
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        _raise("encrypted_manifest_read_failed")
+    if len(raw) > _ENCRYPTED_MANIFEST_BYTES:
+        _raise("encrypted_manifest_too_large")
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, TypeError, ValueError):
+        _raise("invalid_encrypted_manifest")
+    if not isinstance(value, dict):
+        _raise("invalid_encrypted_manifest")
+    return value
+
+
+def _source_summary(value: Any) -> dict[str, Any]:
+    """Validate the public projection of the inner backup contract."""
+    if not isinstance(value, Mapping):
+        _raise("invalid_encrypted_manifest")
+    envelope = {
+        "schema_version": value.get("schema_version"),
+        "database": value.get("database"),
+        "artifacts": value.get("artifacts"),
+    }
+    database, artifacts = _validate_envelope_shape(envelope)
+    artifact_count = value.get("artifact_count")
+    artifact_bytes = value.get("artifact_bytes")
+    if (isinstance(artifact_count, bool) or not isinstance(artifact_count, int)
+            or artifact_count != len(artifacts)):
+        _raise("invalid_encrypted_manifest")
+    if (isinstance(artifact_bytes, bool) or not isinstance(artifact_bytes, int)
+            or artifact_bytes < 0
+            or artifact_bytes != sum(item["size"] for item in artifacts)):
+        _raise("invalid_encrypted_manifest")
+    platform_schema = value.get("platform_schema_version")
+    if platform_schema is not None:
+        if (isinstance(platform_schema, bool) or not isinstance(platform_schema, int)
+                or platform_schema < 0):
+            _raise("invalid_encrypted_manifest")
+    workflow = value.get("workflow")
+    if workflow is not None:
+        if (not isinstance(workflow, Mapping) or set(workflow) != {"schema_version", "minimum_reader_version"}
+                or any(type(item) is not int or item < 1 for item in workflow.values())):
+            _raise("invalid_encrypted_manifest")
+    return {
+        "schema_version": BACKUP_SCHEMA_VERSION,
+        "platform_schema_version": platform_schema,
+        "database": database,
+        "artifact_count": artifact_count,
+        "artifact_bytes": artifact_bytes,
+        "artifacts": artifacts,
+        **({"workflow": dict(workflow)} if workflow is not None else {}),
+    }
+
+
+def _expected_plain_paths(source: Mapping[str, Any]) -> set[str]:
+    paths = {DATABASE_FILENAME, BACKUP_FILENAME}
+    for item in source["artifacts"]:
+        artifact_id = item["artifact_id"]
+        paths.add(f"{ARTIFACTS_DIRNAME}/{artifact_id}/manifest.json")
+        paths.add(f"{ARTIFACTS_DIRNAME}/{artifact_id}/content")
+    return paths
+
+
+def _validate_plain_path(value: Any) -> str:
+    if not isinstance(value, str) or not value or len(value) > 512:
+        _raise("invalid_encrypted_manifest")
+    if value.startswith(("/", "\\")) or "\\" in value:
+        _raise("invalid_encrypted_manifest")
+    parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        _raise("invalid_encrypted_manifest")
+    return value
+
+
+def _encrypted_structure(backup_root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    root = _directory(backup_root, missing_code="encrypted_backup_missing")
+    # The encrypted root is a deliberately tiny format boundary.  Reject
+    # unknown files, directories, and symlinked marker entries before reading
+    # the manifest so a backup cannot smuggle unrelated material beside the
+    # ciphertext tree.
+    try:
+        root_children = list(root.iterdir())
+    except OSError:
+        _raise("encrypted_manifest_read_failed")
+    expected_root_names = {ENCRYPTED_MANIFEST_FILENAME, ENCRYPTED_PAYLOAD_DIRNAME}
+    actual_root_names = {child.name for child in root_children}
+    if actual_root_names != expected_root_names:
+        for child in root_children:
+            if child.name in expected_root_names and child.is_symlink():
+                _raise("unsafe_path")
+        _raise("invalid_encrypted_manifest")
+    for child in root_children:
+        if child.is_symlink():
+            _raise("unsafe_path")
+    manifest = _encrypted_json(root / ENCRYPTED_MANIFEST_FILENAME)
+    if type(manifest.get("schema_version")) is not int:
+        _raise("unsupported_encrypted_schema")
+    if manifest.get("schema_version") != ENCRYPTED_BACKUP_SCHEMA_VERSION:
+        _raise("unsupported_encrypted_schema")
+    if manifest.get("format") != "aes-256-gcm-stream-v1":
+        _raise("unsupported_encrypted_schema")
+    key_id = _encryption_key_id(manifest.get("key_id"))
+    created_at = manifest.get("created_at")
+    try:
+        created_number = float(created_at)
+    except (TypeError, ValueError):
+        _raise("invalid_encrypted_manifest")
+    if not math.isfinite(created_number) or created_number < 0:
+        _raise("invalid_encrypted_manifest")
+    source = _source_summary(manifest.get("source"))
+    files = manifest.get("files")
+    if not isinstance(files, list) or not files or len(files) > _MAX_ENCRYPTED_FILES:
+        _raise("invalid_encrypted_manifest")
+    expected_paths = _expected_plain_paths(source)
+    normalized_files: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    plaintext_total = 0
+    expected_payloads: set[str] = set()
+    for item in files:
+        if not isinstance(item, Mapping):
+            _raise("invalid_encrypted_manifest")
+        plain_path = _validate_plain_path(item.get("path"))
+        if plain_path not in expected_paths or plain_path in seen:
+            _raise("invalid_encrypted_manifest")
+        seen.add(plain_path)
+        payload_path = item.get("payload")
+        expected_payload = f"{ENCRYPTED_PAYLOAD_DIRNAME}/{plain_path}.enc"
+        if payload_path != expected_payload:
+            _raise("invalid_encrypted_manifest")
+        size = item.get("size")
+        payload_size = item.get("payload_size")
+        digest = item.get("sha256")
+        payload_digest = item.get("payload_sha256")
+        if (isinstance(size, bool) or not isinstance(size, int) or size < 0
+                or size > MAX_TOTAL_ARTIFACT_BYTES):
+            _raise("invalid_encrypted_manifest")
+        if (isinstance(payload_size, bool) or not isinstance(payload_size, int)
+                or payload_size != size + len(_ENCRYPTED_MAGIC) + _GCM_NONCE_BYTES + _GCM_TAG_BYTES):
+            _raise("invalid_encrypted_manifest")
+        if (not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest)
+                or not isinstance(payload_digest, str) or not _SHA256_RE.fullmatch(payload_digest)):
+            _raise("invalid_encrypted_manifest")
+        plaintext_total += size
+        if plaintext_total > MAX_TOTAL_ARTIFACT_BYTES + _MAX_MANIFEST_BYTES:
+            _raise("artifact_bytes_exceeded")
+        expected_payloads.add(payload_path)
+        normalized_files.append({
+            "path": plain_path,
+            "payload": payload_path,
+            "size": size,
+            "payload_size": payload_size,
+            "sha256": digest,
+            "payload_sha256": payload_digest,
+        })
+    if seen != expected_paths:
+        _raise("invalid_encrypted_manifest")
+    payload_root = _directory(root / ENCRYPTED_PAYLOAD_DIRNAME, missing_code="invalid_encrypted_manifest")
+    actual_payloads: set[str] = set()
+    actual_dirs: set[str] = set()
+    try:
+        for current, dirs, filenames in os.walk(payload_root, topdown=True, followlinks=False):
+            current_path = Path(current)
+            for directory in list(dirs):
+                path = current_path / directory
+                if path.is_symlink() or not path.is_dir():
+                    _raise("unsafe_path")
+                actual_dirs.add(path.relative_to(root).as_posix())
+            for filename in filenames:
+                path = current_path / filename
+                if path.is_symlink() or not path.is_file():
+                    _raise("unsafe_path")
+                actual_payloads.add(path.relative_to(root).as_posix())
+    except OSError:
+        _raise("encrypted_manifest_read_failed")
+    expected_dirs: set[str] = set()
+    for payload in expected_payloads:
+        parent = payload.rsplit("/", 1)[0]
+        while parent and parent != ENCRYPTED_PAYLOAD_DIRNAME:
+            expected_dirs.add(parent)
+            parent = parent.rsplit("/", 1)[0] if "/" in parent else ENCRYPTED_PAYLOAD_DIRNAME
+    if actual_payloads != expected_payloads or actual_dirs != expected_dirs:
+        _raise("invalid_encrypted_manifest")
+    normalized = {
+        "encrypted": True,
+        "schema_version": ENCRYPTED_BACKUP_SCHEMA_VERSION,
+        "key_id": key_id,
+        "created_at": created_number,
+        "source": source,
+        "artifact_count": source["artifact_count"],
+        "artifact_bytes": source["artifact_bytes"],
+        "ciphertext_bytes": sum(item["payload_size"] for item in normalized_files),
+    }
+    return normalized, normalized_files
+
+
+def _hash_payloads(backup_root: Path, files: list[dict[str, Any]]) -> None:
+    root = Path(backup_root)
+    for item in files:
+        path = root / item["payload"]
+        size, digest = _sha256(path)
+        if size != item["payload_size"]:
+            _raise("ciphertext_size_mismatch")
+        if digest != item["payload_sha256"]:
+            _raise("ciphertext_hash_mismatch")
+
+
+def _encrypt_file(source: Path, destination: Path, key: bytes) -> dict[str, Any]:
+    source_size, source_digest = _sha256(source)
+    nonce = secrets.token_bytes(_GCM_NONCE_BYTES)
+    partial = destination.with_name(f".{destination.name}.{secrets.token_hex(8)}.partial")
+    encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with source.open("rb") as input_file, partial.open("wb") as output_file:
+            output_file.write(_ENCRYPTED_MAGIC + nonce)
+            while True:
+                chunk = input_file.read(_ENCRYPTION_CHUNK_BYTES)
+                if not chunk:
+                    break
+                output_file.write(encryptor.update(chunk))
+            output_file.write(encryptor.finalize())
+            output_file.write(encryptor.tag)
+        payload_size, payload_digest = _sha256(partial)
+        os.replace(partial, destination)
+    except (OSError, ValueError):
+        try:
+            partial.unlink()
+        except OSError:
+            pass
+        _raise("encryption_failed")
+    return {
+        "size": source_size,
+        "sha256": source_digest,
+        "payload_size": payload_size,
+        "payload_sha256": payload_digest,
+    }
+
+
+def _decrypt_file(source: Path, destination: Path, key: bytes) -> None:
+    partial = destination.with_name(f".{destination.name}.{secrets.token_hex(8)}.partial")
+    try:
+        _regular_file(source)
+        size = source.stat().st_size
+        minimum = len(_ENCRYPTED_MAGIC) + _GCM_NONCE_BYTES + _GCM_TAG_BYTES
+        if size < minimum:
+            _raise("invalid_encrypted_payload")
+        with source.open("rb") as input_file:
+            header = input_file.read(len(_ENCRYPTED_MAGIC) + _GCM_NONCE_BYTES)
+            if len(header) != len(_ENCRYPTED_MAGIC) + _GCM_NONCE_BYTES or not header.startswith(_ENCRYPTED_MAGIC):
+                _raise("invalid_encrypted_payload")
+            nonce = header[len(_ENCRYPTED_MAGIC):]
+            input_file.seek(-_GCM_TAG_BYTES, os.SEEK_END)
+            tag = input_file.read(_GCM_TAG_BYTES)
+            input_file.seek(len(header), os.SEEK_SET)
+            remaining = size - len(header) - _GCM_TAG_BYTES
+            decryptor = Cipher(algorithms.AES(key), modes.GCM(nonce, tag)).decryptor()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with partial.open("wb") as output_file:
+                while remaining:
+                    chunk = input_file.read(min(_ENCRYPTION_CHUNK_BYTES, remaining))
+                    if not chunk or len(chunk) > remaining:
+                        _raise("invalid_encrypted_payload")
+                    remaining -= len(chunk)
+                    output_file.write(decryptor.update(chunk))
+                output_file.write(decryptor.finalize())
+        os.replace(partial, destination)
+    except InvalidTag:
+        try:
+            partial.unlink()
+        except OSError:
+            pass
+        _raise("encryption_invalid")
+    except BackupError:
+        try:
+            partial.unlink()
+        except OSError:
+            pass
+        raise
+    except (OSError, ValueError):
+        try:
+            partial.unlink()
+        except OSError:
+            pass
+        _raise("decryption_failed")
+
+
+def _decrypt_to_plain(backup_root: Path, files: list[dict[str, Any]], key: bytes, plain_root: Path) -> None:
+    # The unencrypted backup contract always contains an artifacts directory,
+    # including when the source catalog is empty. Directory entries are not
+    # encrypted as files, so recreate this required empty root before
+    # validating the decrypted pair.
+    (plain_root / ARTIFACTS_DIRNAME).mkdir(parents=True, exist_ok=True)
+    for item in files:
+        destination = plain_root / item["path"]
+        if destination.exists() or destination.is_symlink():
+            _raise("unsafe_path")
+        _decrypt_file(Path(backup_root) / item["payload"], destination, key)
+        size, digest = _sha256(destination)
+        if size != item["size"]:
+            _raise("plaintext_size_mismatch")
+        if digest != item["sha256"]:
+            _raise("plaintext_hash_mismatch")
+
+
+class PlatformBackupService:
+    """Create, inspect, and restore an offline platform backup pair."""
+
+    def create_backup(self, db_path: Path, artifact_root: Path, target_root: Path) -> dict[str, Any]:
+        source_db = Path(db_path).expanduser()
+        source_artifacts = Path(artifact_root).expanduser()
+        target = Path(target_root).expanduser()
+        _regular_file(source_db)
+        if os.path.lexists(target):
+            _raise("destination_exists")
+        _directory(source_artifacts, missing_code="artifact_root_missing")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=str(target.parent)))
+        try:
+            # Freeze publication/GC while taking the database snapshot and
+            # its artifact closure. Taking inventory first can omit content
+            # referenced by a subsequently committed Run.
+            with artifact_snapshot_barrier(source_artifacts):
+                staged_db = stage / DATABASE_FILENAME
+                source = destination = None
+                try:
+                    source = sqlite3.connect(str(source_db), timeout=10)
+                    destination = sqlite3.connect(str(staged_db), timeout=10)
+                    source.backup(destination)
+                    destination.commit()
+                except (sqlite3.Error, OSError):
+                    _raise("database_backup_failed")
+                finally:
+                    if destination is not None:
+                        destination.close()
+                    if source is not None:
+                        source.close()
+                inventory = _read_artifact_inventory(source_artifacts)
+                artifacts_stage = stage / ARTIFACTS_DIRNAME
+                artifacts_stage.mkdir()
+                for entry, manifest_path, content_path in inventory:
+                    destination_dir = artifacts_stage / entry["artifact_id"]
+                    destination_dir.mkdir()
+                    shutil.copyfile(manifest_path, destination_dir / "manifest.json")
+                    shutil.copyfile(content_path, destination_dir / "content")
+            schema_version, db_size, db_digest = _database_integrity(staged_db)
+            envelope = {
+                "schema_version": BACKUP_SCHEMA_VERSION,
+                "platform_schema_version": schema_version,
+                "database": {
+                    "filename": DATABASE_FILENAME,
+                    "size": db_size,
+                    "sha256": db_digest,
+                },
+                "artifacts": [entry for entry, _manifest, _content in inventory],
+            }
+            workflow = _workflow_contract(staged_db, artifacts_stage, envelope["artifacts"])
+            if workflow is not None:
+                envelope["workflow"] = workflow
+            (stage / BACKUP_FILENAME).write_text(
+                json.dumps(envelope, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            checked = _validate_backup_files(stage)
+            _publish_new_directory(stage, target)
+            return checked
+        except BackupError:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise
+        except (OSError, ValueError, TypeError):
+            shutil.rmtree(stage, ignore_errors=True)
+            _raise("backup_failed")
+
+    def inspect_backup(self, backup_root: Path) -> dict[str, Any]:
+        return _validate_backup_files(Path(backup_root).expanduser())
+
+    def restore_backup(self, backup_root: Path, target_root: Path) -> dict[str, Any]:
+        source = Path(backup_root).expanduser()
+        target = Path(target_root).expanduser()
+        checked = _validate_backup_files(source)
+        if os.path.lexists(target):
+            _raise("destination_exists")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=str(target.parent)))
+        try:
+            shutil.copyfile(source / DATABASE_FILENAME, stage / DATABASE_FILENAME)
+            shutil.copyfile(source / BACKUP_FILENAME, stage / BACKUP_FILENAME)
+            # Preserve symlink nodes during staging; the second full
+            # validation then rejects them without ever traversing outside the
+            # backup root.
+            shutil.copytree(source / ARTIFACTS_DIRNAME, stage / ARTIFACTS_DIRNAME, symlinks=True)
+            staged_checked = _validate_backup_files(stage)
+            if staged_checked != checked:
+                _raise("restore_validation_failed")
+            staged_checked = _freeze_restored_workflows(stage)
+            _publish_new_directory(stage, target)
+            return staged_checked
+        except BackupError:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise
+        except (OSError, ValueError, TypeError):
+            shutil.rmtree(stage, ignore_errors=True)
+            _raise("restore_failed")
+
+    def create_encrypted_backup(
+        self,
+        db_path: Path,
+        artifact_root: Path,
+        target_root: Path,
+        key: bytes,
+        key_id: str,
+    ) -> dict[str, Any]:
+        """Create an authenticated encrypted backup without publishing plaintext."""
+        encryption_key = _encryption_key(key)
+        normalized_key_id = _encryption_key_id(key_id)
+        target = Path(target_root).expanduser()
+        if os.path.lexists(target):
+            _raise("destination_exists")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        plain_parent = Path(tempfile.mkdtemp(prefix=f".{target.name}.plain.", dir=str(target.parent)))
+        plain_root = plain_parent / "source"
+        stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=str(target.parent)))
+        try:
+            source = self.create_backup(db_path, artifact_root, plain_root)
+            files = [
+                {"path": DATABASE_FILENAME},
+                {"path": BACKUP_FILENAME},
+            ]
+            for artifact in source["artifacts"]:
+                artifact_id = artifact["artifact_id"]
+                files.extend([
+                    {"path": f"{ARTIFACTS_DIRNAME}/{artifact_id}/manifest.json"},
+                    {"path": f"{ARTIFACTS_DIRNAME}/{artifact_id}/content"},
+                ])
+            for item in files:
+                source_path = plain_root / item["path"]
+                payload_path = stage / ENCRYPTED_PAYLOAD_DIRNAME / f"{item['path']}.enc"
+                details = _encrypt_file(source_path, payload_path, encryption_key)
+                item.update({
+                    "payload": f"{ENCRYPTED_PAYLOAD_DIRNAME}/{item['path']}.enc",
+                    **details,
+                })
+            manifest = {
+                "schema_version": ENCRYPTED_BACKUP_SCHEMA_VERSION,
+                "format": "aes-256-gcm-stream-v1",
+                "key_id": normalized_key_id,
+                "created_at": time.time(),
+                "source": source,
+                "files": files,
+            }
+            (stage / ENCRYPTED_MANIFEST_FILENAME).write_text(
+                json.dumps(manifest, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            checked, checked_files = _encrypted_structure(stage)
+            _hash_payloads(stage, checked_files)
+            _publish_new_directory(stage, target)
+            return checked | {"verified": True}
+        except BackupError:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise
+        except (OSError, ValueError, TypeError):
+            shutil.rmtree(stage, ignore_errors=True)
+            _raise("encrypted_backup_failed")
+        finally:
+            shutil.rmtree(plain_parent, ignore_errors=True)
+
+    def inspect_encrypted_backup(
+        self,
+        backup_root: Path,
+        *,
+        key: bytes | None = None,
+        expected_key_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Inspect public encrypted metadata, optionally verifying plaintext."""
+        metadata, files = _encrypted_structure(Path(backup_root).expanduser())
+        _hash_payloads(Path(backup_root).expanduser(), files)
+        if expected_key_id is not None and metadata["key_id"] != _encryption_key_id(expected_key_id):
+            _raise("key_id_mismatch")
+        if key is None:
+            return metadata | {"verified": False}
+        encryption_key = _encryption_key(key)
+        plain_root = Path(tempfile.mkdtemp(prefix=".encrypted-inspect."))
+        try:
+            _decrypt_to_plain(Path(backup_root).expanduser(), files, encryption_key, plain_root)
+            checked = _validate_backup_files(plain_root)
+            if checked != metadata["source"]:
+                _raise("source_contract_mismatch")
+            return metadata | {"verified": True}
+        except InvalidTag:
+            _raise("encryption_invalid")
+        finally:
+            shutil.rmtree(plain_root, ignore_errors=True)
+
+    def restore_encrypted_backup(
+        self,
+        backup_root: Path,
+        target_root: Path,
+        key: bytes,
+        *,
+        expected_key_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Decrypt and atomically publish a validated backup pair."""
+        source = Path(backup_root).expanduser()
+        target = Path(target_root).expanduser()
+        metadata, files = _encrypted_structure(source)
+        _hash_payloads(source, files)
+        if expected_key_id is not None and metadata["key_id"] != _encryption_key_id(expected_key_id):
+            _raise("key_id_mismatch")
+        encryption_key = _encryption_key(key)
+        if os.path.lexists(target):
+            _raise("destination_exists")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        plain_root = Path(tempfile.mkdtemp(prefix=f".{target.name}.plain.", dir=str(target.parent)))
+        stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=str(target.parent)))
+        try:
+            _decrypt_to_plain(source, files, encryption_key, plain_root)
+            checked = _validate_backup_files(plain_root)
+            if checked != metadata["source"]:
+                _raise("source_contract_mismatch")
+            shutil.copytree(plain_root, stage, dirs_exist_ok=True)
+            staged_checked = _validate_backup_files(stage)
+            if staged_checked != checked:
+                _raise("restore_validation_failed")
+            staged_checked = _freeze_restored_workflows(stage)
+            _publish_new_directory(stage, target)
+            return staged_checked
+        except InvalidTag:
+            shutil.rmtree(stage, ignore_errors=True)
+            _raise("encryption_invalid")
+        except BackupError:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise
+        except (OSError, ValueError, TypeError):
+            shutil.rmtree(stage, ignore_errors=True)
+            _raise("encrypted_restore_failed")
+        finally:
+            shutil.rmtree(plain_root, ignore_errors=True)
+
+    @staticmethod
+    def _retention_now(value: Any) -> float:
+        try:
+            now = time.time() if value is None else float(value)
+        except (TypeError, ValueError):
+            _raise("invalid_retention_now")
+        if not math.isfinite(now) or now < 0:
+            _raise("invalid_retention_now")
+        return now
+
+    def plan_retention(
+        self,
+        root: Path,
+        policy: BackupRetentionPolicy,
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Return a deterministic deletion plan; never mutates the root."""
+        if not isinstance(policy, BackupRetentionPolicy):
+            _raise("invalid_retention_policy")
+        backup_root = _directory(Path(root).expanduser(), missing_code="retention_root_missing")
+        current = self._retention_now(now)
+        complete: list[dict[str, Any]] = []
+        skipped: list[dict[str, str]] = []
+        try:
+            children = sorted(backup_root.iterdir(), key=lambda item: item.name)
+        except OSError:
+            _raise("retention_read_failed")
+        for child in children:
+            if child.is_symlink():
+                skipped.append({"name": child.name, "reason": "unsafe_path"})
+                continue
+            if not child.is_dir():
+                skipped.append({"name": child.name, "reason": "not_directory"})
+                continue
+            try:
+                metadata, files = _encrypted_structure(child)
+                _hash_payloads(child, files)
+            except BackupError as exc:
+                skipped.append({"name": child.name, "reason": exc.code})
+                continue
+            complete.append({
+                "name": child.name,
+                "created_at": metadata["created_at"],
+                "bytes": sum(item["payload_size"] for item in files),
+            })
+        complete.sort(key=lambda item: (-item["created_at"], item["name"]))
+        mandatory_names = {item["name"] for item in complete[:policy.keep_last]}
+        retain_names = set(mandatory_names)
+        cutoff = None if policy.max_age_s is None else current - float(policy.max_age_s)
+        delete_names: set[str] = set()
+        for item in complete[policy.keep_last:]:
+            if cutoff is not None and item["created_at"] >= cutoff:
+                retain_names.add(item["name"])
+            else:
+                delete_names.add(item["name"])
+        total = sum(item["bytes"] for item in complete if item["name"] in retain_names)
+        if policy.max_total_bytes is not None and total > policy.max_total_bytes:
+            for item in sorted(
+                (candidate for candidate in complete
+                 if candidate["name"] in retain_names
+                 and candidate["name"] not in mandatory_names),
+                key=lambda candidate: (candidate["created_at"], candidate["name"]),
+            ):
+                if total <= policy.max_total_bytes:
+                    break
+                retain_names.remove(item["name"])
+                delete_names.add(item["name"])
+                total -= item["bytes"]
+        delete = [item for item in complete if item["name"] in delete_names]
+        retain = [item for item in complete if item["name"] not in delete_names]
+        return {
+            "apply": False,
+            "root_name": backup_root.name,
+            "now": current,
+            "delete": [item["name"] for item in sorted(delete, key=lambda item: (item["created_at"], item["name"]))],
+            "retain": [item["name"] for item in sorted(retain, key=lambda item: (-item["created_at"], item["name"]))],
+            "skipped": skipped,
+            "delete_bytes": sum(item["bytes"] for item in delete),
+            "retain_bytes": sum(item["bytes"] for item in retain),
+        }
+
+    def prune_retention(
+        self,
+        root: Path,
+        policy: BackupRetentionPolicy,
+        *,
+        now: float | None = None,
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        plan = self.plan_retention(root, policy, now=now)
+        if not apply:
+            return plan
+        backup_root = _directory(Path(root).expanduser(), missing_code="retention_root_missing")
+        deleted: list[str] = []
+        for name in plan["delete"]:
+            candidate = backup_root / name
+            if candidate.is_symlink() or not candidate.is_dir():
+                _raise("retention_race")
+            # Revalidate the marker and contents immediately before deletion.
+            metadata, files = _encrypted_structure(candidate)
+            _hash_payloads(candidate, files)
+            del metadata
+            del files
+            shutil.rmtree(candidate)
+            deleted.append(name)
+        return plan | {"apply": True, "deleted": deleted}
+
+
+__all__ = [
+    "ARTIFACTS_DIRNAME", "BACKUP_FILENAME", "BACKUP_SCHEMA_VERSION",
+    "BackupError", "MAX_ARTIFACTS", "MAX_TOTAL_ARTIFACT_BYTES",
+    "BackupRetentionPolicy", "PlatformBackupService",
+]

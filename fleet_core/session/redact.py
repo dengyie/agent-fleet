@@ -1,0 +1,829 @@
+"""Deterministic event redaction for the agent-fleet supervision surface.
+
+Redaction runs at Agent capture time, before Hub durable ingest and before
+any Operator response.  This module is intentionally dependency-light (no
+Flask, no cryptography, no network, no filesystem) so both the ``tools/``
+side and the Hub can import the same pure rules.
+
+Contract
+--------
+
+- ``Redactor.redact_event(event) -> (dict, RedactionReport)`` transforms an
+  event's ``payload`` (walking nested dicts/lists) and returns the sanitized
+  event plus a bounded report.  The original event must have been validated
+  against :mod:`session_schema` already; this module never rejects an
+  envelope, it only sanitizes payload values.
+- Replacement is deterministic: same input always produces the same output
+  and the same report.  Anything iterable that could affect output order is
+  sorted (categories/dedup).
+- The original text NEVER appears in the ``RedactionReport``: the report only
+  carries ``replaced`` count, deduplicated sorted ``categories``, an
+  ``uncertain`` flag, and ``details`` tuples of ``(category, replacement)``
+  where ``replacement`` never contains the original secret or path.
+- High-confidence rules fire first (private key blocks, database URLs, env
+  secret assignments, session/cookie ids, bearer tokens, known token sigils).
+  A generic absolute path is replaced but flagged ``uncertain``; a sensitive
+  location (``.ssh``, ``id_rsa``, ``.key``, ``credentials``, ``.netrc`` ...)
+  is certain.
+- A whole value under a demonstrably sensitive key (``password=``,
+  ``token=``, ``api_key``) is replaced regardless of its format, and the
+  replacement is flagged ``uncertain`` when the format cannot be proven
+  sensitive.  The same rule applies when that value is itself a container:
+  a dict/list under a sensitive key is replaced wholesale (never walked).
+
+Bounds and fail-closed behavior
+-------------------------------
+
+- Every string is capped at ``MAX_REDACT_STRING``; nested containers at
+  ``MAX_REDACT_DEPTH``.  A value that would overflow either bound is replaced
+  by a bounded ``[REDACTED:unclassified]`` placeholder and flagged
+  ``uncertain`` -- it is never silently truncated in a way that could let a
+  secret survive at the boundary.
+- The running replacement counter is capped at ``MAX_REDACT_COUNT`` and the
+  report detail list at ``MAX_DETAILS``, so one oversized input can never
+  inflate ``replaced`` without bound.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
+
+MAX_REDACT_STRING = 1 << 20        # 1 MiB per-string cap before processing
+MAX_REDACT_DEPTH = 64              # nested container depth cap
+MAX_REDACT_COUNT = 4096            # cap for the running replacement counter
+MAX_DETAILS = 64
+MAX_RULES = 64
+
+_PLACEHOLDER_BASE = "[REDACTED:"
+
+_SENSITIVE_PARTS = (
+    ".ssh", "id_rsa", "id_ed25519", "_rsa", "_ed25519", ".key",
+    "private_key", "credentials", "credential", "cred",
+    ".netrc", "auth0", "secret", "token", "password", "passwd",
+    ".aws/credentials", "_token", "_apikey", "jenkins",
+)
+
+_PASSWORD_KEYS = frozenset({
+    "password", "passwd", "pwd", "secret", "client_secret",
+    "secret_key", "private_key", "privatekey",
+})
+
+# Keys whose whole value must never survive, even when the value is a
+# container (dict/list) or carries no recognisable sigil.  A value under one
+# of these is replaced and marked ``uncertain=True``, never leaked.
+_SENSITIVE_VALUE_KEYS = frozenset({
+    "password", "passwd", "pwd", "api_key", "apikey", "api-key",
+    "access_token", "accesstoken", "auth_token", "authtoken",
+    "refresh_token", "refreshtoken", "client_secret", "clientsecret",
+    "secret", "secret_key", "secretkey", "private_key", "privatekey",
+    "token", "authorization", "auth", "x-api-key", "x-auth-token",
+    "proxy-authorization", "signing_key", "signingkey", "credential",
+    "credentials", "session_id", "connect.sid", "sns_credential",
+    "k8s_token", "bearer", "aws_secret_access_key",
+    "aws_access_key_id",
+})
+
+# Key-name families matched by suffix/substring (``ANTHROPIC_AUTH_TOKEN``,
+# ``x-goog-api-key``, ``DB_PASSWORD``, ``client-secret`` ...).  Plural
+# counters (``max_tokens``/``input_tokens``) never end in ``token`` and stay
+# readable; a few structural ``*_key`` names are explicitly benign.
+_SENSITIVE_KEY_SUFFIXES = (
+    "token", "apikey", "api_key", "access_key", "secret_key", "private_key",
+    "signing_key", "encryption_key", "auth_key", "master_key", "account_key",
+    "storage_key", "client_key", "license_key", "webhook_key",
+    "credential", "credentials", "cookie", "session_id", "sessionid",
+)
+_SENSITIVE_KEY_PARTS = ("secret", "password", "passwd", "passphrase")
+_BENIGN_KEYS = frozenset({
+    "public_key", "publickey", "sort_key", "cache_key", "primary_key",
+    "foreign_key", "partition_key", "range_key", "hash_key", "idempotency_key",
+    "dedup_key", "group_key", "lookup_key", "map_key", "next_token",
+    "page_token", "next_page_token", "continuation_token", "pagination_token",
+    "eos_token", "bos_token", "pad_token", "unk_token", "stop_token",
+    "sep_token", "cls_token", "mask_token", "secret_name", "secret_ref",
+    "secret_id", "secretname", "password_policy", "token_type",
+})
+
+
+def _norm_key(key: str) -> str:
+    return key.strip().lower().replace("-", "_").replace(".", "_")
+
+
+def _is_sensitive_key(key_lower: str) -> bool:
+    """True when ``key_lower`` names a credential-bearing field."""
+    if not key_lower:
+        return False
+    if key_lower in _SENSITIVE_VALUE_KEYS:
+        return True
+    norm = _norm_key(key_lower)
+    if norm in _SENSITIVE_VALUE_KEYS:
+        return True
+    if norm in _BENIGN_KEYS or len(norm) > 128:
+        return False
+    if any(part in norm for part in _SENSITIVE_KEY_PARTS):
+        return True
+    return norm.endswith(_SENSITIVE_KEY_SUFFIXES)
+
+
+def _is_password_key(key_lower: str) -> bool:
+    norm = _norm_key(key_lower)
+    return key_lower in _PASSWORD_KEYS or norm in _PASSWORD_KEYS or \
+        any(part in norm for part in ("password", "passwd", "passphrase"))
+
+
+@dataclass(frozen=True)
+class RedactionReport:
+    """Bounded redaction metadata.
+
+    ``details`` contains only ``(category, replacement)`` pairs where
+    ``replacement`` is a fixed placeholder - never the original text.
+    """
+
+    replaced: int
+    categories: tuple[str, ...]
+    uncertain: bool
+    details: tuple[tuple[str, str], ...] = ()
+
+
+class RedactionContext:
+    """Working counters for one :meth:`Redactor.redact_event` walk."""
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.categories: set[str] = set()
+        self.uncertain = False
+        self.details: list[tuple[str, str]] = []
+
+    def add(self, category: str, replacement: str, *, uncertain: bool) -> None:
+        if self.count < MAX_REDACT_COUNT:
+            self.count += 1
+        self.categories.add(category)
+        if uncertain:
+            self.uncertain = True
+        if len(self.details) < MAX_DETAILS:
+            self.details.append((category, replacement))
+
+    def flag_uncertain(self) -> None:
+        self.uncertain = True
+
+
+# ---------------------------------------------------------------------------
+# Matching primitives (scanned in a fixed order, first match wins per value)
+# ---------------------------------------------------------------------------
+
+_PEM_BLOCK_RE = re.compile(
+    r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----.*?"
+    r"-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# DB URL scheme://userinfo@... : the userinfo (credentials) spans until the
+# first ``@`` that precedes a host.  The ``@`` is consumed by the match so the
+# reconstruction ``scheme://[REDACTED:credential]@`` is faithful and one-shot
+# (running it twice must not re-fire or double the separator).
+_DB_URL_RE = re.compile(
+    r"\b(?P<scheme>postgres|postgresql|mysql|mariadb|mongodb(?:\+srv)?|"
+    r"redis|rediss|amqp|amqps|mssql)://"
+    r"(?P<cred>[^@\s/\"'<>]+?)@",
+    re.IGNORECASE,
+)
+
+# Any ``scheme://user:password@host``: the password may itself contain ``/``
+# or ``@`` (``postgres://u:Ab/cd@h``, ``postgres://u:p@ss@h``), so the
+# credential spans up to the LAST ``@`` before the host within the URL token
+# (whitespace/quotes end it).  ``host:port/...@x`` (``localhost:5173/@vite``)
+# is not userinfo: a purely numeric "password" followed by a path is skipped.
+# User/password lengths are bounded so a hostile line stays linear-time.
+_URL_CRED_RE = re.compile(
+    r"(?<![A-Za-z0-9+.\-])(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]{0,31})://"
+    r"(?P<cred>[^\s@/:\"'<>`]{0,256}:(?!\d{1,5}(?:[/?#]|$))"
+    r"[^\s\"'<>`]{0,512})@(?=[A-Za-z0-9\[_])",
+)
+
+# Shared assignment-value grammar for the whole secret/token/password family:
+# the value is consumed up to the terminator (``;``, ``]``, newline, ``}``)
+# or end of line, so "client_secret=correct horse battery staple" is fully
+# redacted instead of leaking the tail.  Env, generic secret and password
+# assignments below all use this one rule.
+# 已替换的占位符（含其 ``]``）作为整体被消费，保证规则对二次脱敏幂等。
+_ASSIGN_VALUE_RE = r"(?:\[REDACTED:[a-z_]+\]|[^;\]\n\}])+"
+
+# Env-style secret assignments consume a multi-token value (until ``;``, a
+# newline, ``}``/``]``, or end of line), so a password like
+# "AWS_SECRET_ACCESS_KEY=correct horse battery staple" is fully redacted.
+_ENV_ASSIGN_RE = re.compile(
+    r"\b(?P<key>AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|"
+    r"AZURE_CLIENT_SECRET|AZURE_CLIENT_KEY|AZURE_STORAGE_KEY|"
+    r"GOOGLE_API_KEY|GITHUB_API_KEY|GH_TOKEN|OPENAI_API_KEY|"
+    r"ANTHROPIC_API_KEY|BEDROCK_API_KEY|STRIPE_SECRET_KEY|VPN_TOKEN)"
+    r"\s*=\s*(?P<val>" + _ASSIGN_VALUE_RE + r")",
+    re.IGNORECASE,
+)
+
+# Session / cookie ids: plain ``session=...`` plus the conventional names.
+_SESSION_COOKIE_RE = re.compile(
+    r"\b(?:connect\.sid|PHPSESSID|JSESSIONID|sessionid|session_id|"
+    r"session-id|sid|session)\s*=\s*(?P<val>[A-Za-z0-9_.\-]{4,})",
+    re.IGNORECASE,
+)
+
+# Generic sensitive secret-family assignments (client_secret=, token=,
+# api_key=, ...).  Values share the env/password multi-token grammar, so a
+# passphrase like "client_secret=correct horse battery staple" is fully
+# consumed (never leaks its tail).
+_SECRET_ASSIGN_RE = re.compile(
+    r"(?:(?P<key>api[_-]?key|token|access[_ -]?token|refresh[_ -]?token|"
+    r"auth_token|signing_key|secret|client_secret)\s*=\s*"
+    r"(?P<val>" + _ASSIGN_VALUE_RE + r"))",
+    re.IGNORECASE,
+)
+
+# Password-family assignments consume a multi-token value the same way as env
+# and the secret family (one shared assignment-value grammar).
+_PASSWORD_ASSIGN_RE = re.compile(
+    r"(?:(?P<key>password|passwd|pwd|secret_key|private_key|privatekey)"
+    r"\s*=\s*(?P<val>" + _ASSIGN_VALUE_RE + r"))",
+    re.IGNORECASE,
+)
+
+# ``sk-`` tokens: a short body (dates, pod ids, counters) must not be treated
+# as high-confidence.  ``_is_long_sk`` decides; a short match is kept but the
+# report turns ``uncertain``.
+_SK_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_])sk-(?P<body>[A-Za-z0-9_\-.]*)",
+)
+
+_GITHUB_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:github_pat_[A-Za-z0-9_]{8,}|"
+    r"gh[pousr]_[A-Za-z0-9]{8,})",
+)
+_SLACK_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:xox[bapr]|xapp)[_-][A-Za-z0-9_-]{6,}",
+)
+_AWS_KEY_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Za-z])",
+)
+# AWS secret access key (40 chars, mixed case base64 alphabet); only
+# redacted when an access key id is present in the same text, so ordinary
+# 40-char hex digests (commit SHAs) are never touched.
+_AWS_SECRET_RE = re.compile(
+    r"(?<![A-Za-z0-9/+=])(?=[A-Za-z0-9/+]*[a-z])(?=[A-Za-z0-9/+]*[A-Z])"
+    r"[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+=])",
+)
+# Vendor token sigils: Stripe, Google API keys, GitLab, Hugging Face, npm.
+_VENDOR_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:"
+    r"(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{8,}|"
+    r"AIza[0-9A-Za-z_\-]{35}|"
+    r"glpat-[A-Za-z0-9_\-]{8,}|"
+    r"hf_[A-Za-z0-9]{16,}|"
+    r"npm_[A-Za-z0-9]{16,})",
+)
+_JWT_RE = re.compile(
+    r"(?<![A-Za-z0-9_])eyJ[A-Za-z0-9_\-]{12,}\.[A-Za-z0-9._\-]{10,}",
+)
+_BEARER_RE = re.compile(
+    r"\bBearer[ \t]+(?P<tok>[A-Za-z0-9._\-+/=]{6,})",
+)
+_BASIC_AUTH_RE = re.compile(
+    r"\bBasic[ \t]+(?P<tok>[A-Za-z0-9._\-+/=]{4,})",
+)
+_PATH_ABS_RE = re.compile(
+    r"(?<![\w/.:\\])(?:"
+    r"(?:[A-Za-z]:\\|\/)(?:[A-Za-z0-9._~\-]+)(?:\\|\/)"
+    r"(?:[A-Za-z0-9._~\-]+(?:[\\/][A-Za-z0-9._~\s\-]+)*)|"
+    r"~/(?:[A-Za-z0-9._~\-]+(?:/[A-Za-z0-9._~\-]+)*))",
+)
+_WINDOWS_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9.])(?:[A-Za-z]:\\(?:[A-Za-z0-9._\- ]+\\)"
+    r"[A-Za-z0-9._\- ]+|[A-Za-z]:\\[A-Za-z0-9._\-]+)",
+)
+_HEADER_VALUE_RE = re.compile(
+    r"(?im)(?:^|(?<=[\s\"'(]))[ \t]*(?:Authorization|Proxy-Authorization|"
+    r"X-Api-Key|X-Auth-Token)[ \t]*:[ \t]*(?P<value>[^,\r\n\"']+)",
+)
+
+# Generic keyed assignment in free text: ``NAME=value``, ``name: value``
+# (YAML), ``"name": "value"``, ``'name': 'value'``.  The name is filtered by
+# :func:`_is_sensitive_key`; the separator ``:`` must be followed by blank or
+# a quote (so ``scheme://`` / ``a::b`` never match).
+_KEYED_ASSIGN_RE = re.compile(
+    r"(?<![A-Za-z0-9_.\-:/])(?P<kq>[\"']?)"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_.\-]{0,127})(?P=kq)"
+    r"(?P<sep>[ \t]*=[ \t]*|[ \t]*:(?=[ \t\"'])[ \t]*)"
+    r"(?:(?P<q>[\"'])(?P<qval>(?:\\.|(?!(?P=q))[^\\\r\n])*)(?P=q)"
+    r"|(?P<val>[^\s\"'`,;\}\]][^\r\n\"'`,;\}\]]*"
+    r"[^\s\"'`,;\}\]]|[^\s\"'`,;\}\]]))",
+)
+
+# CLI credential flags: ``--token VALUE``, ``--api-key=VALUE``,
+# ``--password "a b"``.
+_CLI_FLAG_RE = re.compile(
+    r"(?<![A-Za-z0-9_\-])(?P<flag>--?(?P<name>[A-Za-z][A-Za-z0-9_\-]{0,63}))"
+    r"(?P<sep>=|[ \t]+)"
+    r"(?:(?P<q>[\"'])(?P<qval>(?:\\.|(?!(?P=q))[^\\\r\n])*)(?P=q)"
+    r"|(?P<val>(?!-)[^\s\"'`]+))",
+)
+
+_TRIVIAL_VALUE_RE = re.compile(
+    r"^(?:-?\d{1,12}(?:\.\d+)?|true|false|null|none|nil|yes|no|"
+    r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|<[^<>]*>|\*+|x+)$",
+    re.IGNORECASE,
+)
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+def replacement(category: str) -> str:
+    """Return the fixed placeholder used for ``category``."""
+    return f"{_PLACEHOLDER_BASE}{category}]"
+
+
+def _is_sensitive_location(text: str) -> bool:
+    lowered = text.lower()
+    return any(part.lower() in lowered for part in _SENSITIVE_PARTS)
+
+
+def _is_long_sk(body: str) -> bool:
+    """True when an ``sk-`` body looks like a real token, not a date/pid."""
+    if not body:
+        return False
+    alpha = sum(1 for ch in body if ch.isalnum())
+    if alpha >= 24:
+        return True
+    for prefix in ("ant-api", "proj-", "live-", "test-",
+                   "secret-", "admin-", "codex-"):
+        if body.startswith(prefix):
+            # ant-api03-<long> etc must be long enough to be credible.
+            return alpha >= 12
+    return False
+
+
+def _certain_token(text: str) -> bool:
+    """True when ``text`` carries a high-confidence credential sigil."""
+    if not text:
+        return False
+    if _GITHUB_RE.search(text) or _SLACK_RE.search(text) or \
+            _AWS_KEY_RE.search(text) or _JWT_RE.search(text) or \
+            _VENDOR_TOKEN_RE.search(text) or _BEARER_RE.search(text):
+        return True
+    m = _SK_TOKEN_RE.search(text)
+    if m:
+        return _is_long_sk(m.group("body"))
+    return False
+
+
+# ---------------------------------------------------------------------------
+# String redaction
+# ---------------------------------------------------------------------------
+
+def _redact_string(text: str, key_lower: str, ctx: RedactionContext,
+                   depth: int) -> str:
+    """Redact one bounded string value, deterministic order."""
+    if depth > MAX_REDACT_DEPTH:
+        ctx.add("unclassified", replacement("unclassified"), uncertain=True)
+        return replacement("unclassified")
+
+    # Whole-string handling: this value stands alone (a dict leaf).  If it
+    # still exceeds the size bound it must be replaced, not truncated.
+    if len(text) > MAX_REDACT_STRING:
+        ctx.add("unclassified", replacement("unclassified"), uncertain=True)
+        return replacement("unclassified")
+
+    # Empty strings cannot match any token/path/assignment pattern — skip
+    # the regex chain (structural empty fields are ~36% of payload values
+    # on real transcripts; profiling showed the chain dominating runtime).
+    if not text:
+        return text
+
+    # A whole value under a demonstrably sensitive key is replaced regardless
+    # of whether its format matches a sigil - never leaked, marked uncertain.
+    if _is_sensitive_key(key_lower):
+        category = "password" if _is_password_key(key_lower) else "credential"
+        ctx.add(category, replacement(category), uncertain=True)
+        return replacement(category)
+
+    result = text
+    result = _redact_blocks(result, ctx)
+    result = _apply_tokens_and_assignments(result, ctx)
+    result = _redact_paths(result, ctx)
+    return result
+
+
+def _redact_blocks(text: str, ctx: RedactionContext) -> str:
+    """Handle PEM private-key blocks, DB URLs, env and cookie assignments."""
+    out = text
+
+    # PEM / base64 private key blocks
+    out, n = _PEM_BLOCK_RE.subn(replacement("private_key"), out)
+    if n:
+        ctx.add("private_key", replacement("private_key"), uncertain=False)
+
+    # DB URL userinfo -> keep scheme + trailing '@', redact the credentials.
+    def _db_repl(match: re.Match) -> str:
+        scheme = match.group("scheme")
+        ctx.add("db_url", replacement("credential"), uncertain=False)
+        return f"{scheme}://{replacement('credential')}@"
+
+    out, _ = _DB_URL_RE.subn(_db_repl, out)
+
+    # Any scheme with ``user:password@`` (password may contain ``/``/``@``);
+    # a credential already reduced to the placeholder is left untouched.
+    def _url_repl(match: re.Match) -> str:
+        if match.group("cred") == replacement("credential"):
+            return match.group(0)
+        return _db_repl(match)
+
+    out, _ = _URL_CRED_RE.subn(_url_repl, out)
+
+    # Env-style secret assignment (value can be multi-token).
+    def _env_repl(match: re.Match) -> str:
+        key = match.group("key")
+        if match.group("val").startswith(_PLACEHOLDER_BASE):
+            # 已脱敏的值（节点侧先脱敏、Hub 再兜底）保持幂等，不重复包裹。
+            return match.group(0)
+        ctx.add("env", replacement("env"), uncertain=False)
+        return f"{key}={replacement('env')}"
+
+    out, _ = _ENV_ASSIGN_RE.subn(_env_repl, out)
+
+    # Session / cookie assignments.
+    out, n = _SESSION_COOKIE_RE.subn(replacement("session"), out)
+    if n:
+        ctx.add("session", replacement("session"), uncertain=False)
+
+    return out
+
+
+def _apply_tokens_and_assignments(text: str, ctx: RedactionContext) -> str:
+    """Redact bearer/basic/sigil tokens and generic assignment values."""
+    out = text
+
+    # Bearer / Basic tokens (anywhere, including mid-string).
+    def _bearer_repl(match: re.Match) -> str:
+        tok = match.group("tok")
+        ctx.add("credential", replacement("credential"),
+                uncertain=not _certain_token(tok))
+        return "Bearer " + replacement("credential")
+
+    out, _ = _BEARER_RE.subn(_bearer_repl, out)
+
+    def _basic_repl(match: re.Match) -> str:
+        ctx.add("credential", replacement("credential"), uncertain=False)
+        return "Basic " + replacement("credential")
+
+    out, _ = _BASIC_AUTH_RE.subn(_basic_repl, out)
+
+    # sk- tokens: only redact when the body is long enough to be credible;
+    # otherwise keep the text but flag the overall redaction as uncertain.
+    def _sk_repl(match: re.Match) -> str:
+        body = match.group("body")
+        if _is_long_sk(body):
+            ctx.add("credential", replacement("credential"),
+                    uncertain=False)
+            return "sk-" + replacement("credential")
+        ctx.flag_uncertain()
+        return match.group(0)
+
+    out, _ = _SK_TOKEN_RE.subn(_sk_repl, out)
+
+    # High-confidence sigils (github / slack / aws / jwt).
+    def _sigil_repl(match: re.Match) -> str:
+        ctx.add("credential", replacement("credential"), uncertain=False)
+        return replacement("credential")
+
+    aws_present = bool(_AWS_KEY_RE.search(out))
+    for pattern in (_GITHUB_RE, _SLACK_RE, _AWS_KEY_RE, _JWT_RE,
+                    _VENDOR_TOKEN_RE):
+        out, _ = pattern.subn(_sigil_repl, out)
+    if aws_present:
+        out, _ = _AWS_SECRET_RE.subn(_sigil_repl, out)
+
+    # Generic single-token assignments (token=, api_key=...).
+    def _assign_repl(match: re.Match) -> str:
+        key = match.group("key")
+        val = match.group("val")
+        if val.startswith(_PLACEHOLDER_BASE):
+            return match.group(0)
+        cat = "password" if key in _PASSWORD_KEYS else "credential"
+        strong = _certain_token(val)
+        ctx.add(cat, replacement(cat), uncertain=not strong)
+        return f"{key}={replacement(cat)}"
+
+    out, _ = _SECRET_ASSIGN_RE.subn(_assign_repl, out)
+
+    # Password assignments with multi-token values.
+    def _pass_repl(match: re.Match) -> str:
+        key = match.group("key")
+        if match.group("val").startswith(_PLACEHOLDER_BASE):
+            return match.group(0)
+        ctx.add("password", replacement("password"), uncertain=True)
+        return f"{key}={replacement('password')}"
+
+    out, _ = _PASSWORD_ASSIGN_RE.subn(_pass_repl, out)
+
+    # Header-style auth lines.
+    def _header_repl(match: re.Match) -> str:
+        header = match.group(0).split(":", 1)[0]
+        if match.group("value").startswith(_PLACEHOLDER_BASE):
+            return match.group(0)
+        ctx.add("credential", replacement("credential"), uncertain=False)
+        return f"{header}: {replacement('credential')}"
+
+    out, _ = _HEADER_VALUE_RE.subn(_header_repl, out)
+
+    out = _redact_keyed_values(out, ctx)
+    return out
+
+
+def _keyed_value_is_secret(name: str, value: str) -> bool:
+    if not value or value.startswith(_PLACEHOLDER_BASE):
+        return False
+    if not _is_sensitive_key(name.lower()):
+        return False
+    if _is_password_key(name.lower()) or "secret" in _norm_key(name):
+        return value.strip() != ""
+    # token/key family: numeric config or placeholders are not secrets.
+    return not _TRIVIAL_VALUE_RE.match(value.strip())
+
+
+def _redact_keyed_values(text: str, ctx: RedactionContext) -> str:
+    """Redact sensitive-named CLI flags and key/value pairs in free text."""
+
+    def _value_repl(match: re.Match, head: str) -> str:
+        quote = match.group("q")
+        value = match.group("qval") if quote else match.group("val")
+        if not _keyed_value_is_secret(match.group("name"), value or ""):
+            return match.group(0)
+        cat = "password" if _is_password_key(match.group("name").lower()) \
+            else "credential"
+        ctx.add(cat, replacement(cat), uncertain=not _certain_token(value))
+        quote = quote or ""
+        return f"{head}{quote}{replacement(cat)}{quote}"
+
+    def _flag_repl(match: re.Match) -> str:
+        return _value_repl(match, match.group("flag") + match.group("sep"))
+
+    out, _ = _CLI_FLAG_RE.subn(_flag_repl, text)
+
+    def _keyed_repl(match: re.Match) -> str:
+        kq = match.group("kq")
+        head = f"{kq}{match.group('name')}{kq}{match.group('sep')}"
+        return _value_repl(match, head)
+
+    out, _ = _KEYED_ASSIGN_RE.subn(_keyed_repl, out)
+    return out
+
+
+def _redact_paths(text: str, ctx: RedactionContext) -> str:
+    def _path_repl(match: re.Match) -> str:
+        subject = match.group(0)
+        ctx.add("path", replacement("path"),
+                uncertain=not _is_sensitive_location(subject))
+        return replacement("path")
+
+    out, _ = _PATH_ABS_RE.subn(_path_repl, text)
+    out, _ = _WINDOWS_PATH_RE.subn(_path_repl, out)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Secret-only redaction (transcript archive / log lines)
+# ---------------------------------------------------------------------------
+#
+# 完整会话归档（source_record）与普通预览保留路径和正文，但凭据/密钥形态的
+# 片段（sk-/ghp_/AKIA/JWT/Bearer/env 赋值/PEM 私钥/DB URL 口令/敏感键值）
+# 必须在节点侧被替换，绝不离开本机。这里只跑 secret 规则，不改写路径；
+# JSON 文本先解析再逐个字符串值脱敏后重新序列化，保证结构仍是合法 JSON。
+# 规则对已替换的占位符幂等（节点脱敏后 Hub 再兜底不会叠加）。
+
+
+def _redact_secret_string(text: str, key_lower: str,
+                          ctx: RedactionContext) -> str:
+    if not text:
+        return text
+    if _is_sensitive_key(key_lower):
+        if text.startswith(_PLACEHOLDER_BASE) and text.endswith("]"):
+            return text
+        category = "password" if _is_password_key(key_lower) else "credential"
+        ctx.add(category, replacement(category), uncertain=True)
+        return replacement(category)
+    out = _redact_blocks(text, ctx)
+    return _apply_tokens_and_assignments(out, ctx)
+
+
+def _redact_secret_value(value: Any, key_lower: str, ctx: RedactionContext,
+                         depth: int) -> Any:
+    if depth > MAX_REDACT_DEPTH:
+        ctx.add("unclassified", replacement("unclassified"), uncertain=True)
+        return replacement("unclassified")
+    if isinstance(value, str):
+        return _redact_secret_string(value, key_lower, ctx)
+    if isinstance(value, Mapping):
+        if _is_sensitive_key(key_lower):
+            category = ("password" if _is_password_key(key_lower)
+                        else "credential")
+            ctx.add(category, replacement(category), uncertain=True)
+            return replacement(category)
+        return {str(k): _redact_secret_value(v, str(k).lower(), ctx, depth + 1)
+                for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        if _is_sensitive_key(key_lower) and value:
+            category = ("password" if _is_password_key(key_lower)
+                        else "credential")
+            ctx.add(category, replacement(category), uncertain=True)
+            return replacement(category)
+        return [_redact_secret_value(item, key_lower, ctx, depth + 1)
+                for item in value]
+    return value
+
+
+def _report(ctx: RedactionContext) -> RedactionReport:
+    return RedactionReport(
+        replaced=ctx.count,
+        categories=tuple(sorted(ctx.categories)),
+        uncertain=ctx.uncertain,
+        details=tuple(ctx.details),
+    )
+
+
+def redact_secrets_text(text: str) -> tuple[str, RedactionReport]:
+    """Secret-only redaction of one text blob (log line / raw source line).
+
+    A text that parses as a JSON object/array is redacted value-by-value and
+    re-serialized, so the archive stays valid JSON and an assignment rule can
+    never swallow JSON quotes/commas.  Paths and ordinary prose are kept.
+    """
+    ctx = RedactionContext()
+    if not isinstance(text, str) or not text:
+        return text, _report(ctx)
+    stripped = text.strip()
+    if stripped[:1] in ("{", "["):
+        try:
+            parsed = json.loads(stripped)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, (dict, list)):
+            cleaned = _redact_secret_value(parsed, "", ctx, 0)
+            if not ctx.count:
+                return text, _report(ctx)
+            return (json.dumps(cleaned, ensure_ascii=False,
+                               separators=(",", ":")), _report(ctx))
+    return _redact_secret_string(text, "", ctx), _report(ctx)
+
+
+def redact_secrets_value(value: Any) -> tuple[Any, RedactionReport]:
+    """Secret-only redaction of a JSON-like value (structure preserved)."""
+    ctx = RedactionContext()
+    if isinstance(value, str):
+        return redact_secrets_text(value)
+    return _redact_secret_value(value, "", ctx, 0), _report(ctx)
+
+
+def redact_event_secrets(event: Mapping[str, Any]) -> dict:
+    """Return a shallow event copy whose payload carries no secret patterns.
+
+    ``source_record`` text is treated as a raw source line (JSON-aware); every
+    other payload string goes through the same secret-only rules.  Envelope
+    identity fields are never touched.
+    """
+    out: dict[str, Any] = dict(event)
+    payload = out.get("payload")
+    if not isinstance(payload, Mapping):
+        return out
+    if out.get("kind") == "source_record":
+        cleaned = dict(payload)
+        if isinstance(cleaned.get("text"), str):
+            cleaned["text"] = redact_secrets_text(cleaned["text"])[0]
+        out["payload"] = cleaned
+        return out
+    out["payload"] = redact_secrets_value(dict(payload))[0]
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Redactor (public entrypoint)
+# ---------------------------------------------------------------------------
+
+class Redactor:
+    """Deterministic payload-value redactor for session events.
+
+    Route A (2026-09-07): the live ingest/query path defaults to
+    ``passthrough=True`` so operator consoles see the agent's own
+    user/assistant/tool text.  The replacement engine remains available
+    for unit tests and any future opt-in call site (``passthrough=False``).
+    Envelope allowlisting and size bounds still come from session_schema;
+    this flag only skips *payload-value* substitution.
+    """
+
+    def __init__(self, *, passthrough: bool = True) -> None:
+        self.passthrough = bool(passthrough)
+
+    def redact_event(
+        self, event: Mapping[str, Any]
+    ) -> tuple[dict, RedactionReport]:
+        """Return ``(sanitized_event, report)``.
+
+        ``sanitized_event`` is a shallow copy of the input.  In passthrough
+        mode the payload is left intact and the report is empty
+        (``state=none``).  Otherwise payload values are replaced by fixed
+        placeholders; the report carries only count / categories /
+        uncertainty / replacement tuples (never original text).
+        """
+        out: dict[str, Any] = dict(event)
+        if self.passthrough:
+            empty = RedactionReport(
+                replaced=0, categories=(), uncertain=False, details=())
+            out["redaction"] = self._redaction_metadata(empty)
+            return out, empty
+
+        ctx = RedactionContext()
+        payload = out.get("payload")
+
+        if isinstance(payload, Mapping):
+            out["payload"] = self._redact_value(
+                dict(payload), "", ctx, 0)
+        elif payload is not None and not isinstance(payload, (str, bytes)):
+            out["payload"] = self._redact_value(payload, "", ctx, 0)
+
+        report = RedactionReport(
+            replaced=ctx.count,
+            categories=tuple(sorted(ctx.categories)),
+            uncertain=ctx.uncertain,
+            details=tuple(ctx.details),
+        )
+        out["redaction"] = self._redaction_metadata(report)
+        return out, report
+
+    def _redact_value(self, value: Any, key_lower: str,
+                      ctx: RedactionContext, depth: int) -> Any:
+        if depth > MAX_REDACT_DEPTH:
+            # Past the safety bound: replace the whole node (never walk into
+            # an unbounded subtree) and flag the redaction as uncertain.
+            ctx.add("unclassified", replacement("unclassified"),
+                    uncertain=True)
+            return replacement("unclassified")
+
+        if isinstance(value, str):
+            if len(value) > MAX_REDACT_STRING:
+                ctx.add("unclassified", replacement("unclassified"),
+                        uncertain=True)
+                return replacement("unclassified")
+            return _redact_string(value, key_lower, ctx, depth + 1)
+
+        if isinstance(value, Mapping):
+            if _is_sensitive_key(key_lower):
+                category = ("password" if _is_password_key(key_lower)
+                            else "credential")
+                ctx.add(category, replacement(category), uncertain=True)
+                return replacement(category)
+            return {
+                str(k): self._redact_value(v, str(k).lower(), ctx, depth + 1)
+                for k, v in value.items()
+            }
+
+        if isinstance(value, list):
+            if _is_sensitive_key(key_lower):
+                category = ("password" if _is_password_key(key_lower)
+                            else "credential")
+                ctx.add(category, replacement(category), uncertain=True)
+                return replacement(category)
+            return [
+                self._redact_value(item, key_lower, ctx, depth + 1)
+                for item in value
+            ]
+
+        return value
+
+    @staticmethod
+    def _redaction_metadata(report: RedactionReport) -> dict[str, Any]:
+        if report.replaced:
+            state = "redacted"
+        elif report.uncertain:
+            state = "partial"
+        else:
+            state = "none"
+        return {
+            "state": state,
+            "uncertain": bool(report.uncertain),
+            "rules": list(report.categories)[:MAX_RULES],
+            "replaced": report.replaced,
+        }
+
+
+__all__ = [
+    "MAX_REDACT_DEPTH",
+    "MAX_REDACT_STRING",
+    "RedactionReport",
+    "Redactor",
+    "redact_event_secrets",
+    "redact_secrets_text",
+    "redact_secrets_value",
+    "replacement",
+]

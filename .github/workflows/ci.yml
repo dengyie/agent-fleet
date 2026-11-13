@@ -1,0 +1,241 @@
+name: CI
+
+# 打包契约：main 的发布产物一律由此 workflow 产出（2026-09-02 起）。
+# test/package 不接触部署凭据。只有 main 的部署 job 使用 production 环境，
+# 经专用受限 SSH 入口提交同一 run 的发布包；宿主保留运行配置和数据库。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Never interrupt a production transaction because another main commit arrived.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # requirements-lock.txt pins the full transitive set of the
+          # test requirements (regenerate: see header of the lock file).
+          pip install -r requirements-lock.txt
+          pip install ruff==0.17.3 pip-audit==2.10.1
+      - name: Lint Python (syntax errors and undefined names)
+        # F401：有意的再导出用 ``# noqa: F401`` 标注原因（兼容门面/包级 API）。
+        run: ruff check --select E9,F63,F7,F82,F401 hub tools connectors fleet_core
+      - name: Lint deploy shell scripts
+        run: shellcheck --shell=bash --severity=error deploy/*.sh
+      - name: Audit pinned dependencies
+        run: pip-audit -r requirements-lock.txt --disable-pip --no-deps --strict
+      - name: Install Linux isolation test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y bubblewrap libseccomp2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install browser test runner
+        run: |
+          npm install --prefix "$RUNNER_TEMP/fleet-browser" --no-audit --no-fund --package-lock=false playwright@1.63.0
+          "$RUNNER_TEMP/fleet-browser/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Run test suite
+        run: |
+          FLEET_PLAYWRIGHT_MODULE="$RUNNER_TEMP/fleet-browser/node_modules/playwright" \
+          FLEET_SCREENSHOTS="$RUNNER_TEMP/fleet-test-evidence/browser" \
+          FLEET_BROWSER_CHANNEL=chromium PYTHONPATH=. python -m pytest tests -q \
+            --junitxml="$RUNNER_TEMP/fleet-test-evidence/results.xml" \
+            --require-journeys \
+            --journey-report="$RUNNER_TEMP/fleet-test-evidence/journeys.json"
+      - name: Verify release evidence
+        run: |
+          python -m tools.testing.release_evidence \
+            --evidence "$RUNNER_TEMP/fleet-test-evidence" \
+            --checkout "$GITHUB_WORKSPACE" \
+            --revision "$GITHUB_SHA"
+      - name: Preserve test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-fleet-test-evidence
+          path: ${{ runner.temp }}/fleet-test-evidence/
+          retention-days: 7
+          if-no-files-found: warn
+
+  # Windows process launch, workspace execution and bounded pipe collection.
+  # Kept outside the Linux release-evidence gate: discovery's POSIX ps clock
+  # regression is explicitly skipped here and executed by the Linux job.
+  launch-policy-windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-lock.txt
+      - name: Check existing Node runtime
+        run: node --version
+      - name: Run Windows process and workspace tests
+        env:
+          PYTHONPATH: .
+        run: >-
+          python -m pytest tests/test_local_process.py tests/test_probe_context.py
+          tests/test_discovery.py tests/test_transport.py
+          tests/test_worktree_diff_streaming.py tests/test_workspace_output_bounds.py
+          tests/test_platform_sandbox_artifacts.py tests/test_bounded_process.py -q
+          tests/test_main_review_regressions.py tests/test_round5_windows_process.py
+          tests/test_workflow_shared_node_startup.py tests/test_workflow_startup.py
+          tests/test_workflow_setup.py
+          tests/test_workflow_native_setup.py tests/test_integration_identity_registration.py
+          tests/test_mcp_registration.py
+          tests/test_workflow_native_video_inputs.py
+          tests/test_workflow_summary_generation.py
+          tests/test_workflow_summary.py::test_first_summary_preserves_existing_native_media_reader_and_recovery
+          tests/test_workflow_summary.py::test_failed_first_summary_does_not_change_existing_higher_reader
+          tests/test_artifact_capacity.py::test_download_pool_is_shared_across_reopened_directories_and_nodes
+          tests/test_artifact_capacity.py::test_download_processes_compete_for_one_last_slot
+          tests/test_artifact_capacity.py::test_download_process_death_releases_native_pool
+          tests/fixtures/workflow/windows_artifact_probe.py
+          --junitxml=windows-results.xml
+      - name: Preserve Windows test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-fleet-windows-test-evidence
+          path: windows-results.xml
+          retention-days: 7
+          if-no-files-found: warn
+
+  # 仅 main 上的 push / 手动触发打包。按 ref 判断而非事件类型：
+  # PR（refs/pull/*）与从非 main 分支手动 dispatch 都不得产出部署用
+  # artifact（按名取件时绝不会拿到未合并代码）。
+  package:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build release archive
+        run: |
+          mkdir -p out
+          f="out/agent-fleet-release-${{ github.sha }}.tgz"
+          # 溯源戳由打包脚本统一追加（RELEASE_ORIGIN 成员；部署解包后
+          # mv 为 release 根的 RELEASE_ORIGIN，HK 上可验证来源 commit/run）。
+          bash deploy/package-release.sh "$f" \
+            "${{ github.sha }}|${{ github.run_id }}|${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          tar -tzf "$f" | tail -3
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-fleet-release
+          path: out/agent-fleet-release-*.tgz
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Build independent frontend release
+        run: bash deploy/package-frontend-release.sh out/frontend "${{ github.sha }}"
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-fleet-frontend
+          path: out/frontend/
+          retention-days: 14
+          if-no-files-found: error
+
+  deploy:
+    needs: [test, launch-policy-windows, package]
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    concurrency:
+      group: agent-fleet-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      deployments: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject obsolete main releases
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$current" = "$GITHUB_SHA" ]; then
+            echo 'deploy=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'deploy=false' >> "$GITHUB_OUTPUT"
+            echo 'A newer main commit exists; this release will not deploy.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/download-artifact@v4
+        if: steps.current.outputs.deploy == 'true'
+        with:
+          name: agent-fleet-release
+          path: release/backend
+      - uses: actions/download-artifact@v4
+        if: steps.current.outputs.deploy == 'true'
+        with:
+          name: agent-fleet-frontend
+          path: release/frontend
+      - name: Validate and bundle this run's artifacts
+        if: steps.current.outputs.deploy == 'true'
+        run: |
+          python3 deploy/auto_deploy_ssh.py bundle \
+            --backend "release/backend/agent-fleet-release-$GITHUB_SHA.tgz" \
+            --frontend release/frontend --output "$RUNNER_TEMP/fleet-deploy.tgz" \
+            --sha "$GITHUB_SHA" --run "$GITHUB_RUN_ID"
+      - name: Submit restricted deployment
+        if: steps.current.outputs.deploy == 'true'
+        env:
+          DEPLOY_HOST: ${{ secrets.SSH_HOST }}
+          DEPLOY_PORT: ${{ secrets.SSH_PORT }}
+          DEPLOY_USER: ${{ secrets.SSH_USER }}
+          DEPLOY_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$RUNNER_TEMP/fleet-deploy-key"
+          known="$RUNNER_TEMP/fleet-deploy-known-hosts"
+          trap 'rm -f "$key" "$known"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" > "$key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$known"
+          unset DEPLOY_KEY DEPLOY_KNOWN_HOSTS
+          digest=$(sha256sum "$RUNNER_TEMP/fleet-deploy.tgz" | cut -d ' ' -f 1)
+          size=$(stat -c %s "$RUNNER_TEMP/fleet-deploy.tgz")
+          ssh -T -i "$key" -p "$DEPLOY_PORT" -o IdentitiesOnly=yes \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known" \
+            -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=40 \
+            "$DEPLOY_USER@$DEPLOY_HOST" "deploy $GITHUB_SHA $GITHUB_RUN_ID $digest $size" \
+            < "$RUNNER_TEMP/fleet-deploy.tgz" | tee "$RUNNER_TEMP/deployment.json"
+      - name: Preserve deployment result
+        if: always() && steps.current.outputs.deploy == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-fleet-deployment
+          path: ${{ runner.temp }}/deployment.json
+          retention-days: 14
+          if-no-files-found: warn

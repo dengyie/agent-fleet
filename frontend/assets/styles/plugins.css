@@ -1,0 +1,28 @@
+.plugin-catalog { display: grid; gap: 14px; margin-bottom: 24px; }
+.plugin-enrollment { margin-bottom: 20px; padding: 16px; border: 1px solid var(--border); border-radius: 12px; }
+.plugin-enrollment summary { cursor: pointer; }
+.plugin-enrollment form, .plugin-enrollment-result { margin-top: 14px; }
+.plugin-enrollment-result { display: grid; gap: 12px; }
+.plugin-enrollment-result code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.plugin-card { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 20px; border: 1px solid var(--border); border-radius: 16px; background: var(--panel); }
+.plugin-title { font-size: 18px; font-weight: 650; border: 0; padding: 0; background: transparent; color: inherit; text-align: left; }
+.plugin-card p { margin: 8px 0; }
+.plugin-meta, .plugin-identity { color: var(--text-2); font-size: 13px; overflow-wrap: anywhere; }
+.plugin-content { display: grid; gap: 16px; }
+.plugin-content h3, .plugin-content p { margin: 0; }
+.plugin-controls, .plugin-actions { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+.plugin-field { display: grid; gap: 7px; flex: 1 1 180px; font-size: 13px; }
+.plugin-field input, .plugin-field select { width: 100%; min-height: 40px; border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; background: var(--panel); color: inherit; }
+.plugin-content button:not(.button-primary), .plugin-toggle { min-height: 38px; padding: 7px 12px; border: 1px solid var(--border); border-radius: 9px; color: inherit; background: var(--panel); cursor: pointer; }
+.plugin-content button:disabled { opacity: .5; cursor: default; }
+.plugin-auth { display: grid; gap: 12px; padding: 18px; border: 1px solid var(--border); border-radius: 14px; }
+.plugin-account, .plugin-operation { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.plugin-account > span { flex: 1 1 160px; font-size: 13px; }
+.plugin-login { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; }
+.plugin-login:empty { display: none; }
+.plugin-device-code { font-size: 24px; letter-spacing: 3px; padding: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; user-select: all; }
+.plugin-message, .plugin-notice { color: var(--text-2); overflow-wrap: anywhere; }
+.plugin-error { color: var(--danger, #bc4141); overflow-wrap: anywhere; }
+.plugin-setup { font-size: 13px; color: var(--text-2); line-height: 1.7; }
+.plugin-setup summary { cursor: pointer; }
+@media (max-width: 600px) { .plugin-card { align-items: start; flex-direction: column; } .plugin-actions > button { flex: 1 1 140px; } }

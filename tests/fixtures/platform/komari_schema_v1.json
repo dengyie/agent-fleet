@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "nodes": [
+    {
+      "uuid": "fixture-node-1",
+      "hostname": "edge-fixture-a",
+      "online": true,
+      "status": "online",
+      "version": "fixture-1",
+      "secret": "fixture-sentinel-ignore",
+      "token": "fixture-token-ignore",
+      "raw_output": "fixture-raw-output-ignore"
+    },
+    {
+      "uuid": "fixture-node-2",
+      "hostname": "edge-fixture-b",
+      "online": false,
+      "status": "offline",
+      "platform": "linux"
+    }
+  ],
+  "ignored_envelope_field": "fixture-envelope-ignore"
+}

@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+"""Machine-side ControlClient entrypoint (LaunchAgent / cron).
+
+``tools.supervisor.control_client.ControlClient`` is a library — it has no
+CLI. This wrapper is the process that:
+
+- pulls ``POST /api/supervisor/poll`` with ``X-Supervisor-Credential``;
+- validates + dispatches signed control (adopt / detach / pause / …);
+- on successful adopt, opens one ``SessionBridge`` and tails the native
+  transcript into the encrypted spool, then POSTs a JSON *list* to
+  ``/api/session-events`` (Observe ingest domain).
+
+The process must stay resident: live bridges live on the ControlClient
+instance. A StartInterval cron that exits after one poll would drop them.
+
+Usage:
+  python3 tools/supervisor/control_client_cli.py --config ~/.config/agent-fleet/runner.yaml
+  python3 tools/supervisor/control_client_cli.py --config ... --once
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+
+def _bootstrap_direct_imports():
+    """LaunchAgent / cron 直跑：把 repo root 挂到 sys.path[0]。
+
+    ``tools.supervisor.supervisor`` 顶层 import repo root 的
+    ``report_schema``（INSTANCE_FAMILIES），``tools.transport`` /
+    ``hub.domain`` 也按 repo-root 布局解析；无 WorkingDirectory 的环境
+    下 root 置于 sys.path[0] 后全部可达。
+    """
+    if __package__ not in (None, ""):
+        return
+    root = Path(__file__).resolve().parent.parent.parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+
+
+_bootstrap_direct_imports()
+
+from tools import runner_config  # noqa: E402
+from tools.client_update import runtime as client_runtime  # noqa: E402
+from tools.transport import Transport as _OutboundTransport  # noqa: E402
+
+
+DEFAULT_INTERVAL_S = 15
+MIN_BACKOFF_S = 5
+MAX_BACKOFF_S = 60
+DEFAULT_INGEST_TOKEN = Path.home() / ".config" / "agent-fleet" / "ingest-token"
+DEFAULT_SPOOL_KEY = Path.home() / ".config" / "agent-fleet" / "session-spool.key"
+DEFAULT_SPOOL_ROOT = Path.home() / ".cache" / "agent-fleet" / "session-spool"
+ROLE = "control-client"
+USER_AGENT = client_runtime.client_headers(ROLE)["User-Agent"]
+#: 另一个 control-client 已持有单实例锁
+EXIT_ALREADY_RUNNING = 75
+
+
+class CliError(Exception):
+    """Fail-closed configuration error; message is a bounded token, no secrets."""
+
+
+def _load_or_create_spool_key(path: Path) -> bytes:
+    path = Path(path).expanduser()
+    if path.exists():
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            raise CliError("无法读取 session spool key") from exc
+        if len(data) != 32:
+            raise CliError("session spool key 必须是 32 字节")
+        return data
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        key = os.urandom(32)
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(key)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError as exc:
+        raise CliError("无法写入 session spool key") from exc
+    return key
+
+
+def _read_token_file(path: Path, what: str) -> str:
+    try:
+        token = Path(path).expanduser().read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise CliError(f"无法读取 {what}") from exc
+    if not token:
+        raise CliError(f"{what} 为空")
+    return token
+
+
+def _make_session_events_post(hub_url: str, ingest_token: str):
+    """Uploader transport: unwrap ``{\"events\": [...]}`` and POST a JSON list."""
+
+    # Proxy-aware outbound (2026-09-15): 与 poll/result 同一策略 —— 直连被
+    # CF 边缘拦截或传输失败时回退系统代理（tools/transport.Transport auto）。
+    transport = _OutboundTransport()
+
+    def post_json(payload):
+        events = payload.get("events") if isinstance(payload, dict) else payload
+        if not isinstance(events, list):
+            raise TypeError("events list required")
+        status, body = transport.post_json(
+            hub_url.rstrip("/") + "/api/session-events",
+            events,
+            {
+                "Content-Type": "application/json",
+                "X-Agent-Fleet-Token": ingest_token,
+                **client_runtime.client_headers(ROLE),
+            },
+            timeout=30,
+        )
+        # uploader 合同（tools/session/uploader.py）：返回响应 Mapping；
+        # 传输失败（status=0）返回空 Mapping（记录重试 sentinel）。
+        if status == 0:
+            return {}
+        return body if isinstance(body, dict) else {}
+
+    return post_json
+
+
+def _make_bridge_factory():
+    """Build a SessionBridge from ControlClient's bounded adopt config."""
+
+    def factory(cfg: dict):
+        from tools.session.bridge import SessionBridge
+
+        family = str(cfg.get("agent_family") or "claude")
+        native_path = cfg.get("native_file_path") or None
+        manifest = {
+            "agent": family,
+            "version": "0",
+            "installed": True,
+            "spawn": False,
+            "resume": False,
+            "native_transcript": bool(native_path),
+            "structured_stream": False,
+            "hooks": False,
+            "pty": False,
+            "supported_event_kinds": [],
+            "quality_by_kind": {},
+            "diagnostics": [],
+        }
+        bridge = SessionBridge.open(manifest, {**cfg, "preserve_source": True})
+        # ``native_file_path`` rides in the adopt config; the bridge stores it
+        # at construction, so later pump ticks can call ingest_native() with no
+        # path.
+        return bridge
+
+    return factory
+
+
+def _pump_bridges(client) -> None:
+    """Best-effort native tail + flush for every live adopted bridge."""
+    for bridge in client.iter_bridges():
+        try:
+            supervisor = getattr(client, "supervisor", None)
+            pump = getattr(supervisor, "pump_output", None)
+            if callable(pump):
+                pump(bridge.session_id)
+            ingest = getattr(bridge, "ingest_native", None)
+            if callable(ingest):
+                ingest()
+        except Exception:
+            pass
+        try:
+            flush = getattr(bridge, "flush", None)
+            if callable(flush):
+                flush()
+        except Exception:
+            pass
+
+
+def _build_client(cfg, *, ingest_token: str, spool_key: bytes,
+                  spool_root: Path):
+    from tools.supervisor.control_client import ControlClient, NonceStore
+    from tools.supervisor.supervisor import Supervisor
+
+    if not cfg.supervisor_enabled or cfg.supervisor_manifest_dir is None:
+        raise CliError("supervisor 未启用")
+    if not cfg.supervisor_credential:
+        raise CliError("缺少 supervisor credential")
+    if not cfg.supervisor_public_key:
+        raise CliError("缺少 supervisor public_key")
+
+    supervisor = Supervisor(
+        manifest_dir=cfg.supervisor_manifest_dir,
+        machine_id=cfg.machine,
+    )
+    try:
+        supervisor.recover()
+    except Exception:
+        pass
+
+    spool_root = Path(spool_root).expanduser()
+    spool_root.mkdir(parents=True, exist_ok=True)
+
+    return ControlClient(
+        hub_url=cfg.hub,
+        machine_id=cfg.machine,
+        credential=cfg.supervisor_credential,
+        hub_public_key=cfg.supervisor_public_key,
+        public_supervisor=supervisor,
+        nonce_store=NonceStore(),
+        bridge_factory=_make_bridge_factory(),
+        spool_root=spool_root,
+        spool_key=spool_key,
+        post_json=_make_session_events_post(cfg.hub, ingest_token),
+    )
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="agent-fleet ControlClient（pull-only 控制面 + session 上报）")
+    parser.add_argument("--config", default=str(runner_config.DEFAULT_CONFIG_PATH))
+    parser.add_argument("--once", action="store_true", help="单轮 poll（cron / 拨测）")
+    parser.add_argument("--interval", type=int, default=None,
+                        help="常驻轮询间隔秒（默认 15）")
+    parser.add_argument("--ingest-token-file",
+                        default=str(DEFAULT_INGEST_TOKEN))
+    parser.add_argument("--spool-key-file", default=str(DEFAULT_SPOOL_KEY))
+    parser.add_argument("--spool-root", default=str(DEFAULT_SPOOL_ROOT))
+    args = parser.parse_args(argv)
+
+    try:
+        cfg = runner_config.load_config(args.config)
+        if not cfg.supervisor_enabled or cfg.supervisor_manifest_dir is None:
+            raise CliError("supervisor 未启用")
+        if not cfg.supervisor_credential:
+            raise CliError("缺少 supervisor credential")
+        if not cfg.supervisor_public_key:
+            raise CliError("缺少 supervisor public_key")
+        ingest_token = _read_token_file(
+            Path(args.ingest_token_file), "ingest-token")
+        spool_key = _load_or_create_spool_key(Path(args.spool_key_file))
+        client = _build_client(
+            cfg, ingest_token=ingest_token, spool_key=spool_key,
+            spool_root=Path(args.spool_root))
+    except (CliError, runner_config.ConfigError) as extra:
+        print(f"[control-client] {extra}", file=sys.stderr)
+        return 2
+
+    interval = args.interval or DEFAULT_INTERVAL_S
+    lock = _acquire_instance_lock(cfg)
+    if lock is None:
+        return EXIT_ALREADY_RUNNING
+    try:
+        return _run(client, args, interval)
+    finally:
+        lock.release()
+
+
+def _acquire_instance_lock(cfg):
+    from fleet_core.locking import LockBusy, OwnedLock
+
+    lock = OwnedLock(cfg.cache_dir / "control-client.lock", "control-client",
+                     {"version": client_runtime.client_info()["version"]})
+    try:
+        return lock.acquire()
+    except LockBusy as exc:
+        print(f"[control-client] 已有实例在运行 pid={(exc.owner or {}).get('pid')}",
+              file=sys.stderr)
+        return None
+
+
+class _Stop(Exception):
+    pass
+
+
+def _run(client, args, interval):
+    announced = False
+
+    def _tick():
+        nonlocal announced
+        result = client.poll_once()
+        _pump_bridges(client)
+        if (not announced and result.get("ok")
+                and getattr(client, "adoption_recovery_complete", True)):
+            client_runtime.announce(ROLE)
+            announced = True
+        return result
+
+    if args.once:
+        result = _tick()
+        ok = bool(result.get("ok"))
+        n = int(result.get("commands") or 0)
+        err = result.get("error") or ""
+        if ok:
+            print(f"[control-client] poll ok commands={n}")
+        else:
+            print(f"[control-client] poll failed {str(err)[:80]}",
+                  file=sys.stderr)
+        return 0 if ok else 1
+
+    # SIGTERM 在睡眠期间到达才立即退出；poll/pump 中只置标志，本轮结束再退。
+    state = {"stop": False, "busy": False}
+
+    def _on_term(signum, frame):
+        state["stop"] = True
+        if not state["busy"]:
+            raise _Stop()
+
+    try:
+        signal.signal(signal.SIGTERM, _on_term)
+    except ValueError:
+        pass
+    backoff = MIN_BACKOFF_S
+    while True:
+        if state["stop"] or client_runtime.drain_requested(ROLE):
+            print("[control-client] 退出（SIGTERM 或客户端已切换新版本）", file=sys.stderr)
+            return 0
+        try:
+            state["busy"] = True
+            try:
+                result = _tick()
+            finally:
+                state["busy"] = False
+            if result.get("ok"):
+                backoff = MIN_BACKOFF_S
+            else:
+                print(f"[control-client] poll failed {str(result.get('error') or '')[:80]}",
+                      file=sys.stderr)
+                backoff = min(max(backoff, MIN_BACKOFF_S) * 2, MAX_BACKOFF_S)
+            time.sleep(interval if result.get("ok") else backoff)
+        except (KeyboardInterrupt, _Stop):
+            return 0
+        except Exception as exc:
+            print(f"[control-client] {type(exc).__name__}", file=sys.stderr)
+            try:
+                time.sleep(backoff)
+            except _Stop:
+                return 0
+            backoff = min(backoff * 2, MAX_BACKOFF_S)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

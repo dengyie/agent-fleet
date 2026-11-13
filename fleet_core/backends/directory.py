@@ -1,0 +1,149 @@
+"""Non-Git directory backend with path and output boundaries."""
+from __future__ import annotations
+
+import os
+import hashlib
+import subprocess
+import sys
+from pathlib import Path
+from typing import Callable
+
+from fleet_core.workspace import WorkspaceError, normalize_relative_path
+from fleet_core.process.bounded_process import (
+    ProcessCancelled, ProcessStopUnconfirmed, decode_prefix, run_bounded,
+)
+from .base import ToolReceipt
+
+MAX_READ_BYTES = 64 * 1024
+MAX_DIGEST_BYTES = 8 * 1024 * 1024
+MAX_OUTPUT_BYTES = 64 * 1024
+ALLOWED_EXECUTABLES = frozenset({
+    "cat", "find", "git", "ls", "pwd", "python",
+    "python3", "pytest", "rg", "sed",
+})
+
+
+def executable_allowed(executable: str) -> bool:
+    """Admit fixed aliases and the exact runtime used to register recipes."""
+    path = Path(executable)
+    return path.name in ALLOWED_EXECUTABLES or (path.is_absolute() and executable == sys.executable)
+
+
+class DirectoryBackend:
+    def __init__(self, root: Path, *, quota_bytes: int = 1024 * 1024 * 1024):
+        self.root = Path(root).expanduser().resolve()
+        self.quota_bytes = int(quota_bytes)
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, relative_path: str) -> Path:
+        normalized = normalize_relative_path(relative_path) if relative_path else ""
+        if not normalized:
+            return self.root
+        candidate = (self.root / normalized).resolve()
+        try:
+            candidate.relative_to(self.root)
+        except ValueError:
+            raise WorkspaceError("path_escape") from None
+        # Resolve catches symlink escapes for existing paths.  For a new file,
+        # validate the resolved parent too.
+        parent = candidate.parent.resolve()
+        try:
+            parent.relative_to(self.root)
+        except ValueError:
+            raise WorkspaceError("path_escape") from None
+        return candidate
+
+    def _receipt(self, command_id, state, result=None, error_code=None, truncated=False):
+        return ToolReceipt(command_id, state, result or {}, error_code, truncated)
+
+    def list(self, relative_path: str = ""):
+        try:
+            path = self._path(relative_path)
+            if not path.exists() or not path.is_dir():
+                return self._receipt("", "failed", error_code="not_found")
+            entries = []
+            for item in sorted(path.iterdir(), key=lambda p: p.name)[:1000]:
+                entries.append({"name": item.name, "kind": "directory" if item.is_dir() else "file"})
+            return self._receipt("", "succeeded", {"path": relative_path, "entries": entries})
+        except WorkspaceError as exc:
+            return self._receipt("", "failed", error_code=exc.code)
+
+    def read(self, relative_path: str):
+        try:
+            path = self._path(relative_path)
+            if not path.is_file():
+                return self._receipt("", "failed", error_code="not_found")
+            with path.open("rb") as handle:
+                raw = handle.read(MAX_READ_BYTES + 1)
+            content, truncated = decode_prefix(raw, MAX_READ_BYTES)
+            return self._receipt("", "succeeded", {"path": relative_path, "content": content}, truncated=truncated)
+        except WorkspaceError as exc:
+            return self._receipt("", "failed", error_code=exc.code)
+        except OSError:
+            return self._receipt("", "failed", error_code="read_failed")
+
+    def digest(self, relative_path: str):
+        try:
+            path = self._path(relative_path)
+            if not path.is_file():
+                return self._receipt("", "failed", error_code="not_found")
+            digest = hashlib.sha256()
+            size = 0
+            with path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > MAX_DIGEST_BYTES:
+                        return self._receipt("", "failed", error_code="digest_too_large")
+                    digest.update(chunk)
+            return self._receipt("", "succeeded", {
+                "path": relative_path, "sha256": digest.hexdigest(), "size": size,
+            })
+        except WorkspaceError as exc:
+            return self._receipt("", "failed", error_code=exc.code)
+        except OSError:
+            return self._receipt("", "failed", error_code="digest_failed")
+
+    def write(self, relative_path: str, content: bytes):
+        try:
+            if not isinstance(content, (bytes, bytearray)):
+                return self._receipt("", "failed", error_code="invalid_content")
+            path = self._path(relative_path)
+            current_size = sum(p.stat().st_size for p in self.root.rglob("*") if p.is_file())
+            replaced_size = path.stat().st_size if path.is_file() else 0
+            if current_size - replaced_size + len(content) > self.quota_bytes:
+                return self._receipt("", "failed", error_code="disk_quota")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(bytes(content))
+            return self._receipt("", "succeeded", {"path": relative_path, "size": len(content)})
+        except WorkspaceError as exc:
+            return self._receipt("", "failed", error_code=exc.code)
+        except OSError:
+            return self._receipt("", "failed", error_code="write_failed")
+
+    def execute(self, command_id: str, argv: list[str], *, timeout_s: float = 30.0,
+                should_cancel: Callable[[], bool] | None = None):
+        if not isinstance(argv, list) or not argv or any(not isinstance(arg, str) or len(arg) > 4096 for arg in argv):
+            return self._receipt(command_id, "failed", error_code="invalid_command")
+        if not executable_allowed(argv[0]) or any(arg in {"-c", "--command"} for arg in argv[1:]):
+            return self._receipt(command_id, "failed", error_code="command_not_allowed")
+        try:
+            proc = run_bounded(argv, cwd=self.root, timeout_s=max(0.1, min(float(timeout_s), 300.0)),
+                               stdout_limit=MAX_OUTPUT_BYTES + 1, stderr_limit=MAX_OUTPUT_BYTES + 1,
+                               env={"PATH": os.environ.get("PATH", "")}, should_cancel=should_cancel)
+            raw = proc.stdout + proc.stderr
+            output, truncated = decode_prefix(raw, MAX_OUTPUT_BYTES)
+            return self._receipt(command_id, "succeeded" if proc.returncode == 0 else "failed", {"returncode": proc.returncode, "output": output}, error_code=None if proc.returncode == 0 else "process_failed", truncated=truncated)
+        except subprocess.TimeoutExpired:
+            return self._receipt(command_id, "failed", error_code="timeout")
+        except ProcessCancelled:
+            return self._receipt(command_id, "cancelled", error_code="cancelled")
+        except ProcessStopUnconfirmed:
+            return self._receipt(command_id, "unknown", error_code="process_stop_unconfirmed")
+        except OSError:
+            return self._receipt(command_id, "failed", error_code="exec_failed")
+
+
+__all__ = ["ALLOWED_EXECUTABLES", "DirectoryBackend", "MAX_DIGEST_BYTES", "MAX_OUTPUT_BYTES", "MAX_READ_BYTES", "executable_allowed"]

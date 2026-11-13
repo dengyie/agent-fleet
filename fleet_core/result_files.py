@@ -1,0 +1,365 @@
+"""Bounded, allowlisted task-result file snapshots.
+
+Runner collects a small set of text files from the disposable worktree and
+attaches them to ``POST /api/commands/<id>/result``. Hub re-validates the same
+rules, stores the snapshot locally, and serves ``GET /api/tasks/<id>/files/...``
+without reverse-connecting the runner.
+
+Rules (fail closed):
+
+- relative POSIX path only; no ``..``, absolute, backslash, empty, or ``//``;
+- depth / name / suffix allowlist;
+- secret-looking names rejected (``.env``, ``id_rsa``, ``credentials``, ...);
+- symlink / NUL / non-UTF8 skipped at collection time;
+- per-file byte + line caps, per-result file-count cap;
+- content redacted with the session redactor (passthrough off);
+- operator read is rate-limited by the Hub service (see ``MAX_BYTES_PER_WINDOW``).
+"""
+from __future__ import annotations
+
+import os
+import re
+import stat
+import uuid
+from pathlib import Path
+from typing import Any, Iterable
+
+from fleet_core.task_result import (
+    MAX_DIFF_PATCH, MAX_TEST_SUMMARY, PatchError, TestSummaryError,
+    bound_patch, normalize_test_summary,
+)
+from fleet_core.session.redact import RedactionReport, Redactor
+
+MAX_FILES = 16
+MAX_FILE_BYTES = 16384
+MAX_FILE_LINES = 400
+MAX_DEPTH = 4
+MAX_NAME = 64
+MAX_BYTES_PER_WINDOW = 1048576  # 1MB
+READ_WINDOW_S = 60.0
+TEST_RESULT_NAMES = ("test-results.json", "test_results.json")
+
+ALLOWED_SUFFIXES = (
+    ".py", ".md", ".txt", ".json", ".yml", ".yaml", ".toml",
+    ".rst", ".ini", ".cfg", ".js", ".ts", ".css", ".html", ".sh",
+)
+
+_FORBIDDEN_NAMES = frozenset({
+    ".env", ".netrc", ".npmrc", ".pypirc",
+    "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+    "credentials", "credentials.json", "credential",
+    "secrets", "secrets.json", "secret",
+    "authorized_keys", "known_hosts",
+})
+
+_FORBIDDEN_PARTS = (
+    ".ssh", "id_rsa", "id_ed25519", "credentials", "credential",
+    ".netrc", "secret", "token", "passwd", ".aws",
+)
+
+
+class PathRejected(ValueError):
+    """Path failed the allowlist. Public callers must not echo the raw path."""
+
+
+def normalize_path(raw: Any) -> str:
+    """Return a relative POSIX path or raise :class:`PathRejected`."""
+    if not isinstance(raw, str) or not raw or raw in (".", ".."):
+        raise PathRejected("rejected")
+    if "\\" in raw or "//" in raw or raw.startswith("/") or raw.startswith("~"):
+        raise PathRejected("rejected")
+    parts = raw.split("/")
+    if len(parts) > MAX_DEPTH:
+        raise PathRejected("rejected")
+    for part in parts:
+        if not part or part in (".", "..") or len(part) > MAX_NAME:
+            raise PathRejected("rejected")
+        lowered = part.lower()
+        if lowered in _FORBIDDEN_NAMES:
+            raise PathRejected("rejected")
+        if part.startswith("."):
+            raise PathRejected("rejected")
+        if any(token in lowered for token in _FORBIDDEN_PARTS):
+            raise PathRejected("rejected")
+    lowered_path = raw.lower()
+    if not any(lowered_path.endswith(suffix) for suffix in ALLOWED_SUFFIXES):
+        raise PathRejected("rejected")
+    return "/".join(parts)
+
+
+def bound_content(
+    text: str,
+    max_bytes: int = MAX_FILE_BYTES,
+    max_lines: int = MAX_FILE_LINES,
+) -> tuple[str, bool]:
+    """Truncate ``text`` to ``max_lines`` then ``max_bytes``. Never raises."""
+    if not isinstance(text, str):
+        text = str(text)
+    truncated = False
+    lines = text.splitlines(keepends=True)
+    if len(lines) > max_lines:
+        text = "".join(lines[:max_lines])
+        truncated = True
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text, truncated
+    cut = encoded[:max_bytes]
+    while cut:
+        try:
+            return cut.decode("utf-8"), True
+        except UnicodeDecodeError:
+            cut = cut[:-1]
+    return "", True
+
+
+def redact_patch(text: str, max_bytes: int = MAX_DIFF_PATCH) -> tuple[str, bool]:
+    """Redact + bound a unified diff. Empty input stays empty."""
+    if not isinstance(text, str):
+        raise PatchError("invalid_diff_patch")
+    if not text:
+        return "", False
+    # /dev/null is Git syntax for an added/deleted file, not a private path.
+    # Protect only exact diff headers, retaining whole-text secret redaction
+    # (including multiline private keys). The marker never survives output.
+    marker = "fleet_diff_null_" + uuid.uuid4().hex
+    protected = re.sub(r"(?m)^(---|\+\+\+) /dev/null$", lambda m: m[1] + " " + marker, text)
+    redacted, report = redact_content(protected)
+    redacted = redacted.replace(marker, "/dev/null")
+    redacted, truncated = bound_patch(redacted, max_bytes)
+    return redacted, truncated or report.replaced > 0
+
+
+def _read_summary_file(path: Path) -> bytes | None:
+    try:
+        original = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise TestSummaryError("test_summary_read") from exc
+    if not stat.S_ISREG(original.st_mode):
+        return None
+    if original.st_size > MAX_TEST_SUMMARY:
+        raise TestSummaryError("test_summary_too_large")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (original.st_dev, original.st_ino):
+                raise TestSummaryError("test_summary_changed")
+            with open(descriptor, "rb", closefd=False) as stream:
+                body = stream.read(MAX_TEST_SUMMARY + 1)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise TestSummaryError("test_summary_read") from exc
+    if len(body) > MAX_TEST_SUMMARY:
+        raise TestSummaryError("test_summary_too_large")
+    return body
+
+
+def _read_capped(path: Path, limit: int) -> bytes | None:
+    """先 stat 再读：只读普通文件，且最多读 ``limit`` 字节（巨型产物不整份入内存）。"""
+    try:
+        original = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(original.st_mode):
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) \
+        | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (original.st_dev, original.st_ino):
+            return None
+        with open(descriptor, "rb", closefd=False) as stream:
+            return stream.read(limit)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def collect_test_summary(worktree: Path) -> dict[str, Any] | None:
+    """Read bounded regular reports; absent evidence differs from invalid."""
+    for name in TEST_RESULT_NAMES:
+        body = _read_summary_file(Path(worktree) / name)
+        if body is None:
+            continue
+        try:
+            text = body.decode("utf-8")
+        except UnicodeError as exc:
+            raise TestSummaryError("invalid_test_summary") from exc
+        if not text:
+            raise TestSummaryError("invalid_test_summary")
+        return normalize_test_summary(text)
+    return None
+
+
+def redact_content(text: str) -> tuple[str, RedactionReport]:
+    """Redact secret sigils in file text. Original never appears in the report."""
+    if not isinstance(text, str):
+        text = str(text)
+    redactor = Redactor(passthrough=False)
+    sanitized, report = redactor.redact_event({"payload": {"body": text}})
+    payload = sanitized.get("payload") if isinstance(sanitized, dict) else None
+    body = payload.get("body") if isinstance(payload, dict) else text
+    if not isinstance(body, str):
+        body = str(body)
+    return body, report
+
+
+def _record(path: str, content: str, truncated: bool, redacted: bool) -> dict[str, Any]:
+    return {
+        "path": path,
+        "content": content,
+        "truncated": bool(truncated),
+        "redacted": bool(redacted),
+        "bytes": len(content.encode("utf-8")),
+    }
+
+
+def sanitize_files(files: Any, *, max_files: int = MAX_FILES) -> list[dict[str, Any]]:
+    """Re-validate a runner-supplied file list. Unknown/unsafe entries drop out."""
+    if not isinstance(files, list):
+        return []
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in files:
+        if len(out) >= max_files:
+            break
+        if not isinstance(item, dict):
+            continue
+        try:
+            path = normalize_path(item.get("path"))
+        except PathRejected:
+            continue
+        if path in seen:
+            continue
+        content = item.get("content")
+        if not isinstance(content, str) or "\x00" in content:
+            continue
+        redacted_text, report = redact_content(content)
+        bounded, truncated = bound_content(redacted_text)
+        seen.add(path)
+        out.append(_record(path, bounded, truncated, report.replaced > 0))
+    return out
+
+
+def collect_result_files(
+    worktree: Path,
+    max_files: int = MAX_FILES,
+) -> list[dict[str, Any]]:
+    """Walk a worktree and return a bounded, redacted snapshot (no symlinks)."""
+    root = Path(worktree)
+    try:
+        root = root.resolve()
+    except OSError:
+        return []
+    if not root.is_dir():
+        return []
+    found: list[dict[str, Any]] = []
+    try:
+        candidates: Iterable[Path] = sorted(root.rglob("*"))
+    except OSError:
+        return []
+    for path in candidates:
+        if len(found) >= max_files:
+            break
+        try:
+            if not path.is_file() or path.is_symlink():
+                continue
+        except OSError:
+            continue
+        if ".git" in path.parts:
+            continue
+        try:
+            rel = path.relative_to(root).as_posix()
+            norm = normalize_path(rel)
+        except (PathRejected, ValueError):
+            continue
+        raw = _read_capped(path, MAX_FILE_BYTES * 4 + 1)
+        if raw is None:
+            continue
+        if b"\x00" in raw:
+            continue
+        cut = len(raw) > MAX_FILE_BYTES * 4
+        if cut:
+            raw = raw[:MAX_FILE_BYTES]
+        text = _decode_utf8_prefix(raw, cut)
+        if text is None:
+            continue
+        redacted_text, report = redact_content(text)
+        bounded, truncated = bound_content(redacted_text)
+        found.append(_record(norm, bounded, truncated or cut,
+                             report.replaced > 0))
+    return found
+
+
+def _decode_utf8_prefix(raw: bytes, cut: bool) -> str | None:
+    """Decode ``raw`` as UTF-8; ``None`` for a non-UTF-8 (binary) file.
+
+    When ``raw`` is a byte-truncated prefix (``cut``) the slice may end in
+    the middle of a multi-byte character: drop only that incomplete tail
+    (at most 3 bytes) instead of rejecting the whole file.
+    """
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        if not cut or exc.start < len(raw) - 3:
+            return None
+        try:
+            return raw[:exc.start].decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+
+
+def public_file_meta(item: dict[str, Any]) -> dict[str, Any]:
+    """List-row DTO: path + bounds flags, never the body."""
+    return {
+        "path": item.get("path", ""),
+        "bytes": int(item.get("bytes") or 0),
+        "truncated": bool(item.get("truncated")),
+        "redacted": bool(item.get("redacted")),
+    }
+
+
+def public_file(item: dict[str, Any]) -> dict[str, Any]:
+    """Single-file DTO for the operator read surface."""
+    content = item.get("content")
+    if not isinstance(content, str):
+        content = ""
+    content, truncated = bound_content(content)
+    return {
+        "path": item.get("path", ""),
+        "content": content,
+        "bytes": int(item.get("bytes") or len(content.encode("utf-8"))),
+        "truncated": bool(item.get("truncated")) or truncated,
+        "redacted": bool(item.get("redacted")),
+    }
+
+
+__all__ = [
+    "ALLOWED_SUFFIXES",
+    "MAX_DEPTH",
+    "MAX_FILE_BYTES",
+    "MAX_FILE_LINES",
+    "MAX_FILES",
+    "MAX_BYTES_PER_WINDOW",
+    "PathRejected",
+    "READ_WINDOW_S",
+    "bound_content",
+    "collect_result_files",
+    "collect_test_summary",
+    "normalize_path",
+    "normalize_test_summary",
+    "redact_patch",
+    "public_file",
+    "public_file_meta",
+    "redact_content",
+    "sanitize_files",
+]

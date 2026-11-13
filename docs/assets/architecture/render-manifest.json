@@ -1,0 +1,62 @@
+{
+  "source": "docs/visual-architecture.md",
+  "mermaid": "12.3.0",
+  "playwright": "1.64.1",
+  "browser": "156.0.8078.80",
+  "diagrams": [
+    {
+      "name": "system-topology",
+      "source_sha256": "6c1fea5f0c5c9f0b8152727dc889bd46b6c4ab1e9731ced0966bdf429cd347eb",
+      "svg_sha256": "1a932ccfba39d0c2eb6034cd62de47479ddee667b76cc869725d41636385b1a0",
+      "png_sha256": "5a0591207e4203826bfb23a9ca4d0203dba57a9b4df7448398e67d90d43246f6",
+      "svg_width": 773,
+      "svg_height": 1089,
+      "png_scale": 2
+    },
+    {
+      "name": "data-control-planes",
+      "source_sha256": "c1710080c561614a5a3b1a33b91e81252134ed4557eb3eb02d66e7933caabf4b",
+      "svg_sha256": "8abbce0f75f4e250bb883e75396a2054a2202b410302139cbcefba5402f90f61",
+      "png_sha256": "0ad310d0cb9373e1610d9bee4da0e644d61b07c186e72c0afa76f1cebe87a2af",
+      "svg_width": 696,
+      "svg_height": 595,
+      "png_scale": 2
+    },
+    {
+      "name": "task-attempt-states",
+      "source_sha256": "2501b2b3e2668a7ca3142f01c4e3715919c8c4a503414cf33108f23346257ded",
+      "svg_sha256": "ecacba1f0ecacbffc875d70188071926bf131a39cb3291d58074ded2b0e68194",
+      "png_sha256": "993145979c20eaa3e8b31268ac1938a5d2b149eb4d8a10f3d870968af72726f1",
+      "svg_width": 582,
+      "svg_height": 913,
+      "png_scale": 2
+    },
+    {
+      "name": "transcript-identity",
+      "source_sha256": "ce4b2d451f0dd6b5006684e0d1b0d853fa534b9b0f4e13ff11cb67019657e056",
+      "svg_sha256": "0d0df68498454343027e6a5425c3eee2d0cfeabb370c4be206a2ddb4d576211c",
+      "png_sha256": "1c36ddd93448263593286912b80b9750214a4f212d306285be3f1afc684732b2",
+      "svg_width": 536,
+      "svg_height": 1650,
+      "png_scale": 2
+    },
+    {
+      "name": "scheduler-lifecycle",
+      "source_sha256": "0d60b94a94771af89424c873ed5bfea88ae71c65efac2fc9117aa496c4d231f5",
+      "svg_sha256": "9b3f684e7cf49fe62fced936c7bac81c14fd1b25b75536930bb92ef57f7900d3",
+      "png_sha256": "845c11d1b0ce8555a4e6d9a613cfe6ab34216cbcfb30a8385c1a68acec17da91",
+      "svg_width": 1019,
+      "svg_height": 1187,
+      "png_scale": 2
+    },
+    {
+      "name": "release-verification",
+      "source_sha256": "157f9cd61edc646e762cbf869599975b73f4a4001ab0cba6e7c29078183a3ebf",
+      "svg_sha256": "54b94782b6939a6462ac73e0fb8937a7069d947d29114e96d97ca880b76f33a3",
+      "png_sha256": "b45338c6705a47fcdfc4943926143307b99fe8beb31d1fe21c22a5c62e5d2db0",
+      "svg_width": 360,
+      "svg_height": 1548,
+      "png_scale": 2
+    }
+  ]
+}

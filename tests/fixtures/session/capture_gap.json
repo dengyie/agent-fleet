@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "event_id": "evt_f1_capture_gap",
+  "stream_id": "stream_golden_1",
+  "machine_id": "host-golden-1",
+  "session_id": "sess_golden_1",
+  "attempt_id": "att_golden_1",
+  "process_group_id": "grp_golden_1",
+  "sequence": 25,
+  "kind": "capture_gap",
+  "capture_quality": "structured",
+  "source": "log_follow",
+  "emitted_at": "2026-08-26T00:05:00+00:00",
+  "payload": {
+    "start_sequence": 22,
+    "end_sequence": 24,
+    "reason": "structured stream temporarily unavailable",
+    "quality": "best_effort"
+  },
+  "redaction": {
+    "state": "none",
+    "uncertain": false,
+    "rules": []
+  }
+}

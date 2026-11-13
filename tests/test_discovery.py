@@ -1,0 +1,565 @@
+"""Task 1 tests: pure-local agent process discovery -> stable Instance metadata.
+
+These tests pin the Task 1 contract from the agent-discovery-adoption plan:
+
+- ``discover_instances()`` adapts process rows into frozen ``Instance`` values
+  and returns them stably sorted by ``(pid, started_at)``;
+- each bad row is skipped individually and never poisons sibling rows;
+- a whole-``ps`` failure yields an empty list (callers bucket it as the fixed
+  ``discovery_error`` code), never an exception;
+- family classification is bounded to ``OBSERVABLE_AGENT_TYPES`` only;
+- ``attachable`` comes from same-user + native path readability.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+
+import pytest
+
+from tools.probe import discovery
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ps timezone boundary")
+def test_process_start_time_is_utc_under_non_utc_parent_timezone():
+    import datetime
+    import os
+    import subprocess
+    import sys
+
+    code = """import datetime,json,os
+from tools.probe import discovery
+observed=discovery._start_map(discovery._run_ps(['-p',str(os.getpid()),'-o','pid=,lstart=']))[os.getpid()]
+print(json.dumps({'observed':observed,'now':datetime.datetime.now(datetime.timezone.utc).isoformat()}))
+"""
+    env = dict(os.environ, TZ='Asia/Singapore')
+    result = subprocess.run([sys.executable, '-c', code], env=env,
+                            capture_output=True, text=True, check=True, timeout=15)
+    data = json.loads(result.stdout)
+    observed = datetime.datetime.fromisoformat(data['observed'].replace('Z', '+00:00'))
+    now = datetime.datetime.fromisoformat(data['now'])
+    assert 0 <= (now - observed).total_seconds() < 15
+
+
+def test_ps_uses_utc_at_collection_boundary(monkeypatch):
+    captured = {}
+
+    def run(argv, **kwargs):
+        captured.update(kwargs)
+        return type('Result', (), {'returncode': 0, 'stdout': b''})()
+
+    monkeypatch.setattr(discovery, '_run_local_bounded', run)
+    discovery._run_ps(['-eo', 'pid=,lstart='])
+    assert captured['env']['TZ'] == 'UTC'
+    assert captured['env']['LC_ALL'] == 'C'
+
+
+def test_discover_instances_returns_identity(monkeypatch):
+    monkeypatch.setattr(discovery, "enumerate_process_rows", lambda: [
+        discovery.ProcRow(
+            user="mango", pid=321, pgid=320,
+            exe_path="/usr/local/bin/codex", cmdline="codex --resume abc",
+            started_at="2026-08-30T00:00:01Z",
+        )
+    ])
+    monkeypatch.setattr(discovery, "native_path_for", lambda row: None)
+    monkeypatch.setattr(discovery, "can_attach", lambda row, native: True)
+    assert discovery.discover_instances() == [discovery.Instance(
+        321, 320, "/usr/local/bin/codex", "codex --resume abc", "codex",
+        None, "2026-08-30T00:00:01Z", True,
+    )]
+
+
+def test_bad_row_does_not_poison_other_rows(monkeypatch):
+    monkeypatch.setattr(discovery, "enumerate_process_rows", lambda: [
+        object(), discovery.ProcRow(
+            user="mango", pid=9, pgid=9, exe_path="/bin/hermes",
+            cmdline="hermes", started_at="2026-08-30T00:00:02Z")])
+    monkeypatch.setattr(discovery, "native_path_for", lambda row: None)
+    monkeypatch.setattr(discovery, "can_attach", lambda row, native: True)
+    assert [item.pid for item in discovery.discover_instances()] == [9]
+
+
+def test_results_are_sorted_by_pid_then_started_at(monkeypatch):
+    monkeypatch.setattr(discovery, "enumerate_process_rows", lambda: [
+        discovery.ProcRow("u", 30, 30, "/bin/codex", "codex", "2026-08-30T00:03:00Z"),
+        discovery.ProcRow("u", 10, 10, "/bin/hermes", "hermes", "2026-08-30T00:01:00Z"),
+        discovery.ProcRow("u", 12, 12, "/bin/codex", "codex", "2026-08-30T00:00:00Z"),
+        discovery.ProcRow("u", 10, 10, "/bin/opencode", "opencode", "2026-08-30T00:02:00Z"),
+    ])
+    monkeypatch.setattr(discovery, "native_path_for", lambda row: None)
+    monkeypatch.setattr(discovery, "can_attach", lambda row, native: True)
+    got = [(i.pid, i.started_at) for i in discovery.discover_instances()]
+    assert got == sorted(got)
+    assert got[0] == (10, "2026-08-30T00:01:00Z")
+    assert got[1] == (10, "2026-08-30T00:02:00Z")
+    assert got[-1] == (30, "2026-08-30T00:03:00Z")
+
+
+def test_ps_command_failure_returns_empty_list(monkeypatch):
+    def _boom():
+        raise OSError("ps missing")
+    monkeypatch.setattr(discovery, "enumerate_process_rows", _boom)
+    assert discovery.discover_instances() == []
+    assert discovery.last_discovery_error == discovery.DISCOVERY_ERROR_CODE
+
+
+def test_powershell_json_preserves_unicode_command_and_output(monkeypatch):
+    payload = [{"Name": "codex.exe", "CommandLine": "codex --resume 測試"}]
+    captured = {}
+
+    class Result:
+        returncode = 0
+        stdout = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    monkeypatch.setattr(discovery.os, "name", "nt")
+    monkeypatch.setattr(discovery.shutil, "which", lambda _: "powershell.exe")
+
+    def run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return Result()
+
+    monkeypatch.setattr(discovery, "_run_local_bounded", run)
+    assert discovery._run_powershell_json("Write-Output '測試'") == payload
+    assert captured["argv"][-2] == "-EncodedCommand"
+    assert base64.b64decode(captured["argv"][-1]).decode("utf-16le") == "Write-Output '測試'"
+    assert captured["kwargs"]["timeout"] == discovery.POWERSHELL_TIMEOUT_S
+
+
+def test_non_agent_rows_are_filtered_out(monkeypatch):
+    monkeypatch.setattr(discovery, "enumerate_process_rows", lambda: [
+        discovery.ProcRow("root", 1, 1, "/sbin/launchd", "launchd", "2026-08-30T00:00:00Z"),
+        discovery.ProcRow("root", 190, 190, "/usr/sbin/sshd", "sshd", "2026-08-30T00:00:00Z"),
+    ])
+    monkeypatch.setattr(discovery, "native_path_for", lambda row: None)
+    monkeypatch.setattr(discovery, "can_attach", lambda row, native: True)
+    assert discovery.discover_instances() == []
+
+
+def test_family_classification_is_bounded_to_observable_types():
+    assert set(discovery.OBSERVABLE_AGENT_TYPES) == {
+        "codex", "claude_code", "hermes", "pi", "zcode", "generic"}
+    cases = {
+        "/usr/local/bin/codex": "codex",
+        "/opt/homebrew/bin/codex.js": "codex",
+        "/usr/bin/claude": "claude_code",
+        "/usr/local/bin/hermes": "hermes",
+        "/opt/homebrew/bin/pi": "pi",
+        "/usr/local/bin/zcode": "zcode",
+        "/usr/bin/opencode": "generic",
+        "/tmp/fleetdoos/aider": "generic",
+    }
+    for path, expected in cases.items():
+        assert discovery.classify_family(path, "ignored") == expected
+    assert discovery.classify_family("/usr/bin/sshd", "sshd") is None
+
+
+def test_zcode_script_cli_classified_via_second_argv_token():
+    # 桌面版跑法：exe 是 node，家族身份只在 argv[1] 的 basename（zcode.cjs）。
+    # 路径分隔符与被探测机器一致（discovery 跑在 agent 本机）；
+    # 测试用 / 保证跨平台 basename 语义一致。
+    assert discovery.classify_family(
+        "/usr/bin/node",
+        "node F:/programe/ZCode/resources/glm/zcode.cjs -p hi",
+    ) == "zcode"
+    assert discovery.classify_family(
+        "/usr/local/bin/node", "node /opt/cli/zcode.cjs --version") == "zcode"
+    # WMI/引号保留的含空格路径（Windows 桌面版安装位）：剥引号后仍可分类
+    assert discovery.classify_family(
+        "/usr/bin/node",
+        'node "F:/programe/ZCode/resources/glm/zcode.cjs" -p hi',
+    ) == "zcode"
+    # 引号内含真实空格（"C:\Program Files\..."）：tokenize 必须尊重引号内
+    # 空白，不得在第一个空格处截断
+    assert discovery.classify_family(
+        "/usr/bin/node",
+        r'node "C:\Program Files\ZCode\resources\glm\zcode.cjs" -p hi',
+    ) == "zcode"
+    # 反斜杠分隔符同样命中（跨平台 basename 语义）；raw string 避免无效转义
+    assert discovery.classify_family(
+        "/usr/bin/node",
+        r'node "F:\programe\ZCode\resources\glm\zcode.cjs" -p hi',
+    ) == "zcode"
+    # 未闭合引号宽容退化：不崩溃；退化方向是不识别而非误分类（尾部参数
+    # 会留在 token 里导致 basename 不精确命中，None 是安全答案）
+    assert discovery.classify_family(
+        "/usr/bin/node",
+        'node "/opt/cli/zcode.cjs -p hi',
+    ) is None
+    # node 跑非家族脚本绝不误分类
+    assert discovery.classify_family(
+        "/usr/bin/node", "node /opt/server/app.cjs serve") is None
+    # argv[1] 必须精确 basename：同前缀的别的脚本不算
+    assert discovery.classify_family(
+        "/usr/bin/node", "node /opt/cli/zcodeUtils.cjs run") is None
+
+
+def test_pi_basename_never_matches_as_substring():
+    # pi 只能走精确 basename:可执行名是 pip/pipenv/pil 时绝不分类为 pi。
+    assert discovery.classify_family("/usr/bin/pip", "pip install x") is None
+    assert discovery.classify_family("/usr/bin/pipenv", "pipenv run") is None
+    assert discovery.classify_family("/usr/bin/pil", "pil") is None
+
+
+def test_windows_process_rows_parse_agent_processes_after_narrow_owner_filter(monkeypatch):
+    captured = {}
+    payload = [
+        {
+            "User": "mango", "ProcessId": 42, "ParentProcessId": 1,
+            "ExecutablePath": r"C:\Users\mango\AppData\Local\OpenAI\Codex\codex.exe",
+            "CommandLine": r"C:\Users\mango\AppData\Local\OpenAI\Codex\codex.exe app-server",
+            "Name": "codex.exe", "CreationUtc": "2026-10-19T01:02:03Z",
+        },
+        {
+            "User": "mango", "ProcessId": 43, "ParentProcessId": 2,
+            "ExecutablePath": r"F:\programe\ZCode\ZCode.exe",
+            "CommandLine": r"F:\programe\ZCode\ZCode.exe F:\programe\ZCode\resources\glm\zcode.cjs app-server --stdio",
+            "Name": "ZCode.exe", "CreationUtc": "2026-10-19T01:02:04Z",
+        },
+    ]
+
+    def run_script(script):
+        captured["script"] = script
+        return payload
+
+    monkeypatch.setattr(discovery.os, "name", "nt")
+    monkeypatch.setattr(discovery, "_run_powershell_json", run_script)
+    rows = discovery.enumerate_process_rows()
+
+    assert [(row.pid, row.user, row.comm) for row in rows] == [
+        (42, "mango", "codex.exe"), (43, "mango", "ZCode.exe")]
+    script = captured["script"]
+    assert script.index("Where-Object") < script.index("Invoke-CimMethod")
+    assert "GetOwner" in script
+    assert "AGENT_FLEET_LOCAL_USER" not in script
+    assert "zcode\\.cjs" in script
+    assert "($interpreter -and $script_cli)" in script
+
+
+def test_windows_process_query_timeout_is_reported_as_discovery_error(monkeypatch):
+    monkeypatch.setattr(discovery.os, "name", "nt")
+    monkeypatch.setattr(discovery, "_run_powershell_json", lambda script: None)
+    assert discovery.discover_instances() == []
+    assert discovery.last_discovery_error == discovery.DISCOVERY_ERROR_CODE
+
+
+def test_can_attach_requires_same_user_and_readable_native(monkeypatch):
+    from tools.probe import discovery as d
+    monkeypatch.setattr(d, "current_user", lambda: "mango")
+    import os
+    row = d.ProcRow("mango", 1, 1, "/bin/codex", "codex", "2026-08-30T00:00:00Z")
+    assert d.can_attach(row, None) is True
+    assert d.can_attach(row, "") is True
+    row_other = d.ProcRow("root", 1, 1, "/bin/codex", "codex", "2026-08-30T00:00:00Z")
+    assert d.can_attach(row_other, None) is False
+    with monkeypatch.context() as m:
+        m.setattr(os, "access", lambda p, mode: False)
+        assert d.can_attach(row, "/no/read") is False
+
+
+def test_cmdline_truncated_only_at_schema_boundary(monkeypatch):
+    long_cmd = "codex" + " x" * 500
+    monkeypatch.setattr(discovery, "enumerate_process_rows", lambda: [
+        discovery.ProcRow("mango", 5, 5, "/bin/codex", long_cmd,
+                          "2026-08-30T00:00:00Z")])
+    monkeypatch.setattr(discovery, "native_path_for", lambda row: None)
+    monkeypatch.setattr(discovery, "can_attach", lambda row, native: True)
+    got = discovery.discover_instances()
+    assert len(got) == 1
+    assert len(got[0].cmdline) <= discovery.MAX_CMDLINE_CHARS
+
+def test_codex_native_path_finds_nested_rollout(tmp_path, monkeypatch):
+    """An unqualified Codex process cannot be assigned a rollout by mtime."""
+    import os
+    from tools.probe import discovery as d
+    day = tmp_path / "2026" / "09" / "03"
+    day.mkdir(parents=True)
+    old = day / "rollout-2026-09-03T01-00-00-a.jsonl"
+    old.write_text("{}\n")
+    new = day / "rollout-2026-09-03T07-00-00-b.jsonl"
+    new.write_text("{}\n")
+    os.utime(old, (1000, 1000))
+    os.utime(new, (2000, 2000))
+    monkeypatch.setattr(d.os.path, "expanduser",
+                        lambda p: str(tmp_path) if p == "~/.codex/sessions"
+                        else p)
+    got = d._codex_native_path("codex app-server")
+    assert got is None
+
+
+def test_codex_native_path_uses_explicit_resume_id_in_nested_layout(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    day = tmp_path / "2026" / "09" / "03"
+    day.mkdir(parents=True)
+    expected = day / "session-current.jsonl"
+    expected.write_text("{}\n", encoding="utf-8")
+    (day / "session-old.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda path: str(tmp_path) if path == "~/.codex/sessions" else path,
+    )
+
+    assert d._codex_native_path(
+        "codex exec resume --json session-current prompt"
+    ) == str(expected)
+
+
+def test_codex_native_path_rejects_conflicting_resume_flags(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    root = tmp_path / "codex"
+    root.mkdir()
+    (root / "session-a.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda path: str(root) if path == "~/.codex/sessions" else path,
+    )
+
+    assert d._codex_native_path(
+        "codex exec resume --resume session-a --resume session-b prompt"
+    ) is None
+
+
+def test_codex_native_path_rejects_conflicting_resume_forms(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    root = tmp_path / "codex"
+    root.mkdir()
+    (root / "session-a.jsonl").write_text("{}\n", encoding="utf-8")
+    (root / "session-b.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda path: str(root) if path == "~/.codex/sessions" else path,
+    )
+
+    assert d._codex_native_path(
+        "codex exec resume session-a --resume session-b prompt"
+    ) is None
+
+
+def test_pi_native_path_uses_explicit_session_path_only(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    root = tmp_path / "pi"
+    root.mkdir()
+    current = root / "current.jsonl"
+    current.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda path: str(root) if path == "~/.pi/agent/sessions" else path,
+    )
+
+    assert d._pi_native_path(f"pi --session {current} prompt") == str(current)
+    assert d._pi_native_path("pi --session-id current prompt") == str(current)
+    assert d._pi_native_path(
+        f"pi --session {current} --session-id other prompt"
+    ) is None
+
+
+@pytest.mark.parametrize(("family", "exe", "root_name"), [
+    ("codex", "/opt/codex", "~/.codex/sessions"),
+    ("pi", "/opt/pi", "~/.pi/agent/sessions"),
+    ("zcode", "/opt/zcode", "~/.zcode/cli/rollout"),
+])
+def test_native_path_without_process_identity_fails_closed(
+        tmp_path, monkeypatch, family, exe, root_name):
+    """A directory's newest file is not proof of this process's session."""
+    root = tmp_path / family
+    root.mkdir()
+    (root / "older.jsonl").write_text("{}\n", encoding="utf-8")
+    newest = root / "newest.jsonl"
+    newest.write_text("{}\n", encoding="utf-8")
+    os.utime(newest, (2000, 2000))
+    monkeypatch.setattr(
+        discovery.os.path, "expanduser",
+        lambda path: str(root) if path == root_name else path,
+    )
+
+    row = discovery.ProcRow(
+        user="mango", pid=1, pgid=1, exe_path=exe,
+        cmdline=exe, started_at="2026-11-04T00:00:00Z",
+    )
+    assert discovery.native_path_for(row) is None
+
+
+def test_claude_native_path_uses_explicit_session_id(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    old_session = "7e40a001-b4bf-4f31-b94d-451b24b1eef3"
+    current_session = "e4d96615-0dc1-44ea-8c6d-ea7b5a952a5b"
+    old_project = tmp_path / "C--old-workspace"
+    current_project = tmp_path / "C--current-workspace"
+    old_project.mkdir()
+    current_project.mkdir()
+    old = old_project / f"{old_session}.jsonl"
+    current = current_project / f"{current_session}.jsonl"
+    old.write_text("{}\n", encoding="utf-8")
+    current.write_text("{}\n", encoding="utf-8")
+    os.utime(old, (2000, 2000))
+    os.utime(current, (1000, 1000))
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    cmdline = (
+        r'C:\claude.exe --bare --setting-sources "" '
+        f"--session-id {current_session}"
+    )
+    assert d._claude_native_path(cmdline) == str(current)
+
+
+def test_claude_native_path_without_explicit_identity_fails_closed(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    project = tmp_path / "C--workspace"
+    project.mkdir()
+    newest = project / "7e40a001-b4bf-4f31-b94d-451b24b1eef3.jsonl"
+    newest.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    assert d._claude_native_path(r"C:\claude.exe --bare") is None
+
+
+def test_claude_missing_explicit_session_never_falls_back(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    project = tmp_path / "C--workspace"
+    project.mkdir()
+    unrelated = project / "7e40a001-b4bf-4f31-b94d-451b24b1eef3.jsonl"
+    unrelated.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    missing = "e4d96615-0dc1-44ea-8c6d-ea7b5a952a5b"
+    assert d._claude_native_path(f"claude --session-id {missing}") is None
+
+
+@pytest.mark.parametrize("identity_arg", [
+    "--resume session-current",
+    "--resume=session-current",
+    "-r session-current",
+])
+def test_claude_resume_uses_exact_session(tmp_path, monkeypatch, identity_arg):
+    from tools.probe import discovery as d
+
+    project = tmp_path / "C--workspace"
+    project.mkdir()
+    current = project / "session-current.jsonl"
+    current.write_text("{}\n", encoding="utf-8")
+    (project / "session-old.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    assert d._claude_native_path(f"claude {identity_arg}") == str(current)
+
+
+def test_claude_conflicting_session_flags_fail_closed(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    project = tmp_path / "C--workspace"
+    project.mkdir()
+    (project / "session-new.jsonl").write_text("{}\n", encoding="utf-8")
+    (project / "session-old.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    cmdline = "claude --session-id session-new --resume session-old"
+    assert d._claude_native_path(cmdline) is None
+
+    missing_value = "claude --resume session-old --session-id"
+    assert d._claude_native_path(missing_value) is None
+
+
+def test_claude_duplicate_session_id_fails_closed(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    session_id = "e4d96615-0dc1-44ea-8c6d-ea7b5a952a5b"
+    for name in ("C--workspace-a", "C--workspace-b"):
+        project = tmp_path / name
+        project.mkdir()
+        (project / f"{session_id}.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    assert d._claude_native_path(f"claude --session-id={session_id}") is None
+
+
+def test_claude_native_lookup_has_no_512_file_cap(tmp_path, monkeypatch):
+    # 评审 #6：按已知布局直接定位，超过 512 个文件不再静默失败。
+    from tools.probe import discovery as d
+
+    project = tmp_path / "C--workspace"
+    project.mkdir()
+    for index in range(513):
+        (project / f"session-{index:03d}.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    expected = project / "session-000.jsonl"
+    assert d._claude_native_path("claude --session-id session-000") == str(expected)
+
+
+def test_claude_native_scan_accepts_exact_cap(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    project = tmp_path / "C--workspace"
+    project.mkdir()
+    for index in range(512):
+        (project / f"session-{index:03d}.jsonl").write_text("{}\n", encoding="utf-8")
+    expected = project / "session-511.jsonl"
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    assert d._claude_native_path("claude --session-id session-511") == str(expected)
+
+
+def test_claude_native_lookup_ignores_many_non_transcript_files(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    project = tmp_path / "C--workspace"
+    project.mkdir()
+    (project / "session-current.jsonl").write_text("{}\n", encoding="utf-8")
+    for index in range(513):
+        (project / f"unrelated-{index:03d}.txt").write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    assert d._claude_native_path("claude --session-id session-current") == str(
+        project / "session-current.jsonl")
+
+
+def test_claude_native_lookup_handles_many_project_directories(tmp_path, monkeypatch):
+    from tools.probe import discovery as d
+
+    for index in range(513):
+        (tmp_path / f"C--workspace-{index:03d}").mkdir()
+    target = tmp_path / "C--workspace-000" / "session-current.jsonl"
+    target.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        d.os.path, "expanduser",
+        lambda p: str(tmp_path) if p == "~/.claude/projects" else p,
+    )
+
+    assert d._claude_native_path("claude --session-id session-current") == str(target)

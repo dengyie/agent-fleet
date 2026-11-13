@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "event_id": "evt_f1_quality_changed",
+  "stream_id": "stream_golden_1",
+  "machine_id": "host-golden-1",
+  "session_id": "sess_golden_1",
+  "attempt_id": "att_golden_1",
+  "process_group_id": "grp_golden_1",
+  "sequence": 20,
+  "kind": "capture_quality_changed",
+  "capture_quality": "structured",
+  "source": "hooks",
+  "emitted_at": "2026-08-26T00:04:00+00:00",
+  "payload": {
+    "old_quality": "exact",
+    "new_quality": "structured",
+    "reason": "native transcript ended, hook stream resumed"
+  },
+  "redaction": {
+    "state": "none",
+    "uncertain": false,
+    "rules": []
+  }
+}

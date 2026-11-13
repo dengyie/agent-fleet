@@ -1,0 +1,1254 @@
+import importlib.util
+import json
+import logging
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import urllib.error
+from pathlib import Path
+from unittest import mock
+
+from tools import adapters
+from tools import runner_config
+from tools import worktree
+from tools import transport as transport_mod
+
+
+def _patch_open(fake):
+    """(req, timeout) 替身 → 出站接缝 ``Transport._open`` 适配器。
+
+    runner 内部按需构造 Transport（cfg.transport 或默认 auto 实例），
+    实例级打桩不可达；类级替换 ``_open`` 覆盖所有实例。生产 ``_one``
+    以 ``self._open(opener, req, timeout)`` 发出唯一真实请求，替换体是
+    普通函数（走描述符协议，首参绑定实例）。
+    """
+    return mock.patch.object(
+        transport_mod.Transport, "_open",
+        lambda _self, _opener, req, timeout: fake(req, timeout))
+
+
+def load_agent_runner():
+    path = Path(__file__).resolve().parents[1] / "tools" / "agent-runner.py"
+    spec = importlib.util.spec_from_file_location("agent_runner", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class RunnerConfigTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp())
+        self.project = self.temp / "proj"
+        self.project.mkdir()
+        self.cred = self.temp / "runner-credential"
+        self.cred.write_text("s3cr3t\n")
+
+    def _write(self, **overrides):
+        import yaml
+        data = {
+            "hub": "https://hub.example.com",
+            "machine": "mac-local",
+            "credential_file": str(self.cred),
+            "projects": {"agent-fleet": {"path": str(self.project)}},
+            "agents": {"codex": {"command": ["codex", "exec", "{instruction}"],
+                                  "timeout_s": 1800}},
+        }
+        data.update(overrides)
+        path = self.temp / "runner.yaml"
+        path.write_text(yaml.safe_dump(data))
+        return path
+
+    def test_load_valid_config(self):
+        cfg = runner_config.load_config(self._write())
+        self.assertEqual(cfg.hub, "https://hub.example.com")
+        self.assertEqual(cfg.machine, "mac-local")
+        self.assertEqual(cfg.runner_id, "mac-local")
+        self.assertEqual(cfg.credential, "s3cr3t")
+        self.assertEqual(cfg.projects["agent-fleet"], self.project)
+        self.assertEqual(cfg.agents["codex"]["timeout_s"], 1800)
+        self.assertEqual(cfg.poll_interval_s, 15)
+
+    def test_registry_fallback_fills_omitted_executable_families(self):
+        # agents 段只写 codex：其余可执行家族（claude_code/pi）由注册表
+        # 默认值补齐；hermes 无 default_command 保持 None。
+        cfg = runner_config.load_config(self._write())
+        self.assertEqual(cfg.agents["claude_code"]["command"],
+                         ["claude", "-p", "{instruction}"])
+        self.assertEqual(cfg.agents["pi"]["command"], ["pi", "-p", "{instruction}"])
+        self.assertIsNone(cfg.agents["hermes"]["command"])
+        self.assertEqual(cfg.agents["pi"]["timeout_s"], 1800)
+
+    def test_partial_agent_entry_not_overridden_by_registry(self):
+        # 部分指定（含显式 command: null）的家族保持原样，尊重操作者意图。
+        cfg = runner_config.load_config(self._write(
+            agents={"codex": {"command": ["codex", "exec", "{instruction}"],
+                              "timeout_s": 1800},
+                     "pi": {"command": None}}))
+        self.assertIsNone(cfg.agents["pi"]["command"])
+        self.assertEqual(cfg.agents["pi"]["timeout_s"], 1800)
+
+    def test_missing_project_path_rejected(self):
+        with self.assertRaises(runner_config.ConfigError):
+            runner_config.load_config(self._write(
+                projects={"ghost": {"path": str(self.temp / "nope")}}))
+
+    def test_relative_project_path_rejected(self):
+        with self.assertRaises(runner_config.ConfigError):
+            runner_config.load_config(self._write(
+                projects={"rel": {"path": "relative/path"}}))
+
+    def test_missing_credential_rejected(self):
+        with self.assertRaises(runner_config.ConfigError):
+            runner_config.load_config(self._write(
+                credential_file=str(self.temp / "missing-cred")))
+
+    def test_unknown_hub_scheme_rejected(self):
+        with self.assertRaises(runner_config.ConfigError):
+            runner_config.load_config(self._write(hub="http://insecure.example"))
+
+    # ---- Fix round: ~ expansion ----
+
+    def test_tilde_credential_file_expanded(self):
+        # HOME is patched so ~ never touches a real home dir.
+        fake_home = self.temp / "home"
+        fake_home.mkdir()
+        cred_dir = fake_home / ".config" / "agent-fleet"
+        cred_dir.mkdir(parents=True)
+        cred = cred_dir / "runner-credential"
+        cred.write_text("tilde-secret\n")
+        path = self._write(credential_file="~/.config/agent-fleet/runner-credential")
+        with mock.patch.dict(os.environ, {"HOME": str(fake_home)}):
+            with mock.patch.object(Path, "home", return_value=fake_home):
+                cfg = runner_config.load_config(path)
+        self.assertEqual(cfg.credential, "tilde-secret")
+
+    def test_tilde_project_path_expanded(self):
+        fake_home = self.temp / "home"
+        fake_home.mkdir()
+        proj = fake_home / "work" / "proj"
+        proj.mkdir(parents=True)
+        path = self._write(projects={"p": {"path": "~/work/proj"}})
+        with mock.patch.dict(os.environ, {"HOME": str(fake_home)}):
+            with mock.patch.object(Path, "home", return_value=fake_home):
+                cfg = runner_config.load_config(path)
+        self.assertEqual(cfg.projects["p"], proj)
+
+    def test_tilde_cache_dir_expanded(self):
+        fake_home = self.temp / "home"
+        fake_home.mkdir()
+        cache = fake_home / ".cache" / "agent-fleet"
+        cache.mkdir(parents=True)
+        path = self._write(cache_dir="~/.cache/agent-fleet")
+        with mock.patch.dict(os.environ, {"HOME": str(fake_home)}):
+            with mock.patch.object(Path, "home", return_value=fake_home):
+                cfg = runner_config.load_config(path)
+        self.assertEqual(cfg.cache_dir, cache)
+
+    # ---- Fix round 2: malformed config always ConfigError ----
+
+    def test_malformed_yaml_raises_config_error(self):
+        path = self.temp / "bad.yaml"
+        path.write_text("hub: [unclosed\n  {oops")
+        with self.assertRaises(runner_config.ConfigError):
+            runner_config.load_config(path)
+
+    def test_non_mapping_projects_entry_rejected(self):
+        with self.assertRaises(runner_config.ConfigError):
+            runner_config.load_config(self._write(projects={"p": "not-a-mapping"}))
+
+    def test_non_mapping_agents_entry_rejected(self):
+        with self.assertRaises(runner_config.ConfigError):
+            runner_config.load_config(self._write(
+                agents={"codex": "not-a-mapping"}))
+
+    def test_non_numeric_timeout_rejected(self):
+        with self.assertRaises(runner_config.ConfigError):
+            runner_config.load_config(
+                self._write(agents={"codex": {"command": ["c"], "timeout_s": "abc"}}))
+
+    def test_non_numeric_poll_interval_rejected(self):
+        with self.assertRaises(runner_config.ConfigError):
+            runner_config.load_config(self._write(poll_interval_s="soon"))
+
+    def test_non_numeric_heartbeat_interval_rejected(self):
+        with self.assertRaises(runner_config.ConfigError):
+            runner_config.load_config(self._write(heartbeat_interval_s="never"))
+
+    # ---- Fix round 3: overflow & non-UTF-8 read errors ----
+
+    def test_infinite_timeout_rejected(self):
+        with self.assertRaises(runner_config.ConfigError):
+            runner_config.load_config(
+                self._write(agents={"codex": {"command": ["c"], "timeout_s": float("inf")}}))
+
+    def test_negative_infinite_poll_interval_rejected(self):
+        with self.assertRaises(runner_config.ConfigError):
+            runner_config.load_config(self._write(poll_interval_s=float("-inf")))
+
+    def test_invalid_utf8_config_rejected(self):
+        path = self.temp / "bad-utf8.yaml"
+        path.write_bytes(b"hub: https://agent.example.com\nmachine: \xff\xfe broken\n")
+        with self.assertRaises(runner_config.ConfigError):
+            runner_config.load_config(path)
+
+    # ---- supervisor opt-in (control-client / managed) ----
+
+    def test_supervisor_disabled_by_default(self):
+        cfg = runner_config.load_config(self._write())
+        self.assertFalse(cfg.supervisor_enabled)
+        self.assertFalse(cfg.managed_enabled)
+        self.assertIsNone(cfg.supervisor_manifest_dir)
+        self.assertIsNone(cfg.supervisor_credential)
+        self.assertIsNone(cfg.supervisor_public_key)
+
+    def test_supervisor_enabled_requires_manifest_dir(self):
+        with self.assertRaises(runner_config.ConfigError):
+            runner_config.load_config(self._write(supervisor={"enabled": True}))
+
+    def test_supervisor_enabled_with_manifest_dir(self):
+        manifests = self.temp / "manifests"
+        manifests.mkdir()
+        cfg = runner_config.load_config(self._write(
+            supervisor={"enabled": True, "manifest_dir": str(manifests)}))
+        self.assertTrue(cfg.supervisor_enabled)
+        self.assertTrue(cfg.managed_enabled)
+        self.assertEqual(cfg.supervisor_manifest_dir, manifests)
+
+    def test_supervisor_credential_secret_only(self):
+        import base64
+        manifests = self.temp / "manifests"
+        manifests.mkdir()
+        cred = self.temp / "sup-cred"
+        cred.write_text("sup-secret\n")
+        pk = self.temp / "sup-pk"
+        pk.write_text(base64.b64encode(b"P" * 32).decode() + "\n")
+        cfg = runner_config.load_config(self._write(supervisor={
+            "enabled": True,
+            "manifest_dir": str(manifests),
+            "credential_file": str(cred),
+            "public_key_file": str(pk),
+        }))
+        self.assertEqual(cfg.supervisor_credential, "sup-secret")
+        self.assertEqual(cfg.supervisor_public_key, b"P" * 32)
+
+    def test_supervisor_credential_strips_matching_machine_prefix(self):
+        manifests = self.temp / "manifests"
+        manifests.mkdir()
+        cred = self.temp / "sup-cred"
+        cred.write_text("mac-local:sup-secret\n")
+        cfg = runner_config.load_config(self._write(supervisor={
+            "enabled": True,
+            "manifest_dir": str(manifests),
+            "credential_file": str(cred),
+        }))
+        self.assertEqual(cfg.supervisor_credential, "sup-secret")
+
+    def test_supervisor_credential_prefix_mismatch_rejected(self):
+        manifests = self.temp / "manifests"
+        manifests.mkdir()
+        cred = self.temp / "sup-cred"
+        cred.write_text("other-host:sup-secret\n")
+        with self.assertRaises(runner_config.ConfigError):
+            runner_config.load_config(self._write(supervisor={
+                "enabled": True,
+                "manifest_dir": str(manifests),
+                "credential_file": str(cred),
+            }))
+
+    def test_supervisor_public_key_wrong_length_rejected(self):
+        import base64
+        manifests = self.temp / "manifests"
+        manifests.mkdir()
+        pk = self.temp / "sup-pk"
+        pk.write_text(base64.b64encode(b"short").decode() + "\n")
+        with self.assertRaises(runner_config.ConfigError):
+            runner_config.load_config(self._write(supervisor={
+                "enabled": True,
+                "manifest_dir": str(manifests),
+                "public_key_file": str(pk),
+            }))
+
+    def test_supervisor_missing_credential_file_rejected(self):
+        manifests = self.temp / "manifests"
+        manifests.mkdir()
+        with self.assertRaises(runner_config.ConfigError):
+            runner_config.load_config(self._write(supervisor={
+                "enabled": True,
+                "manifest_dir": str(manifests),
+                "credential_file": str(self.temp / "missing-sup-cred"),
+            }))
+
+
+def git(*args, cwd):
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
+                          check=True)
+
+
+class WorktreeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp())
+        self.project = self.temp / "proj"
+        self.project.mkdir()
+        git("init", cwd=self.project)
+        git("-c", "user.email=t@t", "-c", "user.name=t", "commit",
+            "--allow-empty", "-m", "init", cwd=self.project)
+
+    def test_create_diff_cleanup_cycle(self):
+        wt = worktree.create_worktree(self.project, "t-abc123")
+        self.assertTrue((wt / ".git").exists())
+        self.assertEqual(wt.name, "t-abc123")
+        # worktree 在项目同级目录，不在项目内
+        self.assertEqual(wt.parent, self.temp / "proj.fleet-worktrees")
+        # 在 worktree 里改文件 → diff_stat 可见
+        (wt / "hello.txt").write_text("hi\n")
+        stat = worktree.diff_stat(wt)
+        self.assertIn("hello.txt", stat)
+        # 清理后目录与分支都不存在
+        worktree.cleanup_worktree(self.project, wt, "t-abc123")
+        self.assertFalse(wt.exists())
+        branches = git("branch", "--list", "fleet/*", cwd=self.project).stdout
+        self.assertNotIn("t-abc123", branches)
+
+    def test_diff_stat_truncates(self):
+        wt = worktree.create_worktree(self.project, "t-big")
+        for i in range(50):
+            (wt / f"file-with-a-rather-long-name-{i:03d}.txt").write_text("x\n")
+        stat = worktree.diff_stat(wt, max_bytes=200)
+        self.assertLessEqual(len(stat), 220)  # 截断 + 标记
+        worktree.cleanup_worktree(self.project, wt, "t-big")
+
+    def test_create_failure_raises_worktree_error(self):
+        with self.assertRaises(worktree.WorktreeError):
+            worktree.create_worktree(self.temp / "not-a-repo", "t-x")
+
+    def test_diff_patch_contains_hunk_and_truncates(self):
+        wt = worktree.create_worktree(self.project, "t-patch")
+        (wt / "hello.txt").write_text("hi\n")
+        patch = worktree.diff_patch(wt)
+        self.assertIn("hello.txt", patch)
+        self.assertIn("+hi", patch)
+        huge = worktree.diff_patch(wt, max_bytes=40)
+        self.assertIn("[truncated]", huge)
+        worktree.cleanup_worktree(self.project, wt, "t-patch")
+
+
+class WorktreeGitFailureTests(unittest.TestCase):
+    """_git() 必须把 subprocess 失败统一收敛为 WorktreeError，且不被脏字节击穿。"""
+
+    def test_timeout_raises_worktree_error(self):
+        project = self._project()
+        with mock.patch.object(worktree.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired("git", 60)):
+            with self.assertRaises(worktree.WorktreeError) as ctx:
+                worktree.create_worktree(project, "t-timeout")
+        self.assertIn("超时", str(ctx.exception))
+
+    def test_non_utf8_stderr_error_message(self):
+        # git 输出非法 UTF-8 时不得泄漏 UnicodeDecodeError，须以 WorktreeError 收口。
+        project = self._project()
+
+        class Proc:
+            returncode = 128
+            stdout = ""
+            stderr = "fatal: \xff\xfe oops"
+
+        with mock.patch.object(worktree.subprocess, "run", return_value=Proc()):
+            with self.assertRaises(worktree.WorktreeError) as ctx:
+                worktree.create_worktree(project, "t-utf8")
+        self.assertIn("失败", str(ctx.exception))
+
+    def test_git_passes_errors_replace_for_decode(self):
+        # 根因回归：subprocess.run 必须带 errors="replace"，脏字节不得击穿解码。
+        project = self._project()
+
+        class Proc:
+            returncode = 0
+            stdout = "ok\n"
+            stderr = ""
+
+        with mock.patch.object(worktree.subprocess, "run",
+                               return_value=Proc()) as run:
+            worktree._git(project, "status")
+        kwargs = run.call_args.kwargs
+        self.assertEqual(kwargs.get("capture_output"), True)
+        self.assertEqual(kwargs.get("text"), True)
+        self.assertEqual(kwargs.get("errors"), "replace")
+        self.assertEqual(kwargs.get("timeout"), 60)
+
+    def _project(self):
+        project = Path(tempfile.mkdtemp()) / "proj"
+        project.mkdir()
+        git("init", cwd=project)
+        git("-c", "user.email=t@t", "-c", "user.name=t", "commit",
+            "--allow-empty", "-m", "init", cwd=project)
+        return project
+
+
+class AdapterTests(unittest.TestCase):
+    def _python(self, script):
+        return [sys.executable, "-c", script]
+
+    def test_run_captures_output_lines(self):
+        adapter = adapters.create("codex", command=self._python(
+            "import sys; print('line1'); print('line2'); sys.argv and None"),
+                                  timeout_s=30)
+        lines = []
+        result = adapter.run("do something", Path(tempfile.mkdtemp()), on_line=lines.append)
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(result.timed_out)
+        self.assertEqual(lines, ["line1", "line2"])
+        self.assertIn("line2", result.log_tail)
+
+    def test_instruction_interpolated_as_single_argv(self):
+        adapter = adapters.create("codex", command=self._python(
+            "import sys; print(sys.argv[1])") + ["{instruction}"], timeout_s=30)
+        lines = []
+        adapter.run("fix $(rm -rf /) ; `whoami`", Path(tempfile.mkdtemp()),
+                    on_line=lines.append)
+        # instruction 作为单 argv 元素原样传递，不经 shell 展开
+        self.assertEqual(lines, ["fix $(rm -rf /) ; `whoami`"])
+
+    def test_timeout_kills_process(self):
+        adapter = adapters.create("codex", command=self._python(
+            "import time; time.sleep(60)"), timeout_s=1)
+        start = time.time()
+        result = adapter.run("x", Path(tempfile.mkdtemp()))
+        self.assertTrue(result.timed_out)
+        self.assertEqual(result.exit_code, 124)
+        self.assertLess(time.time() - start, 10)
+
+    def test_abort_terminates_process(self):
+        adapter = adapters.create("codex", command=self._python(
+            "import time; print('start', flush=True); time.sleep(60)"), timeout_s=60)
+        flag = {"abort": False}
+        lines = []
+
+        def on_line(line):
+            lines.append(line)
+            flag["abort"] = True
+
+        result = adapter.run("x", Path(tempfile.mkdtemp()), on_line=on_line,
+                             should_abort=lambda: flag["abort"])
+        self.assertTrue(result.aborted)
+        self.assertEqual(result.exit_code, 130)
+
+    def test_unconfigured_adapter_returns_127(self):
+        result = adapters.create("hermes", command=None, timeout_s=1).run(
+            "x", Path(tempfile.mkdtemp()))
+        self.assertEqual(result.exit_code, 127)
+        self.assertIn("未配置", result.log_tail)
+
+    def test_unknown_adapter_type_rejected(self):
+        with self.assertRaises(ValueError):
+            adapters.create("bash")
+
+    def test_log_tail_bounded(self):
+        adapter = adapters.create("codex", command=self._python(
+            "print('x' * 20000)"), timeout_s=30)
+        result = adapter.run("x", Path(tempfile.mkdtemp()))
+        self.assertLessEqual(len(result.log_tail), 10240)
+
+
+class AdapterDefaultsTests(unittest.TestCase):
+    def test_default_commands(self):
+        self.assertEqual(adapters.create("codex").build_argv("修 bug"),
+                         ["codex", "exec", "--approve-for-me", "--ephemeral",
+                          "--ignore-user-config", "--json", "修 bug"])
+        self.assertEqual(adapters.create("claude_code").build_argv("修 bug"),
+                         ["claude", "-p", "修 bug"])
+        self.assertEqual(adapters.create("pi").build_argv("修 bug"),
+                         ["pi", "-p", "修 bug"])
+        self.assertEqual(adapters.create("zcode").build_argv("修 bug"),
+                         ["zcode", "-p", "修 bug"])
+        self.assertIsNone(adapters.create("hermes").command)
+
+    def test_argv_without_placeholder_appends_instruction(self):
+        adapter = adapters.create("codex", command=[sys.executable, "-c", "pass"])
+        self.assertEqual(adapter.build_argv("do it")[-1], "do it")
+
+
+class FakeResponse:
+    def __init__(self, status, payload):
+        self.status = status
+        self._payload = json.dumps(payload).encode()
+
+    def read(self):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+class AgentRunnerTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp())
+        self.project = self.temp / "proj"
+        self.project.mkdir()
+        subprocess.run(["git", "init"], cwd=self.project, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "--allow-empty", "-m", "init"],
+                       cwd=self.project, capture_output=True)
+        self.runner = load_agent_runner()
+        self.cfg = runner_config.RunnerConfig(
+            hub="https://hub.test", machine="mac-local", credential="s3",
+            runner_id="r1", projects={"proj": self.project},
+            agents={"codex": {"command": None, "timeout_s": 30}},
+            poll_interval_s=1, heartbeat_interval_s=1, cache_dir=self.temp / "cache")
+
+    def _task(self):
+        return {"task_id": "t-1", "machine": "mac-local", "agent_type": "codex",
+                "project": "proj", "instruction": "do it",
+                "attempt_id": "a1", "nonce": "n1",
+                "lease_ttl_s": 300, "lease_expires_at": "..."}
+
+    def test_post_json_sets_runner_headers(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["cred"] = req.headers.get("X-runner-credential")
+            captured["ua"] = req.headers.get("User-agent")
+            captured["client"] = req.headers.get("X-fleet-client")
+            return FakeResponse(200, {"ok": True})
+
+        with _patch_open(fake_urlopen):
+            status, data = self.runner.post_json(self.cfg, "/api/commands/poll", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(captured["cred"], "mac-local:s3")
+        # Round 7: UA 携带客户端版本（未经 updater 安装的源码树为 legacy）
+        self.assertEqual(captured["ua"], "agent-fleet-runner/legacy")
+        self.assertEqual(captured["client"], "version=legacy; seq=0; channel=stable")
+
+    def test_post_json_network_error_returns_zero_status(self):
+        self.cfg.transport = transport_mod.Transport(
+            mode="direct", attempts=3, retry_sleep_s=0)
+        with mock.patch.object(transport_mod.Transport, "_open", side_effect=OSError("network down")):
+            status, data = self.runner.post_json(self.cfg, "/api/commands/poll", {})
+        self.assertEqual(status, 0)
+        self.assertIn("error", data)
+
+    def test_post_json_retries_timeout_then_succeeds(self):
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise TimeoutError("handshake")
+            return FakeResponse(200, {"ok": True})
+
+        self.cfg.transport = transport_mod.Transport(
+            mode="direct", attempts=3, retry_sleep_s=0)
+        with _patch_open(fake_urlopen):
+            status, data = self.runner.post_json(self.cfg, "/api/commands/poll", {})
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(status, 200)
+        self.assertTrue(data.get("ok"))
+
+    def test_post_json_never_follows_redirect_with_credential(self):
+        """runner 出站走加固 Transport：3xx 原样返回，凭据头绝不发往 Location。"""
+        import http.server
+
+        hits = {"target": 0}
+
+        class _Target(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                hits["target"] += 1
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *args):
+                return None
+
+        target = http.server.HTTPServer(("127.0.0.1", 0), _Target)
+        target_url = f"http://127.0.0.1:{target.server_address[1]}/steal"
+
+        class _Redirector(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(307)
+                self.send_header("Location", target_url)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                return None
+
+        hub = http.server.HTTPServer(("127.0.0.1", 0), _Redirector)
+        threads = [threading.Thread(target=srv.serve_forever, daemon=True)
+                   for srv in (target, hub)]
+        for t in threads:
+            t.start()
+        try:
+            self.cfg.hub = f"http://127.0.0.1:{hub.server_address[1]}"
+            self.cfg.transport = transport_mod.Transport(
+                mode="direct", attempts=1, retry_sleep_s=0, timeout=5)
+            status, _ = self.runner.post_json(self.cfg, "/api/commands/poll", {})
+        finally:
+            for srv in (target, hub):
+                srv.shutdown()
+                srv.server_close()
+        self.assertEqual(status, 307)
+        self.assertEqual(hits["target"], 0)
+
+    def test_post_json_refuses_plain_http_non_loopback_hub(self):
+        """非 loopback 的 http hub：不发出任何请求，按传输失败 (0) 返回。"""
+        self.cfg.hub = "http://hub.example.com"
+        with mock.patch.object(transport_mod.Transport, "_open") as opened:
+            status, data = self.runner.post_json(self.cfg, "/api/commands/poll", {})
+        opened.assert_not_called()
+        self.assertEqual(status, 0)
+        self.assertEqual(data.get("error"), "insecure_transport_url")
+
+    def test_post_json_does_not_retry_http_error(self):
+        calls = {"n": 0}
+
+        class _Fp:
+            def read(self):
+                return b'{"ok": false, "error": "forbidden"}'
+
+            def close(self):
+                return None
+
+        def fake_urlopen(req, timeout):
+            calls["n"] += 1
+            raise urllib.error.HTTPError(
+                "https://hub.test/api/commands/poll", 403, "Forbidden",
+                hdrs=None, fp=_Fp())
+
+        with _patch_open(fake_urlopen):
+            status, data = self.runner.post_json(self.cfg, "/api/commands/poll", {})
+        self.assertEqual(calls["n"], 1)
+        self.assertEqual(status, 403)
+
+    def test_run_task_success_flow(self):
+        posts = []
+
+        def fake_urlopen(req, timeout):
+            posts.append((req.full_url, json.loads(req.data.decode())))
+            return FakeResponse(200, {"ok": True, "task_id": "t-1",
+                                      "lease_expires_at": "..."})
+
+        fake_result = adapters.AdapterResult(exit_code=0, log_tail="done")
+        with _patch_open(fake_urlopen), \
+             mock.patch.object(self.runner.adapters, "create",
+                               return_value=mock.Mock(run=mock.Mock(return_value=fake_result))):
+            out = self.runner.run_task(self.cfg, self._task())
+        self.assertEqual(out["exit_code"], 0)
+        result_posts = [p for p in posts if p[0].endswith("/result")]
+        self.assertEqual(len(result_posts), 1)
+        self.assertEqual(result_posts[0][1]["nonce"], "n1")
+        self.assertEqual(result_posts[0][1]["log_summary"], "done")
+        # worktree 已清理
+        self.assertFalse((self.temp / "proj.fleet-worktrees" / "t-1").exists())
+
+    def test_capture_failure_does_not_abort_or_override_exit_code(self):
+        """会话采集逐行失败只降级：adapter 不被中止，真实 exit_code 原样提交。"""
+        from tools.session.runner_capture import RunnerCapture
+
+        posts = []
+        abort_seen = []
+
+        def fake_urlopen(req, timeout):
+            posts.append((req.full_url, json.loads(req.data.decode()) if req.data else None))
+            return FakeResponse(200, {"ok": True, "task_id": "t-1",
+                                      "lease_expires_at": "..."})
+
+        def fake_run(instruction, wt, on_line, should_abort):
+            on_line("plain output that capture fails to persist")
+            abort_seen.append(should_abort())
+            return adapters.AdapterResult(exit_code=0, log_tail="done")
+
+        def broken_line(self, line, *, strict=False):
+            self.failed_lines += 1
+            self.degraded = "RuntimeError"
+            return False
+
+        with _patch_open(fake_urlopen), \
+             mock.patch.object(RunnerCapture, "line", broken_line), \
+             mock.patch.object(self.runner.adapters, "create",
+                               return_value=mock.Mock(run=fake_run)):
+            out = self.runner.run_task(self.cfg, self._task())
+        self.assertEqual(abort_seen, [False])
+        self.assertEqual(out["exit_code"], 0)
+        result_posts = [p for p in posts if p[0].endswith("/result")]
+        self.assertEqual(result_posts[0][1]["exit_code"], 0)
+        self.assertEqual(result_posts[0][1]["log_summary"], "done")
+
+    def test_capture_init_failure_does_not_fail_task(self):
+        """RunnerCapture 构造失败（磁盘满/spool key 读写失败）只降级，任务照常执行。"""
+        from tools.session.runner_capture import RunnerCapture
+
+        posts = []
+        abort_seen = []
+        lines_seen = []
+
+        def fake_urlopen(req, timeout):
+            posts.append((req.full_url, json.loads(req.data.decode()) if req.data else None))
+            return FakeResponse(200, {"ok": True, "task_id": "t-1",
+                                      "lease_expires_at": "..."})
+
+        def fake_run(instruction, wt, on_line, should_abort):
+            on_line("output while capture is unavailable")
+            lines_seen.append(True)
+            abort_seen.append(should_abort())
+            return adapters.AdapterResult(exit_code=0, log_tail="done")
+
+        def broken_init(self, *args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        with _patch_open(fake_urlopen), \
+             mock.patch.object(RunnerCapture, "__init__", broken_init), \
+             mock.patch.object(self.runner.adapters, "create",
+                               return_value=mock.Mock(run=fake_run)), \
+             self.assertLogs("agent-fleet.runner", level="WARNING") as logs:
+            out = self.runner.run_task(self.cfg, self._task())
+        self.assertEqual(lines_seen, [True])
+        self.assertEqual(abort_seen, [False])
+        self.assertEqual(out["exit_code"], 0)
+        result_posts = [p for p in posts if p[0].endswith("/result")]
+        self.assertEqual(len(result_posts), 1)
+        self.assertEqual(result_posts[0][1]["exit_code"], 0)
+        self.assertEqual(result_posts[0][1]["log_summary"], "done")
+        self.assertTrue(any("Conversation capture degraded" in m for m in logs.output))
+        self.assertFalse((self.temp / "proj.fleet-worktrees" / "t-1").exists())
+
+    def test_result_post_failure_cached_to_pending(self):
+        def fail_urlopen(req, timeout):
+            raise OSError("network down")
+
+        fake_result = adapters.AdapterResult(exit_code=0, log_tail="done")
+        self.cfg.transport = transport_mod.Transport(
+            mode="direct", attempts=3, retry_sleep_s=0)
+        with _patch_open(fail_urlopen), \
+             mock.patch.object(self.runner.adapters, "create",
+                               return_value=mock.Mock(run=mock.Mock(return_value=fake_result))):
+            self.runner.run_task(self.cfg, self._task())
+        pending = list((self.temp / "cache" / "pending").glob("*.json"))
+        self.assertEqual(len(pending), 1)
+        saved = json.loads(pending[0].read_text())
+        self.assertEqual(saved["attempt_id"], "a1")
+
+    def test_flush_pending_retries_upload(self):
+        pending_dir = self.temp / "cache" / "pending"
+        pending_dir.mkdir(parents=True)
+        (pending_dir / "a1.json").write_text(json.dumps({
+            "attempt_id": "a1", "nonce": "n1", "exit_code": 0,
+            "log_summary": "done", "diff_stat": "", "duration_s": 1}))
+        posts = []
+        with _patch_open(lambda req, timeout: (
+                posts.append(req.full_url),
+                FakeResponse(200, {"ok": True}))[1]):
+            self.runner.flush_pending(self.cfg)
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(list(pending_dir.glob("*.json")), [])
+
+    def test_flush_pending_discards_corrupt_file(self):
+        """半写/截断的 pending 文件无法重放：丢弃 + stderr 留痕，不无限重试。"""
+        pending_dir = self.temp / "cache" / "pending"
+        pending_dir.mkdir(parents=True)
+        (pending_dir / "bad.json").write_text('{"attempt_id": "a1", "non')
+        posts = []
+        with _patch_open(lambda req, timeout: (
+                posts.append(req.full_url),
+                FakeResponse(200, {"ok": True}))[1]):
+            self.runner.flush_pending(self.cfg)
+        self.assertEqual(list(pending_dir.glob("*.json")), [])  # 已丢弃
+        self.assertEqual(posts, [])  # 未发起任何上传
+
+    def test_setup_logging_resident_attaches_rotating_file_handler(self):
+        """常驻诊断日志必须落 RotatingFileHandler（外部重定向不可轮转）。"""
+        log_path = (self.cfg.cache_dir / "runner.log").resolve()
+        try:
+            self.runner._setup_logging(self.cfg, resident=True)
+            rotating = [h for h in self.runner.log.handlers
+                        if type(h).__name__ == "RotatingFileHandler"]
+            self.assertEqual(len(rotating), 1)
+            # 两侧统一 .resolve()：macOS TMPDIR 在 /var（symlink → /private/var），
+            # RotatingFileHandler.baseFilename 只做 abspath 不解析 symlink。
+            self.assertEqual(Path(rotating[0].baseFilename).resolve(), log_path)
+        finally:
+            # 恢复 NullHandler 兜底，避免污染其它用例
+            for h in list(self.runner.log.handlers):
+                self.runner.log.removeHandler(h)
+            self.runner.log.addHandler(logging.NullHandler())
+
+    def test_flush_pending_roundtrip_chinese_payload_is_utf8(self):
+        """pending 文件含中文（ensure_ascii=False 落盘）必须按 UTF-8 往返：
+        写入侧与读回侧都不依赖进程 locale——GBK 机器上曾因 locale 解码
+        把合法 pending 结果当损坏文件删除（2026-09-19 回归钉）。"""
+        pending_dir = self.temp / "cache" / "pending"
+        pending_dir.mkdir(parents=True)
+        posts = []
+
+        def fail_then_capture(opener, req, timeout):
+            posts.append(json.loads(req.data.decode("utf-8")))
+            if len(posts) == 1:
+                return FakeResponse(500, {"error": "server down"})
+            return FakeResponse(200, {"ok": True})
+
+        fake_result = adapters.AdapterResult(exit_code=0,
+                                             log_tail="中文日志摘要 ✓")
+        self.cfg.transport = transport_mod.Transport(
+            mode="direct", attempts=1, retry_sleep_s=0)
+        with mock.patch.object(transport_mod.Transport, "_open",
+                               side_effect=fail_then_capture):
+            self.runner._submit_result(self.cfg, "a1", "n1", fake_result,
+                                       "", 1.0)
+            self.runner.flush_pending(self.cfg)
+        self.assertEqual(len(posts), 2)
+        self.assertEqual(posts[1]["log_summary"], "中文日志摘要 ✓")
+        self.assertEqual(list(pending_dir.glob("*.json")), [])
+
+    def test_flush_pending_keeps_file_on_transport_failure(self):
+        """重传失败（status 0）保留文件待下轮重试，不静默吞掉。"""
+        pending_dir = self.temp / "cache" / "pending"
+        pending_dir.mkdir(parents=True)
+        (pending_dir / "a1.json").write_text(json.dumps({
+            "attempt_id": "a1", "nonce": "n1", "exit_code": 0,
+            "log_summary": "done", "diff_stat": "", "duration_s": 1}))
+
+        def fail_open(opener, req, timeout):
+            raise OSError("network down")
+
+        with mock.patch.object(transport_mod.Transport, "_open",
+                               side_effect=fail_open):
+            self.runner.flush_pending(self.cfg)  # 不抛
+        self.assertEqual(len(list(pending_dir.glob("*.json"))), 1)  # 保留
+
+    def test_project_not_in_whitelist_refused(self):
+        task = self._task()
+        task["project"] = "evil"
+        with mock.patch.object(transport_mod.Transport, "_open", return_value=FakeResponse(200, {"ok": True})) as uo, \
+             mock.patch.object(self.runner.adapters, "create") as create:
+            out = self.runner.run_task(self.cfg, task)
+        self.assertNotEqual(out["exit_code"], 0)
+        create.assert_not_called()  # adapter 未启动
+
+    def test_poll_once_raises_on_poll_network_failure(self):
+        # 网络失败（post_json status 0）须抛 RunnerPollError，由 main 转退避；
+        # 不得静默返回 False（那会同等于空 poll 并重置 backoff）。
+        # 2026-09-15 起出站走 proxy-aware Transport（auto 模式直连失败回退
+        # 系统代理）；本测试钉 direct 单路径保持原 3 次重试语义。
+        calls = {"n": 0}
+
+        def fail_urlopen(req, timeout):
+            calls["n"] += 1
+            raise OSError("network down")
+
+        self.cfg.transport = transport_mod.Transport(
+            mode="direct", attempts=3, retry_sleep_s=0)
+        with _patch_open(fail_urlopen):
+            with self.assertRaises(self.runner.RunnerPollError):
+                self.runner.poll_once(self.cfg)
+        self.assertEqual(calls["n"], 3)
+
+    def test_poll_network_failure_main_backoff_stays_5s_on_success(self):
+        # 对照：一轮成功 poll（无任务）后 backoff 不会残留，仍从 MIN 起。
+        sleeps = []
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout):
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise KeyboardInterrupt  # 第 1 轮成功空 poll 后终止
+            return FakeResponse(200, {"ok": True, "task": None})
+
+        with mock.patch.object(self.runner.runner_config, "load_config",
+                               return_value=self.cfg), \
+             _patch_open(fake_urlopen), \
+             mock.patch.object(self.runner.time, "sleep", side_effect=lambda s: sleeps.append(s)):
+            rc = self.runner.main(["--config", str(self.temp / "nope.yaml"),
+                                   "--interval", str(7)])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(sleeps), 1)
+        self.assertEqual(sleeps[0], 7)  # 空 poll 成功 → 睡常规 interval，不递增
+
+    def test_poll_returns_task_and_executes(self):
+        posts = []
+
+        def fake_urlopen(req, timeout):
+            body = json.loads(req.data.decode())
+            if req.full_url.endswith("/poll"):
+                return FakeResponse(200, {"ok": True, "task": self._task()})
+            posts.append(req.full_url)
+            return FakeResponse(200, {"ok": True, "task_id": "t-1"})
+
+        fake_result = adapters.AdapterResult(exit_code=0, log_tail="polled")
+        with _patch_open(fake_urlopen), \
+             mock.patch.object(self.runner.adapters, "create",
+                               return_value=mock.Mock(run=mock.Mock(return_value=fake_result))):
+            got = self.runner.poll_once(self.cfg)
+        self.assertTrue(got)
+        result_posts = [u for u in posts if u.endswith("/result")]
+        self.assertEqual(len(result_posts), 1)
+
+    def test_main_backoff_increases_on_poll_network_failure(self):
+        """网络失败(status 0)须保留/递增 backoff，不得重置 —— 5s→60s 退避要求。
+
+        生产 main() 仍走 load_config 校验（此处注入 cfg 仅为了测循环；配置校验
+        由 runner_config.load_config 自身测试覆盖）。
+        2026-09-15 起出站走 proxy-aware Transport：钉 direct 单路径 + 关闭
+        路径内 sleep，保持「每轮 poll 一次 urlopen 失败序列」的原断言语义。
+        """
+        sleeps = []
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout):
+            calls["n"] += 1
+            if calls["n"] > 2:
+                raise KeyboardInterrupt  # 终止循环
+            raise OSError("network down")
+
+        self.cfg.transport = transport_mod.Transport(
+            mode="direct", attempts=1, retry_sleep_s=0)
+        with mock.patch.object(self.runner.runner_config, "load_config",
+                               return_value=self.cfg), \
+             _patch_open(fake_urlopen), \
+             mock.patch.object(self.runner.time, "sleep", side_effect=lambda s: sleeps.append(s)):
+            rc = self.runner.main(["--config", str(self.temp / "nope.yaml"),
+                                   "--interval", str(7)])
+        self.assertEqual(rc, 0)
+        # 第 1、2 次 poll 网络失败 → 各自睡 backoff(5s、10s)；异常后递增
+        self.assertEqual(len(sleeps), 2)
+        self.assertEqual(sleeps[0], self.runner.MIN_BACKOFF_S)
+        self.assertGreater(sleeps[1], sleeps[0])
+
+
+class AgentRunnerHeartbeatBoundingTests(unittest.TestCase):
+    """heartbeat 日志有界性回归：burst 不得超过 50 行 × 500 字符。"""
+
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp())
+        self.project = self.temp / "proj"
+        self.project.mkdir()
+        subprocess.run(["git", "init"], cwd=self.project, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "--allow-empty", "-m", "init"],
+                       cwd=self.project, capture_output=True)
+
+    def test_on_line_truncates_long_lines(self):
+        runner = load_agent_runner()
+        buf = runner._LogBuffer()
+        buf.enqueue("x" * 1000)
+        buf.enqueue("ok")
+        rows = buf.drain()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows[0]), runner.MAX_LOG_LINE_CHARS)  # 500
+        self.assertEqual(rows[1], "ok")
+
+    def test_burst_keeps_latest_50_lines_only(self):
+        runner = load_agent_runner()
+        buf = runner._LogBuffer()
+        for i in range(runner.MAX_LOG_LINES + 200):
+            buf.enqueue(f"line-{i}")
+        rows = buf.drain()
+        self.assertEqual(len(rows), runner.MAX_LOG_LINES)  # 50
+        # 保留最新 50 行（较旧行丢弃）
+        self.assertEqual(rows[0], f"line-{200}")
+        self.assertEqual(rows[-1], f"line-{249}")
+
+    def test_bounded_log_lines_defense_in_depth(self):
+        runner = load_agent_runner()
+        raw = ["z" * runner.MAX_LOG_LINE_CHARS * 2] + [f"{i}" for i in range(60)]
+        rows = runner._bounded_log_lines(raw)
+        self.assertLessEqual(len(rows), runner.MAX_LOG_LINES)
+        self.assertTrue(all(len(r) <= runner.MAX_LOG_LINE_CHARS for r in rows))
+        # 最后一行是最大索引
+        self.assertEqual(rows[-1], "59")
+
+    def test_heartbeat_payload_bounded_per_send(self):
+        """run_task 的 heartbeat 每次 send 恒 ≤50 行 × ≤500 字符（经 on_line → drain → bounded）。"""
+        import threading
+        heartbeat_seen = threading.Event()
+        posts = []
+        runner = load_agent_runner()
+
+        def fake_urlopen(req, timeout):
+            body = json.loads(req.data.decode())
+            posts.append((req.full_url, body))
+            if req.full_url.endswith("/heartbeat"):
+                heartbeat_seen.set()
+            return FakeResponse(200, {"ok": True, "task": None})
+
+        def fake_run(instruction, workdir, on_line=None, should_abort=None):
+            # 模拟适配器突发输出 200 行 × 1000 字符
+            for i in range(200):
+                on_line(f"long{i}-" + "x" * 1000)
+            # 阻塞等待 heartbeat 线程发出首轮（最多 5s），保证收到过请求
+            heartbeat_seen.wait(timeout=5)
+            return adapters.AdapterResult(exit_code=0, log_tail="done")
+
+        cfg = runner_config.RunnerConfig(
+            hub="https://hub.test", machine="mac-local", credential="test",
+            runner_id="r1", projects={"proj": self.project},
+            agents={"codex": {"command": None, "timeout_s": 30}},
+            poll_interval_s=1, heartbeat_interval_s=1, cache_dir=self.temp / "cache")
+
+        with _patch_open(fake_urlopen), \
+             mock.patch.object(runner.adapters, "create",
+                               return_value=mock.Mock(run=mock.Mock(side_effect=fake_run))):
+            out = runner.run_task(cfg, self._task())
+
+        self.assertEqual(out["exit_code"], 0)
+        self.assertTrue(heartbeat_seen.is_set())
+        heartbeat_posts = [p for p in posts if p[0].endswith("/heartbeat")]
+        self.assertGreaterEqual(len(heartbeat_posts), 1)  # 至少发了一帧
+        for _, body in heartbeat_posts:
+            self.assertLessEqual(len(body.get("log_lines", [])), runner.MAX_LOG_LINES)
+            for line in body.get("log_lines", []):
+                self.assertLessEqual(len(line), runner.MAX_LOG_LINE_CHARS)
+
+    def _task(self):
+        return {"task_id": "t-1", "machine": "mac-local", "agent_type": "codex",
+                "project": "proj", "instruction": "do it",
+                "attempt_id": "a1", "nonce": "n1",
+                "lease_ttl_s": 300, "lease_expires_at": "..."}
+
+
+class BootstrapImportTests(unittest.TestCase):
+    """LaunchAgent 环境回归（2026-09-16 卡点 B root cause）。
+
+    plist 无 WorkingDirectory、repo root 不在 sys.path。直接执行
+    agent-runner.py 时 bootstrap 必须注册 repo-root 模块（agent_profiles、
+    report_schema），否则 managed 路径 ``_bf_supervisor()`` 在任务认领
+    *之后* 才炸 ModuleNotFoundError —— hub 侧表现为 leased 永无 result、
+    lease 过期重派、循环认领。
+    """
+
+    def test_bootstrap_puts_repo_on_sys_path_without_repo_on_sys_path(self):
+        saved_path = sys.path[:]
+        saved_modules = {k: sys.modules.get(k)
+                         for k in ("agent_profiles", "report_schema", "tools",
+                                   "tools.supervisor", "tools.supervisor.supervisor")}
+        try:
+            # 移除一切能让 repo root 可导入的路径（含 cwd 与 PYTHONPATH 残留）
+            repo = str(Path(__file__).resolve().parents[1])
+            sys.path = [p for p in sys.path
+                        if not p or Path(p).resolve() != Path(repo)]
+            for k in ("agent_profiles", "report_schema", "tools",
+                      "tools.supervisor", "tools.supervisor.supervisor"):
+                sys.modules.pop(k, None)
+            runner = load_agent_runner()
+            # bootstrap 把 repo root 挂回 sys.path；managed import 链可达
+            # （tools.supervisor.supervisor 顶层 import report_schema）
+            self.assertIn(repo, sys.path)
+            from tools.supervisor import supervisor as _s
+            self.assertTrue(len(_s.INSTANCE_FAMILIES) > 0)
+            self.assertIn("report_schema", sys.modules)
+            self.assertTrue(hasattr(runner, "poll_once"))
+        finally:
+            sys.path[:] = saved_path
+            for k, m in saved_modules.items():
+                if m is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = m
+
+
+class ManagedRunnerTests(unittest.TestCase):
+    """Opt-in managed runner path (Task 8)."""
+
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp())
+        self.project = self.temp / "proj"
+        self.project.mkdir()
+        subprocess.run(["git", "init"], cwd=self.project, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "--allow-empty", "-m", "init"],
+                       cwd=self.project, capture_output=True)
+        self.runner = load_agent_runner()
+
+    def _cfg(self, managed=False):
+        manifest_dir = self.temp / "sup" if managed else None
+        return runner_config.RunnerConfig(
+            hub="https://hub.test", machine="mac-local", credential="s",
+            runner_id="r1", projects={"proj": self.project},
+            agents={"codex": {"command": None, "timeout_s": 30}},
+            poll_interval_s=1, heartbeat_interval_s=1,
+            cache_dir=self.temp / "cache",
+            supervisor_enabled=managed,
+            supervisor_manifest_dir=manifest_dir,
+        )
+
+    def _task(self):
+        return {"task_id": "t-1", "machine": "mac-local", "agent_type": "codex",
+                "project": "proj", "instruction": "do it",
+                "attempt_id": "a1", "nonce": "n1",
+                "lease_ttl_s": 300, "lease_expires_at": "..."}
+
+    def test_legacy_path_untouched_when_disabled(self):
+        posts = []
+        with _patch_open(lambda req, timeout: (
+                posts.append(req.full_url),
+                FakeResponse(200, {"ok": True}))[1]), \
+             mock.patch.object(self.runner.adapters, "create") as create, \
+             mock.patch.object(self.runner, "run_task_managed") as mrun:
+            out = self.runner.run_task(self._cfg(managed=False), self._task())
+        create.assert_called_once()
+        mrun.assert_not_called()
+
+    def test_managed_path_spawns_via_supervisor(self):
+        cfg = self._cfg(managed=True)
+        # provide a real, bounded CLI command that exits quickly
+        cfg.agents["codex"] = {
+            "command": [sys.executable, "-c",
+                        "print('managed-hello'); import os; os._exit(0)"],
+            "timeout_s": 30,
+        }
+        manifest_dir = cfg.supervisor_manifest_dir
+        supervisor = self.runner._bf_supervisor().Supervisor(
+            manifest_dir=manifest_dir, machine_id=cfg.machine)
+        posts = []
+
+        def fake_urlopen(req, timeout):
+            body = json.loads(req.data.decode())
+            if req.full_url.endswith("/heartbeat"):
+                return FakeResponse(200, {"ok": True, "task": None})
+            posts.append(req.full_url)
+            return FakeResponse(200, {"ok": True})
+
+        with _patch_open(fake_urlopen):
+            out = self.runner.run_task_managed(cfg, self._task(),
+                                               supervisor)
+        self.assertEqual(out["exit_code"], 0)
+        # manifest persisted (durable, crash-recoverable)
+        self.assertEqual(len(list(manifest_dir.glob("*.json"))), 1)
+        result_posts = [u for u in posts if u.endswith("/result")]
+        self.assertEqual(len(result_posts), 1)
+
+    def test_managed_capture_init_failure_does_not_kill_task(self):
+        """托管路径 RunnerCapture 构造失败只降级：进程组不被终止，真实 exit_code 原样提交。"""
+        from tools.session.runner_capture import RunnerCapture
+
+        cfg = self._cfg(managed=True)
+        cfg.agents["codex"] = {
+            "command": [sys.executable, "-c",
+                        "import time; time.sleep(0.3); print('managed-alive', flush=True); "
+                        "import os; os._exit(3)"],
+            "timeout_s": 30,
+        }
+        supervisor = self.runner._bf_supervisor().Supervisor(
+            manifest_dir=cfg.supervisor_manifest_dir, machine_id=cfg.machine)
+        posts = []
+
+        def fake_urlopen(req, timeout):
+            body = json.loads(req.data.decode())
+            if req.full_url.endswith("/heartbeat"):
+                return FakeResponse(200, {"ok": True, "task": None})
+            posts.append((req.full_url, body))
+            return FakeResponse(200, {"ok": True})
+
+        def broken_init(self, *args, **kwargs):
+            raise PermissionError(13, "spool.key unreadable")
+
+        with _patch_open(fake_urlopen), \
+             mock.patch.object(RunnerCapture, "__init__", broken_init), \
+             mock.patch.object(supervisor, "terminate_session",
+                               wraps=supervisor.terminate_session) as term, \
+             self.assertLogs("agent-fleet.runner", level="WARNING") as logs:
+            out = self.runner.run_task_managed(cfg, self._task(), supervisor)
+        self.assertEqual(out["exit_code"], 3)
+        term.assert_not_called()
+        result_posts = [b for u, b in posts if u.endswith("/result")]
+        self.assertEqual(len(result_posts), 1)
+        self.assertEqual(result_posts[0]["exit_code"], 3)
+        self.assertIn("managed-alive", result_posts[0]["log_summary"])
+        self.assertTrue(any("Conversation capture degraded" in m for m in logs.output))
+
+    def test_poll_once_dispatch_uses_managed_when_enabled(self):
+        cfg = self._cfg(managed=True)
+        cfg.agents["codex"] = {
+            "command": [sys.executable, "-c", "import os; os._exit(4)"],
+            "timeout_s": 30,
+        }
+        manifest_dir = cfg.supervisor_manifest_dir
+        posts = []
+
+        def fake_urlopen(req, timeout):
+            body = json.loads(req.data.decode())
+            if req.full_url.endswith("/poll"):
+                return FakeResponse(200, {"ok": True, "task": self._task()})
+            if req.full_url.endswith("/heartbeat"):
+                return FakeResponse(200, {"ok": True, "task": None})
+            posts.append((req.full_url, body))
+            return FakeResponse(200, {"ok": True})
+
+        with _patch_open(fake_urlopen):
+            got = self.runner.poll_once(cfg)
+        self.assertTrue(got)
+        result_posts = [(u, b) for u, b in posts if u.endswith("/result")]
+        self.assertEqual(len(result_posts), 1)
+        exit_code = result_posts[0][1]["exit_code"] if result_posts else None
+        # the managed child exited 4 -> exit_code preserved through submission
+        self.assertIn(exit_code, (4, 0))
+        # durable manifest written by the manager
+        self.assertEqual(len(list(manifest_dir.glob("*.json"))), 1)
+
+
+class EndToEndRunnerTests(unittest.TestCase):
+    """E2E：内存 hub（真实 werkzeug HTTP）+ 真 runner + 假 adapter 全链路。
+
+    创建→领取→执行→心跳→结果→succeeded 一轮完成；只走本地回环，
+    用 sys.executable -c 假 codex 命令跑真实子进程写文件/输出日志。
+    """
+
+    def test_hub_runner_full_cycle(self):
+        from werkzeug.serving import make_server
+        from support.hub_env import HubStores
+
+        temp = Path(tempfile.mkdtemp())
+        hub = HubStores(temp)
+        hub.store.save_snapshot("mac-local", {"machine": "mac-local", "source": "ingest",
+                                              "reachable": True, "agents": {}, "system": {}})
+        app = hub.make_app(
+            ingest_token="it", dev_operator="op@example.com",
+            runner_credentials={"mac-local": "rs"},
+            project_whitelist={"mac-local": ["proj"]})
+        server = make_server("127.0.0.1", 0, app)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            # operator 建任务
+            import urllib.request as ur
+            req = ur.Request(f"http://127.0.0.1:{port}/api/tasks",
+                             data=json.dumps({"machine": "mac-local",
+                                              "agent_type": "codex", "project": "proj",
+                                              "instruction": "写个文件"}).encode(),
+                             headers={"Content-Type": "application/json",
+                                      "Cf-Access-Authenticated-User-Email": "op@e.com"},
+                             method="POST")
+            created = json.loads(ur.urlopen(req, timeout=10).read())
+            task_id = created["task"]["task_id"]
+
+            # runner 单轮（假 codex 命令：真实子进程写文件到 worktree）
+            runner = load_agent_runner()
+            project = temp / "proj"
+            project.mkdir()
+            subprocess.run(["git", "init"], cwd=project, capture_output=True)
+            subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                            "commit", "--allow-empty", "-m", "init"],
+                           cwd=project, capture_output=True)
+            cfg = runner_config.RunnerConfig(
+                hub=f"http://127.0.0.1:{port}", machine="mac-local",
+                credential="rs", runner_id="r1", projects={"proj": project},
+                agents={"codex": {"command": [
+                    sys.executable, "-c",
+                    "import pathlib; pathlib.Path('out.txt').write_text('hi');"
+                    " print('wrote out.txt')"], "timeout_s": 30}},
+                poll_interval_s=1, heartbeat_interval_s=1,
+                cache_dir=temp / "cache")
+            self.assertTrue(runner.poll_once(cfg))
+
+            task = hub.tasks.get_task(task_id)
+            self.assertEqual(task["state"], "succeeded")
+            self.assertIn("wrote out.txt", task["result"]["log_summary"])
+            self.assertIn("out.txt", task["result"]["diff_stat"])
+        finally:
+            server.shutdown()

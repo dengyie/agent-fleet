@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "event_id": "evt_f1_session_start",
+  "stream_id": "stream_golden_1",
+  "machine_id": "host-golden-1",
+  "session_id": "sess_golden_1",
+  "attempt_id": "att_golden_1",
+  "process_group_id": "grp_golden_1",
+  "sequence": 1,
+  "kind": "session_start",
+  "capture_quality": "structured",
+  "source": "structured_stream",
+  "emitted_at": "2026-08-26T00:00:00+00:00",
+  "payload": {
+    "agent_family": "codex",
+    "adapter": "codex_structured"
+  },
+  "redaction": {
+    "state": "none",
+    "uncertain": false,
+    "rules": []
+  }
+}

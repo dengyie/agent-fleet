@@ -1,0 +1,411 @@
+"""tools/transport.py — runner/ControlClient 出站 HTTPS 传输（proxy 感知回退）。
+
+问题背景（2026-09-15 定位）：macOS scutil 系统代理（Clash :7897）与 Cloudflare
+边缘共同决定出站可达性——同一 URL 直连可能被 CF 1010 拦截，而走系统代理 200。
+历史补丁（128a52c）为修「KeepAlive 复用全局 opener 挂在代理隧道握手」把两个
+客户端强制成永远直连（``ProxyHandler({})``），在 CF 开始拦直连出口后链路全断。
+
+本模块把出站策略收敛为一个可测的传输函数：
+
+* ``mode="auto"``（默认）：先直连；只有当响应是 *CF 边缘拦截外型*（403 +
+  ``error code: 101x`` 文本体，非 hub 的 JSON 错误外型）或传输层异常时，
+  下一跳改走系统代理重试。成功后按 sticky 记住（进程内），后续请求直接用
+  成功的那条路径，避免每请求都先吃一次握手超时。
+* ``mode="direct"`` / ``mode="proxy"``：钉死单路径，行为与旧补丁一致。
+* 真实 hub 的 4xx/5xx JSON（401/403/409…）永远原样返回给调用方——
+  绝不因业务状态码触发回退，否则会把「凭据错」误判成「路不通」。
+
+设计约束：不引入新依赖；每次尝试新建 opener（不复用全局 urlopen 池，
+这是 128a52c 原始教训）；重试/退避节奏仍归各客户端自己管。
+
+安全加固（携带凭据头的唯一出站口）：
+
+* 永不跟随 3xx：默认 urlopen 会把自定义头（X-Runner-Credential /
+  X-Agent-Fleet-Token）原样带到 Location 指向的任意主机；这里 3xx 作为
+  状态码原样返回，凭据只发往配置的 URL。
+* 只允许 https；明文 http 仅限 loopback（本机开发）或显式
+  ``allow_insecure=True``。拒绝时不发出任何请求。
+"""
+from __future__ import annotations
+
+import ipaddress
+import json
+import math
+import re
+import time
+from contextlib import contextmanager
+import urllib.error
+import urllib.request
+from typing import Any, Callable
+from urllib.parse import urlparse
+
+# CF 边缘拦截外型：403 + 纯文本 "error code: 101x"（1010 浏览器指纹 /
+# 1020 Access rule 等）。hub 自身错误是 JSON（{"error": ...}），不会命中。
+_CF_BLOCK_RE = re.compile(r"error code: 10\d\d", re.IGNORECASE)
+
+_MODES = ("auto", "direct", "proxy")
+
+_TRANSIENT = (TimeoutError, urllib.error.URLError, OSError,
+              ConnectionError, BrokenPipeError)
+
+
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """拒绝跟随任何重定向：3xx 以 HTTPError 形式交还调用方。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "redirect denied",
+                                     headers, fp)
+
+
+class InsecureTransportError(ValueError):
+    """目标 URL 不是 https（且非 loopback / 未显式允许明文）。"""
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def require_secure_url(url: str, *, allow_insecure: bool = False) -> str:
+    """校验携带凭据的出站 URL：https，或 loopback/显式允许的 http。"""
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
+    if not parsed.hostname or scheme not in ("https", "http"):
+        raise InsecureTransportError("invalid_transport_url")
+    if scheme == "http" and not (allow_insecure
+                                 or _is_loopback_host(parsed.hostname)):
+        raise InsecureTransportError("insecure_transport_url")
+    return url
+
+
+def _is_cf_block(status: int, body: bytes | str) -> bool:
+    if status != 403:
+        return False
+    try:
+        text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) \
+            else str(body)
+    except Exception:
+        return False
+    return bool(_CF_BLOCK_RE.search(text))
+
+
+def _read_error_body(exc: urllib.error.HTTPError) -> bytes:
+    try:
+        return exc.read() or b""
+    except Exception:
+        return b""
+
+
+class Transport:
+    """可复用的 POST-JSON 出站传输（每个实例持有自己的 sticky 状态）。"""
+
+    def __init__(self, *, mode: str = "auto",
+                 timeout: float = 15.0,
+                 attempts: int = 3,
+                 retry_sleep_s: float = 0.4,
+                 allow_insecure: bool = False):
+        if mode not in _MODES:
+            raise ValueError(f"transport.mode 必须是 {'|'.join(_MODES)}，得到 {mode!r}")
+        self._mode = mode
+        self._timeout = float(timeout)
+        self._attempts = max(1, int(attempts))
+        self._retry_sleep_s = float(retry_sleep_s)
+        self._sleeper: Callable[[float], None] = time.sleep
+        #: sticky: None=未定向; "direct"/"proxy"=上次成功路径（仅 auto 模式使用）
+        self._preferred: str | None = None
+        self._allow_insecure = bool(allow_insecure)
+        #: 最近一次失败的底层异常（仅供单线程调用方区分可重试性）
+        self.last_exception: BaseException | None = None
+
+    # -- 每跳的 opener ----------------------------------------------------
+
+    def _opener(self, use_proxy: bool):
+        if use_proxy:
+            # 系统代理（macOS = scutil；无代理时 getproxies() 为空 → 等价直连）
+            return urllib.request.build_opener(urllib.request.ProxyHandler(
+                urllib.request.getproxies()), NoRedirectHandler())
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                           NoRedirectHandler())
+
+    # -- 单路径一轮 --------------------------------------------------------
+
+    def _open(self, opener, req, timeout):
+        """唯一的真实出站出口：一次 attempt 的 urlopen。
+
+        永远走局部 ``opener.open``，绝不调用 ``install_opener`` 改写全局
+        状态（128a52c 的多线程竞态教训）。测试替身替换实例的 ``_opener``
+        或类级 ``Transport._open`` 注入，生产代码不含任何测试探测分支。
+        """
+        return opener.open(req, timeout=timeout)
+
+    def _one(self, req: urllib.request.Request, use_proxy: bool,
+             timeout: float, raw_limit: int | None = None):
+        """单路径一次尝试。返回 (status, payload)；CF 拦截外型抛 _CFBlock。
+
+        ``raw_limit`` 非 None 时 2xx 响应体按原始 bytes 返回（超限抛
+        ``ValueError``，不重试）；错误响应仍解析为 JSON dict。
+        """
+        opener = self._opener(use_proxy)
+        try:
+            with self._open(opener, req, timeout) as resp:
+                if raw_limit is not None:
+                    body = resp.read(raw_limit + 1) if hasattr(resp, "read") else b""
+                    if len(body) > raw_limit:
+                        raise ValueError("response_too_large")
+                    return int(getattr(resp, "status", 200)), body
+                body = resp.read() if hasattr(resp, "read") else b""
+                raw = body.decode("utf-8", errors="replace") if body else ""
+                payload = json.loads(raw) if raw else {}
+                if not isinstance(payload, dict):
+                    payload = {"_raw": payload}
+                # urlopen 惯例：非 HTTPResponse（如测试桩/redirect 处理器）
+                # 可能没有 .status —— 缺省 200（成功路径）。
+                return int(getattr(resp, "status", 200)), payload
+        except urllib.error.HTTPError as exc:
+            body = _read_error_body(exc)
+            if _is_cf_block(exc.code, body):
+                raise _CFBlock(str(exc.code)) from exc
+            try:
+                payload = json.loads(body.decode("utf-8") or "{}")
+            except Exception:
+                payload = {"error": "http_error"}
+            if not isinstance(payload, dict):
+                payload = {"error": "http_error"}
+            return int(exc.code), payload
+        # _TRANSIENT 与其它异常一律向上抛，由 _post 统一调度
+
+    # -- 多跳调度 -----------------------------------------------------------
+
+    def _post(self, req: urllib.request.Request, timeout: float,
+              raw_limit: int | None = None, *, deadline: float | None = None,
+              should_cancel: Callable[[], bool] | None = None):
+        """按模式调度路径；auto 模式下 CF 拦截/传输失败可在两路径间切换。
+
+        返回 (status, payload, last_error_str)。status=0 表示两路径均传输失败。
+        """
+        last_err = ""
+        self.last_exception = None
+        if deadline is not None and not math.isfinite(deadline):
+            raise ValueError("invalid_transport_deadline")
+        if self._mode == "auto":
+            # 路径优先级：sticky > alternate；首选路径失败自动回退到备用路径
+            if self._preferred:
+                other = "proxy" if self._preferred == "direct" else "direct"
+                order = [self._preferred, other]
+            else:
+                order = ["direct", "proxy"]
+        else:
+            order = [self._mode]
+
+        for path in order:
+            use_proxy = path == "proxy"
+            for attempt in range(self._attempts):
+                if should_cancel is not None and should_cancel():
+                    return 0, {"error": "transport_cancelled"}, "transport_cancelled"
+                remaining = timeout if deadline is None else min(timeout, deadline - time.monotonic())
+                if remaining <= 0:
+                    return 0, {"error": "transport_deadline_exceeded"}, "transport_deadline_exceeded"
+                try:
+                    status, payload = self._one(req, use_proxy, remaining, raw_limit)
+                    if should_cancel is not None and should_cancel():
+                        return 0, {"error": "transport_cancelled"}, "transport_cancelled"
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return 0, {"error": "transport_deadline_exceeded"}, "transport_deadline_exceeded"
+                    if self._mode == "auto" and 200 <= status < 500:
+                        self._preferred = path
+                    return status, payload, ""
+                except _CFBlock:
+                    # CF 边缘拦截该路径 → 立即换路径（不打满重试）
+                    last_err = "cf_blocked"
+                    break
+                except _TRANSIENT as exc:
+                    self.last_exception = exc
+                    last_err = f"{type(exc).__name__}: {exc}"
+                    if attempt + 1 < self._attempts:
+                        pause = self._retry_sleep_s if deadline is None else min(self._retry_sleep_s, max(0, deadline - time.monotonic()))
+                        self._sleeper(pause)
+                    continue
+                except Exception as exc:  # 不可分类：不重试，换/终止路径
+                    self.last_exception = exc
+                    last_err = f"{type(exc).__name__}: {exc}"
+                    break
+
+        if self._mode == "auto":
+            self._preferred = None
+        return 0, {"error": last_err or "transport_failed"}, last_err
+
+    # -- 公共入口 -----------------------------------------------------------
+
+    def _refuse_insecure(self, url: str):
+        """非 https 目标：不发请求，按网络失败外型返回 (0, error)。"""
+        try:
+            require_secure_url(url, allow_insecure=self._allow_insecure)
+        except InsecureTransportError as exc:
+            self.last_exception = exc
+            return 0, {"error": str(exc)}
+        return None
+
+    @contextmanager
+    def get_stream(self, url: str, headers: dict[str, str], *, deadline: float,
+                   should_cancel: Callable[[], bool]):
+        """One bounded streaming GET; credentials never follow a redirect.
+
+        The consumer owns chunking and whole-body integrity. A failed stream
+        is never retried here, so already-consumed bytes cannot be duplicated.
+        """
+        require_secure_url(url, allow_insecure=self._allow_insecure)
+        if not math.isfinite(deadline):
+            raise ValueError("invalid_transport_deadline")
+        if should_cancel():
+            raise OSError("transport_cancelled")
+        remaining = min(self._timeout, deadline - time.monotonic())
+        if remaining <= 0:
+            raise TimeoutError("transport_deadline_exceeded")
+        use_proxy = self._mode == "proxy" or (self._mode == "auto" and self._preferred == "proxy")
+        opener = self._opener(use_proxy)
+        request = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            response = self._open(opener, request, remaining)
+        except urllib.error.HTTPError as exc:
+            response = exc
+        try:
+            yield response
+        finally:
+            response.close()
+
+    def post_bytes(self, url: str, body: bytes, headers: dict[str, str],
+                   timeout: float | None = None, *, deadline: float | None = None,
+                   should_cancel: Callable[[], bool] | None = None):
+        """POST binary data using the configured transport policy."""
+        if not isinstance(body, bytes):
+            raise TypeError("body must be bytes")
+        refused = self._refuse_insecure(url)
+        if refused is not None:
+            return refused
+        req_headers = dict(headers or {})
+        req_headers.setdefault("Content-Type", "application/octet-stream")
+        req = urllib.request.Request(url, data=body, headers=req_headers,
+                                     method="POST")
+        eff_timeout = self._timeout if timeout is None else float(timeout)
+        if eff_timeout <= 0:
+            eff_timeout = self._timeout
+        status, payload, _ = self._post(req, eff_timeout, deadline=deadline, should_cancel=should_cancel)
+        return status, payload
+
+    def request_bounded_json(self, method: str, url: str, body: bytes | None,
+                             headers: dict[str, str], *, deadline: float,
+                             should_cancel: Callable[[], bool],
+                             max_response_bytes: int = 65536) -> tuple[int, dict[str, Any]]:
+        """One fixed request, no redirects or hidden retries, with bounded JSON.
+
+        The caller owns idempotence and reconciliation after a lost response.
+        ``read1`` returns available data so a trickling peer cannot postpone
+        deadline/cancellation checks until the entire response has arrived.
+        """
+        require_secure_url(url, allow_insecure=self._allow_insecure)
+        if (method not in {"GET", "POST", "PUT"} or (body is not None and type(body) is not bytes)
+                or type(max_response_bytes) is not int or not 1 <= max_response_bytes <= 65536
+                or not math.isfinite(deadline)):
+            raise ValueError("invalid_bounded_request")
+        def check() -> float:
+            if should_cancel():
+                raise OSError("transport_cancelled")
+            remaining = min(self._timeout, deadline - time.monotonic())
+            if remaining <= 0:
+                raise TimeoutError("transport_deadline_exceeded")
+            return remaining
+        remaining = check()
+        use_proxy = self._mode == "proxy" or (self._mode == "auto" and self._preferred == "proxy")
+        opener = self._opener(use_proxy)
+        request = urllib.request.Request(url, data=body, headers=headers, method=method)
+        try:
+            response = self._open(opener, request, remaining)
+        except urllib.error.HTTPError as exc:
+            response = exc
+        try:
+            check()
+            status = response.status
+            if 300 <= status < 400:
+                return status, {"error": "transport_redirect_forbidden"}
+            if response.headers.get("Content-Encoding") or response.headers.get("Transfer-Encoding"):
+                raise ValueError("invalid_bounded_response")
+            length = response.headers.get("Content-Length")
+            if length is not None and (not length.isascii() or not length.isdecimal()
+                    or int(length) > max_response_bytes):
+                raise ValueError("transport_response_too_large")
+            content = bytearray()
+            read = getattr(response, "read1", response.read)
+            while True:
+                check()
+                chunk = read(min(65536, max_response_bytes + 1 - len(content)))
+                check()
+                if not chunk:
+                    break
+                content.extend(chunk)
+                if len(content) > max_response_bytes:
+                    raise ValueError("transport_response_too_large")
+            if length is not None and len(content) != int(length):
+                raise ValueError("invalid_bounded_response")
+            payload = json.loads(content.decode("utf-8"))
+            if type(payload) is not dict:
+                raise ValueError("invalid_bounded_response")
+            return status, payload
+        finally:
+            response.close()
+
+    def post_json(self, url: str, body: Any | None, headers: dict[str, str],
+                  timeout: float | None = None, *, deadline: float | None = None,
+                  should_cancel: Callable[[], bool] | None = None):
+        """POST JSON（body=None 时无请求体）。返回 (status, payload)。
+
+        网络层完全失败返回 (0, {"error": ...})；hub 业务 4xx/5xx 原样透传。
+        timeout 作为参数透传到每次尝试——不落实例状态（调用方可能跨线程复用）。
+        """
+        refused = self._refuse_insecure(url)
+        if refused is not None:
+            return refused
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, headers=headers,
+                                     method="POST")
+        eff_timeout = self._timeout if timeout is None else float(timeout)
+        if eff_timeout <= 0:
+            eff_timeout = self._timeout
+        status, payload, _ = self._post(req, eff_timeout, deadline=deadline, should_cancel=should_cancel)
+        return status, payload
+
+
+    def get_bytes(self, url: str, headers: dict[str, str],
+                  timeout: float | None = None, *, max_bytes: int):
+        """GET 原始响应体。2xx 返回 (status, bytes)，其它返回 (status, dict)。
+
+        超过 ``max_bytes`` 视为失败 (0, {"error": ...})；不跟随重定向。
+        """
+        refused = self._refuse_insecure(url)
+        if refused is not None:
+            return refused
+        req = urllib.request.Request(url, headers=dict(headers or {}), method="GET")
+        eff_timeout = self._timeout if timeout is None or timeout <= 0 else float(timeout)
+        status, payload, _ = self._post(req, eff_timeout, raw_limit=int(max_bytes))
+        return status, payload
+
+    def get_json(self, url: str, headers: dict[str, str],
+                 timeout: float | None = None, *, max_bytes: int = 1 << 20):
+        """GET JSON 对象。返回 (status, dict)；非对象 / 解析失败归为 invalid_json。"""
+        status, body = self.get_bytes(url, headers, timeout, max_bytes=max_bytes)
+        if not isinstance(body, bytes):
+            return status, body
+        try:
+            payload = json.loads(body.decode("utf-8") or "{}")
+        except (ValueError, UnicodeDecodeError):
+            return status, {"error": "invalid_json"}
+        return status, payload if isinstance(payload, dict) else {"error": "invalid_json"}
+
+
+class _CFBlock(Exception):
+    """内部信号：响应匹配 CF 边缘拦截外型。"""

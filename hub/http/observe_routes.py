@@ -1,0 +1,389 @@
+"""hub/http/observe_routes.py — 观测链路薄 HTTP 适配器（ingest token 认证域）
+
+路由（URL、状态码、脱敏与旧 ``hub/routes_observe`` 完全一致）：
+  POST /api/ingest        机器自报告（token 认证）
+  POST /api/scan          触发 stale reconciliation（token 认证，后台线程）
+  GET  /api/status        全部机器摘要（公共，已白名单脱敏）
+  GET  /api/machines/<n>  单机详情 + 历史时间线（公共，脱敏）
+  GET  /api/events        最近事件摘要（公共，不含快照体）
+  GET  /api/stream        SSE 实时事件流（脱敏 + headers 保留）
+
+只做 transport：解析请求 → 认证 → 调 ``ObserveService`` → 序列化。
+业务逻辑全部在 ``hub.application.observe_service``；本模块通过
+``current_app.extensions["fleet"]["services"]`` 取得服务，不 import 任何
+模块级路径存储、hosts 解析器或 SSE 全局门面。
+"""
+import json
+import logging
+import queue
+import re
+import threading
+
+from flask import Blueprint, current_app, g, jsonify, request, Response, stream_with_context
+from werkzeug.exceptions import BadRequest
+
+from hub.application.observe_service import ObserveError, ObserveService
+from hub.auth import extract_operator_identity, require_ingest_token
+from hub.http.errors import ApplicationError, error_response
+from hub.http._common import request_json
+from report_schema import sanitize_agents, sanitize_system
+
+bp = Blueprint("observe", __name__)
+logger = logging.getLogger(__name__)
+
+#: The ONLY fields an anonymous caller sees in each ``instances[]`` row of the
+#: machine-detail endpoint.  Raw ``pid``/``pgid``/``started_at``/
+#: ``exe_path``/``cmdline``/``native_file_path`` are NEVER HTTP-visible without
+#: an operator identity (plan constraint #3) — the anonymous view is
+#: deliberately metadata-only.  Operator-authenticated callers keep the full
+#: sanitized rows because adopting a candidate needs ``pid`` + ``started_at``.
+_ANONYMOUS_INSTANCE_FIELDS = ("agent_family", "attachable")
+
+
+def _identity_gated_machine_detail(detail, identity):
+    """Reduce ``instances[]`` rows unless an operator identity is present.
+
+    Keeps every OTHER detail field (``agents``/``system``/``history``/
+    ``current``) unchanged; anonymous callers only lose the per-process raw
+    identity from each instance row.
+    """
+    if identity:
+        return detail
+    projected = dict(detail)
+    current = projected.get("current")
+    if isinstance(current, dict):
+        rows = current.get("instances")
+        if isinstance(rows, list):
+            reduced = []
+            for row in rows:
+                if isinstance(row, dict):
+                    reduced.append({key: row.get(key)
+                                    for key in _ANONYMOUS_INSTANCE_FIELDS
+                                    if key in row})
+                else:
+                    reduced.append(row)
+            current = dict(current)
+            current["instances"] = reduced
+            projected["current"] = current
+    return projected
+
+
+def _fleet_extensions():
+    fleet = current_app.extensions.get("fleet", {})
+    if not fleet:
+        raise RuntimeError("fleet extension not wired")
+    return fleet
+
+
+def _observe_service() -> ObserveService:
+    service = _fleet_extensions().get("services", {}).get("observe")
+    if service is None:
+        raise RuntimeError("observe service not wired")
+    return service
+
+
+def _publisher():
+    publisher = _fleet_extensions().get("publisher")
+    if publisher is None:
+        raise RuntimeError("event publisher not wired")
+    return publisher
+
+
+#: 默认的并发 SSE 流上限（每个流占一个 worker 线程）；``SSE_MAX_STREAMS`` 可覆盖。
+DEFAULT_SSE_MAX_STREAMS = 64
+_STATE_GUARD = threading.Lock()
+
+
+class _StreamSlots:
+    """有界的 SSE 并发名额；``release`` 幂等由调用方的 once 闭包保证。"""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = int(limit)
+        self.active = 0
+        self._lock = threading.Lock()
+
+    def try_acquire(self) -> bool:
+        with self._lock:
+            if self.active >= self.limit:
+                return False
+            self.active += 1
+            return True
+
+    def release(self) -> None:
+        with self._lock:
+            self.active = max(0, self.active - 1)
+
+
+def _http_state() -> dict:
+    """每个 app 一份的传输层状态（scan 单飞锁、SSE 名额）。"""
+    with _STATE_GUARD:
+        state = current_app.extensions.get("observe_http")
+        if state is None:
+            limit = current_app.config.get("SSE_MAX_STREAMS", DEFAULT_SSE_MAX_STREAMS)
+            state = {"scan_lock": threading.Lock(), "sse": _StreamSlots(limit)}
+            current_app.extensions["observe_http"] = state
+        return state
+
+
+def _observe_error(exc: ObserveError):
+    """ObserveError → 统一错误外型；保留 bounded detail 与 status。
+
+    ``ObserveError`` 已经在应用层截断了 detail（≤200）并计算好 status
+    （``not_found`` → 404），这里只做外型转换，不重新丢弃元数据；原始异常
+    仅通过其有界的 ``code``/``detail``/``status`` 暴露。
+    """
+    return error_response(ApplicationError(
+        code=exc.code, detail=exc.detail, status=exc.status))
+
+
+def _observe_service_error(code, detail="", status=400):
+    return ApplicationError(code=code, detail=detail, status=status)
+
+
+def build_summary():
+    """机器摘要列表（fleet 页面 SSR 用）。委托给注入的 ObserveService。"""
+    return _observe_service().status()["machines"]
+
+
+@bp.route("/api/ingest", methods=["POST"])
+@require_ingest_token
+def api_ingest():
+    try:
+        data = request_json(silent=False, force=True)
+    except (ValueError, TypeError, UnicodeDecodeError, BadRequest, ApplicationError):
+        return error_response(_observe_service_error("invalid_json"))
+    if not isinstance(data, dict):
+        return error_response(_observe_service_error("invalid_json"))
+    try:
+        # 每机凭据认证时 g.ingest_machine 为凭据机器；共享 token 为 None。
+        result = _observe_service().ingest(
+            data, bound_machine=getattr(g, "ingest_machine", None))
+    except ObserveError as exc:
+        return _observe_error(exc)
+    return jsonify(result)
+
+
+@bp.route("/api/scan", methods=["POST"])
+@require_ingest_token
+def api_scan():
+    # 单飞：同一时刻最多一个 reconcile 线程，重复触发不再无界开线程。
+    lock = _http_state()["scan_lock"]
+    if not lock.acquire(blocking=False):
+        return jsonify({"ok": True, "message": "scan already running",
+                        "already_running": True})
+    service = _observe_service()
+
+    def run():
+        try:
+            service.reconcile()
+        except Exception:
+            logger.exception("observe reconcile failed")
+        finally:
+            lock.release()
+
+    try:
+        threading.Thread(target=run, daemon=True).start()
+    except RuntimeError:
+        lock.release()
+        raise
+    return jsonify({"ok": True, "message": "scan triggered (async)"})
+
+
+@bp.get('/healthz')
+def liveness():
+    """Credential-free process liveness; never return fleet or account data."""
+    response = jsonify(status='ok')
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@bp.route("/api/status")
+def api_status():
+    payload = dict(_observe_service().status())
+    payload["features"] = {
+        "append_user_turn": bool(
+            current_app.config.get("APPEND_USER_TURN_ENABLED")),
+        "apply_local_profile": bool(
+            current_app.config.get("APPLY_LOCAL_PROFILE_ENABLED")),
+    }
+    # Round 7: 最新客户端发布（前端据 sequence 标出落后的节点）
+    releases = current_app.extensions.get("fleet", {}).get("services", {}).get("client_releases")
+    payload["client_release"] = releases.summary() if releases is not None else None
+    return jsonify(payload)
+
+
+@bp.route("/api/machines/<name>")
+def api_machine(name):
+    try:
+        detail = _observe_service().machine_detail(name)
+    except ObserveError as exc:
+        return _observe_error(exc)
+    # Identity-gated instance disclosure: CF-Access email (or DEV_OPERATOR with
+    # no foreign-domain header) sees the full sanitized rows an operator needs
+    # to adopt; anonymous callers see the bounded metadata-only projection.
+    identity = extract_operator_identity()
+    return jsonify(_identity_gated_machine_detail(detail, identity))
+
+
+@bp.route("/api/events")
+def api_events():
+    try:
+        limit = min(200, max(1, int(request.args.get("limit", 50))))
+    except (TypeError, ValueError):
+        limit = 50
+    return jsonify({"events": _observe_service().events(limit)})
+
+
+# ---------------------------------------------------------------------------
+# SSE 事件名 / payload 映射（对外保留函数名，兼容旧模块测试引用）
+# ---------------------------------------------------------------------------
+
+def _sse_event_name(e):
+    t = e.get("event", "")
+    if t == "state_changed":
+        return "machine_update"
+    if t == "task_log":
+        return "task_log"
+    if t.startswith("task_"):
+        return "task_update"
+    if t == "session_update":
+        return "session_update"
+    return "fleet_event"
+
+
+def _sse_payload(e):
+    name = _sse_event_name(e)
+    extra = e.get("extra", {}) if isinstance(e.get("extra"), dict) else {}
+    if name == "machine_update" and isinstance(extra.get("snapshot"), dict):
+        snap = extra["snapshot"]
+        return {
+            "machine": e.get("machine"),
+            "changes": e.get("changes", []),
+            "online": bool(snap.get("reachable", True)),
+            "ts": e.get("ts"),
+            "event_seq": e.get("event_seq"),
+            "agents": sanitize_agents(snap.get("agents", {})),
+            "system": sanitize_system(snap.get("system", {})),
+        }
+    if name == "task_log":
+        return {"task_id": extra.get("task_id"), "line": extra.get("line"),
+                "ts": e.get("ts"), "event_seq": e.get("event_seq")}
+    if name == "task_update":
+        return {"task_id": extra.get("task_id"), "machine": e.get("machine"),
+                "state": extra.get("state"), "event": e.get("event"),
+                "ts": e.get("ts"), "event_seq": e.get("event_seq")}
+    if name == "session_update":
+        sequence = extra.get("sequence")
+        return {"session_id": extra.get("session_id"),
+                "sequence": sequence, "cursor": extra.get("cursor", sequence),
+                "kind": extra.get("kind"),
+                "capture_quality": extra.get("capture_quality"),
+                "status": extra.get("status"), "ts": e.get("ts"),
+                "event_seq": e.get("event_seq")}
+    return {
+        "event": e.get("event"),
+        "machine": e.get("machine"),
+        "changes": e.get("changes", []),
+        "ts": e.get("ts"),
+        "event_seq": e.get("event_seq"),
+    }
+
+
+@bp.route("/api/stream")
+def api_stream():
+    raw_since = request.args.get("since", "0") or "0"
+    # New clients send the durable integer event sequence.  Legacy static
+    # clients send a fractional timestamp; retain that replay path until they
+    # migrate.  Integer timestamps from the old client are intentionally
+    # interpreted as sequence cursors, which is the only lossless contract.
+    if re.fullmatch(r"[0-9]+", raw_since):
+        cursor_kind = "sequence"
+        cursor = int(raw_since)
+    else:
+        try:
+            cursor_kind = "timestamp"
+            cursor = float(raw_since)
+        except (TypeError, ValueError):
+            cursor_kind = "timestamp"
+            cursor = 0.0
+    publisher = _publisher()
+    slots = _http_state()["sse"]
+    if not slots.try_acquire():
+        return error_response(ApplicationError(
+            "stream_capacity", "实时流连接数已满，请稍后重试", 503))
+    released = threading.Event()
+
+    def release_slot():
+        # gen 的 finally 与 response.close 都会调用；只释放一次。
+        if not released.is_set():
+            released.set()
+            slots.release()
+
+    def gen():
+        # 订阅放在生成器内部：响应若从未被迭代（客户端提前断开）就不会留下
+        # 永不注销的订阅；一旦订阅，try/finally 保证注销。
+        unsubscribe = None
+        try:
+            q, unsubscribe = publisher.subscribe_sse(queue_size=200)
+            # Subscribe first so events arriving while we establish the replay
+            # end are queued too. The loop below removes that replay/live overlap.
+            recent = (publisher.read_recent(1)
+                      if cursor and cursor_kind == "sequence" else [])
+            watermark = max((e["event_seq"] for e in recent
+                             if isinstance(e.get("event_seq"), int)), default=0)
+            yield ": connected\n\n"
+            replay_cursor = cursor if cursor_kind == "sequence" else 0
+            delivered_sequence = 0
+            if cursor and cursor_kind == "sequence":
+                while replay_cursor < watermark:
+                    replay = publisher.read_since_sequence(replay_cursor, 200)
+                    advanced = False
+                    for e in replay:
+                        sequence = e.get("event_seq", 0)
+                        if not isinstance(sequence, int) or not replay_cursor < sequence <= watermark:
+                            continue
+                        name = _sse_event_name(e)
+                        yield f"event: {name}\ndata: {json.dumps(_sse_payload(e), ensure_ascii=False)}\n\n"
+                        replay_cursor = sequence
+                        delivered_sequence = sequence
+                        advanced = True
+                    if not advanced:
+                        # A failed read must not jump over unconfirmed history
+                        # into the live queue. Reconnect from the client cursor.
+                        return
+            elif cursor:  # Legacy timestamp clients retain their wire format.
+                for e in publisher.read_since(cursor, 200):
+                    name = _sse_event_name(e)
+                    yield f"event: {name}\ndata: {json.dumps(_sse_payload(e), ensure_ascii=False)}\n\n"
+            while True:
+                try:
+                    e = q.get(timeout=25)
+                except queue.Empty:
+                    yield ": keepalive\n\n"
+                    continue
+                if e is getattr(publisher, "SSE_GAP", object()):
+                    # The queue was overrun.  Closing forces EventSource to
+                    # reconnect with the last applied event_seq; continuing
+                    # would silently skip the dropped interval.
+                    return
+                sequence = e.get("event_seq")
+                if isinstance(sequence, int):
+                    if sequence <= delivered_sequence:
+                        continue
+                    delivered_sequence = sequence
+                name = _sse_event_name(e)
+                yield f"event: {name}\ndata: {json.dumps(_sse_payload(e), ensure_ascii=False)}\n\n"
+        finally:
+            if unsubscribe is not None:
+                unsubscribe()
+            release_slot()
+
+    try:
+        response = Response(stream_with_context(gen()), mimetype="text/event-stream",
+                            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    except Exception:
+        release_slot()
+        raise
+    # WSGI 服务器总会 close 响应（即使从未迭代），保证名额归还。
+    response.call_on_close(release_slot)
+    return response

@@ -1,0 +1,120 @@
+"""Fleet-level agent profile registry — single source of truth for agent families.
+
+Mirrors report_schema.py / session_schema.py: stdlib-only, importable by both
+hub/ and tools/ without Flask or CLI dependencies.  The runner falls back to
+these defaults when a machine's runner.yaml omits a family; the hub and probe
+derive their canonical agent-type lists from here.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+DEFAULT_TIMEOUT_S = 1800
+
+
+@dataclass(frozen=True)
+class Profile:
+    family: str                              # canonical family id (adapter/connector key)
+    default_command: tuple[str, ...] | None  # argv template with {instruction}
+    default_timeout_s: int = DEFAULT_TIMEOUT_S
+    executable: bool = True                  # has a runner adapter (tools/adapters)
+    observable: bool = True                  # probe/connector knows it (report_schema)
+    pattern: str | None = None               # generic process match (generic only)
+    # Exact process basenames that identify the family (discovery classification).
+    # Only for families recognizable by precise basename; ``generic`` keeps its
+    # substring ``pattern`` and must NOT be listed here.
+    basenames: tuple[str, ...] = ()
+    # Native session transcript location (profile-driven discovery fallback for
+    # families without a dedicated resolver; codex/claude_code keep theirs).
+    native_session_root: str | None = None   # e.g. "~/.pi/agent/sessions"
+    native_session_depth: int = 2            # os.walk depth covering the layout
+    # Native resume capabilities (supervisor).  ``native_resume``: the CLI can
+    # take a follow-up turn on its own native session (supervisor builds a
+    # family resume argv and stamps ``resume`` on attach with a native path).
+    # ``resume_verifiable``: without an explicit claim, resume may be proven by
+    # probing the attached exe (tools.session.probe verify_resume).
+    # ``resume_by_session_path``: the resume token is the native session file
+    # path rather than an id parsed from it (pi ``--session <path>``).
+    native_resume: bool = False
+    resume_verifiable: bool = False
+    resume_by_session_path: bool = False
+    # tools.session.probe keys families by CLI name; set only where that key
+    # differs from ``family`` (claude_code is probed as ``claude``).
+    probe_family: str | None = None
+
+
+PROFILES: dict[str, Profile] = {
+    # --approve-for-me 自带 workspace-write sandbox，勿再传显式 --sandbox
+    # （codex-cli 0.147.0 起两者互斥）。
+    "codex": Profile("codex", (
+        "codex", "exec", "--approve-for-me",
+        "--ephemeral", "--ignore-user-config", "--json", "{instruction}"),
+        basenames=("codex", "codex-cli", "codex.js"),
+        native_resume=True, resume_verifiable=True),
+    "claude_code": Profile("claude_code", ("claude", "-p", "{instruction}"),
+        basenames=("claude",),
+        native_resume=True, resume_verifiable=True, probe_family="claude"),
+    "hermes": Profile("hermes", None, basenames=("hermes",)),
+    "pi": Profile("pi", ("pi", "-p", "{instruction}"),
+        basenames=("pi",),
+        native_session_root="~/.pi/agent/sessions",
+        native_session_depth=2,
+        native_resume=True, resume_by_session_path=True),
+    # ZCode CLI 非交互 print 模式（-p/--print）。桌面版内嵌 zcode.cjs 的机器
+    # 没有 `zcode` shim，runner.yaml 需按本机覆盖 command（如
+    # ["node", "<...>/resources/glm/zcode.cjs", "-p", "{instruction}"]）；
+    # basenames 覆盖 shim（zcode）与脚本直跑（zcode.cjs）两种进程形态，
+    # 会话元数据在 ~/.zcode/cli/rollout（平铺 model-io-sess_*.jsonl）。
+    "zcode": Profile("zcode", ("zcode", "-p", "{instruction}"),
+        basenames=("zcode", "zcode.cjs"),
+        native_session_root="~/.zcode/cli/rollout",
+        native_session_depth=1),
+    "generic": Profile(
+        "generic", None, executable=False,
+        pattern="claude|codex|astrbot|openclaw|opencode|aider",
+    ),
+}
+
+EXECUTABLE_AGENT_TYPES = tuple(k for k, p in PROFILES.items() if p.executable)
+OBSERVABLE_AGENT_TYPES = tuple(PROFILES)
+NATIVE_RESUME_AGENT_TYPES = tuple(
+    k for k, p in PROFILES.items() if p.native_resume)
+RESUME_VERIFIABLE_AGENT_TYPES = tuple(
+    k for k, p in PROFILES.items() if p.resume_verifiable)
+SESSION_PATH_RESUME_AGENT_TYPES = tuple(
+    k for k, p in PROFILES.items() if p.resume_by_session_path)
+# RESUME_VERIFIABLE_AGENT_TYPES under tools.session.probe family keys.
+RESUME_VERIFIABLE_PROBE_FAMILIES = tuple(
+    p.probe_family or k for k, p in PROFILES.items() if p.resume_verifiable)
+
+
+def is_executable(agent_type: str) -> bool:
+    profile = PROFILES.get(agent_type)
+    return bool(profile and profile.executable)
+
+
+def default_command(agent_type: str) -> tuple[str, ...] | None:
+    profile = PROFILES.get(agent_type)
+    return profile.default_command if profile else None
+
+
+def profile_basenames(agent_type: str) -> tuple[str, ...]:
+    """Exact process basenames for a family (empty for ``generic``/unknown)."""
+    profile = PROFILES.get(agent_type)
+    return profile.basenames if profile else ()
+
+
+__all__ = [
+    "DEFAULT_TIMEOUT_S",
+    "EXECUTABLE_AGENT_TYPES",
+    "NATIVE_RESUME_AGENT_TYPES",
+    "OBSERVABLE_AGENT_TYPES",
+    "PROFILES",
+    "Profile",
+    "RESUME_VERIFIABLE_AGENT_TYPES",
+    "RESUME_VERIFIABLE_PROBE_FAMILIES",
+    "SESSION_PATH_RESUME_AGENT_TYPES",
+    "default_command",
+    "is_executable",
+    "profile_basenames",
+]

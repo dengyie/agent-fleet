@@ -1,0 +1,4 @@
+# Install on each agent machine after writing the token to:
+# ~/.config/agent-fleet/ingest-token (chmod 600)
+# The project directory must contain tools/ and connectors/.
+*/2 * * * * cd /opt/agent-fleet && /usr/bin/python3 tools/agent-self-report.py --endpoint https://hub.example.com --name NODE_NAME --token-file ~/.config/agent-fleet/ingest-token >> /tmp/agent-fleet-self-report.log 2>&1

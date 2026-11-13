@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "event_id": "evt_f1_user_message",
+  "stream_id": "stream_golden_1",
+  "machine_id": "host-golden-1",
+  "session_id": "sess_golden_1",
+  "attempt_id": "att_golden_1",
+  "process_group_id": "grp_golden_1",
+  "sequence": 12,
+  "kind": "user_message",
+  "capture_quality": "structured",
+  "source": "structured_stream",
+  "emitted_at": "2026-08-26T00:02:15+00:00",
+  "payload": {
+    "text": "Please summarise the changes in the repo.",
+    "is_complete": true
+  },
+  "redaction": {
+    "state": "redacted",
+    "uncertain": false,
+    "rules": ["credential_pattern"]
+  }
+}

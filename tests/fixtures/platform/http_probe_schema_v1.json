@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "probe": {
+    "id": "api-health",
+    "state": "healthy",
+    "status_code": 200,
+    "latency_ms": 12.5,
+    "observed_at": 100.0,
+    "secret": "fixture-secret-sentinel",
+    "token": "fixture-token-sentinel",
+    "raw_output": "fixture-raw-sentinel"
+  },
+  "ignored": "fixture-ignored-sentinel"
+}

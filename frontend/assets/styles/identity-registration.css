@@ -1,0 +1,8 @@
+.integration-registration-fields { display: grid; gap: 12px; min-width: 0; margin: 16px 0; padding: 0; border: 0; }
+.integration-registration-fields label, .integration-registration-token { display: grid; gap: 6px; min-width: 0; }
+.integration-registration-fields :is(input:not([type="checkbox"]), textarea), .integration-registration-token input { width: 100%; min-width: 0; box-sizing: border-box; }
+.integration-registration-fields textarea { resize: vertical; }
+.integration-registration-fields .integration-registration-scope { display: flex; align-items: center; gap: 10px; }
+.integration-registration-scope input { width: auto; }
+.integration-registration-token[hidden] { display: none; }
+.integration-registration .integration-actions { position: sticky; bottom: -24px; padding: 12px 0; background: var(--panel); }

@@ -1,0 +1,151 @@
+"""Unified error contract and per-request request_id for the HTTP layer.
+
+The Task 8 contract:
+
+* ``ApplicationError(code, detail, status=400)`` is the canonical bounded
+  application-error type. It is re-exported from the application service so
+  every adapter and the services share a single class (no duplicate error
+  types to catch at the boundary).
+* ``error_response(error, request_id)`` serializes any stable error into the
+  stable shape ``{"ok": false, "error": <code>, "detail": <bounded>,
+  "request_id": <opaque>}``. It never leaks exception reprs, absolute paths,
+  SQLite contents, or credentials: only the bounded ``code`` / ``detail``
+  attributes survive, and ``detail`` is truncated.
+* ``attach_request_id`` is a Flask ``before_request`` hook that stamps an
+  opaque per-request id at the transport boundary.
+"""
+import uuid
+
+from flask import g, jsonify, request
+from hub.diagnostics import log_failure
+
+from hub.application.errors import ApplicationError
+
+__all__ = [
+    "ApplicationError",
+    "attach_request_id",
+    "error_response",
+    "get_request_id",
+    "register_error_handlers",
+]
+
+
+def get_request_id() -> str:
+    """Return the per-request opaque request id, minting one on first use."""
+    rid = g.get("request_id")
+    if not rid:
+        rid = uuid.uuid4().hex
+        g.request_id = rid
+    return rid
+
+
+def attach_request_id():
+    """before_request hook: stamp each request with an opaque transport id."""
+    g.request_id = uuid.uuid4().hex
+    return None
+
+
+def error_response(error, request_id: str | None = None):
+    """Convert a stable error into the unified ``{ok:false,...}`` response.
+
+    ``error`` may be any object exposing ``code`` / ``detail`` / ``status``
+    (``ApplicationError``, ``DomainError``, ``ObserveError``). Bounds are
+    applied defensively: floats/None details are coerced to text and truncated
+    so the public error never exposes internals.
+    """
+    code = getattr(error, "code", None) or "internal_error"
+    detail = getattr(error, "detail", None) or ""
+    detail = str(detail)[:200]
+    status = int(getattr(error, "status", 400))
+    rid = request_id or get_request_id()
+    return jsonify({
+        "ok": False,
+        "error": str(code),
+        "detail": detail,
+        "request_id": rid,
+    }), status
+
+
+def _is_api_path() -> bool:
+    """True when the current request targets an ``/api/*`` endpoint.
+
+    API 400/404/405/413/500 responses are converted to the bounded JSON contract;
+    page routes keep their compatibility plain-text behavior.
+    """
+    return request.path.startswith("/api/") or request.path == "/api"
+
+
+def register_error_handlers(app):
+    """Bind the unified HTTP error contract at the app edge.
+
+    - Malformed bodies (400) and oversized bodies (413) on ``/api/*`` return
+      the bounded JSON shape as well.
+    - Unknown ``/api/*`` routes (404) and disallowed methods (405) return the
+      bounded ``{ok:false,...}`` JSON shape instead of the Flask HTML page.
+    - Unexpected programmer exceptions on ``/api/*`` are logged by Flask and
+      serialized as a bounded 500 JSON response. ``detail`` is always a fixed
+      limited message; no raw exception repr, SQL, path, or credential leaks.
+    - Page routes keep their compatibility plain-text response.
+
+    The handlers must be registered after blueprints so ``jsonify`` and
+    ``request`` see the final app.
+    """
+
+    def _log_exception(exc_info):
+        # Flask's default traceback includes arbitrary exception messages.
+        # Keep code locations and correlation without echoing credentials/SQL.
+        log_failure(app.logger, 'http_unhandled_exception', exc_info[1],
+                    request_id=get_request_id())
+
+    app.log_exception = _log_exception
+
+    @app.after_request
+    def _correlate_response(response):
+        rid = get_request_id()
+        response.headers['X-Request-ID'] = rid
+        if _is_api_path() and response.status_code >= 400:
+            route = request.url_rule.rule if request.url_rule else (
+                '/api/platform/v1/*' if request.path.startswith('/api/platform/v1/') else '/api/*')
+            log_failure(app.logger, 'api_request_failed', request_id=rid,
+                        method=request.method, route=route, status=response.status_code)
+        return response
+
+    @app.errorhandler(400)
+    def _bad_request(exc):
+        # 畸形 JSON / 非法表单在 /api 上同样走 bounded JSON 契约，
+        # 不回 werkzeug 的 HTML 页（也不回显解析器的原始报错）。
+        if _is_api_path():
+            return error_response(ApplicationError(
+                "invalid_json", "请求体格式不正确", 400))
+        return "bad request", 400
+
+    @app.errorhandler(413)
+    def _payload_too_large(exc):
+        if _is_api_path():
+            return error_response(ApplicationError(
+                "payload_too_large", "请求体超过大小限制", 413))
+        return "payload too large", 413
+
+    @app.errorhandler(404)
+    def _not_found(exc):
+        if _is_api_path():
+            return error_response(ApplicationError(
+                "not_found", "接口不存在", 404))
+        return "not found", 404
+
+    @app.errorhandler(405)
+    def _method_not_allowed(exc):
+        if _is_api_path():
+            return error_response(ApplicationError(
+                "method_not_allowed", "接口不支持该请求方法", 405))
+        return "method not allowed", 405
+
+    @app.errorhandler(500)
+    def _internal_error(exc):
+        # Flask already logged the traceback; the public body is bounded.
+        if _is_api_path():
+            return error_response(ApplicationError(
+                "internal_error", "服务器内部错误，请稍后重试", 500))
+        return "internal error", 500
+
+    return app

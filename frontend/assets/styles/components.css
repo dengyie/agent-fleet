@@ -1,0 +1,39 @@
+/* Scoped appearance for copied awesome-ui primitives. */
+stream-markdown { display: block; overflow-wrap: anywhere; font-size: 13px; line-height: 1.9; }
+stream-markdown p { margin: 8px 0; }
+stream-markdown h1,stream-markdown h2 { font-size: 20px; margin: 18px 0 10px; }
+stream-markdown h3,stream-markdown h4 { font-size: 15px; margin: 14px 0 8px; }
+stream-markdown pre { padding: 14px; background: var(--panel-hover); border: 1px solid var(--border); border-radius: 9px; font: 12px/1.8 ui-monospace,monospace; }
+stream-markdown code { font-size: 12px; background: var(--panel-hover); padding: 2px 4px; border-radius: 3px; }
+stream-markdown pre code { padding: 0; }
+stream-markdown table { display: block; overflow-x: auto; border-collapse: collapse; }
+stream-markdown td,stream-markdown th { padding: 6px 10px; border: 1px solid var(--border); }
+stream-markdown blockquote { margin: 12px 0; padding: 6px 14px; color: var(--text-2); border-left: 3px solid var(--link); }
+tool-call-badge { display: block; min-width: 0; }
+tool-call-badge>div { border: 1px solid var(--border); background: var(--panel); border-radius: 8px; overflow: hidden; font-size: 11px; }
+tool-call-badge #toggle-btn { width: 100%; padding: 10px; border: 0; border-radius: 0; background: transparent; display: flex; justify-content: space-between; gap: 5px; text-align: left; }
+tool-call-badge #toggle-btn>div { display: flex; align-items: center; gap: 5px; min-width: 0; }
+tool-call-badge #toggle-btn>div:first-child span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 112px; font: 10px ui-monospace,monospace; }
+tool-call-badge #toggle-btn>div:last-child { font-size: 10px; flex: none; }
+tool-call-badge[status=success] #toggle-btn>div:last-child { color: var(--ok); }
+tool-call-badge[status=error] #toggle-btn>div:last-child { color: var(--bad); }
+tool-call-badge[status=running] #toggle-btn>div:last-child { color: var(--warn); }
+tool-call-badge #drawer { padding: 10px; border-top: 1px solid var(--border); background: var(--bg); }
+tool-call-badge pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; font-size: 10px; }
+tool-call-badge .rotate-90 { transform: rotate(90deg); }
+auto-scroll-anchor #back-to-bottom { position: fixed; bottom: 25px; right: 26px; border-radius: 50%; padding: 10px; box-shadow: var(--shadow-md); z-index: 10; }
+@media (max-width: 767px) { auto-scroll-anchor #back-to-bottom { right: auto; left: 16px; bottom: 18px; } }
+.fleet-layout>section { min-width: 0; }
+.healthbar { grid-template-columns: repeat(5, minmax(0, 1fr)); padding: 20px; gap: 14px; box-shadow: none; }
+.healthbar .hb-value { font-family: inherit; font-size: 29px; font-weight: 600; }
+.hb-label { font-size: 10px; }
+.card { padding: 19px; box-shadow: none; }
+.card h2 { font-size: 15px; font-weight: 600; }
+.card-actions { margin-top: auto; padding-top: 15px; }
+.event-stream { box-shadow: none; align-self: start; }
+.event-stream h3,.session-strip h3 { font-size: 12px; font-weight: 600; }
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
+.card:hover { transform: none; box-shadow: var(--shadow-md); }
+.monitoring-card,.monitoring-summary-item { box-shadow: none; }
+@media (max-width: 1100px) { .fleet-layout { grid-template-columns: minmax(0,1fr); } }
+@media (max-width: 767px) { .grid { grid-template-columns: minmax(0,1fr); } .healthbar { grid-template-columns: repeat(2,minmax(0,1fr)); padding: 15px; } .monitoring-summary { grid-template-columns: minmax(0,1fr); } .task-row { flex-wrap: wrap; } .panel,.card { padding: 15px; } }
