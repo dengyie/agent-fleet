@@ -61,5 +61,9 @@ def project_progress(previous, kind, payload, sequence):
             result['segments'].pop(0)
             result['truncated'] = True
         else:
-            result['segments'][0]['text'] = _text(result['segments'][0].get('text'), 8192)
+            text = result['segments'][0].get('text', '')
+            # JSON can expand one control character to six bytes. Always
+            # shrink instead of repeatedly applying the same fixed cutoff.
+            result['segments'][0]['text'] = _text(text, len(text.encode('utf-8')) // 2)
+            result['truncated'] = True
     return result

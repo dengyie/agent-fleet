@@ -108,7 +108,8 @@
         "tests/test_assistant_live_feedback.py::test_cancel_during_retry_does_not_dispatch_again",
         "tests/test_assistant_live_feedback.py::test_cancel_during_stream_preserves_text_and_closes_body",
         "tests/test_assistant_live_feedback.py::test_run_stream_delivers_updates_after_initial_snapshot",
-        "tests/test_assistant_live_feedback.py::test_retry_notice_remains_visible_during_the_retry_request"
+        "tests/test_assistant_live_feedback.py::test_retry_notice_remains_visible_during_the_retry_request",
+        "tests/test_assistant_live_feedback.py::test_progress_bound_handles_json_escaping_without_hanging"
       ]
     },
     {

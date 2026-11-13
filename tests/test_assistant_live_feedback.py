@@ -189,3 +189,13 @@ def test_retry_notice_remains_visible_during_the_retry_request():
     assert progress['retry']['retry_index']==1
     progress=project_progress(progress,'assistant_response',{'step':2,'text':'已恢复','response_kind':'final'},3)
     assert 'retry' not in progress
+
+def test_progress_bound_handles_json_escaping_without_hanging():
+    import subprocess
+    import sys
+    code = ('import json; from hub.domain.run_progress import project_progress, MAX_PROGRESS_BYTES; '
+        'p=project_progress({},"assistant_response",{"step":1,"text":chr(0)*16000},1); '
+        'assert len(json.dumps(p,ensure_ascii=False).encode()) <= MAX_PROGRESS_BYTES; '
+        'assert p["truncated"] is True')
+    result = subprocess.run([sys.executable,'-c',code],capture_output=True,text=True,timeout=3)
+    assert result.returncode == 0, result.stderr
