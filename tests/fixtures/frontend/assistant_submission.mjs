@@ -26,6 +26,13 @@ class Element {
   set textContent(value) { this._text = String(value); this.children = []; }
   get textContent() { return this._text + this.children.map(c => c.textContent).join(''); }
   setAttribute(key, value) { this.attributes[key] = value; }
+  removeAttribute(key) { delete this.attributes[key]; }
+  toggleAttribute(key, force) {
+    const enabled = force === undefined ? !(key in this.attributes) : Boolean(force);
+    if (enabled) this.attributes[key] = ''; else delete this.attributes[key];
+    return enabled;
+  }
+  remove() { this.parentNode?.removeChild(this); }
   addEventListener(key, fn) { this.listeners[key] = fn; }
   dispatchEvent(event) { this.listeners[event.type]?.(event); return true; }
 }

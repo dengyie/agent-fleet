@@ -254,6 +254,48 @@ export async function platformRequest(path, options) {
   return request(path, options);
 }
 
+// Finite authenticated SSE. Views receive DTO snapshots and own only the abort
+// lifecycle; token routing and all HTTP operations stay at this boundary.
+export async function platformStream(path, {signal, onRun} = {}) {
+  const headers = {Accept: 'text/event-stream'};
+  const target = new URL(path, window.location.href);
+  if (operatorToken && target.origin === window.location.origin) headers['X-Access-Token'] = operatorToken;
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal?.aborted) abort();
+  else signal?.addEventListener('abort', abort, {once:true});
+  const timer = setTimeout(abort, 35000);
+  let reader;
+  try {
+    const response = await fetch(target.href, {headers, signal:controller.signal, cache:'no-store'});
+    if (response.status === 401) window.dispatchEvent(new Event('fleet-auth-required'));
+    if (!response.ok || !response.headers.get('content-type')?.includes('text/event-stream')) throw new ApiError('http', response.status, 'stream_unavailable');
+    reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream:true}).replace(/\r/g, '');
+      if (buffer.length > 524288) throw new ApiError('contract', 200, 'stream_too_large');
+      let end;
+      while ((end = buffer.indexOf('\n\n')) !== -1) {
+        const frame = buffer.slice(0,end); buffer = buffer.slice(end + 2);
+        const lines = frame.split('\n');
+        if (!lines.includes('event: run')) continue;
+        const data = lines.filter(line => line.startsWith('data: ')).map(line => line.slice(6)).join('\n');
+        const run = JSON.parse(data);
+        if (!run || typeof run.run_id !== 'string' || typeof run.state !== 'string') throw new ApiError('contract', 200, 'invalid_run');
+        onRun?.(run);
+      }
+    }
+  } finally {
+    clearTimeout(timer); signal?.removeEventListener('abort', abort);
+    controller.abort();
+    if (reader) { try { await reader.cancel(); } catch (_) {} reader.releaseLock(); }
+  }
+}
+
 /* -- 对外异步接口 --------------------------------------------------------- */
 
 export async function getOperatorSession({deferUnauthorized = false} = {}) {

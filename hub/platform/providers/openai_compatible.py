@@ -592,7 +592,9 @@ class OpenAICompatibleProvider:
         return cls(
             model=str(profile.get("model") or ""), endpoint=endpoint, api_key=secret,
             transport=transport, timeout_s=settings.get("timeout_s", 60.0),
-            max_retries=settings.get("max_retries", 0), headers=_safe_headers(settings.get("headers")),
+            # Retry transient upstream capacity failures by default. Explicit
+            # persisted settings still win for reproducibility.
+            max_retries=settings.get("max_retries", 3), headers=_safe_headers(settings.get("headers")),
             stream=bool(settings.get("stream", False)), sleeper=sleeper,
             allow_network=allow_network, pricing=settings.get("pricing"),
         )
@@ -663,13 +665,22 @@ class OpenAICompatibleProvider:
             except ProviderError as exc:
                 observation.finish(error=exc, http_status=exc.status)
                 if exc.retryable and attempt < self.max_retries:
+                    if request_observer is not None:
+                        request_observer('provider_retry_scheduled', {
+                            'request_index': attempt + 1,
+                            'retry_index': attempt + 1,
+                            'max_retries': self.max_retries,
+                            'provider_status': exc.status,
+                            'provider_error': exc.code,
+                            'retry_in_ms': round(min(2000.0, 100.0 * (2 ** attempt))),
+                        })
                     self.sleeper(min(2.0, 0.1 * (2 ** attempt)))
                     continue
                 raise
             # Once a response body is being consumed, failure is ambiguous and
             # must never automatically replay an already accepted request.
             try:
-                result = self._parse_response(response, tool_names)
+                result = self._parse_response(response, tool_names, request_observer, attempt + 1)
             except ProviderError as exc:
                 observation.finish(error=exc, http_status=response.status)
                 raise
@@ -684,9 +695,9 @@ class OpenAICompatibleProvider:
             return result
         raise ProviderError('provider_unavailable')
 
-    def _parse_response(self, response, tool_names):
+    def _parse_response(self, response, tool_names, observer=None, request_index=1):
         if self.stream:
-            return self._parse_sse(response.body, tool_names)
+            return self._parse_sse(response.body, tool_names, observer, request_index)
         raw = response.body
         if not isinstance(raw, (bytes, bytearray)):
             pieces, total = [], 0
@@ -716,7 +727,10 @@ class OpenAICompatibleProvider:
         return ModelResponse(kind="final", text=text[:MAX_TEXT_CHARS], usage=usage,
                              finish_reason=_finish_reason(choice.get("finish_reason")), metadata=_metadata(payload, self.pricing))
 
-    def _parse_sse(self, body: bytes | Iterable[bytes], tool_names: Mapping[str, str]) -> ModelResponse:
+    def _parse_sse(self, body: bytes | Iterable[bytes], tool_names: Mapping[str, str],
+                   observer=None, request_index=1) -> ModelResponse:
+        from .observation import TextObservation
+        text_observation = TextObservation(observer, request_index)
         metadata_payload = {}
         text_parts = []
         # 流式 tool_calls 按 delta 的 index 分组累积；不同 index 是不同调用，
@@ -725,44 +739,49 @@ class OpenAICompatibleProvider:
         finish_reason = None
         completed = False
         usage = {}
-        for payload in _sse_payloads(body):
-            if payload is None:
-                completed = True
-                break
-            for key in ('model', 'id'):
-                if payload.get(key) is not None:
-                    metadata_payload[key] = payload[key]
-            if isinstance(payload.get('usage'), Mapping):
-                metadata_payload.setdefault('usage', {}).update(payload['usage'])
-                usage.update(_usage(payload) or {})
-            choices = payload.get('choices')
-            if not isinstance(choices, list) or not choices:
-                continue
-            choice = choices[0]
-            if not isinstance(choice, Mapping):
-                raise ProviderError('invalid_response')
-            finish_reason = _finish_reason(choice.get('finish_reason')) or finish_reason
-            delta = choice.get('delta')
-            if not isinstance(delta, Mapping):
-                continue
-            if isinstance(delta.get('content'), str):
-                text_parts.append(delta['content'])
-            calls = delta.get('tool_calls')
-            if isinstance(calls, list):
-                for position, call in enumerate(calls):
-                    if not isinstance(call, Mapping):
-                        raise ProviderError('invalid_response')
-                    index = call.get('index', position)
-                    if isinstance(index, bool) or not isinstance(index, int):
-                        raise ProviderError('invalid_response')
-                    slot = tool_calls.setdefault(index, {'id': None, 'name': '', 'arguments': ''})
-                    slot['id'] = slot['id'] or call.get('id')
-                    function = call.get('function')
-                    if isinstance(function, Mapping):
-                        if isinstance(function.get('name'), str):
-                            slot['name'] += function['name']
-                        if isinstance(function.get('arguments'), str):
-                            slot['arguments'] += function['arguments']
+        try:
+            for payload in _sse_payloads(body):
+                if payload is None:
+                    completed = True
+                    break
+                for key in ('model', 'id'):
+                    if payload.get(key) is not None:
+                        metadata_payload[key] = payload[key]
+                if isinstance(payload.get('usage'), Mapping):
+                    metadata_payload.setdefault('usage', {}).update(payload['usage'])
+                    usage.update(_usage(payload) or {})
+                choices = payload.get('choices')
+                if not isinstance(choices, list) or not choices:
+                    continue
+                choice = choices[0]
+                if not isinstance(choice, Mapping):
+                    raise ProviderError('invalid_response')
+                finish_reason = _finish_reason(choice.get('finish_reason')) or finish_reason
+                delta = choice.get('delta')
+                if not isinstance(delta, Mapping):
+                    continue
+                if isinstance(delta.get('content'), str):
+                    text = delta['content']
+                    text_parts.append(text)
+                    text_observation.append(text)
+                calls = delta.get('tool_calls')
+                if isinstance(calls, list):
+                    for position, call in enumerate(calls):
+                        if not isinstance(call, Mapping):
+                            raise ProviderError('invalid_response')
+                        index = call.get('index', position)
+                        if isinstance(index, bool) or not isinstance(index, int):
+                            raise ProviderError('invalid_response')
+                        slot = tool_calls.setdefault(index, {'id': None, 'name': '', 'arguments': ''})
+                        slot['id'] = slot['id'] or call.get('id')
+                        function = call.get('function')
+                        if isinstance(function, Mapping):
+                            if isinstance(function.get('name'), str):
+                                slot['name'] += function['name']
+                            if isinstance(function.get('arguments'), str):
+                                slot['arguments'] += function['arguments']
+        finally:
+            text_observation.flush()
         if not completed and not finish_reason:
             raise ProviderError('invalid_response')
         metadata = _metadata(metadata_payload, self.pricing)

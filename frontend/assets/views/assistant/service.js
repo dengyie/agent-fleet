@@ -14,6 +14,7 @@ export function createAssistantService(api = platformApi) {
     appendTurn: (...args) => api.appendConversationTurn(...args),
     getRun: (...args) => api.getRun(...args),
     getRunEvents: (...args) => api.getRunEvents(...args),
+    streamRun: (...args) => api.streamRun(...args),
     cancelRun: (...args) => api.cancelRun(...args),
     getUnknownCommands: (...args) => api.getUnknownCommands(...args),
     createLegacyTask: (...args) => api.createPlatformLegacyTask(...args),

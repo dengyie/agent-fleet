@@ -74,10 +74,16 @@ class RequestMetadata(TypedDict, total=False):
     usage: RequestUsage
     cost: RequestCost | None
     cost_unavailable_reason: str
+    text: str
+    offset: int
+    retry_index: int
+    max_retries: int
+    retry_in_ms: int
 
 
 RequestObserver = Callable[
-    [Literal['provider_request_started', 'provider_request_finished'], RequestMetadata], None]
+    [Literal['provider_request_started', 'provider_request_finished',
+             'assistant_text_delta', 'provider_retry_scheduled'], RequestMetadata], None]
 
 TOKEN_FIELDS = ('input_tokens', 'cache_read_tokens', 'reasoning_tokens',
                 'output_tokens', 'cache_write_tokens', 'total_tokens')

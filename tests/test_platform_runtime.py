@@ -231,7 +231,7 @@ def test_worker_emits_bounded_run_events(tmp_path):
     worker = AssistantWorker(NativeAssistantRuntime(DeterministicProvider(), broker), lambda kind, payload: events.append((kind, payload)))
     result = worker.execute(run_id="run-1", owner_id="run-1", epoch=lease["epoch"], messages=[], tools=[])
     assert result.state == "succeeded"
-    assert [kind for kind, _ in events] == ["run_started", "provider_request_started", "provider_request_finished", "tool_call", "tool_result", "provider_request_started", "provider_request_finished", "run_finished"]
+    assert [kind for kind, _ in events] == ["run_started", "provider_request_started", "provider_request_finished", "assistant_response", "tool_call", "tool_result", "provider_request_started", "provider_request_finished", "assistant_response", "run_finished"]
 
 
 def test_persistent_worker_updates_run_and_journals_events(tmp_path):
@@ -251,7 +251,7 @@ def test_persistent_worker_updates_run_and_journals_events(tmp_path):
     assert result.state == "succeeded"
     assert client.get(f"/api/platform/v1/runs/{run['run_id']}").get_json()["state"] == "succeeded"
     events = client.get(f"/api/platform/v1/runs/{run['run_id']}/events").get_json()["events"]
-    assert [event["kind"] for event in events] == ["run_started", "provider_request_started", "provider_request_finished", "tool_call", "tool_result", "provider_request_started", "provider_request_finished", "run_finished"]
+    assert [event["kind"] for event in events] == ["run_started", "provider_request_started", "provider_request_finished", "assistant_response", "tool_call", "tool_result", "provider_request_started", "provider_request_finished", "assistant_response", "run_finished"]
 
 
 def test_run_events_are_private_cursorable_and_owner_scoped(tmp_path):

@@ -241,6 +241,7 @@ class PlatformRepository(
                 # Frozen request projection of terminal runs (see
                 # freeze_run_request_summary); NULL until the run terminates.
                 ("runs", "request_summary", "TEXT"),
+                ("runs", "progress_summary", "TEXT"),
             ):
                 columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
                 if column not in columns:

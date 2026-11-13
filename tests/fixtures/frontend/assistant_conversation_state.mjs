@@ -52,3 +52,9 @@ const updated = mergeConversationPage(refreshed, {
 }, false);
 assert.equal(updated.orderedMessages[0].content, 'updated');
 console.log('assistant conversation state passed');
+const live = mergeConversationPage(createConversationState(), {runs:[{run_id:'r',state:'running',progress:{sequence:8,segments:[{text:'new'}]}}]},false);
+const late = mergeConversationPage(live, {runs:[{run_id:'r',state:'running',progress:{sequence:7,segments:[]}}]},false);
+assert.equal(late.runs.get('r').progress.sequence,8,'late poll/history must not erase newer SSE output');
+const done = mergeConversationPage(live, {runs:[{run_id:'r',state:'succeeded',result_text:'done',progress:{sequence:8}}]},false);
+const stale = mergeConversationPage(done, {runs:[{run_id:'r',state:'running',progress:{sequence:8}}]},false);
+assert.equal(stale.runs.get('r').state,'succeeded','late snapshot cannot reopen a terminal run');

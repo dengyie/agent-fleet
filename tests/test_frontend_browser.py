@@ -241,3 +241,66 @@ def test_request_metadata_in_real_browser(tmp_path):
     finally:
         released.set(); execution.join(10)
         server.shutdown(); server.server_close(); serving.join(5)
+
+
+def test_assistant_live_model_stream_retry_and_reload(tmp_path):
+    if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
+        pytest.skip('Set FLEET_PLAYWRIGHT_MODULE to run Chromium acceptance')
+    import json
+    from hub.application.run_worker_service import LocalRunWorkerService
+    from hub.platform.providers.openai_compatible import OpenAICompatibleProvider, TransportResponse
+    from tests.test_platform_provider import FakeTransport, _response
+    app = create_app(FleetConfig.from_root(
+        tmp_path, frontend_dir=ROOT / 'frontend', dev_operator=OWNER, platform_enabled=True))
+    repo = app.extensions['fleet']['platform_repository']
+    repo.upsert_model(OWNER, {'profile_id':'fixture', 'provider':'deterministic', 'model':'test-stream'})
+    repo.upsert_workspace(OWNER, {'workspace_id':'workspace', 'root_path':str(tmp_path / 'workspace')})
+    repo.update_defaults(OWNER, {'model_profile_id':'fixture', 'workspace_id':'workspace'}, 0)
+    app.add_url_rule('/_fixture/start', 'start_live', lambda:(working.start() or {'ok':True}), methods=['POST'])
+    def release(phase):
+        gates[phase].set()
+        return {'ok':True}
+    app.add_url_rule('/_fixture/release/<phase>', 'release_live', release, methods=['POST'])
+    client = app.test_client()
+    conv = client.post('/api/platform/v1/conversations', json={}).get_json()['conversation']
+    run = client.post('/api/platform/v1/conversations/' + conv['conversation_id'] + '/turns',
+        json={'text':'检查环境并汇报', 'client_token':'live-stream'}).get_json()['run']
+    gates = {key:Event() for key in ('tool','retry','final')}
+    def frame(delta, finish=None):
+        return ('data: ' + json.dumps({'choices':[{'delta':delta, 'finish_reason':finish}]}) + '\n\n').encode()
+    def tool_stream():
+        yield frame({'content':'先检查工作区' + chr(10)*2 + (('这是正在实时输出的检查进度。'+chr(10))*80)})
+        assert gates['tool'].wait(25), 'browser never observed first live narration'
+        yield frame({'tool_calls':[{'index':0,'id':'call-list','function':{'name':'workspace_list','arguments':'{}'}}]}, 'tool_calls')
+        yield b'data: [DONE]\n\n'
+    def final_stream():
+        yield frame({'content':'正在整理结果'})
+        assert gates['final'].wait(25), 'browser never observed final live narration'
+        yield frame({'content':'，检查完成'}, 'stop')
+        yield b'data: [DONE]\n\n'
+    transport = FakeTransport([TransportResponse(200, {}, tool_stream()),
+        _response({}, status=503), _response({}, status=503), TransportResponse(200, {}, final_stream())])
+    def sleep(delay):
+        assert gates['retry'].wait(25), 'browser never observed retry notice'
+    provider = OpenAICompatibleProvider(model='test', endpoint='http://localhost', api_key='not-public',
+        stream=True, max_retries=3, sleeper=sleep, transport=transport)
+    worker = LocalRunWorkerService(repo, app.extensions['fleet']['services']['run_events'],
+        provider_factory=lambda _:provider)
+    working = Thread(target=lambda:worker.run_once(OWNER), daemon=True)
+    server = make_server('127.0.0.1', 0, app, threaded=True)
+    serving = Thread(target=server.serve_forever, daemon=True); serving.start()
+    try:
+        result = subprocess.run(['node', str(ROOT / 'tests/fixtures/frontend/live_feedback_browser.cjs'),
+            'http://127.0.0.1:' + str(server.server_port), conv['conversation_id'], run['run_id']],
+            capture_output=True, text=True, timeout=75)
+        assert result.returncode == 0, result.stdout + result.stderr
+        working.join(5)
+        assert repo.get_run(OWNER,run['run_id'])['state'] == 'succeeded'
+        assert len(transport.calls) == 4
+        events = repo.list_run_events(OWNER,run['run_id'])['events']
+        assert sum(e['kind'] == 'tool_call' for e in events) == 1
+        assert sum(e['kind'] == 'provider_retry_scheduled' for e in events) == 2
+    finally:
+        for gate in gates.values(): gate.set()
+        if working.ident is not None: working.join(5)
+        server.shutdown(); server.server_close(); serving.join(5)

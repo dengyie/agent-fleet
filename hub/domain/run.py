@@ -24,6 +24,7 @@ class Run:
     result_text: str = ""
     usage: dict[str, int] | None = None
     requests: list[RequestMetadata] | None = None
+    progress: dict[str, Any] | None = None
 
     def __post_init__(self):
         if self.state not in RUN_STATES:
@@ -52,6 +53,7 @@ class Run:
             "run_id": self.run_id,
             "trigger_message_id": self.trigger_message_id,
             "requests": self.requests or [],
+            "progress": self.progress or {},
             "conversation_id": self.conversation_id,
             "state": self.state,
             "config": config,
