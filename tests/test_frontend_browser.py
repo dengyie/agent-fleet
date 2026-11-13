@@ -269,7 +269,7 @@ def test_assistant_live_model_stream_retry_and_reload(tmp_path):
     def frame(delta, finish=None):
         return ('data: ' + json.dumps({'choices':[{'delta':delta, 'finish_reason':finish}]}) + '\n\n').encode()
     def tool_stream():
-        yield frame({'content':'先检查工作区'})
+        yield frame({'content':'先检查工作区' + chr(10)*2 + (('这是正在实时输出的检查进度。'+chr(10))*80)})
         assert gates['tool'].wait(25), 'browser never observed first live narration'
         yield frame({'tool_calls':[{'index':0,'id':'call-list','function':{'name':'workspace_list','arguments':'{}'}}]}, 'tool_calls')
         yield b'data: [DONE]\n\n'

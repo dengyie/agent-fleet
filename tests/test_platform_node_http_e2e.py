@@ -266,8 +266,8 @@ def test_worker_node_http_receipt_closes_remote_run_without_local_side_effect(tm
     assert not (tmp_path / "assistant-report.md").exists()
     events = app.extensions["fleet"]["services"]["run_events"].list(OWNER, "run-http")["events"]
     assert [event["kind"] for event in events] == [
-        "run_started", "tool_call", "node_command_queued", "node_receipt",
-        "tool_result", "run_finished",
+        "run_started", "assistant_response", "tool_call", "node_command_queued", "node_receipt",
+        "tool_result", "assistant_response", "run_finished",
     ]
     assert [path for path, _, _ in transport.requests] == [
         "/api/platform/v1/nodes/poll", "/api/platform/v1/nodes/receipts",

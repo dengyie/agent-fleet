@@ -132,9 +132,12 @@ class NativeAssistantRuntime:
                 persist('response', step, response=asdict(response))
             # Publish the committed response before crossing any tool boundary.
             # The projection replaces by step, so checkpoint recovery is idempotent.
+            public_text = response.text.encode('utf-8')[:24576].decode('utf-8', errors='ignore')
+            while len(json.dumps(public_text, ensure_ascii=False).encode('utf-8')) > 48 * 1024:
+                public_text = public_text[:len(public_text) // 2]
             event_sink('assistant_response', {
                 'step': step, 'attempt': attempt,
-                'text': response.text.encode('utf-8')[:24576].decode('utf-8', errors='ignore'),
+                'text': public_text,
                 'response_kind': response.kind,
             })
             if (not progress or progress['phase'] not in {'receipt', 'remote_wait'}) and should_cancel is not None and should_cancel():

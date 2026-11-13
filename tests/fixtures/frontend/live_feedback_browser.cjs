@@ -13,6 +13,7 @@ const [origin, conversation, runId] = process.argv.slice(2);
     const narration = page.locator('.assistant-message-activity stream-markdown');
     await narration.filter({hasText:'先检查工作区'}).waitFor();
     assert.equal(await page.locator('.assistant-message.assistant').getAttribute('aria-busy'),'true');
+    await page.waitForFunction(() => {const thread=document.querySelector('[data-chat-scroll]');return thread && thread.scrollHeight-thread.scrollTop-thread.clientHeight < 72;});
     await page.reload({waitUntil:'domcontentloaded'});
     await narration.filter({hasText:'先检查工作区'}).waitFor();
     await page.evaluate(async runId => {
