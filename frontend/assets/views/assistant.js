@@ -130,7 +130,7 @@ export function mountAssistant(target, options) {
   function setStatus(text) {
     var names = {queued: '排队中', running: '运行中', waiting_node: '等待节点', waiting_approval: '等待审批', waiting_task: '等待任务', cancelling: '正在取消', succeeded: '已完成', failed: '执行失败', unknown: '结果待确认', cancelled: '已取消'};
     status.textContent = names[text] || text;
-    if (text === 'failed' || text === 'unknown') inspectorUi.select('activity', true);
+    if (text === 'failed' || text === 'unknown') inspectorUi.select('activity');
     status.setAttribute('data-state', text); status.setAttribute('role', 'status');
     lockPendingTurn();
   }
@@ -150,6 +150,10 @@ export function mountAssistant(target, options) {
     memoryEnabled.disabled = locked;
     send.disabled = submitting || !!activeRunId || !catalogReady || conversationArchived;
     clear(send); send.appendChild(uiIcon('arrow-up', {size: 17})); send.appendChild(el('span', null, pendingTurn && !submitting ? '重试提交' : '发送'));
+  }
+  function setComposerText(text) {
+    input.value = text;
+    input.dispatchEvent(new Event('input'));
   }
   function setWindowState(next) {
     windowState = Object.assign({}, windowState, next || {});
@@ -590,22 +594,23 @@ export function mountAssistant(target, options) {
         message: {message_id: localId, role: 'user', content: payload.text, turn_sequence: sequence},
         run: {run_id: localId, trigger_message_id: localId, state: 'submitting'}
       };
-      input.value = '';
+      setComposerText('');
       if (!conversationId) conversationTitle.textContent = payload.text.slice(0, 60);
     }
     // An uncertain response keeps the exact token AND payload. A second
     // submit must reconcile the original operation, not create another Run.
     clearActionError(); submitting = true; pendingTurn.run.state = 'submitting'; renderConversation(); lockPendingTurn(); setStatus('提交中');
+    scrollAnchor.scrollToBottom?.();
     try {
       if (!conversationId) {
         var created = await service.createConversation({ workspace_id: pendingTurn.workspaceId });
         if (disposed) return;
         conversationId = created.conversation.conversation_id;
-        if (window.history && window.history.replaceState) window.history.replaceState({}, '', pagePath('conversation', conversationId));
+        options.onConversationCreated?.(conversationId);
       }
       var turn = await service.appendTurn(conversationId, pendingTurn.payload);
       if (disposed) return;
-      pendingTurn = null; input.value = '';
+      pendingTurn = null; setComposerText('');
       mergeConversationPage({messages: [turn.message], runs: [turn.run]}, false);
       activeRunId = turn.run.run_id; latestRunId = activeRunId;
       showRunModel(turn.run); setStatus(turn.run.state); cursor = 0; clear(eventHost); cancel.hidden = false;
@@ -623,7 +628,7 @@ export function mountAssistant(target, options) {
         // An explicit validation/auth rejection did not accept this request.
         // Network, timeout, parse and 5xx failures leave acceptance uncertain.
         if (error && error.kind === 'http' && error.status >= 400 && error.status < 500) {
-          input.value = pendingTurn.payload.text; pendingTurn = null;
+          setComposerText(pendingTurn.payload.text); pendingTurn = null;
         } else if (pendingTurn) pendingTurn.run.state = 'submission_unknown';
         renderConversation();
         setStatus(pendingTurn ? '提交结果待确认，请重试原请求' : '提交失败');
