@@ -775,7 +775,10 @@
         "tests/test_vm_execution.py::test_vm_timeout_and_cancel_reap_descendants",
         "tests/test_vm_execution.py::test_vm_cancel_before_spawn_has_no_side_effect",
         "tests/test_vm_execution.py::test_vm_allows_explicit_shell_argv",
-        "tests/test_vm_execution.py::test_signed_vm_http_failure_returns_to_model_without_replaying_command"
+        "tests/test_vm_execution.py::test_signed_vm_http_failure_returns_to_model_without_replaying_command",
+        "tests/test_vm_execution.py::test_signed_vm_large_receipt_survives_lost_ack_and_restart",
+        "tests/test_vm_execution.py::test_vm_directory_receipt_preserves_complete_names_within_hub_limit",
+        "tests/test_platform_service_logs_postcheck.py::test_service_logs_receipt_includes_envelope_in_json_limit"
       ]
     },
     {

@@ -12,6 +12,7 @@ COMMAND_STATES = frozenset({"queued", "leased", "accepted", "running", "succeede
 TERMINAL_COMMAND_STATES = frozenset({"succeeded", "failed", "unknown", "expired"})
 RECEIPT_STATES = frozenset({"accepted", "running", "succeeded", "failed", "unknown"})
 RETRY_CLASSES = frozenset({"read_only", "idempotent_with_key", "reconcile_before_retry", "manual_only"})
+MAX_COMMAND_RESULT_BYTES = 64 * 1024
 
 
 class CommandValidationError(ValueError):
@@ -111,4 +112,4 @@ class PlatformCommand:
         )
 
 
-__all__ = ["COMMAND_STATES", "CommandValidationError", "PlatformCommand", "RECEIPT_STATES", "RETRY_CLASSES", "TERMINAL_COMMAND_STATES", "args_hash", "canonical_command_bytes", "sign_command", "verify_command"]
+__all__ = ["COMMAND_STATES", "CommandValidationError", "MAX_COMMAND_RESULT_BYTES", "PlatformCommand", "RECEIPT_STATES", "RETRY_CLASSES", "TERMINAL_COMMAND_STATES", "args_hash", "canonical_command_bytes", "sign_command", "verify_command"]

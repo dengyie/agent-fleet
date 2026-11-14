@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import json
 from typing import Any
 
 from fleet_core.backends.base import ToolReceipt
@@ -12,6 +13,7 @@ from fleet_core.artifact_export import ArtifactExportError, EXPORT_ACTION
 from fleet_core.capability import CapabilityError
 from fleet_core.capability_execution import CAPABILITY_ARGUMENT
 from fleet_core.remote_workflow_test import REMOTE_TEST_ACTION, RemoteTestError
+from fleet_core.platform_command import MAX_COMMAND_RESULT_BYTES
 from .browser_backend import BrowserExecutionError
 
 
@@ -24,9 +26,8 @@ from fleet_core.node_action_contract import (
 class NodeToolExecutor:
     """Translate the signed wire action into an existing backend call.
 
-    The command is treated as untrusted data.  In particular, ``argv`` is
-    passed only to the backend's existing fixed executable policy and is never
-    assembled into a shell command here.
+    ``argv`` goes to the configured backend, which owns the direct-VM or sandbox
+    execution policy. It is never assembled into a shell command here.
     """
 
     controlled_actions = frozenset({'tool.workspace.exec', REMOTE_TEST_ACTION})
@@ -66,14 +67,48 @@ class NodeToolExecutor:
         )
 
     @staticmethod
+    def _bound_receipt(wire: dict[str, Any], field: str, *, nested_truncated=False) -> dict[str, Any]:
+        """Fit display data before journaling, using the Hub's JSON encoding.
+
+        Only a text prefix or complete directory entries may be omitted. Keep
+        command identity, execution state, error and exit code unchanged.
+        """
+        def fits():
+            return len(json.dumps(wire, sort_keys=True, separators=(',', ':'),
+                                  ensure_ascii=True, allow_nan=False).encode('utf-8')) <= MAX_COMMAND_RESULT_BYTES
+
+        if fits():
+            return wire
+        payload = wire['result']
+        original = payload[field]
+        (payload if nested_truncated else wire)['truncated'] = True
+        payload[field] = original[:0]
+        if not fits():
+            raise ValueError('receipt_metadata_too_large')
+        low, high = 0, len(original)
+        while low < high:
+            middle = (low + high + 1) // 2
+            payload[field] = original[:middle]
+            if fits():
+                low = middle
+            else:
+                high = middle - 1
+        payload[field] = original[:low]
+        return wire
+
+    @staticmethod
     def _wire(command_id: str, receipt: ToolReceipt) -> dict[str, Any]:
-        return {
+        wire = {
             "state": receipt.state if receipt.state in {"succeeded", "failed", "unknown"} else "failed",
             "result": dict(receipt.result or {}),
             "error_code": receipt.error_code,
             "truncated": bool(receipt.truncated),
             "command_id": command_id,
         }
+        for field in ('output', 'content', 'entries'):
+            if isinstance(wire['result'].get(field), (str, list)):
+                return NodeToolExecutor._bound_receipt(wire, field)
+        return wire
 
     def execute_controlled(self, command: Mapping[str, Any], *, should_cancel):
         return self(command, should_cancel=should_cancel)
@@ -220,8 +255,8 @@ class NodeToolExecutor:
                                       "uncertain": bool(report.uncertain)}}
                 if isinstance(observed_at, (int, float)):
                     safe["observed_at"] = float(observed_at)
-                return {"state": "succeeded", "result": safe,
-                        "command_id": command_id}
+                return self._bound_receipt({"state": "succeeded", "result": safe,
+                        "command_id": command_id}, 'text', nested_truncated=True)
             except Exception:
                 raise
         if not action.startswith("tool."):
