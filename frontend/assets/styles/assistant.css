@@ -236,7 +236,7 @@ chat-prompt-input button[type=submit]:disabled { opacity: .45; }
 .request-group { min-width: 0; color: var(--text-2); font-size: 11px; }
 .request-group-items { display: grid; gap: 6px; padding: 8px 0 4px 10px; border-left: 1px solid var(--border-subtle); }
 .request-group[open] > .request-summary > svg:last-child { transform: rotate(180deg); }
-.tool-call-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+tool-call-badge #toggle-btn > div:first-child .tool-call-label { min-width: 0; max-width: none; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 tool-call-badge #toggle-btn > div:first-child { min-width: 0; flex: 1; }
 tool-call-badge #toggle-btn > div:last-child { flex-shrink: 0; }
 tool-call-badge #drawer pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; }
