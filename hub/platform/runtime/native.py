@@ -213,7 +213,8 @@ class NativeAssistantRuntime:
                 "role": "tool",
                 "tool_call_id": call_id,
                 "tool": response.tool,
-                "result": (receipt.result if receipt.state == 'succeeded' else
+                "result": ({**receipt.result, **({'truncated': True} if receipt.truncated else {})}
+                           if receipt.state == 'succeeded' else
                            {'state': 'failed', 'error_code': receipt.error_code,
                             **({'returncode': receipt.result.get('returncode'),
                                 'output': receipt.result.get('output', ''), 'truncated': receipt.truncated}

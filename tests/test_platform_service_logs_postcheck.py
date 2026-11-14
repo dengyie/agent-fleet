@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import sqlite3
 
 import pytest
@@ -129,6 +130,27 @@ def test_service_logs_postcheck_truncates_multibyte_payload_to_byte_limit(tmp_pa
     payload = result.get_json()["postcheck"]["result"]
     assert payload["truncated"] is True
     assert len(payload["text"].encode("utf-8")) <= 1024
+
+
+@pytest.mark.parametrize('text', ['x', '日志', '🙂', '\n"\\'])
+def test_service_logs_receipt_includes_envelope_in_json_limit(tmp_path, text):
+    from tools.platform.node_executor import SERVICE_LOGS_POSTCHECK_ACTION
+    from hub.infrastructure.command_repository import CommandRepository
+
+    command = PlatformCommand.create(command_id='large-logs', target_node='node-a',
+        action=SERVICE_LOGS_POSTCHECK_ACTION, resource_id='workspace', retry_class='read_only',
+        expires_at=9_999_999_999, arguments={'adapter': 'systemd', 'target_alias': 'api.service',
+            'service_version': 1, 'action': 'logs', 'window_s': 60, 'max_bytes': 65536})
+    repository = CommandRepository(tmp_path / 'commands.db')
+    repository.init()
+    repository.enqueue(command)
+    repository.claim_for_node('node-a', 'worker')
+    result = NodeToolExecutor(None, log_reader=lambda _: {'text': text * 80000})(command.as_dict())
+    assert len(json.dumps(result, sort_keys=True, separators=(',', ':')).encode()) <= 65536
+    assert result['result']['truncated'] is True
+    assert result['result']['text'] and (text * 80000).startswith(result['result']['text'])
+    saved = repository.record_receipt(command.command_id, 'succeeded', result=result, worker_id='worker')
+    assert saved['result'] == result
 
 
 def test_service_logs_postcheck_rejects_forged_envelope_and_keeps_unknown(tmp_path):

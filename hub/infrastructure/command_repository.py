@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any, Callable
 from contextlib import closing, contextmanager
 
-from fleet_core.platform_command import RECEIPT_STATES, PlatformCommand, TERMINAL_COMMAND_STATES, args_hash
+from fleet_core.platform_command import (
+    MAX_COMMAND_RESULT_BYTES, RECEIPT_STATES, PlatformCommand, TERMINAL_COMMAND_STATES, args_hash,
+)
 from fleet_core.command_timing import CommandTiming, MAX_COMMAND_LIFETIME_S
 from hub.domain.capability import CapabilityStoreError
 from hub.domain.capability_execution import CAPABILITY_ARGUMENT
@@ -450,7 +452,7 @@ class CommandRepository:
                 conn.execute("COMMIT")
                 raise CommandRepositoryError("lease_expired")
             encoded = json.dumps(result or {}, sort_keys=True, separators=(",", ":"))
-            if len(encoded.encode("utf-8")) > 64 * 1024:
+            if len(encoded.encode("utf-8")) > MAX_COMMAND_RESULT_BYTES:
                 conn.execute("ROLLBACK")
                 raise CommandRepositoryError("result_too_large")
             if status in TERMINAL_COMMAND_STATES:

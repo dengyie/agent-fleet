@@ -47,6 +47,106 @@ def test_direct_vm_executes_interpreter_and_reuses_durable_receipt(tmp_path):
         node.close_all()
 
 
+@pytest.mark.parametrize('text', ['x', '中文', '🙂', '\x00\n"\\'])
+@pytest.mark.parametrize('operation', ['read', 'exec_ok', 'exec_failed'])
+def test_signed_vm_large_receipt_survives_lost_ack_and_restart(tmp_path, text, operation):
+    from tests.test_node_command_control import server
+    from tests.test_platform_node_http_e2e import OWNER, _app
+    from tools.transport import Transport
+    from hub.platform.remote_tool_broker import RemoteToolBroker
+
+    app = _app(tmp_path / 'hub')
+    platform = app.extensions['fleet']['platform_repository']
+    platform.upsert_node(OWNER, {'node_id': 'vm', 'label': 'VM'})
+    credential = platform.provision_node_credential(OWNER, 'vm', secret='v' * 40)['credential']
+    repository = app.extensions['fleet']['services']['platform_delivery'].repository
+    work = tmp_path / 'work'
+    work.mkdir()
+    content = text * 80000
+    if operation == 'read':
+        (work / 'large.txt').write_bytes(content.encode('utf-8'))
+        action, arguments, field = 'tool.workspace.read', {'path': 'large.txt'}, 'content'
+    else:
+        code = 7 if operation == 'exec_failed' else 0
+        script = ('from pathlib import Path; import sys; '
+            'p=Path("once"); p.write_text(p.read_text()+"x" if p.exists() else "x"); '
+            'sys.stdout.buffer.write((' + repr(text) + '*80000).encode("utf-8")); sys.exit(' + str(code) + ')')
+        action, arguments, field = 'tool.workspace.exec', {'argv': [sys.executable, '-c', script]}, 'output'
+    envelope = PlatformCommand.create(command_id='large', target_node='vm', owner_id=OWNER,
+        resource_id='work', action=action, arguments=arguments,
+        expires_at=time.time() + 90, retry_class='manual_only').signed(PRIVATE)
+    repository.enqueue(envelope)
+
+    class LostAck(Transport):
+        receipt_statuses = None
+
+        def post_json(self, url, body, headers):
+            response = super().post_json(url, body, headers)
+            if url.endswith('/receipts'):
+                self.receipt_statuses = response[0]
+                raise ConnectionError('response lost after Hub processed receipt')
+            return response
+
+    with server(app) as origin:
+        config = NodeRuntimeConfig(node_id='vm', credential=credential, hub_url=origin,
+            public_key=PUBLIC, workspace_root=work, workspace_id='work',
+            journal_path=tmp_path / 'node.db', execution_mode='vm_direct',
+            capabilities=frozenset({'workspace.exec', 'workspace.read'}))
+        transport = LostAck(mode='direct', attempts=1, timeout=3, allow_insecure=True)
+        node = NodeRuntime(config, transport=transport)
+        try:
+            assert node.poll_once(limit=1) == {'ok': True, 'commands': 1, 'receipts': 0}
+            assert transport.receipt_statuses == 200, 'Hub rejected an executed command result'
+            saved = node.journal.get('large')
+            expected_state = 'failed' if operation == 'exec_failed' else 'succeeded'
+            assert saved['state'] == expected_state and saved['receipt_pending']
+            result = saved['result']
+            assert len(json.dumps(result, sort_keys=True, separators=(',', ':')).encode()) <= 64 * 1024
+            assert result['truncated'] is True
+            assert result['result'][field] and content.startswith(result['result'][field])
+            if operation != 'read':
+                assert result['result']['returncode'] == (7 if operation == 'exec_failed' else 0)
+                assert result['error_code'] == ('process_failed' if operation == 'exec_failed' else None)
+            assert repository.get('large')['result'] == result
+            observed = RemoteToolBroker(None, node_id='vm', resource_id='work', run_id='run')._receipt(
+                repository.get('large'), command_id='large', tool=action.removeprefix('tool.'))
+            assert observed.truncated is True
+            assert observed.result == result['result'] and observed.state == expected_state
+        finally:
+            node.close_all()
+        node = NodeRuntime(config, transport=Transport(mode='direct', attempts=1, timeout=3, allow_insecure=True))
+        try:
+            assert node.poll_once(limit=1) == {'ok': True, 'commands': 0, 'receipts': 1}
+            assert node.journal.pending_receipts() == []
+            assert node.journal.get('large')['result'] == result
+            assert repository.get('large')['attempt'] == 1
+            if operation != 'read':
+                assert (work / 'once').read_text() == 'x'
+        finally:
+            node.close_all()
+
+
+@pytest.mark.parametrize('character', ['x', '中', '🙂', ''])
+def test_vm_directory_receipt_preserves_complete_names_within_hub_limit(tmp_path, character):
+    node = runtime(tmp_path, execution_mode='vm_direct')
+    names = sorted(str(index).zfill(4) + character * 50 for index in range(1001))
+    for name in names:
+        (tmp_path / 'work' / name).touch()
+    envelope = PlatformCommand.create(command_id='list-large', target_node='vm', resource_id='work',
+        action='tool.workspace.list', arguments={'path': ''}, retry_class='read_only',
+        expires_at=time.time() + 60).signed(PRIVATE).as_dict()
+    try:
+        result = node.client.handle(envelope)['result']
+        assert len(json.dumps(result, sort_keys=True, separators=(',', ':')).encode()) <= 64 * 1024
+        assert result['truncated'] is True
+        returned = result['result']['entries']
+        assert 0 < len(returned) < len(names)
+        assert [entry['name'] for entry in returned] == names[:len(returned)]
+        assert all(entry['kind'] == 'file' for entry in returned)
+    finally:
+        node.close_all()
+
+
 def test_unconfigured_sandbox_does_not_report_exec(tmp_path):
     node = runtime(tmp_path)
     try:
@@ -141,7 +241,8 @@ def test_vm_allows_explicit_shell_argv(tmp_path):
 
 
 @pytest.mark.parametrize('crash_phase', [None, 'receipt', 'ready'])
-def test_signed_vm_http_failure_returns_to_model_without_replaying_command(tmp_path, monkeypatch, crash_phase):
+@pytest.mark.parametrize('truncated', [False, True])
+def test_signed_vm_http_failure_returns_to_model_without_replaying_command(tmp_path, monkeypatch, crash_phase, truncated):
     from hub.application.run_worker_service import LocalRunWorkerService
     from hub.platform.providers.base import ModelResponse
     from tests.test_native_run_checkpoints import Crash
@@ -168,15 +269,17 @@ def test_signed_vm_http_failure_returns_to_model_without_replaying_command(tmp_p
             if len(calls) == 1:
                 return ModelResponse(kind='tool_call', tool='workspace.exec', tool_call_id='failed-command',
                     arguments={'argv': [sys.executable, '-c',
-                        'from pathlib import Path; import sys; p=Path("once"); p.write_text(p.read_text()+"x" if p.exists() else "x"); print("fix-the-command",file=sys.stderr); sys.exit(7)']})
+                        'from pathlib import Path; import sys; p=Path("once"); p.write_text(p.read_text()+"x" if p.exists() else "x"); print("fix-the-command"+' + ('"x"*100000' if truncated else '""') + ',file=sys.stderr); sys.exit(7)']})
             if len(calls) == 2:
                 result = messages[-1]['result']
                 assert result['returncode'] == 7 and result['error_code'] == 'process_failed'
                 assert 'fix-the-command' in result['output']
+                assert result['truncated'] is truncated
                 assert messages[-1]['tool_call_id'] == 'failed-command'
                 return ModelResponse(kind='tool_call', tool='workspace.exec', arguments={
-                    'argv': [sys.executable, '-c', 'print("VM_FIXED")']})
-            assert messages[-1]['result']['output'].strip() == 'VM_FIXED'
+                    'argv': [sys.executable, '-c', 'print("VM_FIXED"+' + ('"x"*100000' if truncated else '""') + ')']})
+            assert messages[-1]['result']['output'].strip().startswith('VM_FIXED')
+            assert messages[-1]['result'].get('truncated', False) is truncated
             return ModelResponse(kind='final', text='命令已修正。')
 
     def worker():

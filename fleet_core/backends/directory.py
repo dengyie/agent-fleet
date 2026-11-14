@@ -62,9 +62,11 @@ class DirectoryBackend:
             if not path.exists() or not path.is_dir():
                 return self._receipt("", "failed", error_code="not_found")
             entries = []
-            for item in sorted(path.iterdir(), key=lambda p: p.name)[:1000]:
+            items = sorted(path.iterdir(), key=lambda p: p.name)
+            for item in items[:1000]:
                 entries.append({"name": item.name, "kind": "directory" if item.is_dir() else "file"})
-            return self._receipt("", "succeeded", {"path": relative_path, "entries": entries})
+            return self._receipt("", "succeeded", {"path": relative_path, "entries": entries},
+                                 truncated=len(items) > 1000)
         except WorkspaceError as exc:
             return self._receipt("", "failed", error_code=exc.code)
 

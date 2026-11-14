@@ -156,6 +156,7 @@ class RemoteToolBroker:
             attribution['approval_id'] = arguments['approval_id']
         payload = row.get('result') if isinstance(row, Mapping) else None
         payload = payload if isinstance(payload, dict) else {}
+        truncated = payload.get('truncated') is True
         if isinstance(payload.get('state'), str) and isinstance(payload.get('result'), dict):
             result, error = payload['result'], payload.get('error_code')
         else:
@@ -164,9 +165,9 @@ class RemoteToolBroker:
             return ToolReceipt(command_id, 'waiting_node', attribution)
         self._event('node_receipt', command_id, tool, status=status, **attribution)
         if status == 'succeeded':
-            return ToolReceipt(command_id, 'succeeded', {**result, **attribution})
+            return ToolReceipt(command_id, 'succeeded', {**result, **attribution}, truncated=truncated)
         if status in {'failed', 'expired'}:
-            return ToolReceipt(command_id, 'failed', {**result, **attribution}, error or 'remote_failed')
+            return ToolReceipt(command_id, 'failed', {**result, **attribution}, error or 'remote_failed', truncated)
         return ToolReceipt(command_id, 'unknown', attribution, 'receipt_unknown')
 
 
