@@ -126,10 +126,10 @@ def test_signed_vm_large_receipt_survives_lost_ack_and_restart(tmp_path, text, o
             node.close_all()
 
 
-@pytest.mark.parametrize('character', ['x', '中', '🙂'])
+@pytest.mark.parametrize('character', ['x', '中', '🙂', ''])
 def test_vm_directory_receipt_preserves_complete_names_within_hub_limit(tmp_path, character):
     node = runtime(tmp_path, execution_mode='vm_direct')
-    names = sorted(str(index).zfill(4) + character * 50 for index in range(1000))
+    names = sorted(str(index).zfill(4) + character * 50 for index in range(1001))
     for name in names:
         (tmp_path / 'work' / name).touch()
     envelope = PlatformCommand.create(command_id='list-large', target_node='vm', resource_id='work',
