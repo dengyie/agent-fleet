@@ -49,3 +49,21 @@ def test_deployment_cli_fails_when_platform_is_not_enabled(tmp_path, capsys):
     finally:
         server.shutdown(); server.server_close(); thread.join(2)
     assert '"http_status": 404' in capsys.readouterr().out
+
+
+def test_remote_readiness_checks_configuration_without_local_path_or_network_claim(tmp_path):
+    from fleet_core.control import generate_ed25519_keypair
+    private, _ = generate_ed25519_keypair()
+    app = create_app(FleetConfig.from_root(tmp_path, dev_operator=OWNER, platform_enabled=True,
+        platform_worker_enabled=True, platform_worker_scheduler_enabled=True,
+        platform_remote_execution_enabled=True, platform_command_signing_raw=private, service_monitoring_enabled=True))
+    repo = app.extensions['fleet']['platform_repository']
+    repo.upsert_model(OWNER, {'profile_id': 'model', 'provider': 'deterministic', 'model': 'test'})
+    repo.upsert_node(OWNER, {'node_id': 'vm', 'capabilities': {'workspace.exec': True}})
+    repo.upsert_workspace(OWNER, {'workspace_id': 'remote', 'root_path': '/not-on-hub', 'default_node_id': 'vm'})
+    repo.update_defaults(OWNER, {'model_profile_id': 'model', 'workspace_id': 'remote'}, 0)
+    result = app.test_client().get('/api/platform/v1/readiness')
+    assert result.status_code == 200, result.json
+    assert result.json['node_connectivity'] == 'not_tested'
+    repo.upsert_node(OWNER, {'node_id': 'vm', 'enabled': False})
+    assert 'default_node_unavailable' in app.test_client().get('/api/platform/v1/readiness').json['issues']

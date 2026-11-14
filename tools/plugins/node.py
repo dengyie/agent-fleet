@@ -1,4 +1,4 @@
-"""Run registered plugins and optional Workflow tests: python -m tools.plugins.node."""
+"""Run workspace tools, registered plugins and optional Workflow tests."""
 from __future__ import annotations
 
 import argparse
@@ -10,12 +10,13 @@ from pathlib import Path
 import signal
 import threading
 import time
-from urllib.parse import urlsplit
 
 from fleet_core.locking import LockBusy, OwnedLock
 from fleet_core.plugins import OFFICIAL_PLUGINS
+from fleet_core.workspace_execution import valid_hub_origin as valid_origin
 from tools.platform.node_runtime import NodeRuntime, NodeRuntimeConfig
 from tools.platform.node_registration import workflow_test_settings
+from tools.platform.workspace_registration import workspace_settings
 
 
 class PluginNodeRuntime(NodeRuntime):
@@ -30,37 +31,33 @@ class PluginNodeRuntime(NodeRuntime):
             self.ownership_lock.release()
 
 
-def valid_origin(value):
-    url = urlsplit(value)
-    if (not url.hostname or (url.scheme != 'https' and not (
-            url.scheme == 'http' and url.hostname in {'localhost', '127.0.0.1', '::1'})) or url.username or url.password
-            or url.query or url.fragment or url.path not in {'', '/'}):
-        raise ValueError('hub_https_origin_required')
-    return value.rstrip('/')
-
-
 def install_enrollment(path, state_directory):
     raw = Path(path).expanduser().read_bytes()
     if len(raw) > 65536:
         raise ValueError('invalid_enrollment')
     data = json.loads(raw)
-    if not isinstance(data, dict) or set(data) != {'node_id', 'hub_url', 'credential', 'public_key', 'plugins'}:
+    required = {'node_id', 'hub_url', 'credential', 'public_key', 'plugins'}
+    if not isinstance(data, dict) or set(data) - (required | {'workspace'}) or not required <= set(data):
         raise ValueError('invalid_enrollment')
     state = Path(state_directory).expanduser()
-    if not state.is_absolute() or not isinstance(data['plugins'], dict) or not data['plugins']:
+    if (not state.is_absolute() or not isinstance(data['plugins'], dict)
+            or not data['plugins'] and 'workspace' not in data):
         raise ValueError('invalid_enrollment')
     for plugin_id in data['plugins']:
         OFFICIAL_PLUGINS.get(plugin_id)
     public = base64.b64decode(data['public_key'], validate=True)
+    workspace = workspace_settings(data['workspace']) if 'workspace' in data else {}
     NodeRuntimeConfig(node_id=data['node_id'], credential=data['credential'], public_key=public,
                       hub_url=valid_origin(data['hub_url']), workspace_root=state / 'unused-workspace',
-                      journal_path=state / 'commands.db')
+                      journal_path=state / 'commands.db', **workspace)
     paths = {name: state / name for name in ('node-credential', 'command-public-key', 'node.json')}
     if any(path.exists() for path in paths.values()):
         raise ValueError('enrollment_files_exist')
     config = {'node_id': data['node_id'], 'hub_url': valid_origin(data['hub_url']),
               'credential_file': str(paths['node-credential']), 'public_key_file': str(paths['command-public-key']),
               'state_directory': str(state), 'plugins': data['plugins']}
+    if 'workspace' in data:
+        config['workspace'] = data['workspace']
     values = {'node-credential': data['credential'], 'command-public-key': data['public_key'],
               'node.json': json.dumps(config, ensure_ascii=False, indent=2)}
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -77,7 +74,7 @@ def load_runtime(path, *, transport=None):
         raise ValueError('invalid_node_config')
     data = json.loads(raw)
     required = {'node_id', 'hub_url', 'credential_file', 'public_key_file', 'state_directory', 'plugins'}
-    if not isinstance(data, dict) or set(data) - (required | {'poll_interval_s', 'workflow_test'}) or not required <= set(data):
+    if not isinstance(data, dict) or set(data) - (required | {'poll_interval_s', 'workflow_test', 'workspace'}) or not required <= set(data):
         raise ValueError('invalid_node_config')
     valid_origin(data['hub_url'])
     interval = data.get('poll_interval_s', 2)
@@ -85,15 +82,18 @@ def load_runtime(path, *, transport=None):
         raise ValueError('poll_interval_invalid')
     state = Path(data['state_directory']).expanduser()
     if (not state.is_absolute() or not isinstance(data['plugins'], dict)
-            or not data['plugins'] and 'workflow_test' not in data):
+            or not data['plugins'] and not {'workflow_test', 'workspace'} & set(data)):
         raise ValueError('invalid_node_config')
     workflow_settings = workflow_test_settings(data['workflow_test']) if 'workflow_test' in data else {}
+    workspace = workspace_settings(data['workspace']) if 'workspace' in data else {}
+    if workspace and workflow_settings:
+        raise ValueError('workspace and fixed-test runtimes require separate configurations')
     credential = Path(data['credential_file']).expanduser().read_text(encoding='utf-8').strip()
     public = base64.b64decode(Path(data['public_key_file']).expanduser().read_text(encoding='utf-8').strip(), validate=True)
     config = NodeRuntimeConfig(
         node_id=data['node_id'], credential=credential, hub_url=data['hub_url'], public_key=public,
         workspace_root=state / 'unused-workspace', journal_path=state / 'commands.db',
-        plugins=data['plugins'] or None, **workflow_settings)
+        plugins=data['plugins'] or None, **workflow_settings, **workspace)
     lock = OwnedLock(state / 'node.lock', purpose='official-plugin-node').acquire()
     try:
         return PluginNodeRuntime(config, lock, transport=transport), interval

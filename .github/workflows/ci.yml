@@ -103,6 +103,7 @@ jobs:
           tests/test_discovery.py tests/test_transport.py
           tests/test_worktree_diff_streaming.py tests/test_workspace_output_bounds.py
           tests/test_platform_sandbox_artifacts.py tests/test_bounded_process.py -q
+          tests/test_vm_execution.py tests/test_workspace_node_setup.py
           tests/test_main_review_regressions.py tests/test_round5_windows_process.py
           tests/test_workflow_shared_node_startup.py tests/test_workflow_startup.py
           tests/test_workflow_setup.py

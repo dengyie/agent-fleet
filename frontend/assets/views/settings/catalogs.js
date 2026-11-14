@@ -1,4 +1,4 @@
-import {getSettings, saveSetting, saveDefaults, provisionNode} from '../../api/settings.js';
+import {getSettings, saveSetting, saveDefaults, enrollWorkspaceNode} from '../../api/settings.js';
 import {el, button, field, panel, jsonValue, errorText} from './forms.js';
 
 const info = {
@@ -100,22 +100,37 @@ export function mountCatalog(root, kind) {
         controls.root_path = field(form, 'root_path', '工作目录绝对路径', row?.root_path, {required: true});
         controls.node = field(form, 'default_node_id', '默认执行节点', row?.default_node_id, {options: [['', '使用账号默认节点'], ...catalog.nodes.filter(n => n.enabled).map(n => [n.node_id, n.label])]});
       }
-      if (kind === 'nodes') controls.capabilities = field(form, 'capabilities', '能力声明（JSON）', JSON.stringify(row?.capabilities || {}, null, 2), {type: 'textarea', help: '例如 {"workspace.exec": true}。只填写节点实际支持的能力。'});
+      if (kind === 'nodes') controls.capabilities = field(form, 'capabilities', '能力声明（JSON）', JSON.stringify(row?.capabilities || {'workspace.list': true, 'workspace.read': true, 'workspace.write': true, 'workspace.exec': true}, null, 2), {type: 'textarea', help: '工作区节点默认支持列目录、读写文件和执行命令。仅声明实际安装的能力。'});
       const enabled = field(form, 'enabled', '启用此配置', row?.enabled ?? true, {type: 'checkbox'});
       const submit = el('button', '保存配置', 'button-primary'); submit.type = 'submit';
       const result = el('p'); result.setAttribute('role', 'status');
       form.append(submit, button('取消编辑', () => editorRoot.replaceChildren()), result);
       if (kind === 'nodes' && row?.enabled) {
-        form.append(button('签发／轮换节点接入凭据', async event => {
-          if (!window.confirm('轮换后节点必须使用新凭据重新连接，确认继续？')) return;
-          event.currentTarget.disabled = true;
+        const setup = el('details', null, 'settings-advanced');
+        setup.append(el('summary', '部署或更新 VM 执行配置'));
+        setup.append(el('p', '先保存节点，并在「工作区与存储」中将工作目录绑定到此节点。这里生成接入文件；安装文件并重启 VM 上的 Node 后，执行模式和目录才会生效。下载会轮换此节点凭据，旧进程需同步更新。', 'settings-description'));
+        const mode = field(setup, 'execution_mode', '执行模式', 'vm_direct', {options: [['vm_direct', 'VM 直接执行（推荐）'], ['sandbox', '自定义沙盒启动器']]});
+        const launcher = field(setup, 'sandbox_launcher', '沙盒启动参数（JSON）', '[]', {type: 'textarea', help: '仅自定义沙盒填写 argv 数组；VM 直接执行留为 []。VM 模式可运行 shell 和解释器，文件与网络范围由 VM 账号决定。'});
+        launcher.closest('label').hidden = true;
+        mode.addEventListener('change', () => { launcher.closest('label').hidden = mode.value !== 'sandbox'; });
+        setup.append(el('pre', 'python3 -m tools.plugins.node --enroll enrollment.json --state-directory /var/lib/fleet-node/state\npython3 -m tools.plugins.node --config /var/lib/fleet-node/state/node.json', 'settings-description'));
+        setup.append(el('p', '首次安装使用上述命令。更新时先停止 Node，保留 commands.db 命令日志，备份并替换接入文件生成的三个配置文件，再启动 Node。不要删除命令日志；它防止已执行命令重复运行。', 'settings-description'));
+        const download = button('下载接入配置', async () => {
+          if (!window.confirm('将轮换节点凭据。请保存下载文件，并在 VM 上安装后重启 Node，确认继续？')) return;
+          download.disabled = true;
           try {
-            const issued = await provisionNode(row.node_id, formOwner);
+            const issued = await enrollWorkspaceNode(row.node_id, {hub_url: window.location.origin,
+              execution_mode: mode.value, sandbox_launcher: mode.value === 'sandbox' ? JSON.parse(launcher.value) : []}, formOwner);
             if (disposed || ticket !== sequence || !form.isConnected) return;
-            result.textContent = '接入凭据仅显示一次，请保存到节点配置：' + issued.credential;
-          } catch (error) { result.textContent = errorText(error); }
-          finally { if (form.isConnected) event.target.disabled = false; }
-        }));
+            const url = URL.createObjectURL(new Blob([JSON.stringify(issued.enrollment, null, 2) + '\n'], {type: 'application/json'}));
+            const link = el('a'); link.href = url; link.download = row.node_id + '-enrollment.json';
+            document.body.append(link); link.click(); link.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+            result.textContent = '接入配置已下载。请妥善保管凭据，在 VM 安装并重启 Node；出现心跳后再选择为默认执行节点。';
+          } catch (error) { if (!disposed && ticket === sequence && form.isConnected) result.textContent = errorText(error); }
+          finally { download.disabled = false; }
+        });
+        setup.append(download); form.append(setup);
       }
       form.addEventListener('submit', async event => {
         event.preventDefault(); submit.disabled = true; result.textContent = '正在保存…';

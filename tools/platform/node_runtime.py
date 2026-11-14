@@ -16,6 +16,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from fleet_core.backends.sandbox import SandboxBackend
+from fleet_core.backends.vm import VMBackend
+from fleet_core.workspace_execution import validate_execution_mode
 from fleet_core.web_agent_contract import WEB_AGENT_TOOLS
 from tools.browser_bridge.contract import WebAgentExecutor
 from tools.browser_bridge.muse import MuseBridge
@@ -70,6 +72,7 @@ class NodeRuntimeConfig:
     log_path_prefix: tuple[Path, ...] = ()
     service_path_prefix: tuple[Path, ...] = ()
     sandbox_launcher: tuple[str, ...] = ()
+    execution_mode: str = 'sandbox'
     muse_bridge_enabled: bool = False
     muse_workspace_ids: tuple[str, ...] = ()
     muse_bridge_state_path: Path | None = None
@@ -90,6 +93,9 @@ class NodeRuntimeConfig:
     workflow_test_enabled: bool = False
 
     def __post_init__(self):
+        validate_execution_mode(self.execution_mode)
+        if self.execution_mode == 'vm_direct' and self.sandbox_launcher:
+            raise ValueError('direct VM execution cannot use a sandbox launcher')
         if self.plugins is not None and not isinstance(self.plugins, dict):
             raise ValueError('plugins must be an object')
         if not isinstance(self.sandbox_launcher, (tuple, list)) or any(
@@ -207,7 +213,8 @@ class NodeRuntime:
         self.clock = clock or time.time
         self._stopped = threading.Event()
         self.workspace_backends = {
-            resource_id: SandboxBackend(root, launcher=config.sandbox_launcher)
+            resource_id: (VMBackend(root) if config.execution_mode == 'vm_direct'
+                          else SandboxBackend(root, launcher=config.sandbox_launcher))
             for resource_id, root in config.workspace_roots.items()
         }
         # Keep the established single-root inspection attribute while all
@@ -269,6 +276,8 @@ class NodeRuntime:
                 MuseBridge(config.muse_bridge_state_path), workspace_ids=config.muse_workspace_ids)
         if web_agent_executor is None:
             allowed_tools = allowed_tools - WEB_AGENT_TOOLS
+        if not self._exec_available():
+            allowed_tools = allowed_tools - {'workspace.exec'}
         self.web_agent_executor = web_agent_executor
         self.browser_backend = browser_backend
         self.artifact_receiver = None
@@ -339,7 +348,7 @@ class NodeRuntime:
 
     def _capability_actions(self) -> frozenset[str]:
         browser_available = self.browser_backend is not None and self.browser_backend.available
-        exec_available = bool(self.workspace_backends) and all(backend.launcher for backend in self.workspace_backends.values())
+        exec_available = self._exec_available()
         actions = {"tool." + tool for tool in self.executor.allowed_tools
             if (tool != "workspace.exec" or exec_available)
             and (tool not in BROWSER_TOOLS or browser_available)
@@ -348,6 +357,10 @@ class NodeRuntime:
         if self.workflow_test_executor is not None and self.workflow_test_executor.available:
             actions.add(REMOTE_TEST_ACTION)
         return frozenset(actions)
+
+    def _exec_available(self):
+        return bool(self.workspace_backends) and (
+            self.config.execution_mode == 'vm_direct' or bool(self.config.sandbox_launcher))
 
     def report_capabilities(self) -> NodeCapabilityReceipt:
         if self.capability_reporter is None:
@@ -358,10 +371,14 @@ class NodeRuntime:
         return {
             "node_id": self.config.node_id,
             "worker_id": self.config.worker_id,
+            **({'workspace_execution': {'mode': self.config.execution_mode,
+                'command_available': self._exec_available(),
+                'workspace_ids': sorted(self.workspace_backends)}} if self.workspace_backends else {}),
             **({'plugins': self.plugin_executor.manifest()} if self.plugin_executor else {}),
             "capabilities": {
                 **{name: True for name in sorted(self.config.capabilities)
-                   if (name != BROWSER_SESSION_CAPABILITY
+                   if (name != 'workspace.exec' or self._exec_available())
+                   and (name != BROWSER_SESSION_CAPABILITY
                        or (self.browser_backend is not None and self.browser_backend.available))
                    and (name not in WEB_AGENT_TOOLS or self.web_agent_executor is not None)
                    and (name != "artifact.receive" or (self.artifact_receiver is not None and self.artifact_receiver.available))
