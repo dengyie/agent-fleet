@@ -109,7 +109,12 @@
         "tests/test_assistant_live_feedback.py::test_cancel_during_stream_preserves_text_and_closes_body",
         "tests/test_assistant_live_feedback.py::test_run_stream_delivers_updates_after_initial_snapshot",
         "tests/test_assistant_live_feedback.py::test_retry_notice_remains_visible_during_the_retry_request",
-        "tests/test_assistant_live_feedback.py::test_progress_bound_handles_json_escaping_without_hanging"
+        "tests/test_assistant_live_feedback.py::test_progress_bound_handles_json_escaping_without_hanging",
+        "tests/test_assistant_tool_availability.py::test_worker_advertises_exec_only_when_local_sandbox_is_configured",
+        "tests/test_assistant_tool_availability.py::test_failed_tool_reason_survives_public_run_and_conversation_reload",
+        "tests/test_assistant_tool_availability.py::test_environment_inspection_finishes_without_attempting_unavailable_exec",
+        "tests/test_assistant_tool_availability.py::test_receipt_checkpoint_reports_failure_without_replaying_tool",
+        "tests/test_assistant_tool_availability.py::test_progress_keeps_bounded_error_code_without_private_receipt_data"
       ]
     },
     {

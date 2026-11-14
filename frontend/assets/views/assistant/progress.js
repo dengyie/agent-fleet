@@ -20,6 +20,9 @@ export function renderProgress(host, run) {
       const status = segment.state === 'succeeded' ? 'success' : segment.state === 'running' ? (active ? 'running' : 'unknown') : segment.state === 'unknown' ? 'unknown' : 'error';
       if (node.getAttribute('name') !== name) node.setAttribute('name',name);
       if (node.getAttribute('status') !== status) node.setAttribute('status',status);
+      const error = segment.error_code || '';
+      if (error && node.getAttribute('error') !== error) node.setAttribute('error',error);
+      if (!error && node.hasAttribute('error')) node.removeAttribute('error');
     } else {
       if (node.getAttribute('content') !== segment.text) node.setAttribute('content',segment.text);
       node.toggleAttribute('is-streaming',active && !segment.complete);

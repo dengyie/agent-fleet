@@ -60,6 +60,29 @@ const [origin, conversation, runId] = process.argv.slice(2);
       await page.setViewportSize({width:1440,height:1000});
       await page.screenshot({path:process.env.FLEET_SCREENSHOTS + '/live-feedback-complete-desktop.png'});
     }
+    await page.evaluate(async () => {
+      const {renderProgress} = await import('/assets/views/assistant/progress.js');
+      const host = document.createElement('div'); document.body.append(host);
+      const segment = {id:'failed-tool',kind:'tool',tool:'workspace.exec',
+        state:'failed',error_code:'sandbox_unavailable'};
+      const run = {state:'failed',progress:{segments:[segment]}};
+      renderProgress(host,run);
+      const badge = host.querySelector('tool-call-badge');
+      const button = badge.querySelector('button'); button.click(); button.focus();
+      if (!badge.querySelector('#drawer').textContent.includes('sandbox_unavailable')) {
+        throw new Error('failed inline tool must display its specific error');
+      }
+      renderProgress(host,structuredClone(run));
+      if (badge.querySelector('button') !== button || document.activeElement !== button) {
+        throw new Error('unchanged error snapshots must preserve drawer and focus');
+      }
+      delete segment.error_code; segment.state = 'succeeded';
+      renderProgress(host,run);
+      if (badge.hasAttribute('error') || badge.querySelector('#drawer').textContent.includes('sandbox_unavailable')) {
+        throw new Error('a successful receipt must clear stale error details');
+      }
+      host.remove();
+    });
     assert.deepEqual(errors,[]);
     console.log(JSON.stringify({beforeEOF:true,refreshRecovery:true,inlineTool:true,retryVisible:true,mobile:true,errors}));
   } catch (error) {
