@@ -142,7 +142,7 @@ def test_broker_rechecks_cancellation_before_enqueue(tmp_path):
 def test_receipt_cancellation_checks_do_not_renew_sqlite_lease_on_every_poll(tmp_path, monkeypatch):
     app = _app(tmp_path)
     platform = _catalog(app, tmp_path)
-    platform.upsert_node(OWNER, {"node_id": "remote", "label": "remote"})
+    platform.upsert_node(OWNER, {"node_id": "remote", "label": "remote", "capabilities": {"workspace.read": True, "workspace.write": True}})
     conversation = platform.create_conversation(OWNER, "conv-polls", title="", workspace_id="home")
     platform.append_turn(OWNER, conversation["conversation_id"], "msg-polls", "run-polls",
         text="read", client_token="polls", now=1,
@@ -188,7 +188,7 @@ def test_receipt_cancellation_checks_do_not_renew_sqlite_lease_on_every_poll(tmp
 def test_http_run_cancel_interrupts_remote_wait_and_releases_scheduler_slot(tmp_path, dispatched):
     app = _app(tmp_path)
     platform = _catalog(app, tmp_path)
-    platform.upsert_node(OWNER, {"node_id": "remote", "label": "remote"})
+    platform.upsert_node(OWNER, {"node_id": "remote", "label": "remote", "capabilities": {"workspace.read": True, "workspace.write": True}})
     conversation = platform.create_conversation(OWNER, "conv-cancel", title="", workspace_id="home")
     platform.append_turn(OWNER, conversation["conversation_id"], "msg-cancel", "run-cancel",
         text="write", client_token="cancel", now=1,

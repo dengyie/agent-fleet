@@ -24,6 +24,7 @@ class CommandControl:
         self.interval = max(.05, min(1.0, float(lease_s) / 3))
         self.closed, self.cancelled = Event(), Event()
         self.failure = None
+        self.failure_code = None
         self.thread = Thread(target=self._loop, name='node-command-control-' + self.command_id, daemon=True)
 
     def should_cancel(self):
@@ -35,7 +36,20 @@ class CommandControl:
 
     def start(self):
         if self.renew is not None and not self.should_cancel():
-            self._pulse(initial=True)
+            # No process has started yet. Retry observations, never execution;
+            # every request and backoff remains under the signed deadline.
+            for attempt in range(3):
+                self._pulse(initial=False)
+                if self.failure is None or self.should_cancel():
+                    break
+                if attempt < 2:
+                    remaining = min(.1 * (2 ** attempt), self.execution_until - self.monotonic())
+                    if remaining <= 0 or self.closed.wait(remaining):
+                        break
+            if self.failure is not None:
+                if not self.should_cancel():
+                    self.failure_code = 'command_control_unavailable'
+                self.cancelled.set()
             if not self.should_cancel():
                 self.thread.start()
         return self
@@ -64,14 +78,14 @@ class CommandControl:
     def _pulse(self, *, initial=False):
         try:
             started = self.monotonic()
-            control = self.renew(self.closed.is_set)
+            control = self.renew(lambda: self.closed.is_set() or self.should_cancel())
             self._accept(control, started=started)
             self.failure = None
         except Exception as exc:
             if self.closed.is_set():
                 return
             self.failure = exc
-            if initial or isinstance(exc, ControlRejected):
+            if initial or isinstance(exc, ControlRejected) or not isinstance(exc, OSError):
                 self.cancelled.set()
             # Transient failures retry within the last confirmed lease.
             # should_cancel enforces that monotonic boundary independently.

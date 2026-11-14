@@ -227,7 +227,11 @@ class NodeClient:
         renew = (lambda stopped: self._renew_control(command['command_id'], lease_s, stopped)) if control_supported else None
         with CommandControl(command, renew=renew, should_stop=self.should_cancel,
                             clock=self.clock, lease_s=lease_s) as control:
-            return controlled(command, should_cancel=control.should_cancel)
+            result = controlled(command, should_cancel=control.should_cancel)
+            if (control.failure_code and isinstance(result, Mapping)
+                    and result.get('error_code') == 'cancelled'):
+                return {**result, 'error_code': control.failure_code}
+            return result
 
     def handle(self, command: dict, *, control_supported=False, lease_s=60.0):
         command_id = command.get("command_id")

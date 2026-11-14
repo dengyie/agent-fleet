@@ -32,8 +32,9 @@ class PluginNodeRuntime(NodeRuntime):
 
 
 def install_enrollment(path, state_directory):
+    from fleet_core.workspace_execution import MAX_NODE_CONFIG_BYTES, node_config_text
     raw = Path(path).expanduser().read_bytes()
-    if len(raw) > 65536:
+    if len(raw) > MAX_NODE_CONFIG_BYTES:
         raise ValueError('invalid_enrollment')
     data = json.loads(raw)
     required = {'node_id', 'hub_url', 'credential', 'public_key', 'plugins'}
@@ -51,26 +52,28 @@ def install_enrollment(path, state_directory):
                       hub_url=valid_origin(data['hub_url']), workspace_root=state / 'unused-workspace',
                       journal_path=state / 'commands.db', **workspace)
     paths = {name: state / name for name in ('node-credential', 'command-public-key', 'node.json')}
-    if any(path.exists() for path in paths.values()):
-        raise ValueError('enrollment_files_exist')
     config = {'node_id': data['node_id'], 'hub_url': valid_origin(data['hub_url']),
               'credential_file': str(paths['node-credential']), 'public_key_file': str(paths['command-public-key']),
               'state_directory': str(state), 'plugins': data['plugins']}
     if 'workspace' in data:
         config['workspace'] = data['workspace']
-    values = {'node-credential': data['credential'], 'command-public-key': data['public_key'],
-              'node.json': json.dumps(config, ensure_ascii=False, indent=2)}
+    values = {'node-credential': data['credential'] + '\n',
+              'command-public-key': data['public_key'] + '\n',
+              'node.json': node_config_text(config)}
+    if any(path.exists() for path in paths.values()):
+        raise ValueError('enrollment_files_exist')
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     for name, value in values.items():
         fd = os.open(str(paths[name]), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-            handle.write(value + '\n')
+            handle.write(value)
     return paths['node.json']
 
 
 def load_runtime(path, *, transport=None):
+    from fleet_core.workspace_execution import MAX_NODE_CONFIG_BYTES
     raw = Path(path).expanduser().read_bytes()
-    if len(raw) > 65536:
+    if len(raw) > MAX_NODE_CONFIG_BYTES:
         raise ValueError('invalid_node_config')
     data = json.loads(raw)
     required = {'node_id', 'hub_url', 'credential_file', 'public_key_file', 'state_directory', 'plugins'}

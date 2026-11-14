@@ -47,6 +47,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y bubblewrap libseccomp2
+      - name: Delegate direct VM command test scope
+        run: |
+          scope=/sys/fs/cgroup/agent-fleet-tests
+          sudo mkdir "$scope"
+          sudo chown "$(id -u):$(id -g)" "$scope" "$scope/cgroup.procs" "$scope/cgroup.threads" "$scope/cgroup.subtree_control"
+          echo "FLEET_COMMAND_CGROUP_ROOT=$scope" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -56,6 +62,8 @@ jobs:
           "$RUNNER_TEMP/fleet-browser/node_modules/.bin/playwright" install --with-deps chromium
       - name: Run test suite
         run: |
+          # Descendant migration stays inside the delegated test subtree.
+          echo "$$" | sudo tee "$FLEET_COMMAND_CGROUP_ROOT/cgroup.procs" >/dev/null
           FLEET_PLAYWRIGHT_MODULE="$RUNNER_TEMP/fleet-browser/node_modules/playwright" \
           FLEET_SCREENSHOTS="$RUNNER_TEMP/fleet-test-evidence/browser" \
           FLEET_BROWSER_CHANNEL=chromium PYTHONPATH=. python -m pytest tests -q \
@@ -104,6 +112,7 @@ jobs:
           tests/test_worktree_diff_streaming.py tests/test_workspace_output_bounds.py
           tests/test_platform_sandbox_artifacts.py tests/test_bounded_process.py -q
           tests/test_vm_execution.py tests/test_workspace_node_setup.py
+          tests/test_vm_command_scope.py
           tests/test_main_review_regressions.py tests/test_round5_windows_process.py
           tests/test_workflow_shared_node_startup.py tests/test_workflow_startup.py
           tests/test_workflow_setup.py

@@ -18,7 +18,9 @@ def test_worker_advertises_exec_only_when_local_sandbox_is_configured(
     app = _app(tmp_path)
     repo = _catalog(app, tmp_path)
     if remote:
-        repo.upsert_node(OWNER, {'node_id': 'remote', 'capabilities': {'workspace.exec': expected_exec}})
+        repo.upsert_node(OWNER, {'node_id': 'remote', 'capabilities': {
+            'workspace.list': True, 'workspace.read': True, 'workspace.write': True,
+            'workspace.exec': expected_exec}})
         repo.update_defaults(OWNER, {'model_profile_id': 'local', 'workspace_id': 'home',
                                     'execution_node_id': 'remote'}, 1)
     run = _queued(app)
@@ -112,3 +114,41 @@ def test_progress_keeps_bounded_error_code_without_private_receipt_data():
     value = project_progress(value, 'tool_result', {'step': 7, 'command_id': 'run:7',
         'tool': 'workspace.exec', 'state': 'succeeded', 'error_code': None}, 2)
     assert not value['segments'][0].get('error_code')
+
+
+@pytest.mark.parametrize('capabilities', [
+    {'workspace.list': True, 'workspace.read': True},
+    {'workspace.list': True, 'workspace.read': True, 'workspace.write': True, 'workspace.exec': True},
+    {'workspace.list': True, 'workspace.artifact': True, 'fleet.list_services': True},
+])
+def test_remote_declarations_and_admission_use_executable_node_capabilities(tmp_path, capabilities):
+    app = _app(tmp_path)
+    repo = _catalog(app, tmp_path)
+    repo.upsert_node(OWNER, {'node_id': 'vm', 'capabilities': capabilities})
+    repo.update_defaults(OWNER, {'model_profile_id': 'local', 'workspace_id': 'home',
+                                'execution_node_id': 'vm'}, 1)
+    _queued(app)
+    declarations, commands = [], []
+
+    class Provider:
+        def complete(self, messages, tools, **kwargs):
+            declarations.append({item['name'] for item in tools})
+            return ModelResponse(kind='tool_call', tool='fleet.list_services', arguments={})
+
+    class Delivery:
+        def enqueue(self, command, **kwargs):
+            commands.append(command)
+            return command.as_dict()
+
+        def wait_for_receipt(self, *args, **kwargs):
+            return {'status': 'succeeded', 'result': {}}
+
+    worker = LocalRunWorkerService(repo, app.extensions['fleet']['services']['run_events'],
+        remote_execution_enabled=True, remote_delivery=Delivery(), provider_factory=lambda _: Provider())
+    result = worker.run_once(OWNER)
+    expected = {name for name, enabled in capabilities.items() if enabled and name in
+                {'workspace.list', 'workspace.read', 'workspace.write', 'workspace.exec'}}
+    assert declarations == [expected]
+    assert result['state'] == 'failed'
+    assert 'tool_not_allowed' in result['result_text']
+    assert commands == []

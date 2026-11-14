@@ -16,7 +16,8 @@ class LoopbackNode:
         self.failures = []
         self.stopped = Event()
         repo = hub.app.extensions['fleet']['platform_repository']
-        repo.upsert_node(hub.owner, {'node_id': 'loopback-node', 'label': 'Disposable node'})
+        repo.upsert_node(hub.owner, {'node_id': 'loopback-node', 'label': 'Disposable node',
+            'capabilities': {'workspace.list': True, 'workspace.read': True, 'workspace.write': True}})
         repo.provision_node_credential(hub.owner, 'loopback-node', secret='n' * 40)
         repo.upsert_workspace(hub.owner, {
             'workspace_id': 'remote', 'root_path': str(hub.workspace),

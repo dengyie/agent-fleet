@@ -186,7 +186,7 @@ def test_remote_missing_read_continues_from_receipt_without_new_command(tmp_path
 
     app = _app(tmp_path)
     repo = _catalog(app, tmp_path)
-    repo.upsert_node(OWNER, {'node_id': 'remote'})
+    repo.upsert_node(OWNER, {'node_id': 'remote', 'capabilities': {'workspace.read': True}})
     repo.update_defaults(OWNER, {'model_profile_id': 'local', 'workspace_id': 'home',
                                 'execution_node_id': 'remote'}, 1)
     run = _queued(app)

@@ -1,10 +1,11 @@
 """Generate explicit workspace Node configuration; never provisions a cloud VM."""
 import base64
+import secrets
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from fleet_core.workspace_execution import parse_workspace_execution, valid_hub_origin
+from fleet_core.workspace_execution import node_config_text, parse_workspace_execution, valid_hub_origin
 from hub.application.errors import ApplicationError
 from platform_schema import validate_id
 
@@ -37,11 +38,16 @@ class WorkspaceNodeSetupService:
         try:
             workspace = parse_workspace_execution({key: body[key] for key in ('execution_mode', 'sandbox_launcher')} | {'roots': roots})
         except ValueError:
-            raise ApplicationError('invalid_settings', '执行模式、工作目录或沙盒参数无效；VM 直接执行不需要沙盒参数', 400) from None
+            raise ApplicationError('invalid_settings', '执行模式、工作目录或启动参数无效；工作区配置合计须在 48 KiB 内，VM 直接执行不需要沙盒参数', 400) from None
         public = Ed25519PrivateKey.from_private_bytes(self.delivery.signing_key).public_key().public_bytes(
             Encoding.Raw, PublicFormat.Raw)
-        # All validation precedes credential rotation. The operator installs
-        # this file and restarts the Node to apply mode/path changes.
-        credential = self.repository.provision_node_credential(owner, node_id)['credential']
-        return {'ok': True, 'enrollment': {'node_id': node_id, 'hub_url': origin, 'credential': credential,
-                'public_key': base64.b64encode(public).decode('ascii'), 'plugins': {}, 'workspace': workspace}}
+        secret = secrets.token_urlsafe(32)
+        enrollment = {'node_id': node_id, 'hub_url': origin, 'credential': node_id + ':' + secret,
+                      'public_key': base64.b64encode(public).decode('ascii'), 'plugins': {}, 'workspace': workspace}
+        try:
+            node_config_text(enrollment)
+        except ValueError:
+            raise ApplicationError('invalid_settings', '接入配置超过 Node 的 64 KiB 文件限制', 400) from None
+        # Validate the downloaded representation before invalidating live auth.
+        self.repository.provision_node_credential(owner, node_id, secret=secret)
+        return {'ok': True, 'enrollment': enrollment}

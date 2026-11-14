@@ -9,7 +9,7 @@ from tests.test_platform_run_worker import OWNER, _app, _catalog
 def test_remote_command_wait_returns_without_sleeping_or_replaying(tmp_path):
     app = _app(tmp_path)
     repo = _catalog(app, tmp_path)
-    repo.upsert_node(OWNER, {'node_id': 'remote', 'label': 'Remote'})
+    repo.upsert_node(OWNER, {'node_id': 'remote', 'label': 'Remote', 'capabilities': {'workspace.read': True, 'workspace.write': True}})
     commands = CommandRepository(repo.db_path)
     commands.init()
     calls, sleeps = [], []
@@ -79,7 +79,7 @@ import pytest
 def test_cancel_suspended_run_fences_original_remote_command(tmp_path, claimed):
     app = _app(tmp_path)
     repo = _catalog(app, tmp_path)
-    repo.upsert_node(OWNER, {'node_id': 'remote', 'label': 'remote'})
+    repo.upsert_node(OWNER, {'node_id': 'remote', 'label': 'remote', 'capabilities': {'workspace.read': True, 'workspace.write': True}})
     repo.create_conversation(OWNER, 'conversation', title='', workspace_id='home')
     repo.append_turn(OWNER, 'conversation', 'message', 'run-wait', text='write', client_token='wait', now=1,
                      config_snapshot={'model_profile_id': 'local', 'workspace_id': 'home', 'execution_node_id': 'remote'})
@@ -121,7 +121,7 @@ def test_wait_reservation_survives_resume_claim_before_slot_admission(tmp_path):
     import time
     app = _app(tmp_path)
     repo = _catalog(app, tmp_path)
-    repo.upsert_node(OWNER, {'node_id': 'remote', 'label': 'remote'})
+    repo.upsert_node(OWNER, {'node_id': 'remote', 'label': 'remote', 'capabilities': {'workspace.read': True, 'workspace.write': True}})
     repo.create_conversation(OWNER, 'conversation', title='', workspace_id='home')
     repo.append_turn(OWNER, 'conversation', 'message', 'run-wait', text='write', client_token='wait', now=1,
                      config_snapshot={'model_profile_id': 'local', 'workspace_id': 'home', 'execution_node_id': 'remote'})
@@ -144,7 +144,7 @@ def test_wait_reservation_survives_resume_claim_before_slot_admission(tmp_path):
 def test_wait_observation_does_not_reopen_disabled_execution_dependencies(tmp_path, command_state, expected):
     app = _app(tmp_path)
     repo = _catalog(app, tmp_path)
-    repo.upsert_node(OWNER, {'node_id': 'remote', 'label': 'remote'})
+    repo.upsert_node(OWNER, {'node_id': 'remote', 'label': 'remote', 'capabilities': {'workspace.read': True, 'workspace.write': True}})
     repo.create_conversation(OWNER, 'conversation', title='', workspace_id='home')
     repo.append_turn(OWNER, 'conversation', 'message', 'run-wait', text='write', client_token='wait', now=1,
                      config_snapshot={'model_profile_id': 'local', 'workspace_id': 'home', 'execution_node_id': 'remote'})
@@ -175,7 +175,7 @@ def test_terminal_run_releases_suspended_workspace_reservation(tmp_path):
     import time
     app = _app(tmp_path)
     repo = _catalog(app, tmp_path)
-    repo.upsert_node(OWNER, {'node_id': 'remote', 'label': 'remote'})
+    repo.upsert_node(OWNER, {'node_id': 'remote', 'label': 'remote', 'capabilities': {'workspace.read': True, 'workspace.write': True}})
     repo.create_conversation(OWNER, 'conversation', title='', workspace_id='home')
     repo.append_turn(OWNER, 'conversation', 'message', 'run-wait', text='write', client_token='wait', now=1,
                      config_snapshot={'model_profile_id': 'local', 'workspace_id': 'home', 'execution_node_id': 'remote'})
@@ -195,7 +195,7 @@ def test_restored_wait_does_not_keep_workspace_capacity_reserved(tmp_path):
     from hub.infrastructure.platform_db import PlatformRepository
     app = _app(tmp_path)
     repo = _catalog(app, tmp_path)
-    repo.upsert_node(OWNER, {'node_id': 'remote', 'label': 'remote'})
+    repo.upsert_node(OWNER, {'node_id': 'remote', 'label': 'remote', 'capabilities': {'workspace.read': True, 'workspace.write': True}})
     repo.create_conversation(OWNER, 'conversation', title='', workspace_id='home')
     repo.append_turn(OWNER, 'conversation', 'message', 'run-wait', text='write', client_token='wait', now=1,
                      config_snapshot={'model_profile_id': 'local', 'workspace_id': 'home', 'execution_node_id': 'remote'})
