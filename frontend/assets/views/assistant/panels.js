@@ -85,8 +85,9 @@ export function renderEvents(host, events) {
       if (!card) { card = el('tool-call-badge'); card.setAttribute('data-command-id', payload.command_id || String(event.sequence)); host.appendChild(card); }
       card.setAttribute('name', payload.tool || payload.command_id || '工具执行');
       card.setAttribute('status', event.kind === 'tool_call' ? 'running' : payload.state === 'succeeded' ? 'success' : payload.state === 'unknown' ? 'unknown' : 'error');
-      if (event.kind === 'tool_call') card.setAttribute('args', JSON.stringify(payload.argument_keys || []));
-      if (event.kind === 'tool_result') card.setAttribute('output', JSON.stringify(payload));
+      for (const [attribute, value] of [['label', payload.title], ['args', payload.input], ['output', payload.output], ['error', payload.error_code]]) {
+        if (typeof value === 'string' && value) card.setAttribute(attribute, value);
+      }
     } else {
       var labels = {run_started: '开始运行', run_finished: '运行结束', run_failed: '运行失败', run_unknown: '运行结果待确认', memory_context_selected: '已载入记忆上下文'};
       var text = labels[event.kind] || event.kind;
