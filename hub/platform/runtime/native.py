@@ -29,6 +29,17 @@ class _RunCancelled(Exception):
     """Stop consuming narration or dispatching retries after user cancellation."""
 
 
+def can_continue_after_tool_failure(tool: str, state: str, error_code: str | None) -> bool:
+    """Only known, side-effect-free workspace read outcomes are recoverable.
+
+    Continue with the committed receipt, never by automatically replaying it.
+    Policy, lease, write, execution and uncertain outcomes remain terminal.
+    """
+    return state == 'failed' and (
+        (tool in {'workspace.list', 'workspace.read'} and error_code == 'not_found')
+        or (tool == 'workspace.read' and error_code == 'read_failed'))
+
+
 class NativeAssistantRuntime:
     def __init__(self, provider, broker, *, limits: RuntimeLimits | None = None,
                  usage_meter=None, model_key: str | None = None, clock=time.time,
@@ -177,7 +188,8 @@ class NativeAssistantRuntime:
                 return finish("unknown", "远程工具回执未知，等待后续核查。", step, input_tokens, output_tokens, measured_total_tokens, provider_requests)
             if should_cancel is not None and should_cancel():
                 return finish("cancelled", "运行已取消。", step, input_tokens, output_tokens, measured_total_tokens, provider_requests)
-            if receipt.state != "succeeded":
+            if receipt.state != "succeeded" and not can_continue_after_tool_failure(
+                    response.tool, receipt.state, receipt.error_code):
                 code = str(receipt.error_code or "tool_failed")[:128]
                 text = f"工具 {response.tool} 执行失败（{code}）。"
                 if code == "sandbox_unavailable":
@@ -200,7 +212,8 @@ class NativeAssistantRuntime:
                 "role": "tool",
                 "tool_call_id": call_id,
                 "tool": response.tool,
-                "result": receipt.result,
+                "result": (receipt.result if receipt.state == 'succeeded' else
+                           {'state': 'failed', 'error_code': receipt.error_code}),
             })
             persist('ready', step + 1)
             progress = None
@@ -223,4 +236,4 @@ class NativeAssistantRuntime:
         )
 
 
-__all__ = ["NativeAssistantRuntime", "ProviderBoundaryUnknown"]
+__all__ = ["NativeAssistantRuntime", "ProviderBoundaryUnknown", "can_continue_after_tool_failure"]
