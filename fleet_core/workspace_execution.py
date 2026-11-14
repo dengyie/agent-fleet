@@ -1,6 +1,19 @@
 """Portable operator-owned workspace Node enrollment contract."""
 from pathlib import PurePosixPath, PureWindowsPath
 from urllib.parse import urlsplit
+import json
+
+
+MAX_NODE_CONFIG_BYTES = 65536
+# Reserve space for the enrollment envelope and Node-local credential paths.
+MAX_WORKSPACE_CONFIG_BYTES = 48 * 1024
+
+
+def node_config_text(value):
+    text = json.dumps(value, ensure_ascii=False, indent=2) + '\n'
+    if len(text.encode('utf-8')) > MAX_NODE_CONFIG_BYTES:
+        raise ValueError('node configuration exceeds 64 KiB')
+    return text
 
 
 def valid_hub_origin(value):
@@ -39,4 +52,7 @@ def parse_workspace_execution(value):
             or mode == 'vm_direct' and launcher
             or mode == 'sandbox' and not launcher):
         raise ValueError('invalid workspace sandbox launcher')
-    return {'execution_mode': mode, 'roots': dict(roots), 'sandbox_launcher': list(launcher)}
+    result = {'execution_mode': mode, 'roots': dict(roots), 'sandbox_launcher': list(launcher)}
+    if len(node_config_text(result).encode('utf-8')) > MAX_WORKSPACE_CONFIG_BYTES:
+        raise ValueError('workspace configuration exceeds 48 KiB')
+    return result

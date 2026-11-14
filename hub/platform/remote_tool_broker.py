@@ -9,6 +9,7 @@ from fleet_core.backends.base import ToolReceipt
 from fleet_core.browser_policy import BROWSER_TOOLS, BrowserPolicyError, validate_action
 from fleet_core.platform_command import PlatformCommand
 from fleet_core.command_timing import CommandTimingPolicy
+from fleet_core.node_action_contract import NODE_TOOLS
 from hub.domain.capability_execution import CAPABILITY_ARGUMENT
 from fleet_core.web_agent_contract import WEB_AGENT_TOOLS, MuseBridgeError, validate_arguments
 from .tool_broker import ToolBroker
@@ -49,7 +50,8 @@ class RemoteToolBroker:
             raise ValueError("ambiguous_command_timing")
         self.timing_policy = timing_policy or CommandTimingPolicy(
             **({"receipt_timeout_s": receipt_timeout_s} if receipt_timeout_s is not None else {}))
-        self.allowed_tools = ToolBroker.TOOLS if allowed_tools is None else ToolBroker.TOOLS.intersection(allowed_tools)
+        self.allowed_tools = (ToolBroker.TOOLS & NODE_TOOLS if allowed_tools is None else
+                              ToolBroker.TOOLS.intersection(NODE_TOOLS, allowed_tools))
         self.browser_enabled = bool(browser_enabled)
         self.browser_network_enabled = bool(browser_network_enabled)
         self.browser_allowed_origins = tuple(browser_allowed_origins or ())

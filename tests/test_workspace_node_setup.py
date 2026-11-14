@@ -1,6 +1,7 @@
 """Workspace enrollment is generated from owner-scoped catalog bindings."""
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,56 @@ from tools.plugins.node import install_enrollment, load_runtime
 OWNER = 'vm-owner@example.test'
 URL = '/api/platform/v1/settings/nodes/vm/enrollment'
 BODY = {'hub_url': 'https://hub.example', 'execution_mode': 'vm_direct', 'sandbox_launcher': []}
+
+
+def test_oversized_unicode_enrollment_preserves_live_credential(setup):
+    _app, client, repo, old = setup
+    for i in range(31):
+        repo.upsert_workspace(OWNER, {'workspace_id': 'work-' + str(i),
+            'root_path': '/tmp/' + ('中' * 60 + '/') * 16 + str(i), 'default_node_id': 'vm'})
+    response = client.post(URL, json=BODY)
+    assert response.status_code == 400
+    assert repo.authenticate_node_credential('vm', old) is not None
+
+
+def test_oversized_launcher_preserves_live_credential(setup):
+    _app, client, repo, old = setup
+    for i in range(15):
+        repo.upsert_workspace(OWNER, {'workspace_id': 'work-' + str(i),
+            'root_path': '/tmp/' + ('中' * 60 + '/') * 16 + str(i), 'default_node_id': 'vm'})
+    response = client.post(URL, json={**BODY, 'execution_mode': 'sandbox',
+                                      'sandbox_launcher': ['x' * 4096] * 5})
+    assert response.status_code == 400
+    assert repo.authenticate_node_credential('vm', old) is not None
+
+
+@pytest.mark.parametrize('size,accepted', [(65536, True), (65537, False)])
+def test_node_serialization_exact_byte_boundary(size, accepted):
+    from fleet_core.workspace_execution import node_config_text
+    # {"v": "..."} with the same pretty encoding used for the file.
+    overhead = len(node_config_text({'v': ''}).encode('utf-8'))
+    value = {'v': 'x' * (size - overhead)}
+    if accepted:
+        assert len(node_config_text(value).encode('utf-8')) == size
+    else:
+        with pytest.raises(ValueError):
+            node_config_text(value)
+
+
+def test_node_config_size_rejection_creates_no_partial_credentials(tmp_path):
+    from fleet_core.control import generate_ed25519_keypair
+    import base64
+    _, public = generate_ed25519_keypair()
+    data = {'node_id': 'vm', 'hub_url': 'https://hub.example', 'credential': 'vm:' + 's' * 40,
+        'public_key': base64.b64encode(public).decode('ascii'), 'plugins': {},
+        'workspace': {'execution_mode': 'vm_direct', 'sandbox_launcher': [], 'roots': {'work': '/work'}}}
+    source = tmp_path / 'enrollment.json'
+    source.write_text(json.dumps(data), encoding='utf-8')
+    state = Path('/' + 'x' * 23000)
+    # Long installation paths expand three times in node.json; validation must
+    # happen before attempting any mkdir/open in that location.
+    with pytest.raises(ValueError):
+        install_enrollment(source, state)
 
 
 @pytest.fixture

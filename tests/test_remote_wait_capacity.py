@@ -13,7 +13,8 @@ from tests.test_platform_run_worker import OWNER, _app, _catalog
 def test_remote_wait_capacity_work_is_bounded_by_active_waits(tmp_path, monkeypatch, record_property, operation):
     app = _app(tmp_path)
     repo = _catalog(app, tmp_path)
-    repo.upsert_node(OWNER, {'node_id': 'remote', 'label': 'remote'})
+    repo.upsert_node(OWNER, {'node_id': 'remote', 'label': 'remote',
+                             'capabilities': {'workspace.write': True}})
     repo.create_conversation(OWNER, 'waiting', title='', workspace_id='home')
     repo.append_turn(OWNER, 'waiting', 'waiting-message', 'waiting-run', text='write', client_token='wait', now=1,
                      config_snapshot={'model_profile_id': 'local', 'workspace_id': 'home', 'execution_node_id': 'remote'})

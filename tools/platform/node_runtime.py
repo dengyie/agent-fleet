@@ -360,7 +360,8 @@ class NodeRuntime:
 
     def _exec_available(self):
         return bool(self.workspace_backends) and (
-            self.config.execution_mode == 'vm_direct' or bool(self.config.sandbox_launcher))
+            VMBackend.command_available() if self.config.execution_mode == 'vm_direct'
+            else bool(self.config.sandbox_launcher))
 
     def report_capabilities(self) -> NodeCapabilityReceipt:
         if self.capability_reporter is None:

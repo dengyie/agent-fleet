@@ -2,10 +2,15 @@
 import math
 import os
 import subprocess
+import sys
+from contextlib import nullcontext
 
 from .directory import DirectoryBackend, MAX_OUTPUT_BYTES
 from fleet_core.process.bounded_process import (
     ProcessCancelled, ProcessStopUnconfirmed, decode_prefix, run_bounded,
+)
+from fleet_core.process.command_scope import (
+    CommandScope, CommandScopeUnavailable, CommandScopeStopUnconfirmed,
 )
 
 
@@ -15,6 +20,20 @@ class VMBackend(DirectoryBackend):
     File tools retain workspace path checks. Explicit commands can use the
     account filesystem and network, including shell/interpreter argv.
     """
+
+    @staticmethod
+    def command_available():
+        if os.name == 'nt':
+            return True
+        if sys.platform != 'linux':
+            return False
+        try:
+            # Opening/closing an empty scope verifies actual delegation,
+            # including the kernel's recursive kill interface.
+            with CommandScope():
+                return True
+        except (CommandScopeUnavailable, CommandScopeStopUnconfirmed):
+            return False
 
     def execute(self, command_id, argv, *, timeout_s=30.0, should_cancel=None):
         if (type(argv) is not list or not 1 <= len(argv) <= 256
@@ -30,6 +49,8 @@ class VMBackend(DirectoryBackend):
                 or not math.isfinite(timeout_s)):
             return self._receipt(command_id, 'failed', error_code='invalid_timeout')
         try:
+            if sys.platform != 'linux' and os.name != 'nt':
+                return self._receipt(command_id, 'failed', error_code='vm_platform_unsupported')
             home, temporary = self.root / '.fleet-home', self.root / '.fleet-tmp'
             home.mkdir(exist_ok=True)
             temporary.mkdir(exist_ok=True)
@@ -40,8 +61,10 @@ class VMBackend(DirectoryBackend):
                 for name in ('SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT'):
                     if name in os.environ:
                         env[name] = os.environ[name]
-            proc = run_bounded(argv, cwd=self.root, timeout_s=min(float(timeout_s), 30),
-                stdout_limit=MAX_OUTPUT_BYTES + 1, env=env, should_cancel=should_cancel)
+            with CommandScope() if sys.platform == 'linux' else nullcontext() as scope:
+                proc = run_bounded(scope.wrap(argv) if scope is not None else argv,
+                    cwd=self.root, timeout_s=min(float(timeout_s), 30),
+                    stdout_limit=MAX_OUTPUT_BYTES + 1, env=env, should_cancel=should_cancel)
             output, truncated = decode_prefix(proc.stdout, MAX_OUTPUT_BYTES)
             return self._receipt(command_id, 'succeeded' if proc.returncode == 0 else 'failed',
                 {'returncode': proc.returncode, 'output': output},
@@ -50,7 +73,9 @@ class VMBackend(DirectoryBackend):
             return self._receipt(command_id, 'failed', error_code='timeout')
         except ProcessCancelled:
             return self._receipt(command_id, 'cancelled', error_code='cancelled')
-        except ProcessStopUnconfirmed:
+        except (ProcessStopUnconfirmed, CommandScopeStopUnconfirmed):
             return self._receipt(command_id, 'unknown', error_code='process_stop_unconfirmed')
+        except CommandScopeUnavailable:
+            return self._receipt(command_id, 'failed', error_code='command_scope_unavailable')
         except OSError:
             return self._receipt(command_id, 'failed', error_code='exec_failed')

@@ -18,7 +18,7 @@
 
 ## 最新更新
 
-2026-11-14：修复新聊天与后台提交的路由串用；发送后定位到新消息并收起空输入框；手机模型报错保留对话视图；设置账号切换隔离旧表单和晚到的保存响应。完整历史见 [Release Notes](docs/releases/release-notes.md)。
+2026-11-15：远程工具声明对齐节点实际能力；Linux VM 使用独立 cgroup 清理全部命令后代；接入配置先校验大小再轮换凭据；执行前控制请求支持有界重试。完整历史见 [Release Notes](docs/releases/release-notes.md)。
 
 ## Why Agent Fleet?
 

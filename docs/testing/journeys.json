@@ -778,7 +778,14 @@
         "tests/test_vm_execution.py::test_signed_vm_http_failure_returns_to_model_without_replaying_command",
         "tests/test_vm_execution.py::test_signed_vm_large_receipt_survives_lost_ack_and_restart",
         "tests/test_vm_execution.py::test_vm_directory_receipt_preserves_complete_names_within_hub_limit",
-        "tests/test_platform_service_logs_postcheck.py::test_service_logs_receipt_includes_envelope_in_json_limit"
+        "tests/test_platform_service_logs_postcheck.py::test_service_logs_receipt_includes_envelope_in_json_limit",
+        "tests/test_vm_command_scope.py::test_detached_vm_descendant_cannot_write_after_receipt",
+        "tests/test_vm_command_scope.py::test_missing_delegation_never_spawns_vm_command",
+        "tests/test_vm_command_scope.py::test_scope_never_changes_unrelated_process_lifecycle",
+        "tests/test_node_command_control.py::test_initial_transient_control_is_retried_before_command_dispatch",
+        "tests/test_node_command_control.py::test_initial_control_failure_stays_unstarted_and_preserves_reason",
+        "tests/test_node_command_control.py::test_control_retry_does_not_outlive_original_deadline",
+        "tests/test_assistant_tool_availability.py::test_remote_declarations_and_admission_use_executable_node_capabilities"
       ]
     },
     {
@@ -3090,7 +3097,11 @@
         "tests/test_workspace_node_setup.py::test_enrollment_download_round_trips_into_original_node_cli",
         "tests/test_workspace_node_setup.py::test_invalid_enrollment_does_not_rotate_credential",
         "tests/test_workspace_node_setup.py::test_unavailable_node_configuration_does_not_rotate_credential",
-        "tests/test_workspace_node_setup.py::test_enrollment_respects_selected_owner_and_account_default_node"
+        "tests/test_workspace_node_setup.py::test_enrollment_respects_selected_owner_and_account_default_node",
+        "tests/test_workspace_node_setup.py::test_oversized_unicode_enrollment_preserves_live_credential",
+        "tests/test_workspace_node_setup.py::test_oversized_launcher_preserves_live_credential",
+        "tests/test_workspace_node_setup.py::test_node_serialization_exact_byte_boundary",
+        "tests/test_workspace_node_setup.py::test_node_config_size_rejection_creates_no_partial_credentials"
       ]
     }
   ],

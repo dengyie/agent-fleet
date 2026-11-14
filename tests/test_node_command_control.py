@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from threading import Event, Thread, enumerate as threads
 import sqlite3
 import sys
+import os
 import time
 
 import pytest
@@ -226,6 +227,93 @@ def test_lost_control_transport_cannot_extend_last_confirmed_lease():
     assert isinstance(control.failure, OSError)
 
 
+def test_initial_transient_control_is_retried_before_command_dispatch(tmp_path):
+    from tools.platform.journal import NodeJournal
+    from tools.platform.node_client import NodeClient
+
+    observations, executed = [], []
+
+    class TransportOnce:
+        def request_bounded_json(self, *args, **kwargs):
+            observations.append(1)
+            assert not executed
+            if len(observations) == 1:
+                raise OSError('connection reset before control response')
+            return 200, {'ok': True, 'control': {'command_id': 'control-command',
+                'status': 'leased', 'continue': True, 'execution_deadline': 200, 'valid_for_s': 10}}
+
+    class Executor:
+        controlled_actions = {'tool.workspace.exec'}
+
+        def execute_controlled(self, cmd, *, should_cancel):
+            if should_cancel():
+                return {'state': 'failed', 'error_code': 'cancelled'}
+            executed.append(cmd['command_id'])
+            return {'state': 'succeeded', 'result': {}}
+
+    journal = NodeJournal(tmp_path / 'journal.db')
+    journal.init()
+    client = NodeClient(journal, executor=Executor(), transport=TransportOnce(), clock=lambda: 100,
+        public_key=PUBLIC_KEY, node_id='control-node', credential='secret', hub_url='https://hub.test')
+    result = client.handle(command().as_dict(), control_supported=True)
+    assert result['status'] == 'succeeded'
+    assert len(observations) == 2 and executed == ['control-command']
+    assert client.handle(command().as_dict(), control_supported=True) == result
+    assert len(observations) == 2 and len(executed) == 1
+
+
+@pytest.mark.parametrize('failure,expected_calls,expected_code', [
+    ('transport', 3, 'command_control_unavailable'),
+    ('rejected', 1, 'cancelled'),
+])
+def test_initial_control_failure_stays_unstarted_and_preserves_reason(
+        tmp_path, failure, expected_calls, expected_code):
+    from tools.platform.journal import NodeJournal
+    from tools.platform.node_client import NodeClient
+
+    calls = []
+
+    class Unavailable:
+        def request_bounded_json(self, *args, **kwargs):
+            calls.append(1)
+            if failure == 'rejected':
+                return 409, {}
+            raise OSError('control unavailable')
+
+    class Executor:
+        controlled_actions = {'tool.workspace.exec'}
+
+        def execute_controlled(self, cmd, *, should_cancel):
+            assert should_cancel(), 'execution must never begin without confirmed control'
+            return {'state': 'failed', 'error_code': 'cancelled'}
+
+    journal = NodeJournal(tmp_path / 'journal.db')
+    journal.init()
+    client = NodeClient(journal, executor=Executor(), transport=Unavailable(), clock=lambda: 100,
+        public_key=PUBLIC_KEY, node_id='control-node', credential='secret', hub_url='https://hub.test')
+    result = client.handle(command().as_dict(), control_supported=True)
+    assert result['status'] == 'failed' and result['result']['error_code'] == expected_code
+    assert len(calls) == expected_calls
+    assert client.handle(command().as_dict(), control_supported=True) == result
+    assert len(calls) == expected_calls
+
+
+def test_control_retry_does_not_outlive_original_deadline():
+    now, calls = [0.0], []
+
+    def renew(stopped):
+        calls.append(1)
+        now[0] = 2
+        assert stopped(), 'in-flight transport must observe the original expiry'
+        raise OSError('expired')
+
+    with CommandControl(command(expires_at=101).as_dict(), renew=renew,
+                        clock=lambda: 100, monotonic=lambda: now[0]) as control:
+        assert control.should_cancel()
+        assert len(calls) == 1
+        assert control.failure_code is None
+
+
 @pytest.mark.parametrize('change', ['backward_clock', 'initial_transport_error', 'wrong_identity'])
 def test_control_cannot_gain_time_or_spawn_after_failed_initial_observation(change):
     now, wall = [0.0], [100.0]
@@ -285,6 +373,8 @@ def server(app):
         assert not thread.is_alive()
 
 
+@pytest.mark.skipif(sys.platform != 'linux' and os.name != 'nt',
+    reason='direct VM requires Linux cgroup v2 or Windows Job Object')
 @pytest.mark.parametrize('stop', ['hub_cancel', 'node_shutdown', 'execution_deadline', 'lease_renewal', 'hub_disconnect'])
 def test_control_stops_the_owned_process_before_its_late_write(tmp_path, monkeypatch, stop):
     workspace = tmp_path / 'workspace'

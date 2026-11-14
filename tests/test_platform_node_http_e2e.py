@@ -203,7 +203,8 @@ def test_worker_node_http_receipt_closes_remote_run_without_local_side_effect(tm
     workspace_root = tmp_path / "remote-workspace"
     workspace_root.mkdir()
     (workspace_root / "report.md").write_text("from-node", encoding="utf-8")
-    repo.upsert_node(OWNER, {"node_id": "node-http", "label": "HTTP node"})
+    repo.upsert_node(OWNER, {"node_id": "node-http", "label": "HTTP node",
+                             "capabilities": {"workspace.read": True}})
     repo.provision_node_credential(OWNER, "node-http", secret="n" * 40)
     repo.upsert_model(OWNER, {"profile_id": "model", "provider": "deterministic", "model": "test"})
     repo.upsert_workspace(OWNER, {"workspace_id": "remote", "root_path": str(workspace_root)})

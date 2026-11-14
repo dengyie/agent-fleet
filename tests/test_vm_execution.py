@@ -7,6 +7,9 @@ import os
 
 import pytest
 
+pytestmark = pytest.mark.skipif(sys.platform != 'linux' and os.name != 'nt',
+    reason='direct VM requires Linux cgroup v2 or Windows Job Object')
+
 from fleet_core.control import generate_ed25519_keypair
 from fleet_core.platform_command import PlatformCommand
 from tools.platform.node_runtime import NodeRuntime, NodeRuntimeConfig

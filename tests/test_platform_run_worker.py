@@ -96,7 +96,8 @@ def test_acceptance_policy_is_frozen_and_enforced_by_new_worker(tmp_path, remote
     target.write_bytes(b'preserved')
     overrides = {'tool_policy': 'unrestricted', 'allowed_tools': [tool]}
     if remote:
-        repo.upsert_node(OWNER, {'node_id': 'remote', 'label': 'remote'})
+        repo.upsert_node(OWNER, {'node_id': 'remote', 'label': 'remote',
+                                'capabilities': {'workspace.list': True}})
         overrides['execution_node_id'] = 'remote'
     client = app.test_client()
     conversation = client.post('/api/platform/v1/conversations', json={'workspace_id': 'home'}).get_json()['conversation']
@@ -472,7 +473,8 @@ def test_remote_run_uses_node_delivery_without_local_filesystem(tmp_path):
 
     app = _app(tmp_path)
     repo = app.extensions["fleet"]["platform_repository"]
-    repo.upsert_node(OWNER, {"node_id": "node-remote", "label": "remote"})
+    repo.upsert_node(OWNER, {"node_id": "node-remote", "label": "remote",
+                             "capabilities": {"workspace.read": True}})
     repo.upsert_model(OWNER, {"profile_id": "local", "provider": "deterministic", "model": "local"})
     repo.upsert_workspace(OWNER, {
         "workspace_id": "home", "root_path": str(tmp_path / "workspace"),
@@ -527,7 +529,8 @@ def test_remote_unknown_receipt_finishes_run_unknown_without_replay(tmp_path):
 
     app = _app(tmp_path)
     repo = app.extensions["fleet"]["platform_repository"]
-    repo.upsert_node(OWNER, {"node_id": "node-remote", "label": "remote"})
+    repo.upsert_node(OWNER, {"node_id": "node-remote", "label": "remote",
+                             "capabilities": {"workspace.write": True}})
     repo.upsert_model(OWNER, {"profile_id": "local", "provider": "deterministic", "model": "local"})
     repo.upsert_workspace(OWNER, {"workspace_id": "home", "root_path": str(tmp_path / "workspace")})
     conversation = repo.create_conversation(OWNER, "conv-unknown", title="", workspace_id="home")
