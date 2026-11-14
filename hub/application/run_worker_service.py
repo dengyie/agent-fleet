@@ -455,20 +455,24 @@ class LocalRunWorkerService:
                     "max_bytes": int(memory_snapshot.get("max_bytes", 0) or 0),
                 })
                 messages.insert(0, context_message)
+            tools = ToolBroker.tool_definitions(
+                remote_allowed_tools if remote else allowed_tools,
+                browser_enabled=remote_browser_enabled, browser_submit_enabled=remote_submit_enabled,
+                web_agent_enabled=remote_web_agent_enabled,
+                service_actions_enabled=not summary_mode and not remote and self.service_actions is not None,
+                mcp_catalog=self.mcp_catalog if not remote else None,
+                mcp_enabled=self.mcp_enabled if not remote and not summary_mode else False,
+                mcp_owner_id=claim["owner_id"] if not remote else None,
+                mcp_workspace_id=workspace["workspace_id"] if not remote else None,
+                mcp_pins=config.get("mcp_tools", {}),
+                workflow_code_inputs=source_view is not None)
+            if not remote and not self.sandbox_launcher:
+                # File tools remain usable. Do not offer an exec that the
+                # backend must reject; preserve policy/MCP selections as-is.
+                tools = [tool for tool in tools if tool["name"] != "workspace.exec"]
             result = worker.execute(
                 run_id=claim["run_id"], owner_id=claim["owner_id"],
-                epoch=lease["epoch"], messages=messages,
-                tools=ToolBroker.tool_definitions(
-                    remote_allowed_tools if remote else allowed_tools,
-                    browser_enabled=remote_browser_enabled, browser_submit_enabled=remote_submit_enabled,
-                    web_agent_enabled=remote_web_agent_enabled,
-                    service_actions_enabled=not summary_mode and not remote and self.service_actions is not None,
-                    mcp_catalog=self.mcp_catalog if not remote else None,
-                    mcp_enabled=self.mcp_enabled if not remote and not summary_mode else False,
-                    mcp_owner_id=claim["owner_id"] if not remote else None,
-                    mcp_workspace_id=workspace["workspace_id"] if not remote else None,
-                    mcp_pins=config.get("mcp_tools", {}),
-                    workflow_code_inputs=source_view is not None),
+                epoch=lease["epoch"], messages=messages, tools=tools,
                 should_cancel=should_cancel,
                 lease_id=lease_id, worker_id=self.worker_id,
                 attempt=int(claim.get("attempt") or 1),

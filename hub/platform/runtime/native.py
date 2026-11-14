@@ -178,7 +178,11 @@ class NativeAssistantRuntime:
             if should_cancel is not None and should_cancel():
                 return finish("cancelled", "运行已取消。", step, input_tokens, output_tokens, measured_total_tokens, provider_requests)
             if receipt.state != "succeeded":
-                return finish("failed", "工具执行失败。", step, input_tokens, output_tokens, measured_total_tokens, provider_requests)
+                code = str(receipt.error_code or "tool_failed")[:128]
+                text = f"工具 {response.tool} 执行失败（{code}）。"
+                if code == "sandbox_unavailable":
+                    text += "当前执行环境未配置命令沙盒，请配置沙盒或选择可执行命令的节点。"
+                return finish("failed", text, step, input_tokens, output_tokens, measured_total_tokens, provider_requests)
             call_id = response.tool_call_id or command_id
             transcript.append({
                 "role": "assistant",
