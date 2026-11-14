@@ -114,7 +114,15 @@
         "tests/test_assistant_tool_availability.py::test_failed_tool_reason_survives_public_run_and_conversation_reload",
         "tests/test_assistant_tool_availability.py::test_environment_inspection_finishes_without_attempting_unavailable_exec",
         "tests/test_assistant_tool_availability.py::test_receipt_checkpoint_reports_failure_without_replaying_tool",
-        "tests/test_assistant_tool_availability.py::test_progress_keeps_bounded_error_code_without_private_receipt_data"
+        "tests/test_assistant_tool_availability.py::test_progress_keeps_bounded_error_code_without_private_receipt_data",
+        "tests/test_native_tool_recovery.py::test_missing_workspace_path_returns_to_model_and_preserves_failed_progress",
+        "tests/test_native_tool_recovery.py::test_recovered_read_failure_resumes_without_reexecuting_tool",
+        "tests/test_native_tool_recovery.py::test_only_confirmed_workspace_read_failures_can_continue",
+        "tests/test_native_tool_recovery.py::test_read_failure_does_not_override_cancellation_or_step_limit",
+        "tests/test_native_tool_recovery.py::test_read_failure_reaches_openai_wire_with_matching_tool_call_id",
+        "tests/test_native_tool_recovery.py::test_remote_missing_read_continues_from_receipt_without_new_command",
+        "tests/test_native_tool_recovery.py::test_recovered_read_failure_cancellation_needs_no_provider_or_workspace",
+        "tests/test_native_tool_recovery.py::test_repeated_missing_reads_stop_at_frozen_step_budget"
       ]
     },
     {

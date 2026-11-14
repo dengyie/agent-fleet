@@ -21,7 +21,9 @@ from fleet_core.command_timing import CommandTimingPolicy
 from hub.platform.providers.openai_compatible import ProviderFactory, ProviderUnavailable
 from hub.platform.resource_lease import ResourceLeaseError, ResourceLeaseManager
 from hub.platform.runtime.base import RuntimeLimits
-from hub.platform.runtime.native import NativeAssistantRuntime, ProviderBoundaryUnknown
+from hub.platform.runtime.native import (
+    NativeAssistantRuntime, ProviderBoundaryUnknown, can_continue_after_tool_failure,
+)
 from hub.application.platform_memory_context_service import (
     PlatformMemoryContextError,
     build_context_message,
@@ -209,7 +211,9 @@ class LocalRunWorkerService:
                 checkpoint = {**checkpoint, 'phase': 'receipt', 'receipt': asdict(receipt)}
                 save_checkpoint(checkpoint)
             if checkpoint and checkpoint['phase'] == 'receipt' and (
-                    checkpoint['receipt']['state'] != 'succeeded'
+                    (checkpoint['receipt']['state'] != 'succeeded' and not can_continue_after_tool_failure(
+                        checkpoint['response'].get('tool'), checkpoint['receipt']['state'],
+                        checkpoint['receipt'].get('error_code')))
                     or self.repository.run_cancel_requested(claim['owner_id'], claim['run_id'], lease_id=lease_id)):
                 # A terminal tool outcome needs no new provider, sandbox or
                 # workspace. Runtime owns outcome/cancellation precedence.
