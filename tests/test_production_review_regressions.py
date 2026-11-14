@@ -88,6 +88,7 @@ def test_cancellation_does_not_hide_unknown_remote_write(tmp_path):
     app = create_app(FleetConfig.from_root(tmp_path / 'hub', dev_operator=OWNER, platform_enabled=True, platform_worker_enabled=True, platform_remote_execution_enabled=True, platform_command_signing_raw=private, platform_require_command_signature=True))
     fleet = app.extensions['fleet']
     repo = fleet['platform_repository']
+    repo.upsert_node(OWNER, {'node_id': 'node-review', 'capabilities': {'workspace.write': True}})
     repo.upsert_model(OWNER, {'profile_id':'local','provider':'deterministic','model':'local'})
     repo.upsert_workspace(OWNER, {'workspace_id':'home','root_path':str(tmp_path/'hub-workspace')})
     repo.create_conversation(OWNER, 'conv-review', title='', workspace_id='home')
