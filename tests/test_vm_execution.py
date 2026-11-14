@@ -53,6 +53,7 @@ def test_signed_vm_large_receipt_survives_lost_ack_and_restart(tmp_path, text, o
     from tests.test_node_command_control import server
     from tests.test_platform_node_http_e2e import OWNER, _app
     from tools.transport import Transport
+    from hub.platform.remote_tool_broker import RemoteToolBroker
 
     app = _app(tmp_path / 'hub')
     platform = app.extensions['fleet']['platform_repository']
@@ -107,6 +108,10 @@ def test_signed_vm_large_receipt_survives_lost_ack_and_restart(tmp_path, text, o
                 assert result['result']['returncode'] == (7 if operation == 'exec_failed' else 0)
                 assert result['error_code'] == ('process_failed' if operation == 'exec_failed' else None)
             assert repository.get('large')['result'] == result
+            observed = RemoteToolBroker(None, node_id='vm', resource_id='work', run_id='run')._receipt(
+                repository.get('large'), command_id='large', tool=action.removeprefix('tool.'))
+            assert observed.truncated is True
+            assert observed.result == result['result'] and observed.state == expected_state
         finally:
             node.close_all()
         node = NodeRuntime(config, transport=Transport(mode='direct', attempts=1, timeout=3, allow_insecure=True))
@@ -236,7 +241,8 @@ def test_vm_allows_explicit_shell_argv(tmp_path):
 
 
 @pytest.mark.parametrize('crash_phase', [None, 'receipt', 'ready'])
-def test_signed_vm_http_failure_returns_to_model_without_replaying_command(tmp_path, monkeypatch, crash_phase):
+@pytest.mark.parametrize('truncated', [False, True])
+def test_signed_vm_http_failure_returns_to_model_without_replaying_command(tmp_path, monkeypatch, crash_phase, truncated):
     from hub.application.run_worker_service import LocalRunWorkerService
     from hub.platform.providers.base import ModelResponse
     from tests.test_native_run_checkpoints import Crash
@@ -263,15 +269,17 @@ def test_signed_vm_http_failure_returns_to_model_without_replaying_command(tmp_p
             if len(calls) == 1:
                 return ModelResponse(kind='tool_call', tool='workspace.exec', tool_call_id='failed-command',
                     arguments={'argv': [sys.executable, '-c',
-                        'from pathlib import Path; import sys; p=Path("once"); p.write_text(p.read_text()+"x" if p.exists() else "x"); print("fix-the-command",file=sys.stderr); sys.exit(7)']})
+                        'from pathlib import Path; import sys; p=Path("once"); p.write_text(p.read_text()+"x" if p.exists() else "x"); print("fix-the-command"+' + ('"x"*100000' if truncated else '""') + ',file=sys.stderr); sys.exit(7)']})
             if len(calls) == 2:
                 result = messages[-1]['result']
                 assert result['returncode'] == 7 and result['error_code'] == 'process_failed'
                 assert 'fix-the-command' in result['output']
+                assert result['truncated'] is truncated
                 assert messages[-1]['tool_call_id'] == 'failed-command'
                 return ModelResponse(kind='tool_call', tool='workspace.exec', arguments={
-                    'argv': [sys.executable, '-c', 'print("VM_FIXED")']})
-            assert messages[-1]['result']['output'].strip() == 'VM_FIXED'
+                    'argv': [sys.executable, '-c', 'print("VM_FIXED"+' + ('"x"*100000' if truncated else '""') + ')']})
+            assert messages[-1]['result']['output'].strip().startswith('VM_FIXED')
+            assert messages[-1]['result'].get('truncated', False) is truncated
             return ModelResponse(kind='final', text='命令已修正。')
 
     def worker():
