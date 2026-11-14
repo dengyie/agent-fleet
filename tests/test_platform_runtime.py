@@ -267,3 +267,35 @@ def test_run_events_are_private_cursorable_and_owner_scoped(tmp_path):
     payload = response.get_json()
     assert [event["sequence"] for event in payload["events"]] == [1, 2]
     assert client.get(f"/api/platform/v1/runs/{run['run_id']}/events?after=1").get_json()["events"][0]["sequence"] == 2
+
+
+def test_default_assistant_continues_beyond_twenty_steps_and_sixty_thousand_tokens(tmp_path):
+    from hub.platform.providers.base import ModelResponse
+    calls = []
+    class Provider:
+        def complete(self, messages, tools, **kwargs):
+            calls.append(1)
+            return ModelResponse(kind='tool_call', tool='workspace.list', arguments={},
+                                 usage={'input_tokens': 3000, 'output_tokens': 10}) if len(calls) <= 25 else ModelResponse(kind='final', text='all done')
+    backend = DirectoryBackend(tmp_path / 'workspace')
+    leases = ResourceLeaseManager()
+    lease = leases.acquire('workspace-1', 'run-1')
+    result = NativeAssistantRuntime(Provider(), ToolBroker(backend, leases, resource_id='workspace-1')).run(
+        run_id='run-1', owner_id='run-1', epoch=lease['epoch'], messages=[], tools=[])
+    assert result.state == 'succeeded' and result.text == 'all done'
+    assert len(calls) == 26 and result.usage.total_tokens > 60000
+
+
+def test_default_assistant_can_be_cancelled_after_old_step_limit(tmp_path):
+    from hub.platform.providers.base import ModelResponse
+    calls = []
+    class Provider:
+        def complete(self, messages, tools, **kwargs):
+            calls.append(1)
+            return ModelResponse(kind='tool_call', tool='workspace.list', arguments={})
+    leases = ResourceLeaseManager()
+    lease = leases.acquire('workspace-1', 'run-1')
+    result = NativeAssistantRuntime(Provider(), ToolBroker(DirectoryBackend(tmp_path), leases, resource_id='workspace-1')).run(
+        run_id='run-1', owner_id='run-1', epoch=lease['epoch'], messages=[], tools=[],
+        should_cancel=lambda: len(calls) >= 23)
+    assert result.state == 'cancelled' and len(calls) == 23

@@ -27,7 +27,8 @@ def decode_checkpoint(raw):
             if type(data['usage'].get(key)) is not int or data['usage'][key] < 0:
                 raise ValueError('invalid_checkpoint')
         if 'limits' in data and (not isinstance(data['limits'], dict) or set(data['limits']) != {'max_steps', 'max_tokens'}
-                or any(type(value) is not int or value < 0 for value in data['limits'].values())):
+                or any(value is not None and (type(value) is not int or value < 0)
+                       for value in data['limits'].values())):
             raise ValueError('invalid_checkpoint')
         if data['phase'] in {'response', 'receipt', 'remote_wait'} and not isinstance(data.get('response'), dict):
             raise ValueError('invalid_checkpoint')

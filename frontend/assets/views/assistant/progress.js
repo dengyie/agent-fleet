@@ -20,6 +20,10 @@ export function renderProgress(host, run) {
       const status = segment.state === 'succeeded' ? 'success' : segment.state === 'running' ? (active ? 'running' : 'unknown') : segment.state === 'unknown' ? 'unknown' : 'error';
       if (node.getAttribute('name') !== name) node.setAttribute('name',name);
       if (node.getAttribute('status') !== status) node.setAttribute('status',status);
+      for (const [attribute, value] of [['label', segment.title], ['args', segment.input], ['output', segment.output]]) {
+        if (value && node.getAttribute(attribute) !== value) node.setAttribute(attribute,value);
+        if (!value && node.hasAttribute(attribute)) node.removeAttribute(attribute);
+      }
       const error = segment.error_code || '';
       if (error && node.getAttribute('error') !== error) node.setAttribute('error',error);
       if (!error && node.hasAttribute('error')) node.removeAttribute('error');

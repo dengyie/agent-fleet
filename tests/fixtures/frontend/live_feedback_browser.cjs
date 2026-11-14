@@ -25,6 +25,8 @@ const [origin, conversation, runId] = process.argv.slice(2);
     await page.request.post(origin + '/_fixture/release/tool');
     await page.locator('.assistant-message-activity tool-call-badge').first().waitFor();
     await page.waitForFunction(() => document.querySelector('.assistant-message-activity tool-call-badge')?.getAttribute('status') === 'success');
+    assert.match(await page.locator('tool-call-badge').first().getAttribute('label'),/列出目录/);
+    assert.ok(await page.locator('tool-call-badge').first().getAttribute('output'));
     await page.locator('.assistant-message-progress').filter({hasText:'正在自动重试 1/3'}).waitFor();
     await page.waitForFunction(() => window.liveSnapshots.some(run => run.progress?.retry?.retry_index === 1));
     await page.evaluate(async () => {

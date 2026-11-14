@@ -51,6 +51,9 @@ def project_progress(previous, kind, payload, sequence):
             segment['error_code'] = _text(payload.get('error_code'), 128)
         else:
             segment.pop('error_code', None)
+        for field, maximum in (('title', 512), ('input', 4608), ('output', 3584)):
+            if isinstance(payload.get(field), str):
+                segment[field] = _text(payload[field], maximum)
     if kind == 'provider_retry_scheduled':
         result['retry'] = {key: payload[key] for key in
             ('step', 'retry_index', 'max_retries', 'retry_in_ms', 'provider_status')

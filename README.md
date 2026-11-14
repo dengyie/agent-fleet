@@ -18,7 +18,7 @@
 
 ## 最新更新
 
-2026-11-15：远程工具声明对齐节点实际能力；Linux VM 使用独立 cgroup 清理全部命令后代；接入配置先校验大小再轮换凭据；执行前控制请求支持有界重试。完整历史见 [Release Notes](docs/releases/release-notes.md)。
+2026-11-15：主助手默认持续执行至完成或取消，移除固定20步/累计Token默认上限；每轮模型请求统计合并折叠，工具卡片展示具体命令、路径和结果预览。VM后代清理、接入配置与控制重试修复保留。完整历史见 [Release Notes](docs/releases/release-notes.md)。
 
 ## Why Agent Fleet?
 
