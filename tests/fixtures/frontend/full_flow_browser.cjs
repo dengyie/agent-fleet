@@ -33,12 +33,14 @@ const origin = process.argv[2];
     await page.getByText('Full flow completed: 中文回复', {exact: true}).waitFor();
     await page.locator('.assistant-run-status[data-state="succeeded"]').waitFor();
     await page.getByRole('tab', {name: '运行', exact: true}).click();
-    for (const name of ['workspace.list', 'workspace.write', 'workspace.read', 'workspace.artifact']) {
-      await page.locator('.assistant-events').getByText(name, {exact: true}).waitFor();
+    for (const [name, label] of [['workspace.list', '列出目录'], ['workspace.write', '写入文件'], ['workspace.read', '读取文件'], ['workspace.artifact', '保存产物']]) {
+      const badge = page.locator(`.assistant-events tool-call-badge[name="${name}"]`);
+      await badge.getByRole('button', {name: new RegExp(label)}).waitFor();
+      assert.equal(await badge.getAttribute('status'), 'success');
     }
     await page.getByRole('tab', {name: '产物', exact: true}).click();
     await page.getByRole('button', {name: '预览', exact: true}).click();
-    await page.getByText('Full-flow artifact: 中文内容', {exact: false}).waitFor();
+    await page.locator('.assistant-artifact-preview').filter({hasText: 'Full-flow artifact: 中文内容'}).waitFor();
     const downloadPromise = page.waitForEvent('download');
     await page.getByRole('link', {name: '下载', exact: true}).click();
     const download = await downloadPromise;

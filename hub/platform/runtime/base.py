@@ -6,8 +6,10 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class RuntimeLimits:
-    max_steps: int = 20
-    max_tokens: int = 60000
+    # Ordinary conversations run until completion or cancellation. A caller
+    # with an explicit contract (for example a summary) can supply a budget.
+    max_steps: int | None = None
+    max_tokens: int | None = None
 
 
 @dataclass(frozen=True)

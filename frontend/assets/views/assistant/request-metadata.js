@@ -100,25 +100,97 @@ function updateRequest(root, request) {
     (item.includes_unspecified_cache ? '输入（含同价未拆分缓存）' : names[item.category] || item.category) + '：' + item.tokens + ' × $' + item.rate_per_million + ' / 1M = $' + item.amount)));
 }
 
+// Sum each displayed category independently: cache and reasoning are subsets,
+// and missing provider accounting must never silently become zero.
+function displayedTokens(request, key) {
+  const usage = request.usage || {};
+  let value = usage[key];
+  if (key === 'input_tokens' && [value, usage.cache_read_tokens, usage.cache_write_tokens].every(n => typeof n === 'number'))
+    value = Math.max(0, value - usage.cache_read_tokens - usage.cache_write_tokens);
+  if (key === 'output_tokens' && typeof value === 'number' && typeof usage.reasoning_tokens === 'number')
+    value = Math.max(0, value - usage.reasoning_tokens);
+  return value;
+}
+function sumKnown(values, suffix = '') {
+  const known = values.filter(value => typeof value === 'number' && Number.isFinite(value) && value >= 0);
+  if (!known.length) return '—';
+  return (known.length === values.length ? '' : '≥') + known.reduce((total, value) => total + value, 0) + suffix;
+}
+function sumCost(requests) {
+  const amounts = requests.map(r => r.cost).filter(c => c?.currency === 'USD' && /^(\d+)(\.\d+)?$/.test(c.amount));
+  if (!amounts.length) return '费用未提供';
+  const scale = Math.max(...amounts.map(c => (c.amount.split('.')[1] || '').length));
+  const total = amounts.reduce((sum, c) => {
+    const [whole, fraction = ''] = c.amount.split('.');
+    return sum + BigInt(whole + fraction.padEnd(scale, '0'));
+  }, 0n).toString().padStart(scale + 1, '0');
+  const exact = scale ? total.slice(0, -scale) + '.' + total.slice(-scale) : total;
+  return (amounts.length < requests.length ? '≥' : '') + (amounts.some(c => c.source === 'configured') ? '≈' : '') + '$' + exact;
+}
+function updateGroup(group, requests) {
+  const signature = JSON.stringify(requests, (key, value) => key === 'elapsed_ms' ? undefined :
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.keys(value).sort().map(k => [k, value[k]])) : value);
+  if (signature === group._signature) return;
+  group._signature = signature;
+  const summary = group.querySelector(':scope > summary');
+  summary.replaceChildren();
+  const models = [...new Set(requests.map(r => r.model || r.requested_model || '未提供'))];
+  summary.append(chip('模型', models.length === 1 ? models[0] : models.length + ' 个模型', 'cpu'));
+  summary.append(chip('本轮模型请求次数', requests.length + ' 次请求'));
+  const tokens = node('span', 'request-tokens');
+  TOKENS.forEach(([key, label, icon]) => tokens.append(chip((key === 'input_tokens' ? '输入 Token（已拆分缓存时扣除缓存）' : key === 'output_tokens' ? '输出 Token（已拆分推理时扣除推理）' : label) + '合计（≥ 表示有请求未提供）',
+    sumKnown(requests.map(r => displayedTokens(r, key))), icon)));
+  summary.append(tokens);
+  const duration = chip('模型请求耗时合计，不含工具执行；≥ 表示有耗时未确认', sumKnown(requests.map(r => r.duration_ms), 'ms'));
+  duration.className += ' request-group-duration'; summary.append(duration);
+  group._duration = duration.querySelector('.request-chip-value');
+  summary.append(chip('费用合计；≥ 表示部分请求费用未提供；≈ 表示包含估算', sumCost(requests)));
+  const running = requests.filter(r => r.status === 'running').length;
+  const failed = requests.filter(r => ['failed', 'unknown'].includes(r.status)).length;
+  const status = running ? '请求中' : failed ? failed + ' 次失败或未确认' : '已完成';
+  summary.append(node('span', 'request-state', status), uiIcon('chevron-down', {size:13}));
+  group.dataset.state = running ? 'running' : failed ? 'unknown' : 'succeeded';
+  summary.setAttribute('aria-label', '本轮模型请求汇总 · ' + requests.length + ' 次请求，展开查看逐次详情');
+}
 export function renderRequestMetadata(host, requests) {
+  requests = requests || [];
   if (!host._requestRows) host._requestRows = new Map();
+  if (!requests.length) {
+    host.replaceChildren(); host._requestRows.clear(); host._requestGroup = null; return;
+  }
+  if (!host._requestGroup) {
+    const group = node('details', 'request-group');
+    group.append(node('summary', 'request-summary'), node('div', 'request-group-items'));
+    host.append(group); host._requestGroup = group;
+  }
+  const group = host._requestGroup;
+  updateGroup(group, requests);
+  const container = group.querySelector('.request-group-items');
   const keep = new Set();
-  (requests || []).forEach((request, index) => {
+  requests.forEach((request, index) => {
     const id = request.request_id; keep.add(id);
     let row = host._requestRows.get(id);
     if (!row) { row = createRequest(); host._requestRows.set(id, row); }
     updateRequest(row, request);
-    if (host.children[index] !== row) host.insertBefore(row, host.children[index] || null);
+    if (container.children[index] !== row) container.insertBefore(row, container.children[index] || null);
   });
-  host._requestRows.forEach((row, id) => { if (!keep.has(id)) { host.removeChild(row); host._requestRows.delete(id); } });
+  host._requestRows.forEach((row, id) => { if (!keep.has(id)) { row.remove(); host._requestRows.delete(id); } });
 }
 export function tickRequestMetadata(host) {
   let active = false;
+  const durations = [];
   host._requestRows?.forEach(row => {
-    if (row._request.status !== 'running') return;
+    if (row._request.status !== 'running') { durations.push(row._request.duration_ms); return; }
     active = true;
-    const text = '≈' + Math.max(0, Math.round(row._elapsed + performance.now() - row._received)) + 'ms';
+    const elapsed = Math.max(0, Math.round(row._elapsed + performance.now() - row._received));
+    durations.push(elapsed);
+    const text = '≈' + elapsed + 'ms';
     if (row._duration.textContent !== text) row._duration.textContent = text;
   });
+  if (active && host._requestGroup?._duration) {
+    const text = '≈' + sumKnown(durations, 'ms');
+    if (host._requestGroup._duration.textContent !== text) host._requestGroup._duration.textContent = text;
+  }
   return active;
 }

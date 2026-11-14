@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 class Element {
   constructor(tag) { this.tagName = tag; this.children = []; this.attributes = {}; this.listeners = {}; this.value = ''; this._text = ''; this.disabled = false; }
   appendChild(child) { if (child.parentNode) child.parentNode.removeChild(child); child.parentNode = this; this.children.push(child); return child; }
+  replaceChildren(...children) { while (this.firstChild) this.removeChild(this.firstChild); this._text = ''; children.forEach(child => this.appendChild(child)); }
   insertBefore(child, before) { if (child.parentNode) child.parentNode.removeChild(child); child.parentNode = this; this.children.splice(this.children.indexOf(before), 0, child); return child; }
   getAttribute(key) { return this.attributes[key]; }
   get open() { return 'open' in this.attributes; }

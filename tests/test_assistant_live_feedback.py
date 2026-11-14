@@ -199,3 +199,47 @@ def test_progress_bound_handles_json_escaping_without_hanging():
         'assert p["truncated"] is True')
     result = subprocess.run([sys.executable,'-c',code],capture_output=True,text=True,timeout=3)
     assert result.returncode == 0, result.stderr
+
+
+def test_tool_progress_explains_operation_and_result_and_survives_retention(tmp_path):
+    from hub.application.run_worker_service import LocalRunWorkerService
+    from hub.platform.providers.base import ModelResponse
+    from tests.test_platform_run_worker import OWNER, _app, _catalog, _queued
+    app = _app(tmp_path)
+    repo = _catalog(app, tmp_path)
+    run_id = _queued(app)['run_id']
+    (tmp_path / 'workspace').mkdir()
+    (tmp_path / 'workspace' / 'report.txt').write_text('readable result')
+    calls = []
+    class Provider:
+        def complete(self, messages, tools, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                return ModelResponse(kind='tool_call', tool='workspace.read', arguments={'path':'report.txt','api_key':'hidden'})
+            return ModelResponse(kind='final', text='done')
+    LocalRunWorkerService(repo, app.extensions['fleet']['services']['run_events'],provider_factory=lambda _:Provider()).run_once(OWNER)
+    segment = repo.get_run(OWNER,run_id)['progress']['segments'][1]
+    assert segment['title'] == '读取文件 · report.txt'
+    assert segment['input'] == 'report.txt' and segment['output'] == 'readable result'
+    assert 'hidden' not in json.dumps(segment)
+    with repo._connect() as conn:
+        conn.execute('DELETE FROM run_events WHERE run_id=?',(run_id,))
+    assert repo.get_run(OWNER,run_id)['progress']['segments'][1] == segment
+
+
+def test_exec_activity_is_available_before_dispatch_and_result_is_bounded():
+    from hub.domain.tool_activity import tool_activity
+    from hub.domain.run_progress import project_progress
+    from fleet_core.backends.base import ToolReceipt
+    args = {'argv':['sh','-c','python3 -V && pwd'], 'unrelated_secret':'never-public'}
+    call = tool_activity('workspace.exec', args)
+    assert call['title'].startswith('执行命令 · sh -c')
+    assert 'python3 -V && pwd' in call['input'] and 'never-public' not in str(call)
+    receipt = ToolReceipt('cmd','failed',{'returncode':7,'output':'中'*10000},'process_failed',True)
+    result = tool_activity('workspace.exec',args,receipt)
+    assert '退出码：7' in result['output'] and '截断' in result['output']
+    assert len(result['output'].encode()) < 3584
+    public = project_progress({},'tool_call',{'command_id':'cmd','tool':'workspace.exec',**call},1)
+    public = project_progress(public,'tool_result',{'command_id':'cmd','tool':'workspace.exec','state':'failed','error_code':'process_failed',**result},2)
+    assert public['segments'][0]['input']==call['input']
+    assert public['segments'][0]['output']==result['output']

@@ -1,4 +1,4 @@
-"""Finite native assistant loop using only the ToolBroker boundary."""
+"""Native assistant loop using only the ToolBroker boundary."""
 from __future__ import annotations
 
 import json
@@ -16,6 +16,7 @@ from ..providers.openai_compatible import ProviderError
 from ..providers.base import ModelResponse
 
 from hub.infrastructure.usage_repository import UsageLimitExceeded, normalize_usage
+from hub.domain.tool_activity import tool_activity
 
 
 class ProviderBoundaryUnknown(RuntimeError):
@@ -89,7 +90,8 @@ class NativeAssistantRuntime:
         if progress and progress['phase'] not in {'ready', 'response', 'receipt', 'remote_wait'}:
             return self._result('unknown', '执行结果待核查。', start_step,
                                 input_tokens, output_tokens, measured_total_tokens, provider_requests)
-        for step in range(start_step, self.limits.max_steps + 1):
+        step = start_step
+        while self.limits.max_steps is None or step <= self.limits.max_steps:
             if (not progress or progress['phase'] not in {'receipt', 'remote_wait'}) and should_cancel is not None and should_cancel():
                 return finish("cancelled", "运行已取消。", step - 1, input_tokens, output_tokens, measured_total_tokens, provider_requests)
             if progress and progress['phase'] in {'response', 'receipt', 'remote_wait'} and step == start_step:
@@ -154,7 +156,7 @@ class NativeAssistantRuntime:
             })
             if (not progress or progress['phase'] not in {'receipt', 'remote_wait'}) and should_cancel is not None and should_cancel():
                 return finish("cancelled", "运行已取消。", step, input_tokens, output_tokens, measured_total_tokens, provider_requests)
-            if total_tokens > self.limits.max_tokens:
+            if self.limits.max_tokens is not None and total_tokens > self.limits.max_tokens:
                 return finish("failed", "模型预算已用尽。", step, input_tokens, output_tokens, measured_total_tokens, provider_requests)
             if response.kind == "final":
                 return finish("succeeded", response.text[:32768], step, input_tokens, output_tokens, measured_total_tokens, provider_requests)
@@ -170,6 +172,7 @@ class NativeAssistantRuntime:
                     "run_id": run_id, "step": step, "command_id": command_id,
                     "tool": response.tool,
                     "argument_keys": sorted((response.arguments or {}).keys())[:32],
+                    **tool_activity(response.tool, response.arguments),
                 })
                 persist('tool_pending', step, response=asdict(response))
                 receipt = self.broker.execute(
@@ -184,6 +187,7 @@ class NativeAssistantRuntime:
                 "run_id": run_id, "step": step, "command_id": command_id,
                 "tool": response.tool, "state": receipt.state,
                 "error_code": receipt.error_code,
+                **tool_activity(response.tool, response.arguments, receipt),
             })
             if receipt.state == "unknown":
                 return finish("unknown", "远程工具回执未知，等待后续核查。", step, input_tokens, output_tokens, measured_total_tokens, provider_requests)
@@ -222,6 +226,7 @@ class NativeAssistantRuntime:
             })
             persist('ready', step + 1)
             progress = None
+            step += 1
         return finish("failed", "模型步骤已达到上限。", self.limits.max_steps, input_tokens, output_tokens, measured_total_tokens, provider_requests)
 
     def _settle_unknown(self, reservation, *, run_id, step, attempt):

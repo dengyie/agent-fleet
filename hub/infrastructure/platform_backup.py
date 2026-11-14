@@ -639,8 +639,11 @@ def _fsync_path(path: Path) -> None:
     if os.name == "nt" and Path(path).is_dir():
         return
     # Windows CRT fsync/_commit requires a writable handle. These are owned
-    # staged files; read-only descriptors remain sufficient on POSIX.
-    fd = os.open(path, os.O_RDWR if os.name == "nt" else os.O_RDONLY)
+    # staged files; read-only descriptors remain sufficient on POSIX. Binary
+    # mode is essential: Windows CRT O_RDWR text mode strips a trailing 0x1A
+    # even when no write is performed, corrupting arbitrary backup payloads.
+    flags = os.O_RDWR | os.O_BINARY if os.name == "nt" else os.O_RDONLY
+    fd = os.open(path, flags)
     try:
         os.fsync(fd)
     finally:

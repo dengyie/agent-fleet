@@ -11,6 +11,10 @@ const [origin, conversation] = process.argv.slice(2);
     let conversationReads = 0;
     page.on('request', r => {if (r.url().endsWith('/conversations/' + conversation)) conversationReads++;});
     await page.goto(origin + '/conversation/' + conversation, {waitUntil: 'domcontentloaded'});
+    const group = page.locator('.request-group');
+    await group.waitFor();
+    assert.equal(await group.getAttribute('open'),null,'multiple requests start collapsed into one row');
+    await group.locator(':scope > summary').click();
     const requests = page.locator('.request-metadata');
     await requests.nth(1).waitFor();
     assert.equal(await requests.count(),2,'both 429 and pending retry must be visible');
@@ -22,7 +26,7 @@ const [origin, conversation] = process.argv.slice(2);
     await active.locator('summary').focus(); await page.keyboard.press('Enter');
     assert.equal(await active.getAttribute('open'),'');
     const elapsed = await active.locator('.request-duration').textContent();
-    await page.waitForFunction(old => document.querySelectorAll('.request-duration')[1].textContent !== old, elapsed);
+    await page.waitForFunction(old => document.querySelectorAll('.request-metadata .request-duration')[1].textContent !== old, elapsed);
     await active.evaluate(n => {window.metadataNode=n;window.metadataSummary=n.querySelector('summary');});
     await page.waitForResponse(r => r.url().includes('/runs/') && !r.url().includes('/events'));
     assert.equal(await active.evaluate(n => n === window.metadataNode && n.querySelector('summary') === window.metadataSummary),true);
@@ -40,7 +44,7 @@ const [origin, conversation] = process.argv.slice(2);
     assert.match(await active.textContent(),/frozen-model/);
     assert.equal(await page.locator('stream-markdown strong').first().textContent(),'完成','keyed updates retain rendered markdown');
     const finalDuration = await active.locator('.request-duration').textContent();
-    await page.reload(); await requests.nth(1).waitFor();
+    await page.reload(); await group.waitFor(); await group.locator(':scope > summary').click(); await requests.nth(1).waitFor();
     assert.equal(await requests.nth(1).locator('.request-duration').textContent(),finalDuration);
     for (const reduced of ['no-preference','reduce']) {
       await page.emulateMedia({reducedMotion:reduced,colorScheme:'dark'});
@@ -72,12 +76,34 @@ const [origin, conversation] = process.argv.slice(2);
     assert.doesNotMatch(await page.locator('.message-requests').last().textContent(),/请求中/);
     if (process.env.FLEET_SCREENSHOTS) {
       fs.mkdirSync(process.env.FLEET_SCREENSHOTS,{recursive:true});
-      await page.reload(); await requests.nth(1).waitFor();
+      await page.reload(); await group.waitFor(); await group.locator(':scope > summary').click(); await requests.nth(1).waitFor();
       await requests.nth(1).locator('summary').click();
       await page.screenshot({path:process.env.FLEET_SCREENSHOTS+'/request-metadata-mobile.png'});
       await page.setViewportSize({width:1440,height:1000});
       await page.screenshot({path:process.env.FLEET_SCREENSHOTS+'/request-metadata-desktop.png'});
     }
+    await page.evaluate(async () => {
+      const {renderRequestMetadata} = await import('/assets/views/assistant/request-metadata.js');
+      const host = document.createElement('div'); document.body.append(host);
+      const make = (id, input, cache, output, reasoning, cost) => ({request_id:id,status:'succeeded',model:'deepseek',
+        started_at:1,duration_ms: id === 'one' ? 2485 : 2574,
+        usage:{input_tokens:input,cache_read_tokens:cache,cache_write_tokens:0,output_tokens:output,reasoning_tokens:reasoning},
+        cost:{currency:'USD',source:'configured',amount:cost}});
+      const rows = [make('one',673,0,75,16,'0.00014595'),make('two',825,640,235,56,'0.00017067')];
+      renderRequestMetadata(host,rows);
+      const group=host.querySelector('.request-group'), summary=group.querySelector(':scope > summary');
+      assertGroup(!group.open && host.children.length === 1,'one collapsed group');
+      assertGroup(JSON.stringify(Array.from(summary.querySelectorAll('.request-tokens .request-chip-value'),n=>n.textContent)) === JSON.stringify(['858','640','72','238','0']),'token sums');
+      assertGroup(summary.textContent.includes('≈$0.00031662') && summary.textContent.includes('5059ms') && summary.textContent.includes('2 次请求'),'exact decimal cost/duration/count');
+      group.open=true;
+      rows[1].cost=null; rows[1].usage.reasoning_tokens=null;
+      renderRequestMetadata(host,rows);
+      assertGroup(group.open && group === host.querySelector('.request-group'),'aggregate expansion survives updates');
+      assertGroup(summary.textContent.includes('≥≈$0.00014595') && summary.textContent.includes('≥16'),'missing accounting is partial rather than zero');
+      renderRequestMetadata(host,[]); assertGroup(host.children.length===0,'empty request collection removes summary');
+      host.remove();
+      function assertGroup(value,message){if(!value)throw new Error(message);}
+    });
     const performanceEvidence = await page.evaluate(async () => {
       const {renderRequestMetadata, tickRequestMetadata} = await import('/assets/views/assistant/request-metadata.js');
       const host = document.createElement('div');
@@ -94,7 +120,7 @@ const [origin, conversation] = process.argv.slice(2);
       renderRequestMetadata(host,reordered);
       const reorderedChanges=observer.takeRecords().length; observer.disconnect();
       const retainedIcons=Array.from(host.querySelectorAll('svg')).every((icon,index) => icon === icons[index]);
-      return {requests:host.children.length,renderMs,updateMs,changes,reorderedChanges,retainedIcons,idleClock:tickRequestMetadata(host)};
+      return {requests:host.querySelectorAll('.request-metadata').length,renderMs,updateMs,changes,reorderedChanges,retainedIcons,idleClock:tickRequestMetadata(host)};
     });
     assert.equal(performanceEvidence.requests,120);
     // No-op updates and idle timers must do no DOM work, independent of CPU speed.

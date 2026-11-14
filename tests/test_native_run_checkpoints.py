@@ -351,3 +351,27 @@ def test_saved_completion_does_not_reopen_provider_or_workspace(tmp_path):
     assert result['state'] == 'succeeded' and result['result_text'] == 'saved'
     events = repo.list_run_events(OWNER, run['run_id'])['events']
     assert sum(event['kind'] == 'run_finished' for event in events) == 1
+
+
+def test_unlimited_checkpoint_resumes_after_old_default_limit_without_replay(tmp_path):
+    from hub.platform.runtime.base import RuntimeLimits
+    from hub.platform.runtime.native import NativeAssistantRuntime
+    from fleet_core.backends.base import ToolReceipt
+    from hub.infrastructure.runtime_checkpoint import decode_checkpoint
+    import json
+    effects = []
+    class Broker:
+        def execute(self, **kwargs):
+            effects.append(kwargs['command_id'])
+            return ToolReceipt(kwargs['command_id'],'succeeded',{'entries':[]})
+    checkpoint = {'version':1,'phase':'ready','step':26,'limits':{'max_steps':None,'max_tokens':None},
+                  'transcript':[{'role':'user','content':'finish the work'}],
+                  'usage':{'input_tokens':75000,'output_tokens':100,'total_tokens':75100,'provider_requests':25}}
+    class Provider:
+        def complete(self, messages, tools, **kwargs):
+            return ModelResponse(kind='final',text='finished after restart')
+    decoded = decode_checkpoint(json.dumps(checkpoint))
+    result = NativeAssistantRuntime(Provider(),Broker(),checkpoint=decoded,limits=RuntimeLimits()).run(
+        run_id='restored',owner_id=OWNER,epoch=1,messages=[],tools=[])
+    assert result.state=='succeeded' and result.steps==26 and not effects
+    assert result.usage.provider_requests==26 and result.usage.total_tokens==75100

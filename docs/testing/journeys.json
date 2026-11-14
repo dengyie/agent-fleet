@@ -122,7 +122,12 @@
         "tests/test_native_tool_recovery.py::test_read_failure_reaches_openai_wire_with_matching_tool_call_id",
         "tests/test_native_tool_recovery.py::test_remote_missing_read_continues_from_receipt_without_new_command",
         "tests/test_native_tool_recovery.py::test_recovered_read_failure_cancellation_needs_no_provider_or_workspace",
-        "tests/test_native_tool_recovery.py::test_repeated_missing_reads_stop_at_frozen_step_budget"
+        "tests/test_native_tool_recovery.py::test_repeated_missing_reads_stop_at_frozen_step_budget",
+        "tests/test_platform_runtime.py::test_default_assistant_continues_beyond_twenty_steps_and_sixty_thousand_tokens",
+        "tests/test_platform_runtime.py::test_default_assistant_can_be_cancelled_after_old_step_limit",
+        "tests/test_assistant_live_feedback.py::test_tool_progress_explains_operation_and_result_and_survives_retention",
+        "tests/test_assistant_live_feedback.py::test_exec_activity_is_available_before_dispatch_and_result_is_bounded",
+        "tests/test_native_run_checkpoints.py::test_unlimited_checkpoint_resumes_after_old_default_limit_without_replay"
       ]
     },
     {
