@@ -339,6 +339,8 @@ class LocalRunWorkerService:
             if remote:
                 agent_node = self.repository.get_node(claim["owner_id"], execution_node_id)
                 agent_caps = agent_node.get("capabilities", {}) if agent_node and agent_node.get("enabled") else {}
+                if agent_caps.get('workspace.exec') is not True:
+                    remote_allowed_tools = remote_allowed_tools - {'workspace.exec'}
                 enabled_agent_tools = {name for name in WEB_AGENT_TOOLS if agent_caps.get(name) is True}
                 remote_web_agent_enabled = bool(enabled_agent_tools)
                 remote_allowed_tools = (remote_allowed_tools - WEB_AGENT_TOOLS) | (remote_allowed_tools & enabled_agent_tools)

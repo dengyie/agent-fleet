@@ -89,7 +89,10 @@ class ToolBroker:
      {'name': 'workspace.exec',
       'risk': 'restricted_exec',
       'scope_kind': 'workspace',
-      'description': 'Execute an allowed command in the workspace. Requires a configured execution sandbox.',
+      'description': 'Execute argv with the selected workspace as cwd on its execution node. '
+                     'Requires a configured sandbox or direct VM execution. Output includes stdout/stderr '
+                     'and returncode (maximum 64 KiB). Timeout is at most 30 seconds. A nonzero exit '
+                     'returns output so you can correct the next command; it is never automatically replayed.',
       'parameters': {'type': 'object',
                      'properties': {'argv': {'type': 'array',
                                              'items': {'type': 'string'},

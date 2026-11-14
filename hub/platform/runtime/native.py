@@ -30,14 +30,15 @@ class _RunCancelled(Exception):
 
 
 def can_continue_after_tool_failure(tool: str, state: str, error_code: str | None) -> bool:
-    """Only known, side-effect-free workspace read outcomes are recoverable.
+    """Known read failures and confirmed command exits can return to the model.
 
     Continue with the committed receipt, never by automatically replaying it.
-    Policy, lease, write, execution and uncertain outcomes remain terminal.
+    Policy, lease, write, timeout and uncertain outcomes remain terminal.
     """
     return state == 'failed' and (
         (tool in {'workspace.list', 'workspace.read'} and error_code == 'not_found')
-        or (tool == 'workspace.read' and error_code == 'read_failed'))
+        or (tool == 'workspace.read' and error_code == 'read_failed')
+        or (tool == 'workspace.exec' and error_code == 'process_failed'))
 
 
 class NativeAssistantRuntime:
@@ -213,7 +214,10 @@ class NativeAssistantRuntime:
                 "tool_call_id": call_id,
                 "tool": response.tool,
                 "result": (receipt.result if receipt.state == 'succeeded' else
-                           {'state': 'failed', 'error_code': receipt.error_code}),
+                           {'state': 'failed', 'error_code': receipt.error_code,
+                            **({'returncode': receipt.result.get('returncode'),
+                                'output': receipt.result.get('output', ''), 'truncated': receipt.truncated}
+                               if response.tool == 'workspace.exec' else {})}),
             })
             persist('ready', step + 1)
             progress = None

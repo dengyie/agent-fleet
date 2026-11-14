@@ -365,7 +365,8 @@ def test_unconfigured_runtime_does_not_add_reports_or_change_manifest(tmp_path):
         capabilities=frozenset({"workspace.read"})), transport=transport, clock=lambda: 100)
     assert subject.poll_once() == {"ok": True, "commands": 0, "receipts": 0}
     assert len(transport.requests) == 1 and transport.requests[0][1].endswith("/poll")
-    assert subject.manifest() == {"node_id": "node-a", "worker_id": "node-a", "capabilities": {"workspace.read": True}}
+    assert subject.manifest() == {"node_id": "node-a", "worker_id": "node-a", "capabilities": {"workspace.read": True},
+        "workspace_execution": {"mode": "sandbox", "command_available": False, "workspace_ids": ["workspace"]}}
 
 
 def test_offer_does_not_advertise_exec_without_actual_sandbox_launcher(tmp_path):

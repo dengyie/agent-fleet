@@ -109,7 +109,9 @@ def test_recovered_read_failure_resumes_without_reexecuting_tool(tmp_path, monke
     ('workspace.read', 'failed', 'path_escape', 'failed'),
     ('workspace.read', 'failed', None, 'failed'),
     ('workspace.write', 'failed', 'not_found', 'failed'),
-    ('workspace.exec', 'failed', 'process_failed', 'failed'),
+    ('workspace.exec', 'failed', 'process_failed', 'succeeded'),
+    ('workspace.exec', 'unknown', 'process_failed', 'unknown'),
+    ('workspace.exec', 'failed', 'timeout', 'failed'),
     ('mcp.files.read', 'failed', 'not_found', 'failed'),
 ])
 def test_only_confirmed_workspace_read_failures_can_continue(tool, state, code, expected):
@@ -118,7 +120,8 @@ def test_only_confirmed_workspace_read_failures_can_continue(tool, state, code, 
     class Provider:
         def complete(self, messages, tools, **kwargs):
             calls.append(messages)
-            assert messages[-1]['result'] == {'state': 'failed', 'error_code': code}
+            assert messages[-1]['result'] == {'state': 'failed', 'error_code': code,
+                **({'returncode': None, 'output': '', 'truncated': False} if tool == 'workspace.exec' else {})}
             return ModelResponse(kind='final', text='读取失败，请检查文件。')
 
     checkpoint = _receipt_checkpoint(tool=tool, state=state, code=code)

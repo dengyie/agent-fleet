@@ -78,7 +78,9 @@ def test_signed_node_exec_cannot_read_outside_workspace(tmp_path):
     receipt = runtime.client.handle(command.as_dict())
     assert 'review-outside-sentinel' not in str(receipt), receipt
     assert receipt['status'] == 'failed'
-    assert receipt['result']['error_code'] == 'sandbox_unavailable'
+    assert receipt['result']['error_code'] == 'unknown_tool'
+    assert 'workspace.exec' not in runtime.manifest()['capabilities']
+    runtime.close_all()
 
 
 def test_cancellation_does_not_hide_unknown_remote_write(tmp_path):

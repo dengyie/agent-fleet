@@ -163,6 +163,7 @@ The **Muse** workspace (`/muse`) connects native Muse sessions directly without 
 - [Visual Architecture & State Machine](docs/visual-architecture.md)
 - [UI Visual Evidence](docs/testing/visual-evidence.md)
 - [Frontend Release Layout](deploy/frontend-release-layout.md)
+- [VM Workspace Execution Node](docs/platform/workspace-node.md)
 - [Handoff & Operations Guide](docs/HANDOFF.md)
 
 ---

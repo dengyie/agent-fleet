@@ -3,6 +3,7 @@ from flask import Blueprint, current_app, g, jsonify, request
 
 from fleet_core.locking import LockBusy
 from hub.application.defaults_service import DefaultsService
+from hub.application.workspace_node_setup import WorkspaceNodeSetupService
 from hub.auth import require_operator
 from hub.http._common import json_object
 from hub.http.errors import ApplicationError, error_response
@@ -89,4 +90,14 @@ def save_hosts():
 def provision_node(identifier):
     def issue():
         return {'ok': True, **_catalog().repository.provision_node_credential(_owner(), identifier)}
+    return _invoke(issue)
+
+
+@bp.post('/nodes/<identifier>/enrollment')
+@require_operator
+def enroll_workspace_node(identifier):
+    def issue():
+        fleet = current_app.extensions['fleet']
+        return WorkspaceNodeSetupService(_catalog().repository, fleet['services'].get('platform_delivery'),
+            remote_enabled=fleet['config'].platform_remote_execution_enabled).enroll(_owner(), identifier, json_object())
     return _invoke(issue)

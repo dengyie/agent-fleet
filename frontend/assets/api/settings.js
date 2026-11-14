@@ -21,6 +21,7 @@ export async function saveDefaults(defaults, revision, owner = '') {
   window.dispatchEvent(new Event('fleet-settings-updated'));
   return result;
 }
-export function provisionNode(nodeId, owner = '') {
-  return platformRequest(path('nodes', nodeId, 'credential') + (owner ? '?owner_id=' + encodeURIComponent(owner) : ''), {method: 'POST', body: {}, headers: {'Content-Type': 'application/json'}});
+export function enrollWorkspaceNode(nodeId, body, owner = '') {
+  return platformRequest(path('nodes', nodeId, 'enrollment') + (owner ? '?owner_id=' + encodeURIComponent(owner) : ''),
+    {method: 'POST', body, headers: {'Content-Type': 'application/json'}});
 }

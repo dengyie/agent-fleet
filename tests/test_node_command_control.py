@@ -325,11 +325,8 @@ def test_control_stops_the_owned_process_before_its_late_write(tmp_path, monkeyp
     with server(app) as origin:
         runtime = NodeRuntime(NodeRuntimeConfig(node_id='control-node', credential=credential,
             workspace_root=workspace, workspace_id='workspace', journal_path=tmp_path / 'node.db',
-            hub_url=origin, public_key=PUBLIC_KEY, capabilities=frozenset({'workspace.exec'})),
+            hub_url=origin, public_key=PUBLIC_KEY, capabilities=frozenset({'workspace.exec'}), execution_mode='vm_direct'),
             transport=ControlledTransport(mode='direct', attempts=1, timeout=2, allow_insecure=True))
-        # Test process lifecycle with the same backend API; this fixture does
-        # not claim that a plain directory backend proves sandbox isolation.
-        runtime.executor.workspace_backends['workspace'] = DirectoryBackend(workspace)
         results = []
         thread = Thread(target=lambda: results.append(runtime.poll_once(limit=1, lease_s=1)), daemon=True)
         thread.start()
