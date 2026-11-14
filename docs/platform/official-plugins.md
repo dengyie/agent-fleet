@@ -2,6 +2,8 @@
 
 本实现提供随 Fleet 发布的官方插件注册表、插件中心 `/plugins`、按节点启停、节点版本/依赖/运行环境上报，以及持久操作查询。首个插件为 `github-cli` `1.0.0`，插件协议为 v1。它尚不提供第三方包在线安装、独立热更新或市场；节点上的旧 Probe/Runner/ControlClient 不会因此自动成为插件执行器。
 
+普通助手的 VM 直接命令执行见[工作区 Node](workspace-node.md)。它复用本文的 Node CLI 和签名投递链路，配置使用独立的 `workspace` 字段；无需安装 GitHub CLI 插件。
+
 ## 使用流程
 
 1. Hub 已启用 `platform_enabled`。在实际 Hub 发布源码根目录、以运行 Hub 的系统用户执行 `python -m hub.plugins_setup`，再按部署流程重启 Hub，以加载独立的平台命令签名私钥。命令只在密钥不存在时创建 `credentials/platform-command-signing.key`，不会轮换已有密钥；已有 `AGENT_FLEET_PLATFORM_COMMAND_SIGNING_KEY` 时校验并沿用，无效配置拒绝覆盖。平台密钥与 Supervisor 密钥分开。插件中心会在密钥未加载时提示并禁用生成接入文件；仅部署代码不会自动补齐该运行配置。现有平台节点认证和主动出站 HTTP 链路继续使用。

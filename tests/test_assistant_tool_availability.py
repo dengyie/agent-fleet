@@ -11,14 +11,14 @@ from tests.test_platform_run_worker import OWNER, _app, _catalog, _queued
 
 @pytest.mark.parametrize('launcher,remote,expected_exec', [
     (None, False, False), (('fixture-launcher',), False, True),
-    (None, True, True),
+    (None, True, True), (None, True, False),
 ])
 def test_worker_advertises_exec_only_when_local_sandbox_is_configured(
         tmp_path, launcher, remote, expected_exec):
     app = _app(tmp_path)
     repo = _catalog(app, tmp_path)
     if remote:
-        repo.upsert_node(OWNER, {'node_id': 'remote'})
+        repo.upsert_node(OWNER, {'node_id': 'remote', 'capabilities': {'workspace.exec': expected_exec}})
         repo.update_defaults(OWNER, {'model_profile_id': 'local', 'workspace_id': 'home',
                                     'execution_node_id': 'remote'}, 1)
     run = _queued(app)

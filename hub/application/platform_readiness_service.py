@@ -32,11 +32,20 @@ def check_platform_readiness(fleet, owner_id):
         issues.append('default_workspace_unavailable')
     elif workspace['backend'] != 'directory':
         issues.append('workspace_backend_unavailable')
-    elif defaults.get('execution_node_id') or workspace.get('default_node_id'):
-        issues.append('remote_workspace_requires_node_verification')
     else:
-        root = Path(workspace['root_path']).expanduser()
-        if not root.is_dir() or not os.access(root, os.R_OK | os.W_OK | os.X_OK):
-            issues.append('workspace_directory_unavailable')
+        node_id = workspace.get('default_node_id') or defaults.get('execution_node_id')
+        if node_id not in (None, '', 'local', 'hub', 'host'):
+            node = repository.get_node(owner_id, node_id)
+            if not node or not node['enabled']:
+                issues.append('default_node_unavailable')
+            if not config.platform_remote_execution_enabled:
+                issues.append('remote_execution_disabled')
+            delivery = services.get('platform_delivery')
+            if delivery is None or not delivery.signing_key:
+                issues.append('command_signature_required')
+        else:
+            root = Path(workspace['root_path']).expanduser()
+            if not root.is_dir() or not os.access(root, os.R_OK | os.W_OK | os.X_OK):
+                issues.append('workspace_directory_unavailable')
     return {'ok': not issues, 'configuration_ready': not issues, 'issues': issues,
-            'provider_connectivity': 'not_tested'}
+            'provider_connectivity': 'not_tested', 'node_connectivity': 'not_tested'}

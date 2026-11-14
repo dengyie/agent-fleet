@@ -8,13 +8,16 @@ from test_workflow_browser import _browser_acceptance
 
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
+from fleet_core.control import generate_ed25519_keypair
 
 
 @pytest.mark.parametrize('viewport', ['desktop', 'mobile'])
 def test_settings_save_reload_and_navigation(tmp_path, viewport):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE to run Chromium acceptance')
+    private, _ = generate_ed25519_keypair()
     app = create_app(FleetConfig.from_root(tmp_path, frontend_dir=Path(__file__).resolve().parents[1] / 'frontend', platform_enabled=True,
+        platform_remote_execution_enabled=True, platform_command_signing_raw=private,
         accounts={'enabled': True, 'origin': 'http://127.0.0.1'}))
     app.config['ACCOUNT_COOKIE_SECURE'] = False
     app.extensions['accounts'].bootstrap_admin('admin@example.test', PASSWORD)
