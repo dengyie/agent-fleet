@@ -135,9 +135,10 @@ def test_create_backup_never_overwrites_existing_target(tmp_path):
     assert marker.read_text(encoding="utf-8") == "keep"
 
 
-def test_staged_backup_file_flush_preserves_complete_bytes(tmp_path):
+@pytest.mark.parametrize("suffix", [b"", b"\x1a", b"\r\n\x1a"])
+def test_staged_backup_file_flush_preserves_complete_bytes(tmp_path, suffix):
     payload = tmp_path / "payload.bin"
-    original = b"backup\x00\xff" * 1024
+    original = b"backup\x00\xff" * 1024 + suffix
     payload.write_bytes(original)
     _fsync_path(payload)
     assert payload.read_bytes() == original
