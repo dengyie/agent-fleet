@@ -66,10 +66,15 @@ const [origin, conversation, runId] = process.argv.slice(2);
       const {renderProgress} = await import('/assets/views/assistant/progress.js');
       const host = document.createElement('div'); document.body.append(host);
       const segment = {id:'failed-tool',kind:'tool',tool:'workspace.exec',
-        state:'failed',error_code:'sandbox_unavailable'};
+        state:'failed',error_code:'sandbox_unavailable',
+        title:'执行命令 · python3 -c print(ASSISTANT_LONG_RUN_21)'};
       const run = {state:'failed',progress:{segments:[segment]}};
       renderProgress(host,run);
       const badge = host.querySelector('tool-call-badge');
+      const label = badge.querySelector('.tool-call-label');
+      if (label.getBoundingClientRect().width <= 112 || document.documentElement.scrollWidth > innerWidth) {
+        throw new Error('tool operation title must use available width without page overflow');
+      }
       const button = badge.querySelector('button'); button.click(); button.focus();
       if (!badge.querySelector('#drawer').textContent.includes('sandbox_unavailable')) {
         throw new Error('failed inline tool must display its specific error');
