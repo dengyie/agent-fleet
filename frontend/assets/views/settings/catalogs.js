@@ -113,7 +113,7 @@ export function mountCatalog(root, kind) {
         const launcher = field(setup, 'sandbox_launcher', '沙盒启动参数（JSON）', '[]', {type: 'textarea', help: '仅自定义沙盒填写 argv 数组；VM 直接执行留为 []。VM 模式可运行 shell 和解释器，文件与网络范围由 VM 账号决定。'});
         launcher.closest('label').hidden = true;
         mode.addEventListener('change', () => { launcher.closest('label').hidden = mode.value !== 'sandbox'; });
-        setup.append(el('pre', 'python3 -m tools.plugins.node --enroll enrollment.json --state-directory /var/lib/fleet-node/state\npython3 -m tools.plugins.node --config /var/lib/fleet-node/state/node.json', 'settings-description'));
+        setup.append(el('pre', 'python3 -m tools.plugins.node --enroll enrollment.json --state-directory /var/lib/fleet-node/state\npython3 -m tools.plugins.node --config /var/lib/fleet-node/state/node.json', 'settings-description settings-node-command'));
         setup.append(el('p', '首次安装使用上述命令。更新时先停止 Node，保留 commands.db 命令日志，备份并替换接入文件生成的三个配置文件，再启动 Node。不要删除命令日志；它防止已执行命令重复运行。', 'settings-description'));
         const download = button('下载接入配置', async () => {
           if (!window.confirm('将轮换节点凭据。请保存下载文件，并在 VM 上安装后重启 Node，确认继续？')) return;

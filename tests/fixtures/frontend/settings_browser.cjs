@@ -72,6 +72,12 @@ const [origin, viewport] = process.argv.slice(2);
     await chooseSection('nodes','VM 与执行节点');
     await page.getByRole('button',{name:/测试 VM/}).click();
     await page.getByText('部署或更新 VM 执行配置',{exact:true}).click();
+    assert.equal(await page.locator('.settings-advanced pre').evaluate(node=>node.scrollWidth<=node.clientWidth),true,'VM setup commands must wrap within the settings panel');
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    if(process.env.FLEET_SCREENSHOTS) {
+      await fs.mkdir(process.env.FLEET_SCREENSHOTS,{recursive:true});
+      await page.screenshot({path:path.join(process.env.FLEET_SCREENSHOTS,'settings-node-'+viewport+'.png'),fullPage:true});
+    }
     assert.equal(await page.getByLabel('执行模式',{exact:true}).inputValue(),'vm_direct');
     assert.equal(await page.getByLabel('沙盒启动参数（JSON）',{exact:true}).isVisible(),false);
     await page.getByLabel('执行模式',{exact:true}).selectOption('sandbox');

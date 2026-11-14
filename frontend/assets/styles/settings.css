@@ -38,6 +38,7 @@
 .settings-advanced[open] { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px 20px; }
 .settings-advanced[open] summary,.settings-advanced[open] .settings-field:has(textarea) { grid-column: 1/-1; }
 .settings-advanced .settings-field { max-width: 100%; }
+.settings-advanced .settings-node-command { grid-column: 1/-1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .settings-runtime-group { grid-column: 1/-1; padding: 0 14px; border: 1px solid var(--border); border-radius: 9px; }
 .settings-runtime-group > summary { padding: 12px 0; color: var(--text); cursor: pointer; font-size: 14px; font-weight: 550; }
 .settings-runtime-group[open] > summary { margin-bottom: 10px; }
