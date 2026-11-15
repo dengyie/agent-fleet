@@ -23,6 +23,7 @@
 | 明细保留 | `requests` 仅保留最近至多 200 条、总信封至多 48 KiB；`requests_omitted` 明确较早明细数量 | 汇总在裁剪前计算；旧格式在清理前从完整事件补全，已清理数据标记 `complete=false`，不能恢复的账目不补造 |
 | 分批清理 | 终态持久化汇总优先于尚未删完的事件片段 | 每批清理期间与清理完成后的统计一致；不会临时减少请求次数或费用 |
 | 过程保留 | 公共过程最多保留 128 段、48 KiB，单段正文最多 24 KiB，超过任一边界均提示省略 | 运行时在字节或 JSON 转义边界裁剪时将 `truncated` 随响应事件传给公共投影；重启恢复和历史清理后仍提示省略；保留工具卡片和用户展开状态；不限制模型执行次数 |
+| 实时阶段 | `progress.activity.phase` 为 `waiting`、`thinking`、`responding` 或 `tool_call`；同请求内阶段变化立即发布，同阶段至多每秒一次 | `thinking` 只在实际收到非空 `reasoning_content` 时产生，不保存或展示推理原文；未知阶段忽略，结束/失败/取消清除活动阶段；重试开始仍显示重试，开始收到内容或阶段信号后清除旧重试提示 |
 
 `usage.provider_requests` 的预算账本表示成功完成的模型循环请求；全部 HTTP 尝试数看 `request_totals.count`，`requests.length` 仅表示仍可查看的明细条数。二者不应混为一个统计。启用流式请求时，正文增量、耗时、工具和重试状态实时更新；未启用流式时，正文在响应完成后显示。取消在下一个流式检查点或在途网络请求退出后处理，不把本地取消宣称为上游计算已经停止。
 
@@ -31,6 +32,8 @@
 `provider_config.timeout_s`（默认 60 秒、范围 1–600 秒）是每次 HTTP 尝试的总网络截止时间，覆盖 DNS、逐地址 TCP、代理 CONNECT、TLS、响应头和响应体。持续到达的少量字节不能重置预算；截止中断 socket 并关闭响应与定时器，随后 Run 退出并释放调度槽。所有 3xx（包括相对跳转和 HTTPS 降级）返回 `redirect_rejected`，不能转发 Authorization 或自动重发。生产传输的超时/连接中断不自动重试，因为 POST 可能已被接受；明确 HTTP 429/暂时性错误仍按已有重试配置逐条记录。已接受响应的读取/解析失败始终不重放。
 
 流式传输按可用字节增量读取，收到 SSE `[DONE]` 即关闭响应，不等待 HTTP EOF 或攒满缓冲区。DNS 使用与发布验收共用的有界解析器：同一 host/port 共享正在进行的查询，进程最多 8 个查询；容量耗尽时等待也计入截止时间。系统 `getaddrinfo` 无可移植取消 API，迟到线程只能结束 DNS 解析，不能发送网络请求。没有添加后台 HTTP 执行线程或无界任务队列。
+
+阶段信号经原 provider observer、租约事件事务、Run 投影和 SSE 到达对话状态行；刷新可恢复当前阶段。没有阶段信号的供应商只显示等待模型，不能凭耗时推断模型正在思考。正文仅使用公开 `delta.content`；工具参数尚未完整时只显示“正在准备工具调用”，实际操作仍等待完整、合法参数。自动跟随正文增量使用即时滚动，避免平滑滚动的中间位置误判成用户离底；用户主动上滚后停止跟随，手动回到底部保留平滑滚动及减少动画偏好。
 
 JSON 与 SSE 的费用数字在协议解码时直接进入 `Decimal`，不能先经二进制浮点舍入；例如 `123456.123456123456` 必须原样保留。上游报告费用与配置费率最多 12 位小数、最大 1000000，越界在舍入前判断；对外金额使用十进制字符串。结构化工具参数中的十进制数转换为普通 JSON 数字；转换后非有限的值拒绝执行。
 
@@ -59,6 +62,7 @@ JSON 与 SSE 的费用数字在协议解码时直接进入 `Decimal`，不能先
 | 总截止与资源 | 响应头/体滴流准时失败；TLS共享DNS后的剩余预算；未读取即关闭也释放socket/timer | `test_trickle_is_bounded_by_total_deadline_without_replay`、`test_tls_handshake_and_dns_share_deadline`、`test_unread_response_close_reclaims_socket_and_timer` |
 | DNS/代理/TLS | DNS饱和最多固定查询数，迟到不能请求；HTTP代理及HTTPS CONNECT认证隔离；证书和主机名校验 | `test_dns_saturation_is_bounded_and_late_resolution_cannot_dispatch`、`test_system_proxy_and_connect_preserve_origin_credentials`、`test_tls_verification_and_shutdown` |
 | SSE真实连接 | chunked响应发送DONE但不结束HTTP，客户端立即返回并关闭连接 | `test_chunked_done_finishes_before_http_eof_and_closes_socket` |
+| 阶段与流式闭环 | 真实HTTP对端须在客户端观察到思考/首段正文后才发下一块；阶段限频、参数未完整时提示、取消推理即关闭；真实浏览器在EOF前逐段显示、清除旧重试状态并刷新恢复 | `test_real_http_stream_observes_thinking_and_text_before_next_chunk`、`test_reasoning_phase_is_visible_before_text_without_publishing_raw_reasoning`、`test_tool_phase_is_visible_before_arguments_finish`、`test_activity_projection_tracks_request_retry_and_terminal_lifecycle`、`test_thinking_heartbeat_is_throttled_and_phase_changes_are_immediate`、`test_cancel_during_thinking_closes_stream_without_waiting_for_text`、`test_assistant_live_model_stream_retry_and_reload` |
 | worker闭环 | Broker→Factory→worker日志保留类型/位置而无私密正文；超时后释放全局槽，下一Run成功 | `test_worker_secret_failure_retains_safe_cause_chain`、`test_request_timeout_releases_scheduler_slot_and_next_run_executes` |
 | HTTP重试 | 429后成功保存两次开始/结束，各自状态、序号、时间；未隐藏失败 | provider测试 + 真实浏览器测试 |
 | 协议和资源 | SSE usage尾帧、UTF-8逐字节切分、末帧无空行、DONE后停止读取并关闭、非完整输出不冒充成功、异常不重放 | `test_sse_*`、`test_stream_failure_is_recorded_closed_and_never_retried`、`test_accepted_nonstream_read_failure_is_closed_and_never_retried` |

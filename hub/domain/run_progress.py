@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 
 PROGRESS_KINDS = frozenset({
-    'assistant_text_delta', 'assistant_response', 'tool_call', 'tool_result',
+    'assistant_text_delta', 'assistant_activity', 'assistant_response', 'tool_call', 'tool_result',
     'provider_retry_scheduled', 'provider_request_started', 'provider_request_finished',
     'run_started', 'run_waiting_node', 'run_finished',
     'run_unknown', 'run_failed',
@@ -24,6 +24,20 @@ def project_progress(previous, kind, payload, sequence):
     segments = [dict(item) for item in result.get('segments', [])]
     step = payload.get('step', 0)
     step = step if type(step) is int and 0 <= step <= 10000 else 0
+    phase = ('waiting' if kind == 'provider_request_started' else
+             'responding' if kind == 'assistant_text_delta' else
+             payload.get('phase') if kind == 'assistant_activity' else None)
+    if isinstance(phase, str) and phase in {'waiting', 'thinking', 'responding', 'tool_call'}:
+        result['activity'] = {'phase': phase, 'step': step}
+        index = payload.get('request_index')
+        if type(index) is int and index > 0:
+            result['activity']['request_index'] = index
+        if phase != 'waiting':
+            result.pop('retry', None)
+    elif kind in {'provider_request_finished', 'provider_retry_scheduled',
+                  'assistant_response', 'tool_call', 'tool_result',
+                  'run_waiting_node', 'run_finished', 'run_unknown', 'run_failed'}:
+        result.pop('activity', None)
     if kind in {'assistant_text_delta', 'assistant_response'}:
         key = f'text:{step}'
         segment = next((item for item in segments if item.get('id') == key), None)

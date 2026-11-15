@@ -113,7 +113,7 @@ class NativeAssistantRuntime:
                     if kind == 'provider_request_started' and should_cancel is not None and should_cancel():
                         raise _RunCancelled()
                     event_sink(kind, {**data, 'step': step, 'attempt': attempt})
-                    if kind in {'assistant_text_delta', 'provider_retry_scheduled'} and should_cancel is not None and should_cancel():
+                    if kind in {'assistant_text_delta', 'assistant_activity', 'provider_retry_scheduled'} and should_cancel is not None and should_cancel():
                         raise _RunCancelled()
                 try:
                     response = self.provider.complete(request_messages, tools, request_observer=observe_request)

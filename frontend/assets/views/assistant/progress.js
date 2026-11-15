@@ -41,5 +41,9 @@ export function renderProgress(host, run) {
   });
   host._segments.forEach((node,key) => { if (!keep.has(key)) {node.remove();host._segments.delete(key);} });
   const retry = progress.retry;
-  return retry && active ? '上游暂时不可用' + (retry.provider_status ? '（HTTP ' + retry.provider_status + '）' : '') + '，正在自动重试 ' + retry.retry_index + '/' + retry.max_retries + '…' : '';
+  if (!active) return '';
+  if (retry) return '上游暂时不可用' + (retry.provider_status ? '（HTTP ' + retry.provider_status + '）' : '') + '，正在自动重试 ' + retry.retry_index + '/' + retry.max_retries + '…';
+  const phases = {waiting:'正在等待模型响应…', thinking:'模型正在思考…',
+    responding:'正在生成回复…', tool_call:'正在准备工具调用…'};
+  return phases[progress.activity?.phase] || '';
 }

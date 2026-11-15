@@ -24,6 +24,104 @@ def test_text_delta_is_observed_before_upstream_finishes():
     assert ''.join(p['text'] for k, p in observed if k == 'assistant_text_delta') == result.text
 
 
+def test_reasoning_phase_is_visible_before_text_without_publishing_raw_reasoning():
+    observed = []
+    private = 'raw-reasoning-sentinel'
+    def body():
+        for _ in range(5):
+            yield ('data: ' + json.dumps({'choices': [{'delta': {
+                'reasoning_content': private}}]}) + '\n\n').encode()
+        activities = [p for k, p in observed if k == 'assistant_activity']
+        assert activities == [{'phase': 'thinking', 'request_index': 1}]
+        yield _frame('公开回复')
+        assert [p['phase'] for k, p in observed if k == 'assistant_activity'] == ['thinking', 'responding']
+        yield b'data: [DONE]\n\n'
+    provider = OpenAICompatibleProvider(model='test', endpoint='http://localhost', api_key='x',
+        stream=True, transport=FakeTransport([TransportResponse(200, {}, body())]))
+    result = provider.complete([], [], request_observer=lambda k, p: observed.append((k, p)))
+    assert result.text == '公开回复'
+    assert private not in json.dumps(observed, ensure_ascii=False) + json.dumps(result.__dict__, ensure_ascii=False)
+
+
+def test_tool_phase_is_visible_before_arguments_finish():
+    observed = []
+    def body():
+        yield b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"workspace_list","arguments":"{"}}]}}]}\n\n'
+        assert [p['phase'] for k, p in observed if k == 'assistant_activity'] == ['tool_call']
+        yield b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]},"finish_reason":"tool_calls"}]}\n\n'
+        yield b'data: [DONE]\n\n'
+    provider = OpenAICompatibleProvider(model='test', endpoint='http://localhost', api_key='x',
+        stream=True, transport=FakeTransport([TransportResponse(200, {}, body())]))
+    result = provider.complete([], [{'name': 'workspace.list'}],
+        request_observer=lambda k, p: observed.append((k, p)))
+    assert result.kind == 'tool_call' and result.tool == 'workspace.list'
+
+
+def test_activity_projection_tracks_request_retry_and_terminal_lifecycle():
+    from hub.domain.run_progress import project_progress
+    progress = project_progress({}, 'provider_request_started', {'step': 1, 'request_index': 1}, 1)
+    assert progress['activity'] == {'phase': 'waiting', 'step': 1, 'request_index': 1}
+    progress = project_progress(progress, 'assistant_activity', {
+        'step': 1, 'request_index': 1, 'phase': 'thinking', 'reasoning_content': 'private'}, 2)
+    assert progress['activity']['phase'] == 'thinking'
+    assert 'private' not in json.dumps(progress)
+    progress = project_progress(progress, 'assistant_activity', {'step': 1, 'phase': 'arbitrary-private'}, 3)
+    assert progress['activity']['phase'] == 'thinking'
+    progress = project_progress(progress, 'provider_request_finished', {'step': 1, 'status': 'failed'}, 4)
+    assert 'activity' not in progress
+    progress = project_progress(progress, 'provider_retry_scheduled', {'step': 1, 'retry_index': 1}, 5)
+    progress = project_progress(progress, 'provider_request_started', {'step': 1, 'request_index': 2}, 6)
+    assert progress['activity'] == {'phase': 'waiting', 'step': 1, 'request_index': 2}
+    assert progress['retry']['retry_index'] == 1
+    progress = project_progress(progress, 'assistant_text_delta', {'step': 1, 'offset': 0, 'text': '回复'}, 7)
+    assert progress['activity']['phase'] == 'responding'
+    assert 'retry' not in progress
+    progress = project_progress(progress, 'run_finished', {'state': 'cancelled'}, 8)
+    assert 'activity' not in progress
+    assert progress['segments'][0]['text'] == '回复'
+
+
+def test_thinking_heartbeat_is_throttled_and_phase_changes_are_immediate(monkeypatch):
+    from types import SimpleNamespace
+    from hub.platform.providers import observation
+    now, observed = [0.0], []
+    monkeypatch.setattr(observation, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    stream = observation.TextObservation(lambda k, p: observed.append((k, p)), 2)
+    stream.activity('thinking')
+    for _ in range(1000):
+        stream.activity('thinking')
+    assert len(observed) == 1
+    now[0] = 1.1
+    stream.activity('thinking')
+    stream.activity('tool_call')
+    assert [p['phase'] for k, p in observed] == ['thinking', 'thinking', 'tool_call']
+
+
+def test_cancel_during_thinking_closes_stream_without_waiting_for_text(tmp_path):
+    from hub.application.run_worker_service import LocalRunWorkerService
+    from tests.test_platform_run_worker import OWNER, _app, _catalog, _queued
+    app = _app(tmp_path)
+    repo = _catalog(app, tmp_path)
+    run_id = _queued(app)['run_id']
+    closed = []
+    def body():
+        try:
+            repo.cancel_run(OWNER, run_id, now=100)
+            yield b'data: {"choices":[{"delta":{"reasoning_content":"raw-reasoning-cancel-sentinel"}}]}\n\n'
+            raise AssertionError('cancelled reasoning must not wait for a public text delta')
+        finally:
+            closed.append(True)
+    transport = FakeTransport([TransportResponse(200, {}, body())])
+    provider = OpenAICompatibleProvider(model='test', endpoint='http://localhost', api_key='x',
+        stream=True, max_retries=3, transport=transport)
+    LocalRunWorkerService(repo, app.extensions['fleet']['services']['run_events'],
+        provider_factory=lambda _: provider).run_once(OWNER)
+    public = app.test_client().get(f'/api/platform/v1/runs/{run_id}').get_json()
+    assert public['state'] == 'cancelled' and 'activity' not in public['progress']
+    assert 'raw-reasoning-cancel-sentinel' not in json.dumps(repo.list_run_events(OWNER, run_id)) + json.dumps(public)
+    assert closed == [True] and len(transport.calls) == 1
+
+
 def test_transient_retries_are_visible_before_wait_and_keep_one_payload():
     observed, waits = [], []
     def sleep(delay):

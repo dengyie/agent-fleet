@@ -27,7 +27,7 @@ class AutoScrollAnchor extends HTMLElement {
   attributeChangedCallback(name, oldValue, newValue) {
     if (name === "is-streaming" && newValue !== null && this.isAtBottom) {
       cancelAnimationFrame(this._frame);
-      this._frame = requestAnimationFrame(() => this.scrollToBottom());
+      this._frame = requestAnimationFrame(() => this.scrollToBottom(true));
     }
   }
 
@@ -63,8 +63,9 @@ class AutoScrollAnchor extends HTMLElement {
     btn.addEventListener("click", () => this.scrollToBottom());
   }
 
-  scrollToBottom() {
-    const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth';
+  scrollToBottom(followingStream = false) {
+    // Smooth intermediate positions must not disable automatic following.
+    const behavior = followingStream || window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth';
     if (this.scrollRoot && this.scrollRoot !== window) {
       this.scrollRoot.scrollTo({ top: this.scrollRoot.scrollHeight, behavior });
     } else {
