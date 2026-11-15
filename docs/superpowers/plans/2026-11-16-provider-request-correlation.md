@@ -39,3 +39,11 @@
 Local evidence: 185 provider/worker/history/browser regressions, 124 frontend/browser checks, and 134 journey/release-evidence checks passed. The initial bundled Chromium revision was absent; browser verification used the already installed Chrome without downloading software. Mobile screenshots wait for the navigation transition to finish and show the actual correlation details.
 
 Publish through the existing PR and main CI pipeline. Full Linux journey evidence, Windows checks, packaging, deployment receipt, and read-only online revision/hash checks must come from the exact published commit; local checks do not certify deployment. Do not send production model requests merely to create diagnostic identifiers. Preexisting historical records without captured identifiers remain unchanged.
+
+## Release follow-up: deterministic optimistic-submission fixture
+
+The first main CI was correctly blocked by one existing test failure: the optimistic-submission fixture assumed a real HTTP conversation creation completed within 40 ms. Its matching PR CI passed all 7953 cases. The application already renders the pending message synchronously, waits for creation, publishes the route, and only then appends the turn.
+
+Minimal fix: hold conversation creation with an explicit gate to reproduce the incorrect assertion, then replace the fixture's 40 ms/500 ms sleeps with response handshakes. Assert pending text/status and cleared input immediately; release creation, hold the turn response, assert the route, and release the turn. Add the pending-create parameter to the existing mandatory submission selector. Do not change application timing or weaken the route-before-turn-response requirement. Rerun submission, metadata and browser regressions before the next main release.
+
+Evidence: the held-create parameter reproduced the identical missing-route failure before the fixture fix. After the fix, 60 submission/metadata checks and 172 submission, live feedback, journey/release and real-browser checks passed. Register all seven submission scenarios in ASSIST-02. Remove the now-unused global sleep helper; retain the suspend lifecycle's intentional polling observation. Production application code is unchanged by this follow-up.

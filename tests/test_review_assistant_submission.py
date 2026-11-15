@@ -37,7 +37,7 @@ def test_assistant_conversation_state_merges_pages_without_dom():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize('scenario', ['retry', 'retry-503', 'model', 'optimistic', 'existing-optimistic', 'provider-503'])
+@pytest.mark.parametrize('scenario', ['retry', 'retry-503', 'model', 'optimistic', 'optimistic-pending-create', 'existing-optimistic', 'provider-503'])
 def test_assistant_submission_uses_selected_model_and_stable_request(tmp_path, scenario):
     node = shutil.which('node')
     if not node:
@@ -72,7 +72,7 @@ def test_assistant_submission_uses_selected_model_and_stable_request(tmp_path, s
     assert observed['replies'][-1]['message']['message_id'] == observed['replies'][-1]['message_id']
     assert observed['replies'][-1]['message']['content'] == 'Submit one turn'
     assert '本次模型：model-selected' in observed['text']
-    if scenario == 'optimistic':
+    if scenario.startswith('optimistic'):
         assert observed['replacedUrls'], 'new chat should enter its conversation route before model completion'
 
 

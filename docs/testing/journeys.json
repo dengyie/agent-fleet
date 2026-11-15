@@ -88,6 +88,7 @@
         "tests/test_acceptance_flow.py::test_acceptance_queued_policy_survives_hub_restart",
         "tests/test_acceptance_flow.py::test_accepted_response_timeout_recovers_unique_run_by_token",
         "tests/test_frontend_browser.py::test_assistant_event_history_pagination",
+        "tests/test_review_assistant_submission.py::test_assistant_submission_uses_selected_model_and_stable_request",
         "tests/test_native_run_checkpoints.py::test_completed_native_progress_survives_new_worker",
         "tests/test_native_run_checkpoints.py::test_uncertain_boundary_is_never_replayed",
         "tests/test_native_run_checkpoints.py::test_checkpoint_requires_current_lease_and_stays_private",
