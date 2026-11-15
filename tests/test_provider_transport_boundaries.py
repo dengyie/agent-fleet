@@ -52,6 +52,55 @@ def provider(server: ThreadingHTTPServer, **kwargs: Any) -> OpenAICompatibleProv
         allow_network=True, timeout_s=1, **kwargs)
 
 
+def test_real_http_retry_retains_each_gateway_request_id() -> None:
+    events, attempts = [], []
+    class Peer(QuietHandler):
+        def do_POST(self) -> None:
+            self.drain()
+            attempts.append(self.headers.get('X-Oneapi-Request-Id'))
+            self.send_response(503 if len(attempts) == 1 else 200)
+            self.send_header('X-Oneapi-Request-Id', f'gateway-{len(attempts)}')
+            self.send_header('X-Upstream-Request-Id', f'upstream-{len(attempts)}')
+            self.send_header('Set-Cookie', 'private-response-cookie')
+            body = b'{}' if len(attempts) == 1 else REPLY
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    with serve(Peer) as server:
+        result = provider(server, max_retries=1, sleeper=lambda _: None).complete([], [],
+            request_observer=lambda kind, data: events.append((kind, data)))
+    finished = [data for kind, data in events if kind == 'provider_request_finished']
+    assert [item.get('gateway_request_id') for item in finished] == ['gateway-1', 'gateway-2']
+    assert [item.get('upstream_request_id') for item in finished] == ['upstream-1', 'upstream-2']
+    assert [item['http_status'] for item in finished] == [503, 200]
+    assert result.metadata['gateway_request_id'] == 'gateway-2'
+    assert attempts == [None, None], 'response identifiers must not pin later requests'
+    assert 'private-response-cookie' not in json.dumps(events)
+
+
+def test_error_body_timeout_keeps_received_request_ids(monkeypatch) -> None:
+    from hub.platform.providers import openai_compatible as adapter
+    events, closed = [], []
+    class SlowError:
+        status = 503
+        headers = {'X-Oneapi-Request-Id': 'gateway-error-body',
+                   'X-Upstream-Request-Id': 'upstream-error-body'}
+        def read(self, size):
+            raise TimeoutError('private read detail')
+        def close(self):
+            closed.append(True)
+    monkeypatch.setattr(adapter, 'open_http', lambda *args, **kwargs: SlowError())
+    p = OpenAICompatibleProvider(model='fixture', api_key='private-boundary-sentinel',
+        endpoint='http://fixture', allow_network=True, max_retries=3)
+    with pytest.raises(ProviderError) as caught:
+        p.complete([], [], request_observer=lambda kind, data: events.append((kind, data)))
+    assert caught.value.diagnostic()['gateway_request_id'] == 'gateway-error-body'
+    assert events[-1][1]['upstream_request_id'] == 'upstream-error-body'
+    assert events[-1][1]['http_status'] == 503 and closed == [True]
+    assert len(events) == 2, 'reading failure must not enable automatic replay'
+    assert 'private read detail' not in json.dumps(events)
+
+
 @pytest.mark.parametrize('status', [301, 302, 303, 307, 308])
 def test_redirect_never_forwards_credentials_or_replays(status: int) -> None:
     destinations: list[str | None] = []

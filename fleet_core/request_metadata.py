@@ -4,6 +4,7 @@ Input/output are inclusive provider totals. Cache tokens are subsets of input;
 reasoning is a subset of output. Missing detail never means zero.
 """
 from decimal import Decimal, InvalidOperation
+import re
 from typing import Callable, Literal, Mapping, TypedDict, cast
 
 
@@ -60,6 +61,8 @@ class RequestMetadata(TypedDict, total=False):
     response_model: str
     provider: str
     response_id: str
+    gateway_request_id: str
+    upstream_request_id: str
     started_at: float
     duration_ms: int | None
     elapsed_ms: int
@@ -89,6 +92,14 @@ RequestObserver = Callable[
 TOKEN_FIELDS = ('input_tokens', 'cache_read_tokens', 'reasoning_tokens',
                 'output_tokens', 'cache_write_tokens', 'total_tokens')
 RATE_FIELDS = ('input', 'output', 'cache_read', 'cache_write')
+REQUEST_TRACE_FIELDS = ('gateway_request_id', 'upstream_request_id')
+
+
+def request_trace_id(value: object) -> str | None:
+    """A bounded opaque identifier, never a raw header or error message."""
+    if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}', value):
+        return value
+    return None
 
 
 def token_count(value: object) -> int | None:

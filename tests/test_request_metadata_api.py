@@ -56,6 +56,41 @@ def test_requests_survive_restart_and_are_owner_scoped(tmp_path):
     assert 'never-expose' not in json.dumps(history)
 
 
+@pytest.mark.parametrize('succeeds', [True, False])
+def test_gateway_request_ids_survive_worker_retry_retention_and_restart(tmp_path, succeeds):
+    from hub.infrastructure.platform_retention import DAY_S, PlatformRetention
+    app, _, client, conversation, run = setup(tmp_path)
+    class Transport:
+        calls = 0
+        def request(self, **kwargs):
+            self.calls += 1
+            headers = {'X-Oneapi-Request-Id': f'gateway-{self.calls}',
+                       'X-Upstream-Request-Id': f'upstream-{self.calls}'}
+            return (TransportResponse(503, headers, b'{}') if self.calls == 1 or not succeeds else
+                TransportResponse(200, headers, b'{"id":"reply-id","choices":[{"message":{"content":"done"}}]}'))
+    worker = app.extensions['fleet']['services']['platform_worker']
+    transport = Transport()
+    worker.provider_factory = lambda profile: OpenAICompatibleProvider(model=profile['model'],
+        endpoint='http://fixture', api_key='never-expose', transport=transport,
+        max_retries=1, sleeper=lambda _: None)
+    assert worker.run_once(OWNER)['state'] == ('succeeded' if succeeds else 'unknown')
+    url = f"/api/platform/v1/runs/{run['run_id']}"
+    before = client.get(url).get_json()
+    requests = before['requests']
+    assert [item.get('gateway_request_id') for item in requests] == ['gateway-1', 'gateway-2']
+    assert [item.get('upstream_request_id') for item in requests] == ['upstream-1', 'upstream-2']
+    assert [item['request_id'] for item in requests] == ['1:1:1', '1:1:2']
+    assert requests[-1].get('response_id') == ('reply-id' if succeeds else None)
+    assert before['request_totals']['count'] == 2 and transport.calls == 2
+    assert PlatformRetention(next(tmp_path.rglob('platform.db')))(now=50_000 * DAY_S)['run_events'] > 0
+    restarted = create_app(FleetConfig.from_root(tmp_path, dev_operator=OWNER, platform_enabled=True))
+    after = restarted.test_client().get(url).get_json()
+    assert after['requests'] == requests and after['request_totals'] == before['request_totals']
+    history = restarted.test_client().get(
+        f"/api/platform/v1/conversations/{conversation['conversation_id']}").get_json()['conversation']
+    assert history['runs'][0]['requests'] == requests
+
+
 def test_pending_terminal_unknown_and_projection_queries_are_batched(tmp_path, monkeypatch):
     app, repo, client, conversation, run = setup(tmp_path)
     import time
