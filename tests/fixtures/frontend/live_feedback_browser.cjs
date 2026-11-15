@@ -1,7 +1,7 @@
 const {chromium} = require(process.env.FLEET_PLAYWRIGHT_MODULE);
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const [origin, conversation, runId] = process.argv.slice(2);
+const [origin, conversation, runId, outcome = 'succeeded'] = process.argv.slice(2);
 (async () => {
   const browser = await chromium.launch({channel:process.env.FLEET_BROWSER_CHANNEL || 'chrome',headless:true});
   const page = await browser.newPage({viewport:{width:1440,height:1000}});
@@ -66,10 +66,11 @@ const [origin, conversation, runId] = process.argv.slice(2);
       }
     });
     await page.setViewportSize({width:390,height:844});
+    await page.waitForFunction(() => document.getElementById('sidebar').getBoundingClientRect().right <= 1);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
     if (process.env.FLEET_SCREENSHOTS) {
       fs.mkdirSync(process.env.FLEET_SCREENSHOTS,{recursive:true});
-      await page.screenshot({path:process.env.FLEET_SCREENSHOTS + '/live-feedback-retry-mobile.png'});
+      await page.screenshot({path:process.env.FLEET_SCREENSHOTS + '/live-feedback-' + outcome + '-retry-mobile.png'});
     }
     await page.request.post(origin + '/_fixture/release/retry');
     await narration.filter({hasText:'正在整理结果'}).waitFor();
@@ -80,19 +81,36 @@ const [origin, conversation, runId] = process.argv.slice(2);
     assert.equal(await page.locator('.assistant-message.assistant').getAttribute('aria-busy'),'true');
     await page.request.post(origin + '/_fixture/release/final');
     await page.waitForFunction(() => document.querySelector('.assistant-message.assistant')?.getAttribute('aria-busy') === 'false');
-    await page.waitForFunction(() => window.liveSnapshots.some(run => run.state === 'succeeded'));
+    const terminalState = outcome === 'stream_error' ? 'unknown' : 'succeeded';
+    await page.waitForFunction(state => window.liveSnapshots.some(run => run.state === state),terminalState);
     assert.equal(await page.evaluate(() => window.liveStreamError),null,'SSE must work independently of polling');
     assert.equal(await page.evaluate(() => JSON.stringify(window.liveSnapshots).includes('raw-reasoning-browser-sentinel')),false);
     assert.equal(await page.locator('.assistant-message-progress').filter({hasText:'正在生成回复'}).count(),0);
-    const finalText = page.locator('stream-markdown').filter({hasText:'正在整理结果，检查完成'});
+    const expectedText = outcome === 'stream_error' ? '正在整理结果，检查' : '正在整理结果，检查完成';
+    const finalText = page.locator('stream-markdown').filter({hasText:expectedText});
     assert.equal(await finalText.count(),1,'final answer must not be duplicated');
+    if (outcome === 'stream_error') {
+      await page.locator('.assistant-message.assistant > stream-markdown').filter({hasText:'provider_stream_error'}).waitFor();
+      const snapshot = await page.evaluate(() => window.liveSnapshots.at(-1));
+      assert.equal(snapshot.requests.at(-1).gateway_request_id,'gateway-final-stream');
+      assert.equal(snapshot.requests.at(-1).status,'unknown');
+      assert.equal(snapshot.requests.at(-1).http_status,200);
+      assert.ok(!JSON.stringify(snapshot).includes('private-stream-error-browser-sentinel'));
+    }
     await narration.filter({hasText:'先检查工作区'}).waitFor();
     await page.reload({waitUntil:'domcontentloaded'});
-    await page.locator('stream-markdown').filter({hasText:'正在整理结果，检查完成'}).waitFor();
+    await page.locator('stream-markdown').filter({hasText:expectedText}).waitFor();
     await narration.filter({hasText:'先检查工作区'}).waitFor();
+    if (outcome === 'stream_error') {
+      await page.locator('.assistant-message.assistant > stream-markdown').filter({hasText:'provider_stream_error'}).waitFor();
+      assert.equal(await page.locator('.assistant-message-activity tool-call-badge').count(),1);
+      assert.ok(!(await page.locator('body').textContent()).includes('private-stream-error-browser-sentinel'));
+    }
     if (process.env.FLEET_SCREENSHOTS) {
       await page.setViewportSize({width:1440,height:1000});
-      await page.screenshot({path:process.env.FLEET_SCREENSHOTS + '/live-feedback-complete-desktop.png'});
+      await page.waitForFunction(() => document.getElementById('sidebar').getBoundingClientRect().left >= 0);
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await page.screenshot({path:process.env.FLEET_SCREENSHOTS + '/live-feedback-' + outcome + '-complete-desktop.png'});
     }
     await page.evaluate(async () => {
       const {renderProgress} = await import('/assets/views/assistant/progress.js');

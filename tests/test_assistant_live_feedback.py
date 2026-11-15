@@ -318,6 +318,70 @@ def test_partial_stream_failure_flushes_pending_text_without_replaying():
     assert ''.join(p['text'] for k,p in observed if k == 'assistant_text_delta') == '第一段未完成'
     assert len(transport.calls) == 1
 
+
+@pytest.mark.parametrize('text', ['x' * 25000, '中' * 9000], ids=['ascii', 'utf8'])
+@pytest.mark.parametrize('failure', ['disconnect', 'error-frame'])
+def test_interrupted_stream_discloses_provider_text_clipping_in_history(tmp_path, text, failure):
+    from hub.bootstrap import create_app
+    from hub.config import FleetConfig
+    from hub.infrastructure.platform_retention import DAY_S, PlatformRetention
+    from tests.test_request_metadata_api import setup, OWNER
+    app, repo, client, conversation, run = setup(tmp_path)
+    closed = []
+    def body():
+        try:
+            yield _frame(text)
+            if failure == 'disconnect':
+                raise OSError('private-interruption')
+            yield b'data: {"error":{"message":"private-interruption"}}\n\ndata: [DONE]\n\n'
+        finally:
+            closed.append(True)
+    transport = FakeTransport([TransportResponse(200, {}, body())])
+    worker = app.extensions['fleet']['services']['platform_worker']
+    worker.provider_factory = lambda _: OpenAICompatibleProvider(model='fixture', endpoint='http://fixture',
+        api_key='fixture', stream=True, max_retries=3, transport=transport)
+    assert worker.run_once(OWNER)['state'] == 'unknown'
+    before = client.get(f"/api/platform/v1/runs/{run['run_id']}").get_json()
+    progress = before['progress']
+    assert progress.get('truncated') is True
+    assert progress['segments'][0]['text'] == text.encode('utf-8')[:24576].decode('utf-8', errors='ignore')
+    assert len(transport.calls) == 1 and closed == [True]
+    events = repo.list_run_events(OWNER, run['run_id'])['events']
+    assert any(e['kind'] == 'assistant_text_delta' and e['payload'].get('truncated') for e in events)
+    assert 'private-interruption' not in json.dumps(before) + json.dumps(events)
+    assert PlatformRetention(next(tmp_path.rglob('platform.db')))(now=50_000 * DAY_S)['run_events'] > 0
+    restarted = create_app(FleetConfig.from_root(tmp_path, dev_operator=OWNER, platform_enabled=True))
+    history = restarted.test_client().get(
+        f"/api/platform/v1/conversations/{conversation['conversation_id']}").get_json()['conversation']
+    assert history['runs'][0]['progress'] == progress
+
+
+def test_cancel_after_public_text_limit_still_checks_stream_activity(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from hub.platform.providers import observation
+    from tests.test_request_metadata_api import setup, OWNER
+    now, closed = [0.0], []
+    monkeypatch.setattr(observation, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    app, repo, client, _, run = setup(tmp_path)
+    def body():
+        try:
+            yield _frame('x' * 24577)
+            repo.cancel_run(OWNER, run['run_id'], now=100)
+            now[0] = 1.1
+            yield _frame('text beyond the presentation limit')
+            raise AssertionError('cancelled stream must not keep reading after the text limit')
+        finally:
+            closed.append(True)
+    transport = FakeTransport([TransportResponse(200, {}, body())])
+    worker = app.extensions['fleet']['services']['platform_worker']
+    worker.provider_factory = lambda _: OpenAICompatibleProvider(model='fixture', endpoint='http://fixture',
+        api_key='fixture', stream=True, max_retries=3, transport=transport)
+    assert worker.run_once(OWNER)['state'] == 'cancelled'
+    public = client.get(f"/api/platform/v1/runs/{run['run_id']}").get_json()
+    assert public['progress']['segments'][0]['text'] == 'x' * 24576
+    assert len(transport.calls) == 1 and closed == [True]
+
+
 def test_cancel_during_retry_does_not_dispatch_again(tmp_path):
     from hub.application.run_worker_service import LocalRunWorkerService
     from tests.test_platform_run_worker import OWNER, _app, _catalog, _queued

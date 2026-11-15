@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 from pathlib import Path
-import socket
 from threading import Event, Thread
 import time
 from typing import Any, Iterator
@@ -91,14 +91,136 @@ def test_error_body_timeout_keeps_received_request_ids(monkeypatch) -> None:
             closed.append(True)
     monkeypatch.setattr(adapter, 'open_http', lambda *args, **kwargs: SlowError())
     p = OpenAICompatibleProvider(model='fixture', api_key='private-boundary-sentinel',
-        endpoint='http://fixture', allow_network=True, max_retries=3)
+        endpoint='http://fixture', allow_network=True, max_retries=0)
     with pytest.raises(ProviderError) as caught:
         p.complete([], [], request_observer=lambda kind, data: events.append((kind, data)))
     assert caught.value.diagnostic()['gateway_request_id'] == 'gateway-error-body'
     assert events[-1][1]['upstream_request_id'] == 'upstream-error-body'
     assert events[-1][1]['http_status'] == 503 and closed == [True]
-    assert len(events) == 2, 'reading failure must not enable automatic replay'
+    assert len(events) == 2, 'no retry is configured for this correlation check'
     assert 'private read detail' not in json.dumps(events)
+
+
+@pytest.mark.parametrize('failure', [TimeoutError('private-body-failure'),
+    OSError('private-body-failure'), HTTPException('private-body-failure')],
+    ids=['timeout', 'connection', 'http-body'])
+def test_rejected_http_body_failure_still_retries_transient_status(monkeypatch, failure) -> None:
+    from hub.platform.providers import openai_compatible as adapter
+    events, closed, calls, waits = [], [], [], []
+    class Reply:
+        def __init__(self, status, index):
+            self.status, self.index = status, index
+            self.headers = {'X-Oneapi-Request-Id': f'gateway-{index}'}
+        def read(self, size):
+            raise failure
+        def close(self):
+            closed.append(self.index)
+    class Body:
+        def __init__(self):
+            self.sent = False
+        def read1(self, size):
+            if self.sent:
+                return b''
+            self.sent = True
+            return REPLY
+        def close(self):
+            closed.append(2)
+        status = 200
+        headers = {'X-Oneapi-Request-Id': 'gateway-2'}
+    def send(*args, **kwargs):
+        calls.append(True)
+        return Reply(503, 1) if len(calls) == 1 else Body()
+    monkeypatch.setattr(adapter, 'open_http', send)
+    p = OpenAICompatibleProvider(model='fixture', api_key='private-boundary-sentinel',
+        endpoint='http://fixture', allow_network=True, max_retries=1, sleeper=waits.append)
+    assert p.complete([], [], request_observer=lambda k, d: events.append((k, d))).text == 'done'
+    finished = [data for kind, data in events if kind == 'provider_request_finished']
+    assert [data['http_status'] for data in finished] == [503, 200]
+    assert [data['status'] for data in finished] == ['failed', 'succeeded']
+    assert finished[0]['provider_error'] == 'transient_http' and finished[0]['retryable'] is True
+    assert [data['gateway_request_id'] for data in finished] == ['gateway-1', 'gateway-2']
+    assert len(calls) == 2 and closed == [1, 2] and waits == [.1]
+    assert 'private-body-failure' not in json.dumps(events)
+
+
+@pytest.mark.parametrize(('status', 'code', 'retryable'), [
+    (400, 'request_rejected', False), (401, 'auth_error', False), (403, 'auth_error', False),
+    (429, 'rate_limit', True), (503, 'transient_http', True)])
+def test_rejected_http_body_failure_keeps_status_classification_and_cause(monkeypatch, status, code, retryable) -> None:
+    from hub.platform.providers import openai_compatible as adapter
+    failure = TimeoutError('private-body-failure')
+    closed = []
+    class Rejected:
+        headers = {'X-Oneapi-Request-Id': 'gateway-rejected'}
+        def read(self, size):
+            raise failure
+        def close(self):
+            closed.append(True)
+    reply = Rejected()
+    reply.status = status
+    monkeypatch.setattr(adapter, 'open_http', lambda *args, **kwargs: reply)
+    p = OpenAICompatibleProvider(model='fixture', api_key='fixture', endpoint='http://fixture',
+        allow_network=True, max_retries=0)
+    with pytest.raises(ProviderError) as caught:
+        p.complete([], [])
+    assert caught.value.code == code and caught.value.retryable is retryable
+    assert caught.value.status == status and caught.value.__cause__ is failure
+    assert caught.value.diagnostic()['gateway_request_id'] == 'gateway-rejected'
+    assert closed == [True]
+
+
+@pytest.mark.parametrize('status', [429, 503])
+def test_real_http_retries_after_rejection_body_deadline(status) -> None:
+    attempts, observed, stop = [], [], Event()
+    class Peer(QuietHandler):
+        def do_POST(self):
+            self.drain()
+            attempts.append(True)
+            if len(attempts) > 1:
+                self.reply()
+                return
+            self.send_response(status)
+            self.send_header('X-Oneapi-Request-Id', 'gateway-body-deadline')
+            self.send_header('Content-Length', '100')
+            self.end_headers()
+            self.wfile.write(b'{')
+            self.wfile.flush()
+            stop.wait(3)
+    with serve(Peer) as server:
+        try:
+            assert provider(server, max_retries=1, sleeper=lambda _: None).complete([], [],
+                request_observer=lambda k, d: observed.append((k, d))).text == 'done'
+        finally:
+            stop.set()
+    finished = [d for k, d in observed if k == 'provider_request_finished']
+    assert [d['http_status'] for d in finished] == [status, 200]
+    assert finished[0]['gateway_request_id'] == 'gateway-body-deadline'
+    assert len(attempts) == 2
+
+
+def test_real_http_stream_error_does_not_commit_a_partial_tool() -> None:
+    attempts, observed = [], []
+    class Peer(QuietHandler):
+        def do_POST(self):
+            self.drain()
+            attempts.append(True)
+            body = (b'data: {"choices":[{"delta":{"content":"partial","tool_calls":[{"index":0,'
+                b'"function":{"name":"workspace_list","arguments":"{}"}}]}}]}\n\n'
+                b'data: {"error":{"message":"private-stream-error"}}\n\ndata: [DONE]\n\n')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('X-Oneapi-Request-Id', 'gateway-stream-error')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    with serve(Peer) as server:
+        with pytest.raises(ProviderError, match='provider_stream_error'):
+            provider(server, stream=True, max_retries=3).complete([], [{'name': 'workspace.list'}],
+                request_observer=lambda k, d: observed.append((k, d)))
+    assert len(attempts) == 1 and observed[-1][1]['status'] == 'unknown'
+    assert observed[-1][1]['gateway_request_id'] == 'gateway-stream-error'
+    assert ''.join(d['text'] for k, d in observed if k == 'assistant_text_delta') == 'partial'
+    assert 'private-stream-error' not in json.dumps(observed)
 
 
 @pytest.mark.parametrize('status', [301, 302, 303, 307, 308])
