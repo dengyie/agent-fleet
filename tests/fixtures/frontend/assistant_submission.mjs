@@ -46,17 +46,25 @@ globalThis.document = {
 };
 globalThis.DOMParser = class { parseFromString() { return {documentElement: new Element('svg')}; } };
 const [origin, modulePath, scenario] = process.argv.slice(2);
+const newOptimistic = scenario === 'optimistic' || scenario === 'optimistic-pending-create';
+let releaseConversation;
+const conversationGate = new Promise(resolve => { releaseConversation = resolve; });
+let releaseTurnResponse, signalTurnResponse;
+const turnResponseGate = new Promise(resolve => { releaseTurnResponse = resolve; });
+const turnResponseBlocked = new Promise(resolve => { signalTurnResponse = resolve; });
 globalThis.window = Object.assign(new EventTarget(), {FleetConfig: {apiBaseUrl: origin + '/api'}, history: {replaceState() {}}});
 const realFetch = globalThis.fetch;
 const requests = [];
 const replies = [];
 const runPolls = [];
 const replacedUrls = [];
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 globalThis.window.history.replaceState = (_, __, url) => replacedUrls.push(String(url));
 globalThis.fetch = async (url, options) => {
   if (/\/runs\/[^/?]+(\/events)?(\?|$)/.test(String(url))) runPolls.push(String(url));
   const response = await realFetch(url, options);
+  if (scenario === 'optimistic-pending-create' && String(url).endsWith('/conversations') && options?.method === 'POST') {
+    await conversationGate;
+  }
   if (scenario === 'suspend' && /\/runs\/[^/?]+(\?|$)/.test(String(url)) && response.ok) {
     // Pin the Run as active so only suspend/resume can stop the tracker.
     const body = await response.json();
@@ -87,8 +95,9 @@ globalThis.fetch = async (url, options) => {
       return new Response(JSON.stringify({error: 'temporarily_unavailable'}), {status: 503});
     }
   }
-  if ((scenario === 'optimistic' || scenario === 'existing-optimistic') && /\/turns$/.test(String(url))) {
-    await sleep(500);
+  if ((newOptimistic || scenario === 'existing-optimistic') && /\/turns$/.test(String(url))) {
+    signalTurnResponse();
+    await turnResponseGate;
   }
   return response;
 };
@@ -122,13 +131,18 @@ const submit = () => composer.listeners.submit({preventDefault() {}});
 model.value = 'model-selected';
 input.value = 'Submit one turn';
 const submission = submit();
-if (scenario === 'optimistic' || scenario === 'existing-optimistic') {
-  await sleep(40);
+if (newOptimistic || scenario === 'existing-optimistic') {
+  // Pending feedback must be synchronous, even while creation is unresolved.
   const messages = find(n => n.className === 'assistant-messages');
   if (!messages.textContent.includes('Submit one turn')) throw new Error('optimistic user message missing before submit response');
   if (!messages.textContent.includes('正在发送')) throw new Error('optimistic submission status missing in transcript before submit response');
   if (input.value !== '') throw new Error('composer should clear immediately');
-  if (scenario === 'optimistic' && !replacedUrls.length) throw new Error('conversation route missing before append response');
+  releaseConversation();
+  // Creation latency is not the contract: routing must precede acceptance.
+  // Keep the actual turn response blocked until this assertion completes.
+  await turnResponseBlocked;
+  if (newOptimistic && !replacedUrls.length) throw new Error('conversation route missing before append response');
+  releaseTurnResponse();
 }
 await submission;
 if (scenario === 'retry' || scenario === 'retry-503') {
