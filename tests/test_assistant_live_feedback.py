@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from hub.platform.providers.openai_compatible import OpenAICompatibleProvider, TransportResponse
 from tests.test_platform_provider import FakeTransport, _response
 
@@ -115,6 +117,64 @@ def test_single_long_response_discloses_text_retention():
             'step': 1, 'offset': offset, 'text': text[offset:offset + 1000]}, offset + 1)
     assert streaming['segments'][0]['text'] == progress['segments'][0]['text']
     assert streaming['truncated'] is True
+
+
+@pytest.mark.parametrize('text', ['x' * 25000, '中' * 9000, '\x00' * 9000],
+                         ids=['ascii-byte-bound', 'utf8-byte-bound', 'json-escape-bound'])
+@pytest.mark.parametrize('restart', [False, True])
+def test_worker_discloses_response_clipping_through_public_history(tmp_path, monkeypatch, text, restart):
+    from hub.application.run_worker_service import LocalRunWorkerService
+    from hub.platform.providers.base import ModelResponse
+    from hub.platform.providers.openai_compatible import ProviderError
+    from tests.test_native_run_checkpoints import Crash
+    from tests.test_platform_run_worker import OWNER, _app, _catalog, _queued
+
+    app = _app(tmp_path)
+    repo = _catalog(app, tmp_path)
+    run_id = _queued(app)['run_id']
+    calls = []
+
+    class Provider:
+        def complete(self, messages, tools, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                return ModelResponse(kind='tool_call', text=text, tool='workspace.list', arguments={})
+            raise ProviderError('transient_http', status=503)
+
+    def worker(name):
+        return LocalRunWorkerService(repo, app.extensions['fleet']['services']['run_events'],
+            worker_id=name, provider_factory=lambda _: Provider())
+
+    if restart:
+        original = repo.save_runtime_checkpoint
+
+        def crash_after_response(*args, **kwargs):
+            original(*args, **kwargs)
+            if args[2]['phase'] == 'response':
+                raise Crash()
+
+        monkeypatch.setattr(repo, 'save_runtime_checkpoint', crash_after_response)
+        with pytest.raises(Crash):
+            worker('before').run_once(OWNER)
+        monkeypatch.setattr(repo, 'save_runtime_checkpoint', original)
+        with repo._connect() as conn:
+            conn.execute('UPDATE runs SET lease_expires_at=0 WHERE run_id=?', (run_id,))
+
+    worker('after').run_once(OWNER)
+    public = app.test_client().get(f'/api/platform/v1/runs/{run_id}').get_json()
+    assert public['state'] == 'unknown'
+    assert len(calls) == 2  # Recovery reuses the full committed response.
+    assert public['progress']['segments'][0]['text'] != text
+    assert public['progress'].get('truncated') is True
+    response_event = next(event for event in repo.list_run_events(OWNER, run_id)['events']
+                          if event['kind'] == 'assistant_response')
+    assert response_event['payload']['truncated'] is True
+    assert len(json.dumps(response_event['payload'], ensure_ascii=False).encode()) < 64 * 1024
+    # Event retention and conversation hydration keep the same public disclosure.
+    with repo._connect() as conn:
+        conn.execute('DELETE FROM run_events WHERE run_id=?', (run_id,))
+    history = app.test_client().get('/api/platform/v1/conversations/' + public['conversation_id']).get_json()
+    assert history['conversation']['runs'][0]['progress'] == public['progress']
 
 
 def test_run_stream_is_owner_scoped_and_releases_capacity(tmp_path):

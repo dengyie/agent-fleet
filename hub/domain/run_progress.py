@@ -31,6 +31,8 @@ def project_progress(previous, kind, payload, sequence):
             segment = {'id': key, 'kind': 'text', 'step': step, 'text': ''}
             segments.append(segment)
         if kind == 'assistant_response':
+            if payload.get('truncated') is True:
+                result['truncated'] = True
             text = payload.get('text')
             retained = _text(text)
             if isinstance(text, str) and retained != text:

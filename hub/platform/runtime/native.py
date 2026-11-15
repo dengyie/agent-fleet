@@ -152,6 +152,7 @@ class NativeAssistantRuntime:
             event_sink('assistant_response', {
                 'step': step, 'attempt': attempt,
                 'text': public_text,
+                'truncated': public_text != response.text,
                 'response_kind': response.kind,
             })
             if (not progress or progress['phase'] not in {'receipt', 'remote_wait'}) and should_cancel is not None and should_cancel():
