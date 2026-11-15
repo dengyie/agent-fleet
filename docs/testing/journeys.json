@@ -105,6 +105,7 @@
         "tests/test_assistant_live_feedback.py::test_public_progress_is_bounded_and_idempotent",
         "tests/test_assistant_live_feedback.py::test_short_long_run_progress_discloses_segment_retention",
         "tests/test_assistant_live_feedback.py::test_single_long_response_discloses_text_retention",
+        "tests/test_assistant_live_feedback.py::test_worker_discloses_response_clipping_through_public_history",
         "tests/test_assistant_live_feedback.py::test_run_stream_is_owner_scoped_and_releases_capacity",
         "tests/test_assistant_live_feedback.py::test_partial_stream_failure_flushes_pending_text_without_replaying",
         "tests/test_assistant_live_feedback.py::test_cancel_during_retry_does_not_dispatch_again",
