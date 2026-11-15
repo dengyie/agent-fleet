@@ -47,7 +47,7 @@ export function renderMessages(host, messages, runs = [], options = {}) {
       const active = !['succeeded','failed','unknown','cancelled'].includes(run.state);
       row.setAttribute('aria-busy',String(active));
       row._parts.body.toggleAttribute('is-streaming',active);
-      renderRequestMetadata(row._parts.requests, run.requests);
+      renderRequestMetadata(row._parts.requests, run.requests, run.request_totals, run.requests_omitted);
       const states = {submitting: '正在发送…', submission_unknown: '原消息已保留，提交结果待确认', queued: '已发送，等待助手…', running: '助手正在处理…', waiting_node: '正在等待执行节点…', waiting_approval: '等待审批', waiting_task: '任务执行中…', cancelling: '正在取消…', unknown: '运行结果待确认，原请求不会自动重发', failed: '运行失败', cancelled: '已取消'};
       row._parts.progress.textContent = retryStatus || states[run.state] || '';
       row._parts.progress.hidden = !(retryStatus || states[run.state]);

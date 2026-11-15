@@ -1,7 +1,9 @@
 // Assemble existing Markdown and tool components from the public Run projection.
 export function renderProgress(host, run) {
   const progress = run.progress || {};
-  const segments = Array.isArray(progress.segments) ? progress.segments : [];
+  const segments = Array.isArray(progress.segments) ? [...progress.segments] : [];
+  if (progress.truncated) segments.unshift({id:'progress-retention-notice',kind:'notice',
+    text:'部分过程记录已省略，当前显示保留的执行过程。'});
   const active = !['succeeded','failed','unknown','cancelled'].includes(run.state);
   if (!host._segments) host._segments = new Map();
   const keep = new Set();
@@ -11,11 +13,14 @@ export function renderProgress(host, run) {
     keep.add(segment.id);
     let node = host._segments.get(segment.id);
     if (!node) {
-      node = document.createElement(segment.kind === 'tool' ? 'tool-call-badge' : 'stream-markdown');
+      node = document.createElement(segment.kind === 'notice' ? 'p' : segment.kind === 'tool' ? 'tool-call-badge' : 'stream-markdown');
       node.className = 'assistant-progress-segment';
       host._segments.set(segment.id,node);
     }
-    if (segment.kind === 'tool') {
+    if (segment.kind === 'notice') {
+      node.classList.add('meta');
+      if (node.textContent !== segment.text) node.textContent = segment.text;
+    } else if (segment.kind === 'tool') {
       const name = segment.tool || '工具执行';
       const status = segment.state === 'succeeded' ? 'success' : segment.state === 'running' ? (active ? 'running' : 'unknown') : segment.state === 'unknown' ? 'unknown' : 'error';
       if (node.getAttribute('name') !== name) node.setAttribute('name',name);

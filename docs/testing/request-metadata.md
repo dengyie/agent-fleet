@@ -19,8 +19,14 @@
 | 价格拆分 | 缓存单独计费，推理随输出计费 | 缺失缓存细分且单价与普通输入不同则不估算；相同单价可合并到输入，详情注明“含同价未拆分缓存”，不造零值 |
 | 状态与错误 | HTTP状态、结束原因、响应ID、流式参数、网络超时与请求序号 | 失败/未知保留安全错误码，禁止复制原始错误正文、提示词、headers、URL凭据、secret_ref |
 | 历史/取消/崩溃 | start/finish 复用 lease-fenced Run events；Run/Conversation API按 owner投影 | 旧历史没有记录则不造数据；终态中仅有start的记录显示unknown，允许真实请求成功但Run最终取消 |
+| 本轮完整汇总 | `request_totals` 保存全部 HTTP 尝试数、原始/显示 Token 口径、已知字段数、耗时、十进制费用及状态 | 缺失字段合计显示 `≥` 或 `—`；明细保留数量与汇总数量分别计数 |
+| 明细保留 | `requests` 仅保留最近至多 200 条、总信封至多 48 KiB；`requests_omitted` 明确较早明细数量 | 汇总在裁剪前计算；旧格式在清理前从完整事件补全，已清理数据标记 `complete=false`，不能恢复的账目不补造 |
+| 分批清理 | 终态持久化汇总优先于尚未删完的事件片段 | 每批清理期间与清理完成后的统计一致；不会临时减少请求次数或费用 |
+| 过程保留 | 公共过程最多保留 128 段、48 KiB，单段正文最多 24 KiB，超过任一边界均提示省略 | 页面提示部分过程已省略；保留现有工具卡片和用户展开状态；不限制模型执行次数 |
 
-当前 `usage.provider_requests` 的预算账本仍表示模型循环的逻辑步骤数；HTTP尝试数看 `requests.length`。二者不应混为一个统计。当前 provider 是同步完整响应读取；等待时实时的是耗时和请求状态，不声称已实现逐 Token 网络推送或首 Token 时间。取消会等待已在途网络请求退出，再由运行边界处理；不会把“已请求取消”当作上游已取消。
+`usage.provider_requests` 的预算账本表示成功完成的模型循环请求；全部 HTTP 尝试数看 `request_totals.count`，`requests.length` 仅表示仍可查看的明细条数。二者不应混为一个统计。启用流式请求时，正文增量、耗时、工具和重试状态实时更新；未启用流式时，正文在响应完成后显示。取消在下一个流式检查点或在途网络请求退出后处理，不把本地取消宣称为上游计算已经停止。
+
+此次保留边界审查的根因和最小修复见[持续运行生产 Review](../reviews/2026-11-15-continuous-run-production-review.md)。
 
 `provider_config.timeout_s`（默认 60 秒、范围 1–600 秒）是每次 HTTP 尝试的总网络截止时间，覆盖 DNS、逐地址 TCP、代理 CONNECT、TLS、响应头和响应体。持续到达的少量字节不能重置预算；截止中断 socket 并关闭响应与定时器，随后 Run 退出并释放调度槽。所有 3xx（包括相对跳转和 HTTPS 降级）返回 `redirect_rejected`，不能转发 Authorization 或自动重发。生产传输的超时/连接中断不自动重试，因为 POST 可能已被接受；明确 HTTP 429/暂时性错误仍按已有重试配置逐条记录。已接受响应的读取/解析失败始终不重放。
 
@@ -61,6 +67,9 @@ JSON 与 SSE 的费用数字在协议解码时直接进入 `Decimal`，不能先
 | 持久化/配置 | 实际worker → SQLite → Run/Conversation API → 重建app；模型与价格冻结；message/run链接准确 | `tests/test_request_metadata_api.py` |
 | 权限/隐私 | 另一owner读取Run/Conversation为404；投影删除raw_body；输出无fixture密钥 | 同上；沿用 AUTH-04 Cookie/CSRF/角色门禁 |
 | 查询/历史 | 一次Conversation读取只发一条请求事件查询；20个步骤保持完整，终态pending为unknown | `test_pending_terminal_unknown_and_projection_queries_are_batched` |
+| 长任务汇总 | 250 次请求的 Token、十进制费用、耗时和次数在明细裁剪、清理及重启后保持一致；旧格式缺失明确标注 | `test_long_run_totals_survive_detail_retention_and_restart`、`test_legacy_pruned_totals_are_explicitly_partial` |
+| 分批清理 | 每次只删一条事件，终态统计不变化；旧格式在首次删除前补全 | `test_partial_event_pruning_never_replaces_complete_frozen_totals`、`test_retention_upgrades_legacy_summary_before_first_partial_delete` |
+| 过程裁剪 | 150 段短正文及单次/流式长正文裁剪均标记省略，真实浏览器提示且保留工具卡片身份 | `test_short_long_run_progress_discloses_segment_retention`、`test_single_long_response_discloses_text_retention`、`test_assistant_live_model_stream_retry_and_reload` |
 | 慢请求/租约 | 同步provider超过5秒TTL仍完成；心跳失败后禁止继续续约，终结线程回收 | `test_slow_provider_keeps_both_leases_alive_and_cleans_heartbeat`、`tests/test_run_lease_heartbeat.py` |
 | UI性能 | 120条记录量测创建/更新耗时；无变化更新产生0次DOM修改；全终态时不运行耗时更新 | 同一真实浏览器用例的performanceEvidence |
 | UI动态 | 真实Hub/worker/HTTP adapter生成请求记录；活跃数字更新；轮询保留summary节点/展开状态；不重复GET历史 | `test_request_metadata_in_real_browser` |

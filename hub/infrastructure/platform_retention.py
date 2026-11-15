@@ -276,7 +276,8 @@ class PlatformRetention:
             # Freeze before deleting, and only delete events of frozen runs.
             unfrozen = conn.execute(
                 "SELECT r.run_id,r.state FROM runs r "
-                f"WHERE r.state IN ({marks}) AND r.updated_at<? AND r.request_summary IS NULL "
+                f"WHERE r.state IN ({marks}) AND r.updated_at<? AND "
+                "(r.request_summary IS NULL OR json_type(r.request_summary,'$.totals') IS NULL) "
                 "AND EXISTS (SELECT 1 FROM run_events e WHERE e.run_id=r.run_id) LIMIT ?",
                 (*states, cutoff, self.policy.batch_size),
             ).fetchall()

@@ -127,36 +127,50 @@ function sumCost(requests) {
   const exact = scale ? total.slice(0, -scale) + '.' + total.slice(-scale) : total;
   return (amounts.length < requests.length ? '≥' : '') + (amounts.some(c => c.source === 'configured') ? '≈' : '') + '$' + exact;
 }
-function updateGroup(group, requests) {
-  const signature = JSON.stringify(requests, (key, value) => key === 'elapsed_ms' ? undefined :
+function aggregateValue(value, known, count, suffix = '') {
+  return !known ? '—' : (known < count ? '≥' : '') + number(value) + suffix;
+}
+function updateGroup(group, requests, totals, omitted) {
+  const signature = JSON.stringify({requests,totals,omitted}, (key, value) => key === 'elapsed_ms' ? undefined :
     value && typeof value === 'object' && !Array.isArray(value)
       ? Object.fromEntries(Object.keys(value).sort().map(k => [k, value[k]])) : value);
   if (signature === group._signature) return;
   group._signature = signature;
   const summary = group.querySelector(':scope > summary');
   summary.replaceChildren();
-  const models = [...new Set(requests.map(r => r.model || r.requested_model || '未提供'))];
-  summary.append(chip('模型', models.length === 1 ? models[0] : models.length + ' 个模型', 'cpu'));
-  summary.append(chip('本轮模型请求次数', requests.length + ' 次请求'));
+  const models = totals?.models || [...new Set(requests.map(r => r.model || r.requested_model || '未提供'))];
+  const modelCount = totals?.model_count ?? models.length;
+  const count = totals?.count ?? requests.length;
+  summary.append(chip('模型', modelCount === 1 ? models[0] : modelCount + ' 个模型', 'cpu'));
+  summary.append(chip('本轮模型请求次数', count + ' 次请求'));
   const tokens = node('span', 'request-tokens');
   TOKENS.forEach(([key, label, icon]) => tokens.append(chip((key === 'input_tokens' ? '输入 Token（已拆分缓存时扣除缓存）' : key === 'output_tokens' ? '输出 Token（已拆分推理时扣除推理）' : label) + '合计（≥ 表示有请求未提供）',
-    sumKnown(requests.map(r => displayedTokens(r, key))), icon)));
+    totals ? aggregateValue(totals.display_usage[key], totals.known[key], count) : sumKnown(requests.map(r => displayedTokens(r, key))), icon)));
   summary.append(tokens);
-  const duration = chip('模型请求耗时合计，不含工具执行；≥ 表示有耗时未确认', sumKnown(requests.map(r => r.duration_ms), 'ms'));
+  const duration = chip('模型请求耗时合计，不含工具执行；≥ 表示有耗时未确认', totals ? aggregateValue(totals.duration_ms, totals.duration_known, count, 'ms') : sumKnown(requests.map(r => r.duration_ms), 'ms'));
   duration.className += ' request-group-duration'; summary.append(duration);
   group._duration = duration.querySelector('.request-chip-value');
-  summary.append(chip('费用合计；≥ 表示部分请求费用未提供；≈ 表示包含估算', sumCost(requests)));
-  const running = requests.filter(r => r.status === 'running').length;
-  const failed = requests.filter(r => ['failed', 'unknown'].includes(r.status)).length;
-  const status = running ? '请求中' : failed ? failed + ' 次失败或未确认' : '已完成';
+  const cost = totals ? (!totals.cost_known ? '费用未提供' :
+    (totals.cost_known < count ? '≥' : '') + (totals.cost?.source === 'configured' ? '≈' : '') + money(totals.cost)) : sumCost(requests);
+  summary.append(chip('费用合计；≥ 表示部分请求费用未提供；≈ 表示包含估算', cost));
+  const running = totals ? totals.states.running || 0 : requests.filter(r => r.status === 'running').length;
+  const failed = totals ? (totals.states.failed || 0) + (totals.states.unknown || 0) : requests.filter(r => ['failed', 'unknown'].includes(r.status)).length;
+  const status = running ? '请求中' : failed ? failed + ' 次失败或未确认' : totals?.complete === false ? '部分统计' : '已完成';
   summary.append(node('span', 'request-state', status), uiIcon('chevron-down', {size:13}));
   group.dataset.state = running ? 'running' : failed ? 'unknown' : 'succeeded';
-  summary.setAttribute('aria-label', '本轮模型请求汇总 · ' + requests.length + ' 次请求，展开查看逐次详情');
+  summary.setAttribute('aria-label', '本轮模型请求汇总 · ' + count + ' 次请求，展开查看逐次详情');
+  let notice = group.querySelector('.request-retention-notice');
+  if (omitted) {
+    if (!notice) { notice = node('p', 'request-retention-notice request-explanation'); group.insertBefore(notice, group.querySelector('.request-group-items')); }
+    notice.textContent = '已省略 ' + omitted + ' 次较早的请求明细，当前保留 ' + requests.length + ' 次。' +
+      (totals?.complete === false ? '历史完整统计无法恢复，≥ 表示已知部分。' : '汇总包含全部请求。');
+  } else notice?.remove();
+  group._totals = totals;
 }
-export function renderRequestMetadata(host, requests) {
+export function renderRequestMetadata(host, requests, totals = null, omitted = 0) {
   requests = requests || [];
   if (!host._requestRows) host._requestRows = new Map();
-  if (!requests.length) {
+  if (!requests.length && !totals?.count) {
     host.replaceChildren(); host._requestRows.clear(); host._requestGroup = null; return;
   }
   if (!host._requestGroup) {
@@ -165,7 +179,7 @@ export function renderRequestMetadata(host, requests) {
     host.append(group); host._requestGroup = group;
   }
   const group = host._requestGroup;
-  updateGroup(group, requests);
+  updateGroup(group, requests, totals, omitted);
   const container = group.querySelector('.request-group-items');
   const keep = new Set();
   requests.forEach((request, index) => {
@@ -180,16 +194,20 @@ export function renderRequestMetadata(host, requests) {
 export function tickRequestMetadata(host) {
   let active = false;
   const durations = [];
+  const liveElapsed = [];
   host._requestRows?.forEach(row => {
     if (row._request.status !== 'running') { durations.push(row._request.duration_ms); return; }
     active = true;
     const elapsed = Math.max(0, Math.round(row._elapsed + performance.now() - row._received));
     durations.push(elapsed);
+    liveElapsed.push(elapsed);
     const text = '≈' + elapsed + 'ms';
     if (row._duration.textContent !== text) row._duration.textContent = text;
   });
   if (active && host._requestGroup?._duration) {
-    const text = '≈' + sumKnown(durations, 'ms');
+    const totals = host._requestGroup._totals;
+    const text = '≈' + (totals ? aggregateValue(totals.duration_ms + liveElapsed.reduce((sum, value) => sum + value, 0),
+      totals.duration_known + liveElapsed.length, totals.count, 'ms') : sumKnown(durations, 'ms'));
     if (host._requestGroup._duration.textContent !== text) host._requestGroup._duration.textContent = text;
   }
   return active;
