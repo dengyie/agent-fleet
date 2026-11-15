@@ -7,7 +7,7 @@ from tests.test_platform_provider import FakeTransport, _response
 
 
 def _frame(text):
-    return ('data: ' + json.dumps({'choices': [{'delta': {'content': text}}]}) + '\n\n').encode()
+    return ('data: ' + json.dumps({'choices': [{'delta': {'content': text}}]}, ensure_ascii=False) + '\n\n').encode()
 
 
 def test_text_delta_is_observed_before_upstream_finishes():
@@ -22,6 +22,81 @@ def test_text_delta_is_observed_before_upstream_finishes():
     result = provider.complete([], [], request_observer=lambda k, p: observed.append((k, p)))
     assert result.text == '正在检查工作区'
     assert ''.join(p['text'] for k, p in observed if k == 'assistant_text_delta') == result.text
+
+
+@pytest.mark.parametrize('layout', ['separate', 'coalesced', 'fragmented'])
+def test_short_deltas_are_observed_before_the_next_transport_read(monkeypatch, layout):
+    from types import SimpleNamespace
+    from hub.platform.providers import observation
+    monkeypatch.setattr(observation, 'time', SimpleNamespace(monotonic=lambda: 0.0))
+    observed = []
+    def public_text():
+        return ''.join(p['text'] for k, p in observed if k == 'assistant_text_delta')
+    def body():
+        yield _frame('开始')
+        assert public_text() == '开始'
+        wire = _frame('，检查') + _frame('完成')
+        if layout == 'separate':
+            yield _frame('，检查')
+            assert public_text() == '开始，检查'
+            yield _frame('完成')
+        elif layout == 'coalesced':
+            yield wire
+        else:
+            # Split in a UTF-8 character as well as across SSE frames.
+            for byte in wire:
+                yield bytes([byte])
+        assert public_text() == '开始，检查完成'
+        yield b'data: [DONE]\n\n'
+    transport = FakeTransport([TransportResponse(200, {}, body())])
+    provider = OpenAICompatibleProvider(model='test', endpoint='http://localhost', api_key='x',
+        stream=True, transport=transport)
+    assert provider.complete([], [], request_observer=lambda k, p: observed.append((k, p))).text == '开始，检查完成'
+    assert len(transport.calls) == 1
+
+
+def test_coalesced_transport_frames_do_not_write_one_event_per_token(monkeypatch):
+    from types import SimpleNamespace
+    from hub.platform.providers import observation
+    monkeypatch.setattr(observation, 'time', SimpleNamespace(monotonic=lambda: 0.0))
+    observed = []
+    def body():
+        yield b''.join(_frame('x') for _ in range(100))
+        deltas = [p for k, p in observed if k == 'assistant_text_delta']
+        assert ''.join(p['text'] for p in deltas) == 'x' * 100
+        assert len(deltas) < 100
+        yield b'data: [DONE]\n\n'
+    provider = OpenAICompatibleProvider(model='test', endpoint='http://localhost', api_key='x',
+        stream=True, transport=FakeTransport([TransportResponse(200, {}, body())]))
+    assert provider.complete([], [], request_observer=lambda k, p: observed.append((k, p))).text == 'x' * 100
+
+
+def test_worker_persists_short_delta_before_reading_more_upstream(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from hub.application.run_worker_service import LocalRunWorkerService
+    from hub.platform.providers import observation
+    from tests.test_platform_run_worker import OWNER, _app, _catalog, _queued
+    monkeypatch.setattr(observation, 'time', SimpleNamespace(monotonic=lambda: 0.0))
+    app = _app(tmp_path)
+    repo = _catalog(app, tmp_path)
+    run_id = _queued(app)['run_id']
+    checkpoints = []
+    def body():
+        for part, expected in [('开始', '开始'), ('，检查', '开始，检查')]:
+            yield _frame(part)
+            public = app.test_client().get(f'/api/platform/v1/runs/{run_id}').get_json()
+            assert public['state'] == 'running'
+            assert public['progress']['segments'][-1]['text'] == expected
+            checkpoints.append(expected)
+        yield b'data: [DONE]\n\n'
+    transport = FakeTransport([TransportResponse(200, {}, body())])
+    provider = OpenAICompatibleProvider(model='test', endpoint='http://localhost', api_key='x',
+        stream=True, transport=transport)
+    LocalRunWorkerService(repo, app.extensions['fleet']['services']['run_events'],
+        provider_factory=lambda _: provider).run_once(OWNER)
+    assert checkpoints == ['开始', '开始，检查']
+    assert repo.get_run(OWNER, run_id)['state'] == 'succeeded'
+    assert len(transport.calls) == 1
 
 
 def test_reasoning_phase_is_visible_before_text_without_publishing_raw_reasoning():

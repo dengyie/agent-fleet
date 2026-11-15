@@ -76,6 +76,7 @@ const [origin, conversation, runId, outcome = 'succeeded'] = process.argv.slice(
     await narration.filter({hasText:'正在整理结果'}).waitFor();
     await page.locator('.assistant-message-progress').filter({hasText:'正在生成回复'}).waitFor();
     assert.equal(await page.locator('.assistant-message-progress').filter({hasText:'正在自动重试'}).count(),0);
+    assert.equal(await page.locator('.assistant-message.assistant').getAttribute('aria-busy'),'true');
     await page.request.post(origin + '/_fixture/release/delta');
     await narration.filter({hasText:'正在整理结果，检查'}).waitFor();
     assert.equal(await page.locator('.assistant-message.assistant').getAttribute('aria-busy'),'true');

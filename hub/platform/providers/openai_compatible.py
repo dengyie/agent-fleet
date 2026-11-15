@@ -18,7 +18,7 @@ import re
 import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterable, Iterator, Mapping, Protocol
+from typing import Any, Callable, Iterable, Iterator, Mapping, Protocol
 from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import Request
@@ -536,7 +536,8 @@ def _json_payload(body: bytes) -> dict[str, Any]:
     return payload
 
 
-def _sse_payloads(body: bytes | Iterable[bytes]) -> Iterator[dict[str, Any] | None]:
+def _sse_payloads(body: bytes | Iterable[bytes], *,
+                  on_chunk_consumed: Callable[[], None] | None = None) -> Iterator[dict[str, Any] | None]:
     """Decode bounded SSE frames, including arbitrary UTF-8/TCP boundaries."""
     chunks = [bytes(body)] if isinstance(body, (bytes, bytearray)) else body
     decoder = codecs.getincrementaldecoder('utf-8')()
@@ -569,6 +570,10 @@ def _sse_payloads(body: bytes | Iterable[bytes]) -> Iterator[dict[str, Any] | No
                 yield payload
                 if payload is None:
                     return
+            # Do not hold decoded public text while the next network read
+            # blocks. Batch complete frames within this received chunk.
+            if on_chunk_consumed is not None:
+                on_chunk_consumed()
         buffer += decoder.decode(b'', final=True)
         if buffer.strip():
             if events >= MAX_SSE_EVENTS:
@@ -772,7 +777,7 @@ class OpenAICompatibleProvider:
         completed = False
         usage = {}
         try:
-            for payload in _sse_payloads(body):
+            for payload in _sse_payloads(body, on_chunk_consumed=text_observation.flush):
                 if payload is None:
                     completed = True
                     break

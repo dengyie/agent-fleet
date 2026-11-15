@@ -52,6 +52,40 @@ def provider(server: ThreadingHTTPServer, **kwargs: Any) -> OpenAICompatibleProv
         allow_network=True, timeout_s=1, **kwargs)
 
 
+def test_real_http_short_deltas_publish_before_next_read(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from hub.platform.providers import observation
+    monkeypatch.setattr(observation, 'time', SimpleNamespace(monotonic=lambda: 0.0))
+    seen = [Event(), Event()]
+    observed, acknowledged = [], []
+    class Peer(QuietHandler):
+        def do_POST(self) -> None:
+            self.drain()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.end_headers()
+            for index, text in enumerate(('first', 'second')):
+                self.wfile.write(('data: ' + json.dumps({
+                    'choices': [{'delta': {'content': text}}]}) + '\n\n').encode())
+                self.wfile.flush()
+                acknowledged.append(seen[index].wait(2))
+                if not acknowledged[-1]:
+                    return
+            self.wfile.write(b'data: [DONE]\n\n')
+            self.wfile.flush()
+    def observe(kind, data):
+        if kind == 'assistant_text_delta':
+            observed.append(data['text'])
+            seen[len(observed) - 1].set()
+    with serve(Peer) as server:
+        p = OpenAICompatibleProvider(model='fixture', api_key='fixture',
+            endpoint=f'http://127.0.0.1:{server.server_port}/v1/chat/completions',
+            allow_network=True, timeout_s=3, stream=True)
+        assert p.complete([], [], request_observer=observe).text == 'firstsecond'
+    assert acknowledged == [True, True]
+    assert observed == ['first', 'second']
+
+
 def test_real_http_retry_retains_each_gateway_request_id() -> None:
     events, attempts = [], []
     class Peer(QuietHandler):
