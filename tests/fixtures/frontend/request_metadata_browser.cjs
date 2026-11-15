@@ -100,6 +100,18 @@ const [origin, conversation] = process.argv.slice(2);
       renderRequestMetadata(host,rows);
       assertGroup(group.open && group === host.querySelector('.request-group'),'aggregate expansion survives updates');
       assertGroup(summary.textContent.includes('≥≈$0.00014595') && summary.textContent.includes('≥16'),'missing accounting is partial rather than zero');
+      const totals = {count:250,complete:true,models:['deepseek'],model_count:1,
+        display_usage:{input_tokens:12500,output_tokens:3750,cache_read_tokens:10000,cache_write_tokens:2500,reasoning_tokens:1250},
+        known:Object.fromEntries(['input_tokens','output_tokens','cache_read_tokens','cache_write_tokens','reasoning_tokens'].map(key=>[key,250])),
+        duration_ms:784375,duration_known:250,cost:{amount:'0.00030750',currency:'USD',source:'configured'},cost_known:250,
+        states:{succeeded:250}};
+      renderRequestMetadata(host,rows,totals,248);
+      assertGroup(summary.textContent.includes('250 次请求') && summary.textContent.includes('≈$0.00030750'), 'full totals survive detail truncation');
+      assertGroup(summary.querySelector('.request-tokens .request-chip-value').textContent === '12500','full token count rather than retained rows');
+      assertGroup(group.textContent.includes('248') && group.textContent.includes('明细'),'detail omission is disclosed');
+      totals.complete=false; totals.known.input_tokens=2; totals.cost_known=2;
+      renderRequestMetadata(host,rows,totals,248);
+      assertGroup(summary.textContent.includes('≥12500') && summary.textContent.includes('≥≈$0.00030750'),'legacy partial totals are lower bounds');
       renderRequestMetadata(host,[]); assertGroup(host.children.length===0,'empty request collection removes summary');
       host.remove();
       function assertGroup(value,message){if(!value)throw new Error(message);}

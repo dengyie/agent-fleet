@@ -60,6 +60,8 @@ def project_progress(previous, kind, payload, sequence):
             if type(payload.get(key)) is int}
     elif kind in {'assistant_response', 'run_finished', 'run_unknown', 'run_failed'}:
         result.pop('retry', None)
+    if len(segments) > 128:
+        result['truncated'] = True
     result.update(segments=segments[-128:], sequence=sequence)
     # Trim oldest narration first; tools remain ordered and the newest response
     # remains useful even for a long run. JSON escaping is included in the bound.

@@ -88,6 +88,18 @@ def test_public_progress_is_bounded_and_idempotent():
     assert progress['truncated'] is True
 
 
+def test_short_long_run_progress_discloses_segment_retention():
+    from hub.domain.run_progress import project_progress
+    progress = {}
+    for step in range(1, 151):
+        progress = project_progress(progress, 'assistant_response', {
+            'step': step, 'text': f'step {step}', 'response_kind': 'tool_call'}, step)
+    assert len(progress['segments']) == 128
+    assert progress['segments'][0]['step'] == 23
+    assert progress['segments'][-1]['step'] == 150
+    assert progress['truncated'] is True
+
+
 def test_run_stream_is_owner_scoped_and_releases_capacity(tmp_path):
     from tests.test_platform_run_worker import OWNER, _app, _catalog, _queued
     app = _app(tmp_path)

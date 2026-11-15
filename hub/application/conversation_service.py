@@ -136,6 +136,8 @@ class ConversationService:
                     result_text=run.get("result_text", ""),
                     usage=run.get("usage") or {},
                     requests=run.get("requests") or [],
+                    request_totals=run.get("request_totals"),
+                    requests_omitted=run.get("requests_omitted", 0),
                     progress=run.get("progress") or {},
                 ).public()
                 for run in row.get("runs", [])
@@ -302,6 +304,8 @@ class RunService:
                 result_text=row.get("result_text", ""),
                 usage=row.get("usage", {}),
                 requests=row.get("requests", []),
+                request_totals=row.get("request_totals"),
+                requests_omitted=row.get("requests_omitted", 0),
                 progress=row.get("progress") or {},
             ).public() | {"ok": True}
         except ApplicationError:
@@ -328,6 +332,8 @@ class RunService:
                 result_text=row.get("result_text", ""),
                 usage=row.get("usage", {}),
                 requests=row.get("requests", []),
+                request_totals=row.get("request_totals"),
+                requests_omitted=row.get("requests_omitted", 0),
                 progress=row.get("progress") or {},
             ).public() | {"ok": True}
         except Exception as exc:

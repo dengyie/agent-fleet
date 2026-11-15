@@ -5,7 +5,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from hub.domain.request_metadata import REQUEST_EVENT_KINDS, freeze_requests, project_requests
+from hub.domain.request_metadata import REQUEST_EVENT_KINDS, freeze_requests, project_requests, thaw_request_summary
 
 MAX_JSON_BYTES = 64 * 1024
 
@@ -51,4 +51,9 @@ def freeze_run_request_summary(conn, run_id: str, state: str) -> None:
         "SELECT kind,payload FROM run_events WHERE run_id=? AND kind IN (?,?) ORDER BY sequence",
         (run_id, *REQUEST_EVENT_KINDS)).fetchall()
     requests = project_requests([{"kind": row[0], "payload": _decode(row[1])} for row in rows], state)
+    previous = conn.execute('SELECT request_summary FROM runs WHERE run_id=?', (run_id,)).fetchone()
+    if previous and thaw_request_summary(previous[0])['totals']['count'] > len(requests):
+        # Retention may already have removed some source events. Never replace
+        # a larger historical snapshot with the remaining fragment.
+        return
     conn.execute("UPDATE runs SET request_summary=? WHERE run_id=?", (freeze_requests(requests), run_id))

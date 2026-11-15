@@ -11,7 +11,8 @@ from hub.domain.request_metadata import (
     REQUEST_EVENT_KINDS,
     TERMINAL_STATES,
     project_requests,
-    thaw_requests,
+    freeze_requests,
+    thaw_request_summary,
 )
 from hub.infrastructure.platform_db_base import (
     PlatformRepositoryError,
@@ -76,23 +77,29 @@ class PlatformRunMixin:
         rows = conn.execute(
             "SELECT e.run_id,e.kind,e.payload FROM run_events e JOIN runs r ON r.run_id=e.run_id "
             "WHERE r.owner_id=? AND " + event_scope +
+            " AND (r.request_summary IS NULL OR json_type(r.request_summary,'$.totals') IS NULL)"
             " AND e.kind IN ('provider_request_started','provider_request_finished') ORDER BY e.run_id,e.sequence",
             parameters).fetchall()
         grouped = {}
         for row in rows:
             grouped.setdefault(row['run_id'], []).append({'kind': row['kind'], 'payload': _decode(row['payload'])})
-        frozen = {}
-        if any(run['run_id'] not in grouped for run in runs):
-            # Live events win; once retention pruned them, use the frozen copy.
-            frozen = {row['run_id']: row['request_summary'] for row in conn.execute(
-                "SELECT run_id,request_summary FROM runs WHERE owner_id=? AND " +
-                frozen_scope + " AND request_summary IS NOT NULL",
-                parameters).fetchall()}
+        # A terminal snapshot is authoritative even while retention has only
+        # deleted part of its events. Reading that partial tail loses requests.
+        frozen = {row['run_id']: row['request_summary'] for row in conn.execute(
+            "SELECT run_id,request_summary FROM runs WHERE owner_id=? AND " +
+            frozen_scope + " AND request_summary IS NOT NULL",
+            parameters).fetchall()}
         for run in runs:
-            if run['run_id'] in grouped or run['run_id'] not in frozen:
-                run['requests'] = project_requests(grouped.get(run['run_id'], []), run['state'])
-            else:
-                run['requests'] = thaw_requests(frozen[run['run_id']])
+            summary = thaw_request_summary(frozen.get(run['run_id']))
+            if run['run_id'] not in frozen or run['run_id'] in grouped:
+                requests = project_requests(grouped.get(run['run_id'], []), run['state'])
+                # Older releases froze only a detail tail. Reconstruct totals
+                # only when its original event set is still complete.
+                if len(requests) >= summary['totals']['count']:
+                    summary = thaw_request_summary(freeze_requests(requests))
+            run['requests'] = summary['requests']
+            run['request_totals'] = summary['totals']
+            run['requests_omitted'] = summary['omitted']
             for request in run['requests']:
                 if request.get('status') == 'running' and 'started_at' in request:
                     request['elapsed_ms'] = max(0, round((time.time() - request['started_at']) * 1000))

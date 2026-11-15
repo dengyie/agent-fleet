@@ -88,6 +88,11 @@ const [origin, conversation, runId] = process.argv.slice(2);
       if (badge.hasAttribute('error') || badge.querySelector('#drawer').textContent.includes('sandbox_unavailable')) {
         throw new Error('a successful receipt must clear stale error details');
       }
+      run.progress.truncated=true;
+      renderProgress(host,run);
+      if (!host.textContent.includes('较早的过程记录已省略') || host.querySelector('tool-call-badge') !== badge) {
+        throw new Error('retained progress must disclose omission without rebuilding tool cards');
+      }
       host.remove();
     });
     assert.deepEqual(errors,[]);
