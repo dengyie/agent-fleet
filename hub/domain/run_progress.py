@@ -31,12 +31,22 @@ def project_progress(previous, kind, payload, sequence):
             segment = {'id': key, 'kind': 'text', 'step': step, 'text': ''}
             segments.append(segment)
         if kind == 'assistant_response':
-            segment.update(text=_text(payload.get('text')), complete=True,
+            text = payload.get('text')
+            retained = _text(text)
+            if isinstance(text, str) and retained != text:
+                result['truncated'] = True
+            segment.update(text=retained, complete=True,
                            final=payload.get('response_kind') == 'final')
         elif not segment.get('complete'):
             offset = payload.get('offset')
             if type(offset) is int and offset == len(segment['text']):
-                segment['text'] = _text(segment['text'] + _text(payload.get('text'), 4096))
+                text = payload.get('text')
+                delta = _text(text, 4096)
+                combined = segment['text'] + delta
+                retained = _text(combined)
+                if retained != combined or (isinstance(text, str) and delta != text):
+                    result['truncated'] = True
+                segment['text'] = retained
     elif kind in {'tool_call', 'tool_result'}:
         key = _text(payload.get('command_id'), 256)
         segment = next((item for item in segments if item.get('id') == key), None)

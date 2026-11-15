@@ -3,7 +3,7 @@ export function renderProgress(host, run) {
   const progress = run.progress || {};
   const segments = Array.isArray(progress.segments) ? [...progress.segments] : [];
   if (progress.truncated) segments.unshift({id:'progress-retention-notice',kind:'notice',
-    text:'较早的过程记录已省略，当前显示最近的执行过程。'});
+    text:'部分过程记录已省略，当前显示保留的执行过程。'});
   const active = !['succeeded','failed','unknown','cancelled'].includes(run.state);
   if (!host._segments) host._segments = new Map();
   const keep = new Set();
