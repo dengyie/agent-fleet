@@ -16,6 +16,7 @@ class TextObservation:
         self.observer, self.index = observer, index
         self.offset, self.bytes = 0, 0
         self.pending = ''
+        self.truncated = False
         self.last = time.monotonic()
         self.phase = None
         self.last_activity = self.last
@@ -31,14 +32,21 @@ class TextObservation:
     def append(self, text):
         if self.observer is None:
             return
+        original = text
         text = text.encode('utf-8')[:max(0, 24576 - self.bytes)].decode('utf-8', errors='ignore')
-        if not text:
-            return
-        self.bytes += len(text.encode('utf-8'))
-        self.pending += text
-        if self.offset == 0 or len(self.pending) >= 256 or time.monotonic() - self.last >= .05:
+        if text:
+            self.bytes += len(text.encode('utf-8'))
+            self.pending += text
+            if self.offset == 0 or len(self.pending) >= 256 or time.monotonic() - self.last >= .05:
+                self.flush()
+        if text != original and not self.truncated:
+            self.truncated = True
             self.flush()
-        self.activity('responding')
+            self.observer('assistant_text_delta', {
+                'text': '', 'offset': self.offset, 'request_index': self.index, 'truncated': True})
+        # Presentation retention must not stop liveness/cancellation checks.
+        if original:
+            self.activity('responding')
 
     def flush(self):
         while self.pending:

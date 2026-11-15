@@ -79,6 +79,7 @@ class RequestMetadata(TypedDict, total=False):
     cost_unavailable_reason: str
     text: str
     offset: int
+    truncated: bool
     retry_index: int
     max_retries: int
     retry_in_ms: int

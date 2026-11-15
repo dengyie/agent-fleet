@@ -1,12 +1,10 @@
 """Real worker, SQLite and private API request history; no browser-derived totals."""
 import json
-import sqlite3
 
 import pytest
 
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
-from hub.infrastructure.platform_db import PlatformRepository
 from hub.platform.providers.openai_compatible import OpenAICompatibleProvider, TransportResponse
 
 OWNER = 'metadata@example.test'
@@ -89,6 +87,96 @@ def test_gateway_request_ids_survive_worker_retry_retention_and_restart(tmp_path
     history = restarted.test_client().get(
         f"/api/platform/v1/conversations/{conversation['conversation_id']}").get_json()['conversation']
     assert history['runs'][0]['requests'] == requests
+
+
+@pytest.mark.parametrize('succeeds', [True, False])
+def test_http_error_body_failure_keeps_worker_retry_history(tmp_path, monkeypatch, succeeds):
+    from hub.infrastructure.platform_retention import DAY_S, PlatformRetention
+    from hub.platform.providers import openai_compatible as adapter
+    app, _, client, conversation, run = setup(tmp_path)
+    calls, closed, waits = [], [], []
+    class Response:
+        def __init__(self, index):
+            self.index, self.sent = index, False
+            self.status = 200 if index == 2 and succeeds else 503
+            self.headers = {'X-Oneapi-Request-Id': f'gateway-{index}'}
+        def read(self, size):
+            raise TimeoutError('private-error-body')
+        def read1(self, size):
+            if self.sent:
+                return b''
+            self.sent = True
+            return b'{"choices":[{"message":{"content":"recovered"},"finish_reason":"stop"}]}'
+        def close(self):
+            closed.append(self.index)
+    def send(*args, **kwargs):
+        calls.append(True)
+        return Response(len(calls))
+    monkeypatch.setattr(adapter, 'open_http', send)
+    worker = app.extensions['fleet']['services']['platform_worker']
+    worker.provider_factory = lambda profile: OpenAICompatibleProvider(model=profile['model'],
+        endpoint='http://fixture', api_key='never-expose', allow_network=True,
+        max_retries=1, sleeper=waits.append)
+    assert worker.run_once(OWNER)['state'] == ('succeeded' if succeeds else 'unknown')
+    url = f"/api/platform/v1/runs/{run['run_id']}"
+    before = client.get(url).get_json()
+    assert [r['http_status'] for r in before['requests']] == [503, 200 if succeeds else 503]
+    assert [r['gateway_request_id'] for r in before['requests']] == ['gateway-1', 'gateway-2']
+    assert before['requests'][0]['provider_error'] == 'transient_http'
+    assert before['request_totals']['count'] == 2 and closed == [1, 2] and waits == [.1]
+    assert PlatformRetention(next(tmp_path.rglob('platform.db')))(now=50_000 * DAY_S)['run_events'] > 0
+    restarted = create_app(FleetConfig.from_root(tmp_path, dev_operator=OWNER, platform_enabled=True))
+    after = restarted.test_client().get(url).get_json()
+    assert after['requests'] == before['requests'] and after['request_totals'] == before['request_totals']
+    history = restarted.test_client().get(
+        f"/api/platform/v1/conversations/{conversation['conversation_id']}").get_json()['conversation']
+    assert history['runs'][0]['requests'] == before['requests']
+    assert 'private-error-body' not in json.dumps(history)
+
+
+@pytest.mark.parametrize('with_tool', [False, True], ids=['text', 'tool'])
+def test_stream_error_preserves_partial_history_without_dispatching_tool(tmp_path, with_tool):
+    from hub.infrastructure.platform_retention import DAY_S, PlatformRetention
+    app, repo, client, conversation, run = setup(tmp_path)
+    calls, closed = [], []
+    delta = {'content': '已收到的公开说明'}
+    if with_tool:
+        delta['tool_calls'] = [{'index': 0, 'id': 'not-committed', 'function': {
+            'name': 'workspace_write', 'arguments': '{"path":"must-not-write.txt","content":"no"}'}}]
+    def chunks():
+        try:
+            yield ('data: ' + json.dumps({'choices': [{'delta': delta}]}) + '\n\n').encode()
+            yield b'data: {"error":{"message":"private-stream-error","code":"system_cpu_overloaded"}}\n\n'
+            yield b'data: [DONE]\n\n'
+        finally:
+            closed.append(True)
+    class Transport:
+        def request(self, **kwargs):
+            calls.append(True)
+            return TransportResponse(200, {'X-Oneapi-Request-Id': 'gateway-stream-error'}, chunks())
+    worker = app.extensions['fleet']['services']['platform_worker']
+    worker.provider_factory = lambda profile: OpenAICompatibleProvider(model=profile['model'],
+        endpoint='http://fixture', api_key='never-expose', stream=True, transport=Transport(),
+        max_retries=3, sleeper=lambda _: None)
+    assert worker.run_once(OWNER)['state'] == 'unknown'
+    url = f"/api/platform/v1/runs/{run['run_id']}"
+    before = client.get(url).get_json()
+    assert 'provider_stream_error' in before['result_text']
+    assert before['progress']['segments'][0]['text'] == '已收到的公开说明'
+    assert before['requests'][0]['provider_error'] == 'provider_stream_error'
+    assert before['requests'][0]['gateway_request_id'] == 'gateway-stream-error'
+    assert before['requests'][0]['status'] == 'unknown' and before['requests'][0]['http_status'] == 200
+    assert len(calls) == 1 and closed == [True]
+    events = repo.list_run_events(OWNER, run['run_id'])['events']
+    assert not any(e['kind'] in {'tool_call', 'tool_result', 'assistant_response'} for e in events)
+    assert not (tmp_path / 'work' / 'must-not-write.txt').exists()
+    assert 'private-stream-error' not in json.dumps(events) + json.dumps(before)
+    assert PlatformRetention(next(tmp_path.rglob('platform.db')))(now=50_000 * DAY_S)['run_events'] > 0
+    restarted = create_app(FleetConfig.from_root(tmp_path, dev_operator=OWNER, platform_enabled=True))
+    history = restarted.test_client().get(
+        f"/api/platform/v1/conversations/{conversation['conversation_id']}").get_json()['conversation']
+    assert history['runs'][0]['requests'] == before['requests']
+    assert history['runs'][0]['progress'] == before['progress']
 
 
 def test_pending_terminal_unknown_and_projection_queries_are_batched(tmp_path, monkeypatch):

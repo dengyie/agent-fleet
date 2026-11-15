@@ -54,7 +54,7 @@ PROVIDER_ERROR_CODES = frozenset({
     'auth_error', 'rate_limit', 'transient_http', 'request_rejected',
     'provider_http_error', 'timeout', 'network_error', 'invalid_response',
     'response_too_large', 'request_too_large', 'provider_unavailable', 'provider_network_disabled',
-    'provider_secret_missing', 'provider_secret_unavailable',
+    'provider_secret_missing', 'provider_secret_unavailable', 'provider_stream_error',
     'provider_tools_invalid', 'provider_message_invalid', 'redirect_rejected',
 })
 
@@ -158,10 +158,25 @@ class _ResponseBody:
         self.response.close()
 
 
-def _transport_error(exc: Exception, *, status: int | None = None) -> ProviderError:
+def _transport_error(exc: Exception) -> ProviderError:
     reason = exc.reason if isinstance(exc, URLError) else exc
     # A POST may already have been accepted, even without response headers.
-    return ProviderError('timeout' if isinstance(reason, TimeoutError) else 'network_error', status=status)
+    return ProviderError('timeout' if isinstance(reason, TimeoutError) else 'network_error')
+
+
+def _http_error(status: int) -> ProviderError:
+    """Classify an explicit rejection independently of its optional body."""
+    if 300 <= status < 400:
+        return ProviderError('redirect_rejected', status=status)
+    if status in (401, 403):
+        return ProviderError('auth_error', status=status)
+    if status == 429:
+        return ProviderError('rate_limit', retryable=True, status=status)
+    if status in TRANSIENT_STATUS:
+        return ProviderError('transient_http', retryable=True, status=status)
+    if 400 <= status < 500:
+        return ProviderError('request_rejected', status=status)
+    return ProviderError('provider_http_error', retryable=True, status=status)
 
 
 def _response_request_ids(headers: Mapping[str, str]) -> RequestMetadata:
@@ -196,7 +211,9 @@ class UrllibTransport:
                 payload = response.read(4097)
                 return TransportResponse(response.status, headers_out, payload)
             except (TimeoutError, OSError, URLError, HTTPException) as exc:
-                error = _transport_error(exc, status=response.status)
+                # Rejection is already known. Failure to read optional error
+                # details must not erase its HTTP classification/retry policy.
+                error = _http_error(response.status)
                 error.request_ids = _response_request_ids(headers_out)
                 raise error from exc
             finally:
@@ -638,18 +655,7 @@ class OpenAICompatibleProvider:
         status = int(getattr(response, 'status', 0) or 0)
         if 200 <= status < 300:
             return response
-        if 300 <= status < 400:
-            error = ProviderError('redirect_rejected', status=status)
-        elif status in (401, 403):
-            error = ProviderError('auth_error', status=status)
-        elif status == 429:
-            error = ProviderError('rate_limit', retryable=True, status=status)
-        elif status in TRANSIENT_STATUS:
-            error = ProviderError('transient_http', retryable=True, status=status)
-        elif 400 <= status < 500:
-            error = ProviderError('request_rejected', status=status)
-        else:
-            error = ProviderError('provider_http_error', retryable=True, status=status)
+        error = _http_error(status)
         error.request_ids = _response_request_ids(response.headers)
         if isinstance(response.body, bytes) and len(response.body) <= 4096:
             try:
@@ -770,6 +776,15 @@ class OpenAICompatibleProvider:
                 if payload is None:
                     completed = True
                     break
+                if payload.get('error') is not None:
+                    # A later DONE/finish marker cannot turn a rejected stream
+                    # into a committed answer or executable partial tool call.
+                    error = ProviderError('provider_stream_error')
+                    detail = payload['error']
+                    code = detail.get('code') if isinstance(detail, Mapping) else None
+                    if isinstance(code, str) and code in UPSTREAM_ERROR_CODES:
+                        error.upstream_code = code
+                    raise error
                 for key in ('model', 'id'):
                     if payload.get(key) is not None:
                         metadata_payload[key] = payload[key]

@@ -136,7 +136,9 @@
         "tests/test_platform_runtime.py::test_default_assistant_can_be_cancelled_after_old_step_limit",
         "tests/test_assistant_live_feedback.py::test_tool_progress_explains_operation_and_result_and_survives_retention",
         "tests/test_assistant_live_feedback.py::test_exec_activity_is_available_before_dispatch_and_result_is_bounded",
-        "tests/test_native_run_checkpoints.py::test_unlimited_checkpoint_resumes_after_old_default_limit_without_replay"
+        "tests/test_native_run_checkpoints.py::test_unlimited_checkpoint_resumes_after_old_default_limit_without_replay",
+        "tests/test_assistant_live_feedback.py::test_interrupted_stream_discloses_provider_text_clipping_in_history",
+        "tests/test_assistant_live_feedback.py::test_cancel_after_public_text_limit_still_checks_stream_activity"
       ]
     },
     {
@@ -155,7 +157,7 @@
       "id": "MODEL-02",
       "title": "模型异常、超时及错误证据",
       "layer": "integration",
-      "acceptance": "401/429/500/502/503/坏JSON/未知工具成为可恢复查询的unknown；不泄漏上游正文、不自动重放",
+      "acceptance": "明确HTTP暂时性拒绝按配置重试，错误正文读取失败保留分类；流内error阻止部分答案或工具提交；最终故障持久unknown，不泄漏正文、不重放已接受请求",
       "boundary": "disposable Hub; external services simulated",
       "tests": [
         "tests/test_full_flow.py::test_provider_fault_is_durable_visible_and_never_replayed",
@@ -184,7 +186,15 @@
         "tests/test_platform_browser_reconciliation.py::test_stale_reconciliation_rejects_unbounded_or_non_integer_batch",
         "tests/test_platform_browser_reconciliation.py::test_stale_reconciliation_rejects_invalid_clock_values",
         "tests/test_platform_browser_reconciliation.py::test_stale_reconciliation_skips_legacy_nodes_without_liveness_columns",
-        "tests/test_platform_browser_reconciliation.py::test_background_stale_reconciliation_is_gate_scoped_and_stoppable"
+        "tests/test_platform_browser_reconciliation.py::test_background_stale_reconciliation_is_gate_scoped_and_stoppable",
+        "tests/test_provider_transport_boundaries.py::test_rejected_http_body_failure_still_retries_transient_status",
+        "tests/test_provider_transport_boundaries.py::test_rejected_http_body_failure_keeps_status_classification_and_cause",
+        "tests/test_provider_transport_boundaries.py::test_real_http_retries_after_rejection_body_deadline",
+        "tests/test_provider_transport_boundaries.py::test_real_http_stream_error_does_not_commit_a_partial_tool",
+        "tests/test_request_metadata.py::test_inband_stream_error_rejects_partial_response_without_replay",
+        "tests/test_request_metadata.py::test_inband_stream_error_does_not_publish_unrecognized_error_details",
+        "tests/test_request_metadata_api.py::test_http_error_body_failure_keeps_worker_retry_history",
+        "tests/test_request_metadata_api.py::test_stream_error_preserves_partial_history_without_dispatching_tool"
       ]
     },
     {

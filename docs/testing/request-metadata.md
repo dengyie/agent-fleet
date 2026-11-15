@@ -23,7 +23,7 @@
 | 本轮完整汇总 | `request_totals` 保存全部 HTTP 尝试数、原始/显示 Token 口径、已知字段数、耗时、十进制费用及状态 | 缺失字段合计显示 `≥` 或 `—`；明细保留数量与汇总数量分别计数 |
 | 明细保留 | `requests` 仅保留最近至多 200 条、总信封至多 48 KiB；`requests_omitted` 明确较早明细数量 | 汇总在裁剪前计算；旧格式在清理前从完整事件补全，已清理数据标记 `complete=false`，不能恢复的账目不补造 |
 | 分批清理 | 终态持久化汇总优先于尚未删完的事件片段 | 每批清理期间与清理完成后的统计一致；不会临时减少请求次数或费用 |
-| 过程保留 | 公共过程最多保留 128 段、48 KiB，单段正文最多 24 KiB，超过任一边界均提示省略 | 运行时在字节或 JSON 转义边界裁剪时将 `truncated` 随响应事件传给公共投影；重启恢复和历史清理后仍提示省略；保留工具卡片和用户展开状态；不限制模型执行次数 |
+| 过程保留 | 公共过程最多保留 128 段、48 KiB，单段正文最多 24 KiB，超过任一边界均提示省略 | 运行时或 provider 流式观察器预裁剪时通过响应/增量事件传递 `truncated`；流中断、重启和历史清理后仍提示省略；达到展示上限后继续发送限频阶段信号、观察取消；不限制模型执行次数 |
 | 实时阶段 | `progress.activity.phase` 为 `waiting`、`thinking`、`responding` 或 `tool_call`；同请求内阶段变化立即发布，同阶段至多每秒一次 | `thinking` 只在实际收到非空 `reasoning_content` 时产生，不保存或展示推理原文；未知阶段忽略，结束/失败/取消清除活动阶段；重试开始仍显示重试，开始收到内容或阶段信号后清除旧重试提示 |
 
 `usage.provider_requests` 的预算账本表示成功完成的模型循环请求；全部 HTTP 尝试数看 `request_totals.count`，`requests.length` 仅表示仍可查看的明细条数。二者不应混为一个统计。启用流式请求时，正文增量、耗时、工具和重试状态实时更新；未启用流式时，正文在响应完成后显示。取消在下一个流式检查点或在途网络请求退出后处理，不把本地取消宣称为上游计算已经停止。
@@ -32,7 +32,9 @@
 
 网关关联编号随每次 HTTP 尝试独立保留，覆盖显式 HTTP 失败、成功、已接受响应的解析/读取中断，以及已收到错误响应头但错误体读取超时。完成记录通过现有事件、Run/Conversation 投影和终态冻结明细保存；刷新、重启和事件清理后仍能关联网关日志。未收到响应头或取消尚未写入完成记录时，不能补造编号。网关内部的多次渠道尝试仍只对应 AgentFleet 的一次 HTTP 请求；上游编号仅表示网关实际返回的关联编号，不代表内部全部尝试。实现边界见[关联编号计划](../superpowers/plans/2026-11-16-provider-request-correlation.md)。
 
-`provider_config.timeout_s`（默认 60 秒、范围 1–600 秒）是每次 HTTP 尝试的总网络截止时间，覆盖 DNS、逐地址 TCP、代理 CONNECT、TLS、响应头和响应体。持续到达的少量字节不能重置预算；截止中断 socket 并关闭响应与定时器，随后 Run 退出并释放调度槽。所有 3xx（包括相对跳转和 HTTPS 降级）返回 `redirect_rejected`，不能转发 Authorization 或自动重发。生产传输的超时/连接中断不自动重试，因为 POST 可能已被接受；明确 HTTP 429/暂时性错误仍按已有重试配置逐条记录。已接受响应的读取/解析失败始终不重放。
+`provider_config.timeout_s`（默认 60 秒、范围 1–600 秒）是每次 HTTP 尝试的总网络截止时间，覆盖 DNS、逐地址 TCP、代理 CONNECT、TLS、响应头和响应体。持续到达的少量字节不能重置预算；截止中断 socket 并关闭响应与定时器，随后 Run 退出并释放调度槽。所有 3xx（包括相对跳转和 HTTPS 降级）返回 `redirect_rejected`，不能转发 Authorization 或自动重发。未收到明确拒绝响应时，生产传输的超时/连接中断不自动重试，因为 POST 可能已被接受。明确 HTTP 429/暂时性错误按已有重试配置逐条记录，即使可选错误正文读取超时或断连也保留原 HTTP 分类与 cause；401/403/普通400不会因正文读取失败被改成网络错误或开启重试。已接受响应的读取/解析失败始终不重放。
+
+HTTP 200 的 SSE 中出现非 null `error` 字段时，立即以 `provider_stream_error` 结束该次请求并标记 unknown，保留已有公开文字及请求关联编号；后续 DONE 或此前 finish_reason 不能掩盖显式错误。只保留既有白名单中的上游错误码，不保存原始错误消息。尚未提交的工具调用不能执行，已经完成的工具不能重放。相关根因和回归见[提供方故障生产 Review](../reviews/2026-11-16-provider-failure-production-review.md)和[实施计划](../superpowers/plans/2026-11-16-provider-stream-error-review.md)。
 
 流式传输按可用字节增量读取，收到 SSE `[DONE]` 即关闭响应，不等待 HTTP EOF 或攒满缓冲区。DNS 使用与发布验收共用的有界解析器：同一 host/port 共享正在进行的查询，进程最多 8 个查询；容量耗尽时等待也计入截止时间。系统 `getaddrinfo` 无可移植取消 API，迟到线程只能结束 DNS 解析，不能发送网络请求。没有添加后台 HTTP 执行线程或无界任务队列。
 
@@ -68,6 +70,9 @@ JSON 与 SSE 的费用数字在协议解码时直接进入 `Decimal`，不能先
 | 阶段与流式闭环 | 真实HTTP对端须在客户端观察到思考/首段正文后才发下一块；阶段限频、参数未完整时提示、取消推理即关闭；真实浏览器在EOF前逐段显示、清除旧重试状态并刷新恢复 | `test_real_http_stream_observes_thinking_and_text_before_next_chunk`、`test_reasoning_phase_is_visible_before_text_without_publishing_raw_reasoning`、`test_tool_phase_is_visible_before_arguments_finish`、`test_activity_projection_tracks_request_retry_and_terminal_lifecycle`、`test_thinking_heartbeat_is_throttled_and_phase_changes_are_immediate`、`test_cancel_during_thinking_closes_stream_without_waiting_for_text`、`test_assistant_live_model_stream_retry_and_reload` |
 | worker闭环 | Broker→Factory→worker日志保留类型/位置而无私密正文；超时后释放全局槽，下一Run成功 | `test_worker_secret_failure_retains_safe_cause_chain`、`test_request_timeout_releases_scheduler_slot_and_next_run_executes` |
 | HTTP重试 | 429后成功保存两次开始/结束，各自状态、序号、时间；未隐藏失败 | provider测试 + 真实浏览器测试 |
+| 拒绝响应正文失败 | 真实HTTP429/503正文截止后按配置重试；401/403/400保留不重试分类；cause/关联编号不丢失，耗尽后的历史稳定 | `test_rejected_http_body_failure_still_retries_transient_status`、`test_rejected_http_body_failure_keeps_status_classification_and_cause`、`test_real_http_retries_after_rejection_body_deadline`、`test_http_error_body_failure_keeps_worker_retry_history` |
+| 流内显式错误 | 公开文字或工具参数后收到error，DONE/EOF/finish_reason不能伪造成功；不执行部分工具、不重放，未知错误内容不公开 | `test_inband_stream_error_rejects_partial_response_without_replay`、`test_inband_stream_error_does_not_publish_unrecognized_error_details`、`test_real_http_stream_error_does_not_commit_a_partial_tool`、`test_stream_error_preserves_partial_history_without_dispatching_tool`；浏览器流式用例含stream_error参数 |
+| 流式预裁剪 | 超过展示预算后发生断流或错误帧仍提示省略；达到预算后仍观察取消；不改变模型上下文与响应结果限额 | `test_interrupted_stream_discloses_provider_text_clipping_in_history`、`test_cancel_after_public_text_limit_still_checks_stream_activity` |
 | 请求关联 | 503 后成功/重试耗尽、JSON/SSE、流中断和错误体超时保留各次网关/上游编号；真实 HTTP 读取，worker 入库后刷新/重启/清理可查，详情折叠且不改变本地请求身份；非法值及其他 headers 不发布 | `test_response_request_ids_distinguish_failed_and_successful_attempts`、`test_accepted_stream_failure_keeps_request_ids_without_replay`、`test_real_http_retry_retains_each_gateway_request_id`、`test_error_body_timeout_keeps_received_request_ids`、`test_gateway_request_ids_survive_worker_retry_retention_and_restart`、`test_request_ids_reject_nonopaque_values_at_provider_and_projection`、`test_valid_request_ids_remain_distinct_from_local_and_response_ids`、`test_request_metadata_in_real_browser` |
 | 协议和资源 | SSE usage尾帧、UTF-8逐字节切分、末帧无空行、DONE后停止读取并关闭、非完整输出不冒充成功、异常不重放 | `test_sse_*`、`test_stream_failure_is_recorded_closed_and_never_retried`、`test_accepted_nonstream_read_failure_is_closed_and_never_retried` |
 | 存储失败 | start持久化失败时不发请求，不因观察器失败触发网络重试 | `test_request_observer_failure_does_not_dispatch_or_replay` |

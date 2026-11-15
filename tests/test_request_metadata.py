@@ -204,6 +204,53 @@ def test_stream_failure_is_recorded_closed_and_never_retried():
     assert closed == [True]
 
 
+@pytest.mark.parametrize('content', ['text', 'tool'])
+@pytest.mark.parametrize('ending', ['done', 'eof', 'finish-then-done'])
+def test_inband_stream_error_rejects_partial_response_without_replay(content, ending):
+    events, closed = [], []
+    delta = ({'content': 'partial public answer'} if content == 'text' else
+        {'tool_calls': [{'index': 0, 'id': 'partial-call', 'function': {
+            'name': 'workspace_list', 'arguments': '{}'}}]})
+    def chunks():
+        try:
+            yield ('data: ' + json.dumps({'choices': [{'delta': delta}]}) + '\n\n').encode()
+            if ending == 'finish-then-done':
+                yield b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+            yield b'data: {"error":{"code":"system_cpu_overloaded","message":"private-stream-error-sentinel"}}\n\n'
+            if ending != 'eof':
+                yield b'data: [DONE]\n\n'
+        finally:
+            closed.append(True)
+    transport = Transport(TransportResponse(200, {'X-Oneapi-Request-Id': 'gateway-stream-error'}, chunks()))
+    with pytest.raises(ProviderError) as caught:
+        provider(transport, stream=True, max_retries=3).complete([], [{'name': 'workspace.list'}],
+            request_observer=lambda k, d: events.append((k, d)))
+    assert caught.value.code == 'provider_stream_error' and caught.value.retryable is False
+    assert caught.value.diagnostic()['upstream_code'] == 'system_cpu_overloaded'
+    finished = events[-1][1]
+    assert finished['status'] == 'unknown' and finished['http_status'] == 200
+    assert finished['provider_error'] == 'provider_stream_error'
+    assert finished['gateway_request_id'] == 'gateway-stream-error'
+    assert len(transport.calls) == 1 and closed == [True]
+    if content == 'text':
+        assert ''.join(d['text'] for k, d in events if k == 'assistant_text_delta') == 'partial public answer'
+    assert 'private-stream-error-sentinel' not in json.dumps(events) + str(caught.value)
+
+
+@pytest.mark.parametrize('error', ['private-code', {}, [], True,
+    {'code': 'private-code'}, {'code': []}])
+def test_inband_stream_error_does_not_publish_unrecognized_error_details(error):
+    events = []
+    body = ('data: ' + json.dumps({'error': error}) + '\n\ndata: [DONE]\n\n').encode()
+    with pytest.raises(ProviderError) as caught:
+        provider(Transport(TransportResponse(200, {}, body)), stream=True).complete([], [],
+            request_observer=lambda k, d: events.append((k, d)))
+    assert caught.value.code == 'provider_stream_error'
+    assert 'upstream_code' not in caught.value.diagnostic()
+    assert events[-1][1]['status'] == 'unknown'
+    assert 'private-code' not in json.dumps(events) + str(caught.value)
+
+
 def test_request_observer_failure_does_not_dispatch_or_replay():
     transport = Transport(response(payload()))
     def reject(kind, data):

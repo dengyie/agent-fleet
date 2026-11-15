@@ -244,7 +244,8 @@ def test_request_metadata_in_real_browser(tmp_path):
         server.shutdown(); server.server_close(); serving.join(5)
 
 
-def test_assistant_live_model_stream_retry_and_reload(tmp_path):
+@pytest.mark.parametrize('outcome', ['succeeded', 'stream_error'])
+def test_assistant_live_model_stream_retry_and_reload(tmp_path, outcome):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE to run Chromium acceptance')
     import json
@@ -281,10 +282,14 @@ def test_assistant_live_model_stream_retry_and_reload(tmp_path):
         assert gates['delta'].wait(25), 'browser never observed first response delta'
         yield frame({'content':'，检查'})
         assert gates['final'].wait(25), 'browser never observed final live narration'
-        yield frame({'content':'完成'}, 'stop')
+        if outcome == 'stream_error':
+            yield b'data: {"error":{"message":"private-stream-error-browser-sentinel"}}\n\n'
+        else:
+            yield frame({'content':'完成'}, 'stop')
         yield b'data: [DONE]\n\n'
     transport = FakeTransport([TransportResponse(200, {}, tool_stream()),
-        _response({}, status=503), _response({}, status=503), TransportResponse(200, {}, final_stream())])
+        _response({}, status=503), _response({}, status=503), TransportResponse(200,
+            {'X-Oneapi-Request-Id': 'gateway-final-stream'}, final_stream())])
     def sleep(delay):
         assert gates['retry'].wait(25), 'browser never observed retry notice'
     provider = OpenAICompatibleProvider(model='test', endpoint='http://localhost', api_key='not-public',
@@ -296,11 +301,11 @@ def test_assistant_live_model_stream_retry_and_reload(tmp_path):
     serving = Thread(target=server.serve_forever, daemon=True); serving.start()
     try:
         result = subprocess.run(['node', str(ROOT / 'tests/fixtures/frontend/live_feedback_browser.cjs'),
-            'http://127.0.0.1:' + str(server.server_port), conv['conversation_id'], run['run_id']],
+            'http://127.0.0.1:' + str(server.server_port), conv['conversation_id'], run['run_id'], outcome],
             capture_output=True, text=True, timeout=75)
         assert result.returncode == 0, result.stdout + result.stderr
         working.join(5)
-        assert repo.get_run(OWNER,run['run_id'])['state'] == 'succeeded'
+        assert repo.get_run(OWNER,run['run_id'])['state'] == ('unknown' if outcome == 'stream_error' else 'succeeded')
         assert len(transport.calls) == 4
         events = repo.list_run_events(OWNER,run['run_id'])['events']
         assert sum(e['kind'] == 'tool_call' for e in events) == 1

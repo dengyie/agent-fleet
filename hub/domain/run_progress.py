@@ -39,14 +39,14 @@ def project_progress(previous, kind, payload, sequence):
                   'run_waiting_node', 'run_finished', 'run_unknown', 'run_failed'}:
         result.pop('activity', None)
     if kind in {'assistant_text_delta', 'assistant_response'}:
+        if payload.get('truncated') is True:
+            result['truncated'] = True
         key = f'text:{step}'
         segment = next((item for item in segments if item.get('id') == key), None)
         if segment is None:
             segment = {'id': key, 'kind': 'text', 'step': step, 'text': ''}
             segments.append(segment)
         if kind == 'assistant_response':
-            if payload.get('truncated') is True:
-                result['truncated'] = True
             text = payload.get('text')
             retained = _text(text)
             if isinstance(text, str) and retained != text:
