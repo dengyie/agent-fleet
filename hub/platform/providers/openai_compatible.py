@@ -760,12 +760,18 @@ class OpenAICompatibleProvider:
                 delta = choice.get('delta')
                 if not isinstance(delta, Mapping):
                     continue
+                if isinstance(delta.get('reasoning_content'), str) and delta['reasoning_content']:
+                    # A phase signal provides live feedback without publishing
+                    # or persisting the model's private reasoning text.
+                    text_observation.activity('thinking')
                 if isinstance(delta.get('content'), str):
                     text = delta['content']
                     text_parts.append(text)
                     text_observation.append(text)
                 calls = delta.get('tool_calls')
                 if isinstance(calls, list):
+                    if calls:
+                        text_observation.activity('tool_call')
                     for position, call in enumerate(calls):
                         if not isinstance(call, Mapping):
                             raise ProviderError('invalid_response')

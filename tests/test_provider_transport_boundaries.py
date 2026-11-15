@@ -106,6 +106,39 @@ def test_chunked_done_finishes_before_http_eof_and_closes_socket() -> None:
         assert disconnected.wait(.5)
 
 
+def test_real_http_stream_observes_thinking_and_text_before_next_chunk() -> None:
+    thinking, text_seen = Event(), Event()
+    stages = []
+    class Streaming(QuietHandler):
+        protocol_version = 'HTTP/1.1'
+        def do_POST(self) -> None:
+            self.drain()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Transfer-Encoding', 'chunked')
+            self.end_headers()
+            def send(delta):
+                raw = ('data: ' + json.dumps({'choices': [{'delta': delta}]}) + '\n\n').encode()
+                self.wfile.write(f'{len(raw):x}\r\n'.encode() + raw + b'\r\n')
+                self.wfile.flush()
+            send({'reasoning_content': 'raw-reasoning-http-sentinel'})
+            stages.append(thinking.wait(.5))
+            send({'content': 'first'})
+            stages.append(text_seen.wait(.5))
+            raw = b'data: {"choices":[{"delta":{"content":" second"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+            self.wfile.write(f'{len(raw):x}\r\n'.encode() + raw + b'\r\n0\r\n\r\n')
+            self.wfile.flush()
+    observed = []
+    def observe(kind, data):
+        observed.append((kind, data))
+        if kind == 'assistant_activity' and data['phase'] == 'thinking': thinking.set()
+        if kind == 'assistant_text_delta': text_seen.set()
+    with serve(Streaming) as origin:
+        assert provider(origin, stream=True).complete([], [], request_observer=observe).text == 'first second'
+    assert stages == [True, True], 'a later upstream chunk must not be needed to flush the first phase/text'
+    assert 'raw-reasoning-http-sentinel' not in json.dumps(observed)
+
+
 @pytest.mark.parametrize('stage', ['headers', 'body'])
 def test_trickle_is_bounded_by_total_deadline_without_replay(stage: str) -> None:
     stop = Event()

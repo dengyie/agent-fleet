@@ -11,12 +11,22 @@ if TYPE_CHECKING:
 
 
 class TextObservation:
-    """Bounded public narration, flushed immediately first and then in batches."""
+    """Public narration and phase signals; never retain raw model reasoning."""
     def __init__(self, observer, index):
         self.observer, self.index = observer, index
         self.offset, self.bytes = 0, 0
         self.pending = ''
         self.last = time.monotonic()
+        self.phase = None
+        self.last_activity = self.last
+
+    def activity(self, phase):
+        if self.observer is None:
+            return
+        now = time.monotonic()
+        if phase != self.phase or now - self.last_activity >= 1.0:
+            self.observer('assistant_activity', {'phase': phase, 'request_index': self.index})
+            self.phase, self.last_activity = phase, now
 
     def append(self, text):
         if self.observer is None:
@@ -28,6 +38,7 @@ class TextObservation:
         self.pending += text
         if self.offset == 0 or len(self.pending) >= 256 or time.monotonic() - self.last >= .05:
             self.flush()
+        self.activity('responding')
 
     def flush(self):
         while self.pending:

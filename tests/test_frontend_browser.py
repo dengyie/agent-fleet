@@ -265,18 +265,22 @@ def test_assistant_live_model_stream_retry_and_reload(tmp_path):
     conv = client.post('/api/platform/v1/conversations', json={}).get_json()['conversation']
     run = client.post('/api/platform/v1/conversations/' + conv['conversation_id'] + '/turns',
         json={'text':'检查环境并汇报', 'client_token':'live-stream'}).get_json()['run']
-    gates = {key:Event() for key in ('tool','retry','final')}
+    gates = {key:Event() for key in ('thinking','tool','retry','delta','final')}
     def frame(delta, finish=None):
         return ('data: ' + json.dumps({'choices':[{'delta':delta, 'finish_reason':finish}]}) + '\n\n').encode()
     def tool_stream():
+        yield frame({'reasoning_content':'raw-reasoning-browser-sentinel'})
+        assert gates['thinking'].wait(25), 'browser never observed thinking before public text'
         yield frame({'content':'先检查工作区' + chr(10)*2 + (('这是正在实时输出的检查进度。'+chr(10))*80)})
         assert gates['tool'].wait(25), 'browser never observed first live narration'
         yield frame({'tool_calls':[{'index':0,'id':'call-list','function':{'name':'workspace_list','arguments':'{}'}}]}, 'tool_calls')
         yield b'data: [DONE]\n\n'
     def final_stream():
         yield frame({'content':'正在整理结果'})
+        assert gates['delta'].wait(25), 'browser never observed first response delta'
+        yield frame({'content':'，检查'})
         assert gates['final'].wait(25), 'browser never observed final live narration'
-        yield frame({'content':'，检查完成'}, 'stop')
+        yield frame({'content':'完成'}, 'stop')
         yield b'data: [DONE]\n\n'
     transport = FakeTransport([TransportResponse(200, {}, tool_stream()),
         _response({}, status=503), _response({}, status=503), TransportResponse(200, {}, final_stream())])

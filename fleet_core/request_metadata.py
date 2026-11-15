@@ -79,11 +79,12 @@ class RequestMetadata(TypedDict, total=False):
     retry_index: int
     max_retries: int
     retry_in_ms: int
+    phase: Literal['thinking', 'responding', 'tool_call']
 
 
 RequestObserver = Callable[
     [Literal['provider_request_started', 'provider_request_finished',
-             'assistant_text_delta', 'provider_retry_scheduled'], RequestMetadata], None]
+             'assistant_text_delta', 'assistant_activity', 'provider_retry_scheduled'], RequestMetadata], None]
 
 TOKEN_FIELDS = ('input_tokens', 'cache_read_tokens', 'reasoning_tokens',
                 'output_tokens', 'cache_write_tokens', 'total_tokens')

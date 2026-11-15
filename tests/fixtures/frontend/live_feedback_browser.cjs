@@ -9,7 +9,33 @@ const [origin, conversation, runId] = process.argv.slice(2);
   try {
     await page.goto(origin + '/conversation/' + conversation,{waitUntil:'domcontentloaded'});
     await page.locator('.assistant-message.user').waitFor();
+    await page.evaluate(async () => {
+      await customElements.whenDefined('auto-scroll-anchor');
+      const root = document.createElement('div'); root.setAttribute('data-chat-scroll','');
+      root.style.cssText = 'height:150px;overflow:auto;position:fixed;top:0;left:0;width:300px';
+      const filler = document.createElement('div'); filler.style.height = '30px';
+      const anchor = document.createElement('auto-scroll-anchor'); root.append(filler,anchor); document.body.append(root);
+      const frames = async () => {for (let i=0;i<3;i++) await new Promise(requestAnimationFrame);};
+      try {
+        await frames();
+        filler.style.height = '5000px'; anchor.setAttribute('is-streaming','');
+        await frames();
+        if (root.scrollHeight-root.scrollTop-root.clientHeight >= 72 || !anchor.isAtBottom) {
+          throw new Error('automatic streaming scroll must reach the new text without losing follow mode');
+        }
+        root.scrollTop = 0; root.dispatchEvent(new Event('scroll'));
+        filler.style.height = '5500px'; anchor.setAttribute('is-streaming','');
+        await frames();
+        if (root.scrollTop !== 0 || anchor.isAtBottom) throw new Error('streaming must respect manual scroll away');
+      } finally {root.remove();}
+    });
     await page.request.post(origin + '/_fixture/start');
+    await page.locator('.assistant-message-progress').filter({hasText:'模型正在思考'}).waitFor();
+    assert.equal(await page.locator('.assistant-message-activity stream-markdown').count(),0);
+    assert.ok(!(await page.locator('body').textContent()).includes('raw-reasoning-browser-sentinel'));
+    await page.reload({waitUntil:'domcontentloaded'});
+    await page.locator('.assistant-message-progress').filter({hasText:'模型正在思考'}).waitFor();
+    await page.request.post(origin + '/_fixture/release/thinking');
     const narration = page.locator('.assistant-message-activity stream-markdown');
     await narration.filter({hasText:'先检查工作区'}).waitFor();
     assert.equal(await page.locator('.assistant-message.assistant').getAttribute('aria-busy'),'true');
@@ -47,11 +73,17 @@ const [origin, conversation, runId] = process.argv.slice(2);
     }
     await page.request.post(origin + '/_fixture/release/retry');
     await narration.filter({hasText:'正在整理结果'}).waitFor();
+    await page.locator('.assistant-message-progress').filter({hasText:'正在生成回复'}).waitFor();
+    assert.equal(await page.locator('.assistant-message-progress').filter({hasText:'正在自动重试'}).count(),0);
+    await page.request.post(origin + '/_fixture/release/delta');
+    await narration.filter({hasText:'正在整理结果，检查'}).waitFor();
     assert.equal(await page.locator('.assistant-message.assistant').getAttribute('aria-busy'),'true');
     await page.request.post(origin + '/_fixture/release/final');
     await page.waitForFunction(() => document.querySelector('.assistant-message.assistant')?.getAttribute('aria-busy') === 'false');
     await page.waitForFunction(() => window.liveSnapshots.some(run => run.state === 'succeeded'));
     assert.equal(await page.evaluate(() => window.liveStreamError),null,'SSE must work independently of polling');
+    assert.equal(await page.evaluate(() => JSON.stringify(window.liveSnapshots).includes('raw-reasoning-browser-sentinel')),false);
+    assert.equal(await page.locator('.assistant-message-progress').filter({hasText:'正在生成回复'}).count(),0);
     const finalText = page.locator('stream-markdown').filter({hasText:'正在整理结果，检查完成'});
     assert.equal(await finalText.count(),1,'final answer must not be duplicated');
     await narration.filter({hasText:'先检查工作区'}).waitFor();
@@ -98,6 +130,12 @@ const [origin, conversation, runId] = process.argv.slice(2);
     assert.deepEqual(errors,[]);
     console.log(JSON.stringify({beforeEOF:true,refreshRecovery:true,inlineTool:true,retryVisible:true,mobile:true,errors}));
   } catch (error) {
+    console.error(JSON.stringify(await page.evaluate(() => {
+      const t = document.querySelector('[data-chat-scroll]');
+      const a = document.querySelector('auto-scroll-anchor');
+      return {scrollHeight:t?.scrollHeight,scrollTop:t?.scrollTop,clientHeight:t?.clientHeight,
+        isAtBottom:a?.isAtBottom,streaming:a?.hasAttribute('is-streaming')};
+    })));
     console.error(await page.locator('.assistant-transcript').textContent().catch(() => 'no transcript'));
     throw error;
   } finally {await browser.close();}
