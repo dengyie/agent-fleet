@@ -120,10 +120,6 @@ def freeze_requests(requests: list[RequestMetadata]) -> str:
     return _dump({'requests': kept, 'omitted': len(requests) - len(kept), 'totals': totals})
 
 
-def thaw_requests(value: str | None) -> list[RequestMetadata]:
-    return thaw_request_summary(value)['requests']
-
-
 def thaw_request_summary(value: str | None) -> dict:
     try:
         data = json.loads(value or '{}')

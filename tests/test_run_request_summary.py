@@ -8,7 +8,7 @@ import pytest
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
 from hub.domain.request_metadata import (
-    MAX_FROZEN_REQUEST_BYTES, MAX_FROZEN_REQUESTS, freeze_requests, thaw_requests, request_totals,
+    MAX_FROZEN_REQUEST_BYTES, MAX_FROZEN_REQUESTS, freeze_requests, thaw_request_summary, request_totals,
 )
 from hub.infrastructure.platform_db import PlatformRepository
 from hub.infrastructure.platform_retention import DAY_S, PlatformRetention, RetentionPolicy
@@ -72,7 +72,7 @@ def test_finish_run_freezes_requests_that_survive_run_event_retention(tmp_path):
     live_history = client.get(conversation_url).get_json()['conversation']['runs'][0]['requests']
     assert live_run and live_run[0]['model'] == 'returned-model'
     (summary,), = _sql(tmp_path, "SELECT request_summary FROM runs WHERE run_id=?", (run['run_id'],))
-    assert thaw_requests(summary) == live_run
+    assert thaw_request_summary(summary)['requests'] == live_run
     assert 'never-expose' not in summary
 
     pruned = PlatformRetention(_db(tmp_path))(now=FUTURE)
@@ -91,13 +91,13 @@ def test_set_run_state_and_late_request_events_keep_summary_current(tmp_path):
     assert _sql(tmp_path, "SELECT request_summary FROM runs WHERE run_id=?", (run_id,)) == [(None,)]
     repo.set_run_state(OWNER, run_id, 'failed', now=3.0)
     (summary,), = _sql(tmp_path, "SELECT request_summary FROM runs WHERE run_id=?", (run_id,))
-    assert [r['status'] for r in thaw_requests(summary)] == ['unknown']
+    assert [r['status'] for r in thaw_request_summary(summary)['requests']] == ['unknown']
 
     repo.append_run_event(OWNER, run_id, 'provider_request_finished', _request_event(1), now=4.0)
     repo.append_run_event(OWNER, run_id, 'provider_request_finished', _request_event(2), now=5.0)
     live = repo.get_run(OWNER, run_id)['requests']
     (summary,), = _sql(tmp_path, "SELECT request_summary FROM runs WHERE run_id=?", (run_id,))
-    assert thaw_requests(summary) == live
+    assert thaw_request_summary(summary)['requests'] == live
     assert [(r['request_id'], r['status'], r['duration_ms']) for r in live] == [
         ('1:1:1', 'succeeded', 25), ('1:2:1', 'succeeded', 50)]
 
@@ -119,7 +119,7 @@ def test_cancel_before_claim_freezes_summary(tmp_path):
     assert claimed['cancelled_before_claim'] is True
     live = repo.get_run(OWNER, run_id)['requests']
     (summary,), = _sql(tmp_path, "SELECT request_summary FROM runs WHERE run_id=?", (run_id,))
-    assert live and thaw_requests(summary) == live
+    assert live and thaw_request_summary(summary)['requests'] == live
 
 
 def test_frozen_summary_is_bounded_and_keeps_newest_requests():
@@ -136,9 +136,9 @@ def test_frozen_summary_is_bounded_and_keeps_newest_requests():
     assert 0 < len(frozen['requests']) < len(big)
     assert frozen['omitted'] == len(big) - len(frozen['requests'])
     assert frozen['requests'][-1] == big[-1]
-    assert thaw_requests(encoded) == frozen['requests']
-    assert thaw_requests(json.dumps({'requests': []})) == []
-    assert thaw_requests('not json') == [] and thaw_requests(None) == []
+    assert thaw_request_summary(encoded)['requests'] == frozen['requests']
+    assert thaw_request_summary(json.dumps({'requests': []}))['requests'] == []
+    assert thaw_request_summary('not json')['requests'] == [] and thaw_request_summary(None)['requests'] == []
 
 
 def test_long_run_totals_survive_detail_retention_and_restart(tmp_path):
