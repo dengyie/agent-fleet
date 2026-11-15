@@ -5,7 +5,7 @@ import re
 from decimal import Decimal, localcontext
 from typing import Any, Iterable, Mapping, cast
 
-from fleet_core.request_metadata import RequestMetadata, normalized_tokens
+from fleet_core.request_metadata import REQUEST_TRACE_FIELDS, RequestMetadata, normalized_tokens, request_trace_id
 
 
 REQUEST_EVENT_KINDS = ('provider_request_started', 'provider_request_finished')
@@ -33,6 +33,10 @@ def project_requests(events: Iterable[Mapping[str, Any]], state: str) -> list[Re
             'response_model', 'finish_reason', 'http_status', 'provider_error', 'retryable', 'upstream_code',
             'usage', 'cost', 'cost_unavailable_reason') if k in data})
         record['request_id'] = ':'.join(str(x) for x in key)
+        for field in REQUEST_TRACE_FIELDS:
+            identifier = request_trace_id(data.get(field))
+            if identifier is not None:
+                record[field] = identifier
         record['usage'] = normalized_tokens(data.get('usage'))
         if 'started_at' in record:
             started_at = record['started_at']

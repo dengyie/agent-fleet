@@ -63,6 +63,81 @@ def test_unknown_usage_is_not_zero_and_each_retry_is_recorded():
     assert finished[1]['cost'] is None
 
 
+@pytest.mark.parametrize('stream', [False, True])
+def test_response_request_ids_distinguish_failed_and_successful_attempts(stream):
+    events = []
+    wire = (b'data: {"id":"reply-id","choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+            if stream else json.dumps(payload(id='reply-id')).encode())
+    transport = Transport(
+        TransportResponse(503, {'X-Oneapi-Request-Id': 'gateway-failed',
+            'X-Upstream-Request-Id': 'upstream-failed', 'Set-Cookie': 'private-cookie'}, b'{}'),
+        TransportResponse(200, {'x-oneapi-request-id': 'gateway-success',
+            'x-upstream-request-id': 'upstream-success', 'Authorization': 'private-header'}, wire))
+    result = provider(transport, stream=stream, max_retries=1, sleeper=lambda _: None).complete(
+        [], [], request_observer=lambda kind, data: events.append((kind, data)))
+    finished = [data for kind, data in events if kind == 'provider_request_finished']
+    assert [data.get('gateway_request_id') for data in finished] == ['gateway-failed', 'gateway-success']
+    assert [data.get('upstream_request_id') for data in finished] == ['upstream-failed', 'upstream-success']
+    assert [data['request_index'] for data in finished] == [1, 2]
+    assert result.metadata['response_id'] == 'reply-id'
+    assert result.metadata['gateway_request_id'] == 'gateway-success'
+    assert result.metadata['upstream_request_id'] == 'upstream-success'
+    assert not any(secret in json.dumps(events) for secret in ('private-cookie', 'private-header', 'private-fixture-key'))
+
+
+def test_accepted_stream_failure_keeps_request_ids_without_replay():
+    events, closed = [], []
+    def chunks():
+        try:
+            yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            raise TimeoutError('private failure detail')
+        finally:
+            closed.append(True)
+    transport = Transport(TransportResponse(200, {'X-Oneapi-Request-Id': 'gateway-interrupted',
+        'X-Upstream-Request-Id': 'upstream-interrupted'}, chunks()))
+    with pytest.raises(ProviderError) as caught:
+        provider(transport, stream=True, max_retries=3).complete(
+            [], [], request_observer=lambda kind, data: events.append((kind, data)))
+    finished = events[-1][1]
+    assert finished.get('gateway_request_id') == 'gateway-interrupted'
+    assert finished.get('upstream_request_id') == 'upstream-interrupted'
+    assert caught.value.diagnostic()['gateway_request_id'] == 'gateway-interrupted'
+    assert finished['status'] == 'unknown'
+    assert len(transport.calls) == 1 and closed == [True]
+    assert 'private failure detail' not in json.dumps(events)
+
+
+@pytest.mark.parametrize('bad', [None, True, 7, [], {}, '', 'x' * 129, 'with space',
+    'line\nbreak', 'id,another-id', '<img src=x>', 'https://private.invalid/?key=secret', '非编号'])
+def test_request_ids_reject_nonopaque_values_at_provider_and_projection(bad):
+    from hub.domain.request_metadata import project_requests
+    events = []
+    transport = Transport(TransportResponse(503, {'X-Oneapi-Request-Id': bad,
+        'X-Upstream-Request-Id': bad}, b'{}'))
+    with pytest.raises(ProviderError) as caught:
+        provider(transport, max_retries=0).complete(
+            [], [], request_observer=lambda kind, data: events.append((kind, data)))
+    projected = project_requests([{'payload': {'attempt': 1, 'step': 1, 'request_index': 1,
+        'gateway_request_id': bad, 'upstream_request_id': bad, 'raw_headers': {'secret': 'hidden'}}}], 'unknown')[0]
+    for record in (caught.value.diagnostic(), events[-1][1], projected):
+        assert 'gateway_request_id' not in record and 'upstream_request_id' not in record
+        assert 'raw_headers' not in record
+
+
+def test_valid_request_ids_remain_distinct_from_local_and_response_ids():
+    from hub.domain.request_metadata import freeze_requests, project_requests, thaw_request_summary
+    gateway_id = 'G' * 128
+    upstream_id = 'request_123.ABC-def:456'
+    requests = project_requests([{'payload': {'attempt': 1, 'step': 2, 'request_index': 3,
+        'gateway_request_id': gateway_id, 'upstream_request_id': upstream_id,
+        'response_id': 'reply-id', 'status': 'failed'}}], 'unknown')
+    assert requests[0]['request_id'] == '1:2:3'
+    assert requests[0]['response_id'] == 'reply-id'
+    assert requests[0]['gateway_request_id'] == gateway_id
+    assert requests[0]['upstream_request_id'] == upstream_id
+    assert thaw_request_summary(freeze_requests(requests))['requests'] == requests
+
+
 @pytest.mark.parametrize('bad', [True, -1, 1.5, '7', float('nan'), float('inf'), 10_000_001])
 def test_invalid_tokens_remain_unknown(bad):
     p = provider(Transport(response(payload(usage={'prompt_tokens': bad, 'completion_tokens': 0}))))

@@ -7,6 +7,7 @@
 | 字段/行为 | 精确定义 | 缺失/异常处理 |
 |---|---|---|
 | 请求身份 | Run 内 `attempt:step:request_index`；step 是模型工具循环，request_index 是该步第几次 HTTP 尝试 | 重试逐条显示，不覆盖失败记录；同一 Run 仍禁止不确定结果自动重放 |
+| 网关/上游关联编号 | `gateway_request_id` 来自响应头 `X-Oneapi-Request-Id`，`upstream_request_id` 来自 `X-Upstream-Request-Id`；只在展开的逐次请求详情显示 | 响应头名不区分大小写；仅接受 1–128 位 ASCII 不透明编号（首位字母或数字，其余可含 `._:-`）；缺失/异常省略，不从错误正文猜测，不替换本地请求身份或模型 `response_id` |
 | 模型 | 摘要优先响应中的 model，未返回时显示本次实际请求模型；详情分别标明两者 | 使用冻结配置；修改目录或下次模型选择不会改写历史 |
 | 输入 Token | API `input_tokens` 为含缓存输入；紧凑条仅在两项缓存细分均已知时显示扣除缓存后的输入 | 细分缺失时显示含缓存总输入，悬停标签说明口径；详情始终显示总输入 |
 | 缓存读取 / 缓存写入 | 输入的子集，分别显示 | 未提供为 `—`；不能用 0 补齐；负数/小数/布尔/字符串/非有限数/超限值拒为未知 |
@@ -28,6 +29,8 @@
 `usage.provider_requests` 的预算账本表示成功完成的模型循环请求；全部 HTTP 尝试数看 `request_totals.count`，`requests.length` 仅表示仍可查看的明细条数。二者不应混为一个统计。启用流式请求时，正文增量、耗时、工具和重试状态实时更新；未启用流式时，正文在响应完成后显示。取消在下一个流式检查点或在途网络请求退出后处理，不把本地取消宣称为上游计算已经停止。
 
 此次保留边界审查的根因和最小修复见[持续运行生产 Review](../reviews/2026-11-15-continuous-run-production-review.md)。
+
+网关关联编号随每次 HTTP 尝试独立保留，覆盖显式 HTTP 失败、成功、已接受响应的解析/读取中断，以及已收到错误响应头但错误体读取超时。完成记录通过现有事件、Run/Conversation 投影和终态冻结明细保存；刷新、重启和事件清理后仍能关联网关日志。未收到响应头或取消尚未写入完成记录时，不能补造编号。网关内部的多次渠道尝试仍只对应 AgentFleet 的一次 HTTP 请求；上游编号仅表示网关实际返回的关联编号，不代表内部全部尝试。实现边界见[关联编号计划](../superpowers/plans/2026-11-16-provider-request-correlation.md)。
 
 `provider_config.timeout_s`（默认 60 秒、范围 1–600 秒）是每次 HTTP 尝试的总网络截止时间，覆盖 DNS、逐地址 TCP、代理 CONNECT、TLS、响应头和响应体。持续到达的少量字节不能重置预算；截止中断 socket 并关闭响应与定时器，随后 Run 退出并释放调度槽。所有 3xx（包括相对跳转和 HTTPS 降级）返回 `redirect_rejected`，不能转发 Authorization 或自动重发。生产传输的超时/连接中断不自动重试，因为 POST 可能已被接受；明确 HTTP 429/暂时性错误仍按已有重试配置逐条记录。已接受响应的读取/解析失败始终不重放。
 
@@ -65,6 +68,7 @@ JSON 与 SSE 的费用数字在协议解码时直接进入 `Decimal`，不能先
 | 阶段与流式闭环 | 真实HTTP对端须在客户端观察到思考/首段正文后才发下一块；阶段限频、参数未完整时提示、取消推理即关闭；真实浏览器在EOF前逐段显示、清除旧重试状态并刷新恢复 | `test_real_http_stream_observes_thinking_and_text_before_next_chunk`、`test_reasoning_phase_is_visible_before_text_without_publishing_raw_reasoning`、`test_tool_phase_is_visible_before_arguments_finish`、`test_activity_projection_tracks_request_retry_and_terminal_lifecycle`、`test_thinking_heartbeat_is_throttled_and_phase_changes_are_immediate`、`test_cancel_during_thinking_closes_stream_without_waiting_for_text`、`test_assistant_live_model_stream_retry_and_reload` |
 | worker闭环 | Broker→Factory→worker日志保留类型/位置而无私密正文；超时后释放全局槽，下一Run成功 | `test_worker_secret_failure_retains_safe_cause_chain`、`test_request_timeout_releases_scheduler_slot_and_next_run_executes` |
 | HTTP重试 | 429后成功保存两次开始/结束，各自状态、序号、时间；未隐藏失败 | provider测试 + 真实浏览器测试 |
+| 请求关联 | 503 后成功/重试耗尽、JSON/SSE、流中断和错误体超时保留各次网关/上游编号；真实 HTTP 读取，worker 入库后刷新/重启/清理可查，详情折叠且不改变本地请求身份；非法值及其他 headers 不发布 | `test_response_request_ids_distinguish_failed_and_successful_attempts`、`test_accepted_stream_failure_keeps_request_ids_without_replay`、`test_real_http_retry_retains_each_gateway_request_id`、`test_error_body_timeout_keeps_received_request_ids`、`test_gateway_request_ids_survive_worker_retry_retention_and_restart`、`test_request_ids_reject_nonopaque_values_at_provider_and_projection`、`test_valid_request_ids_remain_distinct_from_local_and_response_ids`、`test_request_metadata_in_real_browser` |
 | 协议和资源 | SSE usage尾帧、UTF-8逐字节切分、末帧无空行、DONE后停止读取并关闭、非完整输出不冒充成功、异常不重放 | `test_sse_*`、`test_stream_failure_is_recorded_closed_and_never_retried`、`test_accepted_nonstream_read_failure_is_closed_and_never_retried` |
 | 存储失败 | start持久化失败时不发请求，不因观察器失败触发网络重试 | `test_request_observer_failure_does_not_dispatch_or_replay` |
 | 时间 | 墙钟只记时间戳，耗时由独立monotonic clock得到2988ms | `test_request_timing_uses_monotonic_clock` |

@@ -86,6 +86,8 @@ function updateRequest(root, request) {
   detail(list, '耗时', request.duration_ms == null ? '等待请求结束后确认' : number(request.duration_ms) + 'ms');
   detail(list, '开始时间', validDate ? date.toLocaleString() + ' · ' + date.toISOString() : '未提供');
   detail(list, 'HTTP 状态', request.http_status == null ? '未收到' : String(request.http_status));
+  if (request.gateway_request_id) detail(list, 'API 网关请求编号', request.gateway_request_id);
+  if (request.upstream_request_id) detail(list, '上游请求编号', request.upstream_request_id);
   detail(list, '响应编号', request.response_id || '未提供');
   detail(list, '结束原因', request.finish_reason || request.provider_error || '未提供');
   detail(list, '流式请求', request.parameters?.stream ? '是' : '否');

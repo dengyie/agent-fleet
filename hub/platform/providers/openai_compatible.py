@@ -29,7 +29,8 @@ from .base import ModelResponse
 from .compatible import DeterministicProvider
 from .observation import RequestObservation
 from fleet_core.request_metadata import (
-    RequestMetadata, RequestObserver, normalized_tokens, request_cost, token_count,
+    REQUEST_TRACE_FIELDS, RequestMetadata, RequestObserver, normalized_tokens, request_cost,
+    request_trace_id, token_count,
 )
 
 
@@ -61,11 +62,13 @@ PROVIDER_ERROR_CODES = frozenset({
 class ProviderError(RuntimeError):
     """Stable, secret-free provider failure."""
 
-    def __init__(self, code: str, *, retryable: bool = False, status: int | None = None):
+    def __init__(self, code: str, *, retryable: bool = False, status: int | None = None,
+                 request_ids: Mapping[str, str] | None = None):
         self.code = code
         self.retryable = bool(retryable)
         self.status = status
         self.upstream_code: str | None = None
+        self.request_ids = dict(request_ids or {})
         super().__init__(code)
 
     def diagnostic(self) -> RequestMetadata:
@@ -75,6 +78,10 @@ class ProviderError(RuntimeError):
             result['provider_status'] = self.status
         if self.upstream_code in UPSTREAM_ERROR_CODES:
             result['upstream_code'] = self.upstream_code
+        for key in REQUEST_TRACE_FIELDS:
+            value = request_trace_id(self.request_ids.get(key))
+            if value is not None:
+                result[key] = value
         return result
 
     def __str__(self) -> str:
@@ -157,6 +164,18 @@ def _transport_error(exc: Exception, *, status: int | None = None) -> ProviderEr
     return ProviderError('timeout' if isinstance(reason, TimeoutError) else 'network_error', status=status)
 
 
+def _response_request_ids(headers: Mapping[str, str]) -> RequestMetadata:
+    fields = {'x-oneapi-request-id': 'gateway_request_id',
+              'x-upstream-request-id': 'upstream_request_id'}
+    result: RequestMetadata = {}
+    for name, value in headers.items():
+        key = fields.get(name.lower())
+        identifier = request_trace_id(value) if key else None
+        if identifier is not None:
+            result[key] = identifier
+    return result
+
+
 class UrllibTransport:
     """No redirect/replay; one deadline covers dispatch through response close."""
 
@@ -177,7 +196,9 @@ class UrllibTransport:
                 payload = response.read(4097)
                 return TransportResponse(response.status, headers_out, payload)
             except (TimeoutError, OSError, URLError, HTTPException) as exc:
-                raise _transport_error(exc, status=response.status) from exc
+                error = _transport_error(exc, status=response.status)
+                error.request_ids = _response_request_ids(headers_out)
+                raise error from exc
             finally:
                 response.close()
         return TransportResponse(response.status, headers_out, _ResponseBody(response))
@@ -629,6 +650,7 @@ class OpenAICompatibleProvider:
             error = ProviderError('request_rejected', status=status)
         else:
             error = ProviderError('provider_http_error', retryable=True, status=status)
+        error.request_ids = _response_request_ids(response.headers)
         if isinstance(response.body, bytes) and len(response.body) <= 4096:
             try:
                 body_error = json.loads(response.body).get('error', {})
@@ -679,17 +701,21 @@ class OpenAICompatibleProvider:
                 raise
             # Once a response body is being consumed, failure is ambiguous and
             # must never automatically replay an already accepted request.
+            request_ids = _response_request_ids(response.headers)
             try:
                 result = self._parse_response(response, tool_names, request_observer, attempt + 1)
             except ProviderError as exc:
+                exc.request_ids.update(request_ids)
                 observation.finish(error=exc, http_status=response.status)
                 raise
             except (TimeoutError, OSError) as exc:
-                error = ProviderError('timeout' if isinstance(exc, TimeoutError) else 'network_error')
+                error = ProviderError('timeout' if isinstance(exc, TimeoutError) else 'network_error',
+                                      request_ids=request_ids)
                 observation.finish(error=error, http_status=response.status)
                 raise error from exc
             finally:
                 _close_body(response.body)
+            result.metadata.update(request_ids)
             observation.finish(metadata={**result.metadata, 'finish_reason': result.finish_reason},
                                http_status=response.status)
             return result

@@ -22,6 +22,8 @@ const [origin, conversation] = process.argv.slice(2);
     const iconSizes = await requests.locator('summary svg').evaluateAll(nodes => nodes.map(n => n.getBoundingClientRect().height));
     assert.ok(iconSizes.length >= 14 && iconSizes.every(height => height > 0 && height <= 24),'metadata icons stay compact: ' + JSON.stringify(iconSizes));
     assert.match(await requests.first().textContent(),/请求失败/);
+    assert.match(await requests.first().locator('.request-fields').textContent(),/API 网关请求编号gateway-retry-1/);
+    assert.doesNotMatch(await group.locator(':scope > summary').textContent(),/gateway-retry/,'correlation details stay folded');
     const active = requests.nth(1);
     await active.locator('summary').focus(); await page.keyboard.press('Enter');
     assert.equal(await active.getAttribute('open'),'');
@@ -41,19 +43,32 @@ const [origin, conversation] = process.argv.slice(2);
     assert.match(await summary.textContent(),/\$0\.000131/);
     assert.deepEqual(await summary.locator('.request-tokens .request-chip-value').allTextContents(),['47','100','10','14','0']);
     assert.match(await active.textContent(),/chatcmpl-metadata/);
+    assert.match(await active.locator('.request-fields').textContent(),/API 网关请求编号gateway-retry-2/);
+    assert.match(await active.locator('.request-fields').textContent(),new RegExp('上游请求编号' + 'u'.repeat(128)));
     assert.match(await active.textContent(),/frozen-model/);
     assert.equal(await page.locator('stream-markdown strong').first().textContent(),'完成','keyed updates retain rendered markdown');
+    if (process.env.FLEET_SCREENSHOTS) {
+      fs.mkdirSync(process.env.FLEET_SCREENSHOTS,{recursive:true});
+      await active.locator('dd').filter({hasText:'gateway-retry-2'}).scrollIntoViewIfNeeded();
+      await page.screenshot({path:process.env.FLEET_SCREENSHOTS+'/request-correlation-desktop.png'});
+    }
     const finalDuration = await active.locator('.request-duration').textContent();
     await page.reload(); await group.waitFor(); await group.locator(':scope > summary').click(); await requests.nth(1).waitFor();
     assert.equal(await requests.nth(1).locator('.request-duration').textContent(),finalDuration);
+    assert.match(await requests.first().textContent(),/gateway-retry-1/);
+    assert.match(await requests.nth(1).textContent(),/gateway-retry-2/);
     for (const reduced of ['no-preference','reduce']) {
       await page.emulateMedia({reducedMotion:reduced,colorScheme:'dark'});
       await page.setViewportSize({width:390,height:844});
+      await page.waitForFunction(() => document.getElementById('sidebar').getBoundingClientRect().right <= 1);
       await requests.nth(1).locator('summary').click();
+      await requests.nth(1).locator('dd').filter({hasText:'gateway-retry-2'}).scrollIntoViewIfNeeded();
       const metrics = await page.evaluate(() => ({overflow:document.documentElement.scrollWidth > innerWidth,
         animation:getComputedStyle(document.querySelectorAll('.request-detail')[1]).animationName}));
       assert.equal(metrics.overflow,false);
       if (reduced === 'reduce') assert.equal(metrics.animation,'none');
+      if (reduced === 'no-preference' && process.env.FLEET_SCREENSHOTS)
+        await page.screenshot({path:process.env.FLEET_SCREENSHOTS+'/request-correlation-mobile.png'});
       await requests.nth(1).evaluate(n => n.open=false);
     }
     // Long and hostile response identifiers remain text, and metadata updates

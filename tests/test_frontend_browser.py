@@ -220,10 +220,11 @@ def test_request_metadata_in_real_browser(tmp_path):
         def request(self, **kwargs):
             self.calls += 1
             if self.calls == 1:
-                return TransportResponse(429, {}, b'{}')
+                return TransportResponse(429, {'X-Oneapi-Request-Id':'gateway-retry-1'}, b'{}')
             entered.set()
             assert released.wait(45)
-            return TransportResponse(200, {}, json.dumps({'id':'chatcmpl-metadata','model':'actual-model',
+            return TransportResponse(200, {'X-Oneapi-Request-Id':'gateway-retry-2',
+                'X-Upstream-Request-Id':'u' * 128}, json.dumps({'id':'chatcmpl-metadata','model':'actual-model',
                 'choices':[{'message':{'content':'**完成**，请求详情已保存。'},'finish_reason':'stop'}],
                 'usage':{'prompt_tokens':147,'completion_tokens':24,'total_tokens':171,
                     'prompt_tokens_details':{'cached_tokens':100,'cache_write_tokens':0},
