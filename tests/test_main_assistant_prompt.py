@@ -165,3 +165,28 @@ def test_prompt_separates_code_delivery_from_unrequested_git_mutations():
     assert "仅在用户或适用仓库约定明确要求时" in prompt
     assert "git add、commit 或 push" in prompt
     assert "不要编造作者身份或修改全局 Git 配置" in prompt
+
+
+def test_prompt_treats_cross_vm_agent_management_as_a_real_scoped_capability():
+    prompt = build_assistant_messages([], model='model', workspace={}, node=None, tools=[])[0]['content']
+    assert '跨 VM 管理其他 Agent 会话是主助手的核心能力之一' in prompt
+    assert 'session.send_message' in prompt and 'session.get_command' in prompt
+    assert 'machine_id' in prompt and '不等于当前工作区的 execution_node_id' in prompt
+    assert '动作回执成功只说明该动作已应用' in prompt
+    assert '远端任务交付还要读取后续会话事件验证' in prompt
+    assert 'adoption.candidates' in prompt and 'adoption.adopt' in prompt
+    assert '等待真实纳管状态后使用 session.*' in prompt
+    assert '必须基于用户明确要求' in prompt
+
+
+def test_main_assistant_owns_project_management_and_discovers_actual_capabilities():
+    prompt = build_assistant_messages([], model='model', workspace={}, node=None, tools=[])[0]['content']
+    assert '全面负责本项目的核心管理 Agent' in prompt
+    for name in ('platform.get_system_info', 'platform.admin_inspect', 'platform.admin_mutate',
+                 'nodes.enroll', 'nodes.workspace_enrollment', 'nodes.remove', 'workflows.templates',
+                 'plugins.catalog', 'usage.summary', 'commands.get'):
+        assert name in prompt
+    assert '系统最高' not in prompt  # Authority is granted by the backend, not invented in text.
+    assert '权限在后端执行' in prompt
+    assert '区分“已保存”和“已生效”' in prompt
+    assert '移除登记不会自动卸载机器上的进程' in prompt

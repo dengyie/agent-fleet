@@ -548,7 +548,7 @@ class AdoptionService:
     # -- source control (Task 10) ---------------------------------------------------
 
     def control(self, session_id: str, *, action: str, reason_code: str,
-                actor: str, payload=None) -> dict:
+                actor: str, payload=None, idempotency_key: str | None = None) -> dict:
         """Issue one fixed source-control action for an ADOPTED session
         (bounded).
 
@@ -585,6 +585,8 @@ class AdoptionService:
                 # resume; never queue a follow-up turn for it.
                 raise AdoptionServiceError("unsupported_action")
             enqueue_kwargs = {"nonce": secrets.token_hex(16)}
+            if idempotency_key is not None:
+                enqueue_kwargs['idempotency_key'] = idempotency_key
             if action in _PAYLOAD_CONTROL_ACTIONS:
                 enqueue_kwargs["payload"] = payload
             envelope = self.supervisor.enqueue(

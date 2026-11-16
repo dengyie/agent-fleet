@@ -201,6 +201,17 @@ class SupervisorService:
             raise SupervisorServiceError(
                 "supervisor_disabled", "supervisor 命令签发未启用", 503)
 
+    def available_actions(self) -> frozenset[str]:
+        """Public capability metadata; never expose keys to tool declarations."""
+        if self.public_key() is None:
+            return frozenset()
+        actions = set(CONTROL_ACTIONS) - {'append_user_turn', 'apply_local_profile'}
+        if self._append_user_turn_enabled:
+            actions.add('append_user_turn')
+        if self._apply_local_profile_enabled:
+            actions.add('apply_local_profile')
+        return frozenset(actions)
+
     def public_key(self) -> bytes | None:
         """32-byte public half of the configured signing key (or None)."""
         if not self._signing_key:

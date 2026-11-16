@@ -104,3 +104,7 @@ class SettingsService:
         validate(value)
         saved = getattr(self.repository, 'upsert_' + singular)(owner, value, expected_digest=body['expected_digest'])
         return {'ok': True, 'value': self.public(kind, saved)}
+
+    def remove_node(self, owner, node_id, expected_digest):
+        self.repository.remove_node(owner, node_id, expected_digest)
+        return {'removed': True, 'node_id': node_id, 'cloud_vm_destroyed': False}

@@ -84,6 +84,8 @@ def create_app(
         workflow_dependencies["task_repository"] = core.task_repository
         wire_workflows(app, config, workflow_dependencies)
     register_http(app, config, platform, sessions, control)
+    from hub.composition.assistant_management import wire_assistant_management
+    wire_assistant_management(app, config, platform, sessions, core, control)
     return app
 
 

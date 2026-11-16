@@ -18,7 +18,7 @@
 
 ## 最新更新
 
-2026-11-17：主助手执行项目文档中的命令时明确按仓库目录解释相对路径，并复用同一修复版本已经完成的等价测试回执，减少错误目录与重复验证造成的等待。完整历史见 [Release Notes](docs/releases/release-notes.md)。
+2026-11-17：管理员主助手接入项目系统总览、统一设置与节点管理，并可跨 VM 读取和控制已纳管 Agent 会话、派发任务及追踪原回执。管理工具复用现有后端服务与权限、版本校验；云 VM 生命周期仍需独立厂商接入。完整历史见 [Release Notes](docs/releases/release-notes.md)。
 
 ## Why Agent Fleet?
 
