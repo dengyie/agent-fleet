@@ -8,6 +8,7 @@ import time
 
 from fleet_core.plugins import PluginError
 from hub.infrastructure.sqlite import connect
+from hub.infrastructure.platform_db_node_auth import node_credential_is_current
 
 
 class PluginRepository:
@@ -61,13 +62,25 @@ class PluginRepository:
     def set_target(self, owner, plugin, node, enabled):
         if type(enabled) is not bool:
             raise PluginError('invalid_plugin_settings')
-        with closing(connect(self.db_path)) as conn:
+        with closing(connect(self.db_path)) as conn, conn:
+            conn.execute('BEGIN IMMEDIATE')
+            if not conn.execute('SELECT 1 FROM nodes WHERE owner_id=? AND node_id=?', (owner, node)).fetchone():
+                raise PluginError('node_not_found')
             conn.execute('INSERT INTO plugin_targets VALUES(?,?,?,?) ON CONFLICT(owner_id,plugin_id,node_id) '
                          'DO UPDATE SET enabled=excluded.enabled', (owner, plugin, node, int(enabled)))
 
-    def report(self, owner, node, offers):
+    @staticmethod
+    def _current_node(conn, owner, node, credential_fingerprint):
+        if credential_fingerprint is not None:
+            return node_credential_is_current(conn, owner=owner, node=node, fingerprint=credential_fingerprint)
+        return conn.execute('SELECT 1 FROM nodes WHERE owner_id=? AND node_id=? AND enabled=1',
+                            (owner, node)).fetchone() is not None
+
+    def report(self, owner, node, offers, *, credential_fingerprint=None):
         with closing(connect(self.db_path)) as conn, conn:
             conn.execute('BEGIN IMMEDIATE')
+            if not self._current_node(conn, owner, node, credential_fingerprint):
+                raise PluginError('node_credential_revoked')
             # One node reports its full current inventory, including removals.
             conn.execute('DELETE FROM plugin_offers WHERE owner_id=? AND node_id=?', (owner, node))
             for offer in offers:
@@ -131,10 +144,14 @@ class PluginRepository:
                     job = receipt['result']
             return {**job, 'node_id': node}
 
-    def observe(self, owner, node, plugin, context, hostname, value, created):
-        with closing(connect(self.db_path)) as conn:
+    def observe(self, owner, node, plugin, context, hostname, value, created, *, credential_fingerprint=None):
+        with closing(connect(self.db_path)) as conn, conn:
+            conn.execute('BEGIN IMMEDIATE')
+            if not self._current_node(conn, owner, node, credential_fingerprint):
+                return False
             conn.execute('INSERT INTO plugin_observations VALUES(?,?,?,?,?,?,?) '
                          'ON CONFLICT(owner_id,node_id,plugin_id,context_id,hostname) DO UPDATE '
                          'SET value=excluded.value,command_created_at=excluded.command_created_at '
                          'WHERE excluded.command_created_at>=plugin_observations.command_created_at',
                          (owner, node, plugin, context, hostname, json.dumps(value), created))
+            return True

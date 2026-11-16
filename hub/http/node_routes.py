@@ -174,7 +174,8 @@ def receipt():
             credential_fingerprint=g.platform_node_credential_fingerprint,
         )
         current_app.extensions['fleet']['services']['plugins'].record_receipt(
-            g.platform_node_owner, g.platform_node_id, row)
+            g.platform_node_owner, g.platform_node_id, row,
+            credential_fingerprint=g.platform_node_credential_fingerprint)
         return jsonify({"ok": True, "receipt": {
             "command_id": row["command_id"], "status": row["status"],
             "result": row.get("result"),
@@ -188,7 +189,8 @@ def report_plugins():
     from hub.http.plugin_routes import invoke, service
     def call():
         body = _body()
-        service().report(g.platform_node_owner, g.platform_node_id, body.get('plugins'))
+        service().report(g.platform_node_owner, g.platform_node_id, body.get('plugins'),
+                         credential_fingerprint=g.platform_node_credential_fingerprint)
         return jsonify(ok=True)
     return invoke(call)
 

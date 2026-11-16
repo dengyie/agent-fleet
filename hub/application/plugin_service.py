@@ -47,13 +47,12 @@ class PluginService:
 
     def set_target(self, owner, plugin_id, node_id, enabled):
         self.registry.get(plugin_id)
-        if not self.platform.get_node(owner, node_id):
-            raise PluginError('node_not_found')
         self.repository.set_target(owner, plugin_id, node_id, enabled)
         return {'node_id': node_id, 'enabled': enabled}
 
-    def report(self, owner, node_id, offers):
-        self.repository.report(owner, node_id, validate_offers(offers, self.registry))
+    def report(self, owner, node_id, offers, *, credential_fingerprint=None):
+        self.repository.report(owner, node_id, validate_offers(offers, self.registry),
+                               credential_fingerprint=credential_fingerprint)
 
     def targets(self, owner, plugin_id):
         plugin = self.registry.get(plugin_id)
@@ -151,7 +150,7 @@ class PluginService:
                     owner, plugin_id, node_id=node_id, context_id=context_id, hostname=hostname)],
                 'login': self.repository.current_login(owner, plugin_id, node_id, context_id, hostname) if scoped else None}
 
-    def record_receipt(self, owner, node, row):
+    def record_receipt(self, owner, node, row, *, credential_fingerprint=None):
         if not row['action'].startswith('plugin.') or row['status'] != 'succeeded':
             return
         _, plugin_id, _ = row['action'].split('.', 2)
@@ -162,4 +161,5 @@ class PluginService:
         args = row['arguments']
         self.repository.observe(owner, node, plugin_id, args['context_id'], args['hostname'],
                                 {**auth, 'context_id': args['context_id'], 'hostname': args['hostname'],
-                                 'observed_at': row['updated_at']}, row['created_at'])
+                                 'observed_at': row['updated_at']}, row['created_at'],
+                                credential_fingerprint=credential_fingerprint)

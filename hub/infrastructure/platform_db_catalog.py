@@ -181,7 +181,8 @@ class PlatformCatalogMixin:
         """Delete an explicitly disabled, unreferenced catalog entry atomically.
 
         Historical command receipts remain intact. Capability bindings/policies,
-        configured workspace/default references and live commands block removal.
+        configured workspace/default/service/plugin references and live commands
+        block removal. Derived plugin inventory is scoped to this enrollment.
         """
         from contextlib import closing
         owner_id = validate_owner_id(owner_id)
@@ -212,6 +213,16 @@ class PlatformCatalogMixin:
                         'SELECT 1 FROM capability_node_policies WHERE owner_id=? AND node_id=?',
                         (owner_id, node_id)).fetchone():
                     raise PlatformRepositoryError('node_in_use')
+                for table, condition in (('service_definitions', ''), ('plugin_targets', ' AND enabled=1')):
+                    if table in tables and conn.execute(
+                            f'SELECT 1 FROM {table} WHERE owner_id=? AND node_id=?{condition} LIMIT 1',
+                            (owner_id, node_id)).fetchone():
+                        raise PlatformRepositoryError('node_in_use')
+                # Keep command history; these tables are current bindings/cache,
+                # never evidence that a replacement VM has the same environment.
+                for table in ('plugin_targets', 'plugin_offers', 'plugin_observations'):
+                    if table in tables:
+                        conn.execute(f'DELETE FROM {table} WHERE owner_id=? AND node_id=?', (owner_id, node_id))
                 conn.execute('DELETE FROM node_credentials WHERE owner_id=? AND node_id=?', (owner_id, node_id))
                 conn.execute('DELETE FROM nodes WHERE owner_id=? AND node_id=?', (owner_id, node_id))
                 conn.commit()
