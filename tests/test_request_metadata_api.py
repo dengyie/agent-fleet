@@ -166,7 +166,10 @@ def test_stream_error_preserves_partial_history_without_dispatching_tool(tmp_pat
     assert before['requests'][0]['provider_error'] == 'provider_stream_error'
     assert before['requests'][0]['gateway_request_id'] == 'gateway-stream-error'
     assert before['requests'][0]['status'] == 'unknown' and before['requests'][0]['http_status'] == 200
-    assert len(calls) == 1 and closed == [True]
+    assert len(calls) == 4 and closed == [True] * 4
+    assert before['request_totals']['count'] == 4
+    assert before['request_totals']['states'] == {'unknown': 4}
+    assert before['request_totals']['cost_known'] == 0
     events = repo.list_run_events(OWNER, run['run_id'])['events']
     assert not any(e['kind'] in {'tool_call', 'tool_result', 'assistant_response'} for e in events)
     assert not (tmp_path / 'work' / 'must-not-write.txt').exists()

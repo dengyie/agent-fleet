@@ -536,10 +536,26 @@ def _json_payload(body: bytes) -> dict[str, Any]:
     return payload
 
 
+def _response_chunks(body: bytes | Iterable[bytes]) -> Iterator[bytes]:
+    """Translate read failures only; parser/observer exceptions are not IO."""
+    if isinstance(body, (bytes, bytearray)):
+        yield bytes(body)
+        return
+    chunks = iter(body)
+    while True:
+        try:
+            chunk = next(chunks)
+        except StopIteration:
+            return
+        except (TimeoutError, OSError, URLError, HTTPException) as exc:
+            raise _transport_error(exc) from exc
+        yield chunk
+
+
 def _sse_payloads(body: bytes | Iterable[bytes], *,
                   on_chunk_consumed: Callable[[], None] | None = None) -> Iterator[dict[str, Any] | None]:
     """Decode bounded SSE frames, including arbitrary UTF-8/TCP boundaries."""
-    chunks = [bytes(body)] if isinstance(body, (bytes, bytearray)) else body
+    chunks = _response_chunks(body)
     decoder = codecs.getincrementaldecoder('utf-8')()
     buffer = ''
     total_bytes = events = 0
@@ -700,9 +716,6 @@ class OpenAICompatibleProvider:
                 request_ids = _response_request_ids(response.headers)
                 try:
                     result = self._parse_response(response, tool_names, request_observer, attempt + 1)
-                except (TimeoutError, OSError) as exc:
-                    raise ProviderError('timeout' if isinstance(exc, TimeoutError) else 'network_error',
-                                        retryable=True) from exc
                 finally:
                     _close_body(response.body)
             except ProviderError as exc:
@@ -739,7 +752,7 @@ class OpenAICompatibleProvider:
         raw = response.body
         if not isinstance(raw, (bytes, bytearray)):
             pieces, total = [], 0
-            for chunk in raw:
+            for chunk in _response_chunks(raw):
                 if not isinstance(chunk, (bytes, bytearray)):
                     raise ProviderError('invalid_response')
                 total += len(chunk)

@@ -82,7 +82,7 @@ def test_request_start_for_retry_replaces_only_its_incomplete_draft():
     assert [s['text'] for s in progress['segments']] == ['earlier', 'recovered']
 
 
-@pytest.mark.parametrize('failure', ['timeout', 'network', 'eof', 'transient-frame'])
+@pytest.mark.parametrize('failure', ['timeout', 'network', 'http-read', 'url-timeout', 'eof', 'transient-frame'])
 def test_exhausted_incomplete_generations_close_each_body_and_never_execute_tool(failure):
     from hub.platform.providers.openai_compatible import OpenAICompatibleProvider, TransportResponse
     from hub.platform.runtime.native import ProviderBoundaryUnknown
@@ -97,6 +97,12 @@ def test_exhausted_incomplete_generations_close_each_body_and_never_execute_tool
                 raise TimeoutError('private-error')
             if failure == 'network':
                 raise OSError('private-error')
+            if failure == 'http-read':
+                from http.client import IncompleteRead
+                raise IncompleteRead(b'private-error')
+            if failure == 'url-timeout':
+                from urllib.error import URLError
+                raise URLError(TimeoutError('private-error'))
             if failure == 'transient-frame':
                 yield b'data: {"error":{"code":"system_cpu_overloaded","message":"private-error"}}\n\n'
         finally:
@@ -148,3 +154,77 @@ def test_cancellation_after_partial_generation_closes_body_and_prevents_retry():
     result = NativeAssistantRuntime(p, None).run(run_id='run-cancelled', owner_id='owner', epoch=1,
         messages=[], tools=[], event_sink=observe, should_cancel=lambda: cancelled[0])
     assert result.state == 'cancelled' and len(transport.calls) == 1 and closed == [True]
+
+
+def test_recovered_generation_keeps_unknown_attempt_cost_and_survives_history_restart(tmp_path):
+    from hub.bootstrap import create_app
+    from hub.config import FleetConfig
+    from hub.platform.providers.openai_compatible import OpenAICompatibleProvider, TransportResponse
+    from tests.test_platform_provider import FakeTransport
+    from tests.test_request_metadata_api import setup, OWNER
+
+    app, _, client, conversation, run = setup(tmp_path)
+
+    def interrupted():
+        yield b'data: {"choices":[{"delta":{"content":"abandoned-draft"}}]}\n\n'
+        raise TimeoutError()
+
+    transport = FakeTransport([
+        TransportResponse(200, {'X-Oneapi-Request-Id': 'interrupted'}, interrupted()),
+        TransportResponse(200, {'X-Oneapi-Request-Id': 'recovered'}, [
+            b'data: {"choices":[{"delta":{"content":"recovered-answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"cost":0.001}}\n\ndata: [DONE]\n\n'])])
+    worker = app.extensions['fleet']['services']['platform_worker']
+    worker.provider_factory = lambda _: OpenAICompatibleProvider(model='fixture', endpoint='http://fixture',
+        api_key='private', transport=transport, stream=True, max_retries=2, sleeper=lambda _: None)
+    assert worker.run_once(OWNER)['state'] == 'succeeded'
+    value = client.get('/api/platform/v1/runs/' + run['run_id']).get_json()
+    assert [r['status'] for r in value['requests']] == ['unknown', 'succeeded']
+    assert value['requests'][0]['cost'] is None
+    assert value['requests'][0]['usage']['input_tokens'] is None
+    assert value['request_totals']['cost_known'] == 1 and value['request_totals']['count'] == 2
+    assert value['request_totals']['cost']['amount'] == '0.001'
+    assert value['result_text'] == 'recovered-answer'
+    assert value['progress']['segments'][0]['text'] == 'recovered-answer'
+    restarted = create_app(FleetConfig.from_root(tmp_path, dev_operator=OWNER, platform_enabled=True))
+    history = restarted.test_client().get('/api/platform/v1/conversations/' + conversation['conversation_id']).get_json()['conversation']['runs'][0]
+    assert history['requests'] == value['requests'] and history['request_totals'] == value['request_totals']
+    assert history['progress'] == value['progress']
+
+
+def test_retry_that_produces_no_new_text_preserves_previous_partial_draft():
+    progress = project_progress({}, 'assistant_text_delta', {'step': 2, 'text': 'retained', 'offset': 0}, 1)
+    progress = project_progress(progress, 'provider_request_started', {'step': 2, 'request_index': 2}, 2)
+    progress = project_progress(progress, 'provider_request_finished', {'step': 2, 'request_index': 2, 'status': 'unknown'}, 3)
+    progress = project_progress(progress, 'run_unknown', {'step': 2}, 4)
+    assert progress['segments'][0]['text'] == 'retained'
+
+
+@pytest.mark.parametrize('event_kind', ['assistant_text_delta', 'assistant_activity'])
+@pytest.mark.parametrize('failure_type', [OSError, TimeoutError])
+def test_progress_storage_failure_is_not_retried_as_model_transport(event_kind, failure_type):
+    from hub.platform.providers.openai_compatible import OpenAICompatibleProvider, TransportResponse
+    from tests.test_platform_provider import FakeTransport
+
+    closed, events = [], []
+    failure = failure_type('event storage unavailable')
+
+    def body():
+        try:
+            yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+        finally:
+            closed.append(True)
+
+    def observe(kind, payload):
+        events.append((kind, payload))
+        if kind == event_kind:
+            raise failure
+
+    transport = FakeTransport([TransportResponse(200, {}, body()) for _ in range(2)])
+    p = OpenAICompatibleProvider(model='test', endpoint='http://fixture', api_key='private',
+        transport=transport, stream=True, max_retries=1, sleeper=lambda _: None)
+    with pytest.raises(failure_type) as caught:
+        p.complete([], [], request_observer=observe)
+    assert caught.value is failure
+    assert len(transport.calls) == 1 and closed == [True]
+    assert not any(kind == 'provider_retry_scheduled' for kind, _ in events)
