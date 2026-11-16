@@ -73,6 +73,95 @@ class AccountClient:
         except (ValueError, UnicodeError):
             raise AcceptanceFailure('invalid_response') from None
 
+    def observe_live_run(self, run_id, *, deadline):
+        """Observe the same finite-lived SSE snapshots used by the UI.
+
+        Only a received nonterminal snapshot with unfinished text proves live
+        output. Reconnecting observes the original Run; it never resubmits it.
+        """
+        observed = {'streamed_progress_before_terminal': False,
+                    'activity_phase_seen': False, 'explained_tool_call_seen': False}
+        cursor = 0
+        while True:
+            budget = min(30.0, remaining(deadline))
+            headers = {'User-Agent': 'agent-fleet/1.0', 'Accept': 'text/event-stream'}
+            if self.cookie:
+                headers['Cookie'] = self.cookie
+            request = Request(self.endpoint + '/api/platform/v1/runs/'
+                              + quote(run_id, safe='') + '/stream?after=' + str(cursor), headers=headers)
+            try:
+                with open_http(request, timeout_s=budget, use_proxy=False) as response:
+                    if response.status != 200:
+                        raise AcceptanceFailure('unexpected_http_status', response.status)
+                    if response.headers.get('Content-Type', '').split(';')[0] != 'text/event-stream':
+                        raise AcceptanceFailure('invalid_stream_response')
+                    buffer = b''
+                    while True:
+                        chunk = response.read1(8192)
+                        remaining(deadline)
+                        if not chunk:
+                            if buffer.strip():
+                                raise AcceptanceFailure('invalid_stream_response')
+                            break
+                        buffer = (buffer + chunk).replace(b'\r\n', b'\n')
+                        snapshots = []
+                        while b'\n\n' in buffer:
+                            frame, buffer = buffer.split(b'\n\n', 1)
+                            if len(frame) > MAX_BYTES:
+                                raise AcceptanceFailure('response_too_large')
+                            event = None
+                            data = []
+                            for line in frame.decode('utf-8').split('\n'):
+                                field, _, value = line.partition(':')
+                                value = value.removeprefix(' ')
+                                if field == 'id':
+                                    if not value.isascii() or not value.isdecimal():
+                                        raise AcceptanceFailure('invalid_stream_response')
+                                    cursor = max(cursor, int(value))
+                                elif field == 'event':
+                                    event = value
+                                elif field == 'data':
+                                    data.append(value)
+                            if event != 'run':
+                                continue
+                            run = json.loads('\n'.join(data))
+                            if not isinstance(run, dict) or run.get('run_id') != run_id:
+                                raise AcceptanceFailure('invalid_stream_response')
+                            snapshots.append(run)
+                        if len(buffer) > MAX_BYTES:
+                            raise AcceptanceFailure('response_too_large')
+                        # Coalesced completion frames do not prove live delivery.
+                        if any(run.get('state') in ('succeeded', 'failed', 'cancelled', 'unknown')
+                               for run in snapshots):
+                            return observed
+                        for run in snapshots:
+                            state = run.get('state')
+                            progress = run.get('progress', {})
+                            if not isinstance(progress, dict) or not isinstance(progress.get('segments', []), list):
+                                raise AcceptanceFailure('invalid_stream_response')
+                            if state not in ('queued', 'running', 'waiting_node', 'waiting_approval', 'waiting_task', 'cancelling'):
+                                raise AcceptanceFailure('invalid_stream_response')
+                            activity = progress.get('activity') or {}
+                            if isinstance(activity, dict) and activity.get('phase') in {'thinking', 'responding', 'tool_call'}:
+                                observed['activity_phase_seen'] = True
+                            for segment in progress.get('segments', []):
+                                if not isinstance(segment, dict):
+                                    continue
+                                if segment.get('kind') == 'text' and not segment.get('complete') \
+                                        and isinstance(segment.get('text'), str) and segment['text']:
+                                    observed['streamed_progress_before_terminal'] = True
+                                if segment.get('kind') == 'tool' and isinstance(segment.get('title'), str) \
+                                        and segment['title'].strip():
+                                    observed['explained_tool_call_seen'] = True
+            except AcceptanceFailure:
+                raise
+            except (OSError, URLError, http.client.HTTPException):
+                remaining(deadline)
+                raise AcceptanceFailure('transport_unknown') from None
+            except (ValueError, UnicodeError):
+                raise AcceptanceFailure('invalid_stream_response') from None
+            time.sleep(min(0.25, remaining(deadline)))
+
 
 def check_model(client, model, workspace, timeout, *, require_streaming=False):
     row = {'model_profile_id': model, 'status': 'failed'}
@@ -112,6 +201,11 @@ def check_model(client, model, workspace, timeout, *, require_streaming=False):
         streamed_progress_before_terminal = False
         activity_phase_seen = False
         explained_tool_call_seen = False
+        if require_streaming and callable(getattr(client, 'observe_live_run', None)):
+            live = client.observe_live_run(run_id, deadline=deadline)
+            streamed_progress_before_terminal = live['streamed_progress_before_terminal']
+            activity_phase_seen = live['activity_phase_seen']
+            explained_tool_call_seen = live['explained_tool_call_seen']
         terminal_event_seen = False
         while True:
             run = request('/api/platform/v1/runs/' + quote(run_id, safe=''))

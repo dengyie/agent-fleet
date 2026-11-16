@@ -8,6 +8,201 @@ from support.strict_provider import StrictProvider
 from tools.platform.acceptance_check import main
 
 
+@pytest.mark.parametrize('terminal_only', [False, True])
+@pytest.mark.parametrize('chunk_size', [7, 8192])
+def test_live_observer_requires_partial_text_in_a_received_nonterminal_snapshot(monkeypatch, terminal_only, chunk_size):
+    import time
+
+    import tools.platform.acceptance_check as acceptance
+
+    states = [{
+        'run_id': 'run-live', 'state': 'running',
+        'progress': {'activity': {'phase': 'responding'}, 'segments': [
+            {'kind': 'text', 'text': '正在检查目录', 'complete': False},
+            {'kind': 'tool', 'title': '列出目录 · .'},
+        ]},
+    }, {'run_id': 'run-live', 'state': 'succeeded', 'progress': {'segments': [
+        {'kind': 'text', 'text': '目录检查完成', 'complete': True},
+    ]}}]
+    if terminal_only:
+        states = states[1:]
+    payload = ''.join('id: ' + str(i) + '\nevent: run\ndata: '
+                      + json.dumps(row, ensure_ascii=False) + '\n\n'
+                      for i, row in enumerate(states, 1)).encode('utf-8')
+    calls = []
+
+    class Response:
+        status = 200
+        closed = False
+
+        def __init__(self):
+            self.headers = {'Content-Type': 'text/event-stream; charset=utf-8'}
+            # Split JSON, frame separators and multibyte characters.
+            self.chunks = iter(payload[i:i + chunk_size] for i in range(0, len(payload), chunk_size))
+
+        def read1(self, size):
+            return next(self.chunks, b'')
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.closed = True
+
+    response = Response()
+
+    def open_stream(request, **kwargs):
+        calls.append(request)
+        return response
+
+    monkeypatch.setattr(acceptance, 'open_http', open_stream)
+    client = acceptance.AccountClient('https://example.test')
+    client.cookie = 'session=private'
+    observed = client.observe_live_run('run-live', deadline=time.monotonic() + 5)
+
+    live = not terminal_only and chunk_size == 7
+    assert observed == {
+        'streamed_progress_before_terminal': live,
+        'activity_phase_seen': live,
+        'explained_tool_call_seen': live,
+    }
+    assert len(calls) == 1
+    assert calls[0].get_method() == 'GET'
+    assert calls[0].full_url.endswith('/runs/run-live/stream?after=0')
+    assert calls[0].get_header('Cookie') == 'session=private'
+    assert response.closed
+
+
+def test_live_observer_reconnects_real_http_stream_with_cursor_and_cookie():
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    from tools.platform.acceptance_check import AccountClient
+
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            requests.append((self.path, self.headers.get('Cookie')))
+            first = len(requests) == 1
+            run = {'run_id': 'run-live', 'state': 'running' if first else 'succeeded',
+                   'progress': {'activity': {'phase': 'responding'}, 'segments': [
+                       {'kind': 'text', 'text': '正在检查目录', 'complete': not first},
+                       {'kind': 'tool', 'title': '列出目录 · .'},
+                   ]}}
+            body = (': heartbeat\r\n\r\nid: ' + ('7' if first else '8')
+                    + '\r\nevent: run\r\ndata: ' + json.dumps(run, ensure_ascii=False) + '\r\n\r\n').encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+            self.close_connection = True
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = AccountClient('http://127.0.0.1:' + str(server.server_port))
+        client.cookie = 'session=private-test-cookie'
+        observed = client.observe_live_run('run-live', deadline=time.monotonic() + 5)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+    assert observed == {'streamed_progress_before_terminal': True,
+                        'activity_phase_seen': True, 'explained_tool_call_seen': True}
+    assert requests == [('/api/platform/v1/runs/run-live/stream?after=0', client.cookie),
+                        ('/api/platform/v1/runs/run-live/stream?after=7', client.cookie)]
+    assert not thread.is_alive()
+
+
+@pytest.mark.parametrize('payload,error', [
+    (b'event: run\ndata: {bad json}\n\n', 'invalid_stream_response'),
+    (b'event: run\ndata: {"run_id":"another","state":"running"}\n\n', 'invalid_stream_response'),
+    (b'event: run\ndata: {"run_id":"run-live","state":"invented"}\n\n', 'invalid_stream_response'),
+    (b'event: run\ndata: {"run_id":"run-live","state":"running","progress":[]}\n\n',
+     'invalid_stream_response'),
+    (b'event: run\ndata: {"run_id":"run-live","state":"running","progress":{"segments":{}}}\n\n',
+     'invalid_stream_response'),
+    (b'id: invalid\nevent: run\ndata: {}\n\n', 'invalid_stream_response'),
+    (b'event: run\ndata: {', 'invalid_stream_response'),
+    (b'event: run\ndata: ' + b'x' * (2 * 1024 * 1024 + 1), 'response_too_large'),
+])
+def test_live_observer_rejects_invalid_stream_and_closes_without_replay(monkeypatch, payload, error):
+    import io
+    import time
+
+    import tools.platform.acceptance_check as acceptance
+
+    class Response(io.BytesIO):
+        status = 200
+        headers = {'Content-Type': 'text/event-stream'}
+
+    response = Response(payload)
+    requests = []
+
+    def open_stream(request, **kwargs):
+        requests.append(request)
+        return response
+
+    monkeypatch.setattr(acceptance, 'open_http', open_stream)
+    with pytest.raises(acceptance.AcceptanceFailure) as caught:
+        acceptance.AccountClient('https://example.test').observe_live_run(
+            'run-live', deadline=time.monotonic() + 5)
+
+    assert caught.value.code == error
+    assert response.closed
+    assert len(requests) == 1 and requests[0].get_method() == 'GET'
+
+
+def test_live_observer_deadline_interrupts_real_silent_stream_without_replay():
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Event, Thread
+
+    from tools.platform.acceptance_check import AcceptanceFailure, AccountClient
+
+    requests = []
+    stop = Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            requests.append(self.path)
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.end_headers()
+            self.wfile.flush()
+            stop.wait(5)
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    started = time.monotonic()
+    try:
+        client = AccountClient('http://127.0.0.1:' + str(server.server_port))
+        with pytest.raises(AcceptanceFailure) as caught:
+            client.observe_live_run('run-live', deadline=started + 0.3)
+        assert caught.value.code == 'acceptance_timeout'
+        assert time.monotonic() - started < 3
+    finally:
+        stop.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+    assert requests == ['/api/platform/v1/runs/run-live/stream?after=0']
+
+
 @pytest.fixture
 def release_target(tmp_path, monkeypatch):
     monkeypatch.setenv('FLEET_FULL_FLOW_SECRET', 'full-flow-provider-secret')

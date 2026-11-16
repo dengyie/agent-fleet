@@ -111,3 +111,24 @@ def test_prompt_distinguishes_platform_use_and_development_and_resumes_real_work
     assert "不存在可查询的后台任务时" in prompt
     assert "不得声称已委派其他 Agent" in prompt
     assert "健康检查通过不等于功能验收通过" in prompt
+
+
+def test_prompt_requires_environment_evidence_and_meaningful_test_execution():
+    prompt = build_assistant_messages(
+        [], model="model", workspace={}, node=None, tools=[],
+    )[0]["content"]
+
+    assert "不猜测工作区绝对路径" in prompt
+    assert "当前工作目录" in prompt
+    assert "实际执行数量" in prompt
+    assert "零项测试不能证明验证通过" in prompt
+    assert "输出截断" in prompt
+
+
+def test_prompt_does_not_treat_bounded_conversation_list_as_complete_inventory():
+    prompt = build_assistant_messages(
+        [], model="model", workspace={}, node=None, tools=[],
+    )[0]["content"]
+
+    assert "用户已给出明确会话 ID" in prompt
+    assert "有限列表未命中不能证明会话不存在" in prompt

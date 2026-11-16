@@ -27,9 +27,6 @@ class ToolBroker:
         "conversation.list", "conversation.rename", "conversation.archive",
         "conversation.restore",
     })
-    LOCAL_ONLY_TOOLS = CONVERSATION_TOOLS | frozenset({
-        "platform.get_defaults", "platform.update_defaults", "service.request_action",
-    })
     TOOLS = frozenset({
         "workspace.list", "workspace.read", "workspace.write", "workspace.exec",
         "workspace.artifact", "fleet.list_services", "service.get_health",

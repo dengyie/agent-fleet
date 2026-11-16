@@ -33,8 +33,7 @@ merged to `main`, the workflow can run MODEL-LIVE only by manual dispatch. It
 uses the isolated GitHub environment
 `live-acceptance`, which is restricted to the `main` branch; it does not run on
 pull requests or every push, and it does not use the `production` deployment
-secrets. The environment currently has no acceptance values configured. Set
-these values before dispatch:
+secrets. Configure and verify these values in the environment before dispatch:
 
 | Kind | Name | Purpose |
 |---|---|---|
@@ -64,14 +63,16 @@ with inbox access, a configured test Node, and a separate staging target. The
 existing `CI` workflow continues to run tests on pull requests and to deploy
 only from `main`; a deployment success is not substituted for those checks.
 
-只验证明确指定的模型时重复 `--model PROFILE_ID`，不要同时传 `--all-models`；线上验收还需传 `--require-streaming`，以确认非终态期间收到文本增量和阶段事件。每个 Run 期间按事件游标增量读取公开事件，只在终态后查询事件不能证明实时反馈。profile 未启用时记为单项失败并继续后续 profile，不能阻断兜底模型。`--timeout` 默认每模型 150 秒，范围 1–600 秒；同一截止时间覆盖创建对话、提交、状态轮询、事件读取和对话恢复。DNS 等待、逐地址 TCP 连接、TLS 握手、响应头和响应体读取均使用剩余预算，缓慢传输不能重置预算；截止后返回成功终态仍视为未确认。与 provider 共用有界 HTTP 截止机制；同一 host/port 的阻塞 DNS 查询共享一个后台解析线程，全进程最多 8 个查询，等待容量也计入预算。超时后的 DNS 结果不能建立连接或发送请求；连续验收失败不会不断新增线程。验收客户端仍直连配置的 origin，不使用环境代理。登录、目录预检和最终退出校验独立于每模型预算。选项全部显式提供；该工具不从源码读取固定管理员密码，不推断生产域名，也不配置模型、用户或工作区。
+只验证明确指定的模型时重复 `--model PROFILE_ID`，不要同时传 `--all-models`；线上验收还需传 `--require-streaming`。客户端先读取与 UI 相同的 Run SSE 快照，只有收到非终态、尚未完成的文本段，才计为流式文本证据；同一读取块中合并送达的终态和历史快照不计为实时反馈。有限生命周期的 SSE 正常关闭后，使用事件游标重连同一 Run，不重新提交任务。随后按游标读取公开事件并核对工具回执、最终回复和对话恢复；只在终态后查询历史事件不能证明实时反馈。
+
+profile 未启用时记为单项失败并继续后续 profile，不能阻断兜底模型。`--timeout` 默认每模型 150 秒，范围 1–600 秒；同一截止时间覆盖创建对话、提交、SSE 观察、状态轮询、事件读取和对话恢复。单次 SSE 连接最多使用 30 秒剩余预算，响应类型、Run ID、快照结构和单帧大小均被校验，异常或截止时关闭连接。DNS 等待、逐地址 TCP 连接、TLS 握手、响应头和响应体读取均使用剩余预算，缓慢传输不能重置预算；截止后返回成功终态仍视为未确认。与 provider 共用有界 HTTP 截止机制；同一 host/port 的阻塞 DNS 查询共享一个后台解析线程，全进程最多 8 个查询，等待容量也计入预算。超时后的 DNS 结果不能建立连接或发送请求；连续验收失败不会不断新增线程。验收客户端仍直连配置的 origin，不使用环境代理。登录、目录预检和最终退出校验独立于每模型预算。选项全部显式提供；该工具不从源码读取固定管理员密码，不推断生产域名，也不配置模型、用户或工作区。
 
 每个模型必须同时满足：
 
 1. release manifest 与指定版本相符；账密登录、服务端会话校验和 readiness 成功。
 2. 指定模型/工作区确实在当前账号目录中。
 3. 创建 Run 后轮询终态为 `succeeded`；202 接收或 `running` 均不算通过。
-4. Run 非终态期间至少收到一段真实 `assistant_text_delta` 和可见 activity 阶段；模型原始思维链不作为验收内容。
+4. Run 非终态期间，SSE 快照中收到尚未完成的文本段，或状态查询前后均未完成时收到真实 `assistant_text_delta`；同时有可见 activity 阶段。模型原始思维链不作为验收内容。
 5. `tool_call` 带有面向用户的操作标题；真实 `workspace.list` 的 tool_result 为 succeeded，且没有其他工具调用结果。
 6. 最终回复非空，重新读取对话时 Run、结果和终态一致。
 7. 退出后，用刚才的旧 Cookie 访问会话接口必须返回 401。

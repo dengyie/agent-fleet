@@ -32,6 +32,7 @@ from hub.application.platform_memory_context_service import (
     build_context_message,
 )
 from hub.platform.tool_broker import ToolBroker
+from hub.platform.assistant_tool_broker import AssistantToolBroker
 from hub.platform.remote_tool_broker import RemoteToolBroker
 from fleet_core.web_agent_contract import WEB_AGENT_TOOLS
 from hub.domain.platform import ACCEPTANCE_TOOL_POLICY
@@ -252,7 +253,8 @@ class LocalRunWorkerService:
                 raise RuntimeError("tool_policy_unavailable")
             allowed_tools = frozenset() if summary_mode else (frozenset({"workspace.list"}) if policy == ACCEPTANCE_TOOL_POLICY else None)
             remote_allowed_tools = (allowed_tools if allowed_tools is not None else
-                                    ToolBroker.TOOLS - ToolBroker.LOCAL_ONLY_TOOLS)
+                                    ToolBroker.TOOLS & NODE_TOOLS)
+            hub_allowed_tools = set()
             workspace_id = config.get("workspace_id") or claim.get("conversation_workspace_id")
             if not workspace_id:
                 raise RuntimeError("workspace_unavailable")
@@ -351,6 +353,16 @@ class LocalRunWorkerService:
                               if agent_caps.get(name) is True}
                 remote_allowed_tools &= executable | BROWSER_TOOLS
                 remote_web_agent_enabled = bool(remote_allowed_tools & WEB_AGENT_TOOLS)
+                if policy is None and native_memory is None:
+                    if self.defaults_service is not None:
+                        hub_allowed_tools.update({'platform.get_defaults', 'platform.update_defaults'})
+                    if self.conversation_service is not None:
+                        hub_allowed_tools.update(ToolBroker.CONVERSATION_TOOLS)
+                    if self.diagnostics is not None:
+                        hub_allowed_tools.update({'fleet.list_services', 'service.get_health',
+                                                  'service.read_logs', 'incident.get_evidence'})
+                    if self.service_actions is not None:
+                        hub_allowed_tools.add('service.request_action')
             if remote and self.browser_enabled:
                 node = self.repository.get_node(claim["owner_id"], execution_node_id)
                 capabilities = node.get("capabilities") if isinstance(node, dict) else {}
@@ -427,6 +439,14 @@ class LocalRunWorkerService:
                     browser_allowed_origins=self.browser_allowed_origins,
                     browser_resolver=self.browser_resolver,
                 )
+                if hub_allowed_tools:
+                    broker = AssistantToolBroker(
+                        ToolBroker(None, leases, resource_id=resource_id,
+                            lease_owner_id=lease_owner, allowed_tools=hub_allowed_tools,
+                            defaults_service=self.defaults_service,
+                            conversation_service=self.conversation_service,
+                            diagnostics=self.diagnostics, service_actions=self.service_actions),
+                        broker, hub_tools=hub_allowed_tools)
             else:
                 broker = ToolBroker(
                     backend, leases, resource_id=resource_id,
@@ -469,10 +489,10 @@ class LocalRunWorkerService:
                 })
                 messages.insert(0, context_message)
             tools = ToolBroker.tool_definitions(
-                remote_allowed_tools if remote else allowed_tools,
+                remote_allowed_tools | hub_allowed_tools if remote else allowed_tools,
                 browser_enabled=remote_browser_enabled, browser_submit_enabled=remote_submit_enabled,
                 web_agent_enabled=remote_web_agent_enabled,
-                service_actions_enabled=not summary_mode and not remote and self.service_actions is not None,
+                service_actions_enabled=not summary_mode and self.service_actions is not None,
                 mcp_catalog=self.mcp_catalog if not remote else None,
                 mcp_enabled=self.mcp_enabled if not remote and not summary_mode else False,
                 mcp_owner_id=claim["owner_id"] if not remote else None,
