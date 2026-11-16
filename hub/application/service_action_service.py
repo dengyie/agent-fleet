@@ -117,7 +117,7 @@ class ServiceActionService:
                 )
                 return {"ok": True, "approval_required": True,
                         "grant": self._public_grant(grant)}
-            command_id = "cmd_" + secrets.token_urlsafe(18)
+            command_id = "cmd_" + secrets.token_hex(18)
             command = PlatformCommand.create(
                 command_id=command_id, target_node=service["node_id"],
                 action=f"service.{action}", resource_id=service["service_id"],

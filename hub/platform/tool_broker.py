@@ -134,7 +134,8 @@ class ToolBroker:
      {'name': 'service.read_logs',
       'risk': 'read_only',
       'scope_kind': 'service',
-      'description': 'Read bounded logs for a registered service.',
+      'description': 'Read bounded, redacted logs for a registered service using its configured Node '
+                     'or installed diagnostic reader. Node reads wait for the original command receipt.',
       'parameters': {'type': 'object',
                      'properties': {'service_id': {'type': 'string',
                                                    'description': 'ID returned by fleet.list_services.'},
@@ -246,7 +247,7 @@ class ToolBroker:
                         'required': ['session_id', 'selector'], 'additionalProperties': False}}
 
     def __init__(self, backend, leases, *, resource_id: str, artifact_store=None,
-                 diagnostics=None, lease_owner_id: str | None = None,
+                 diagnostics=None, service_logs=None, lease_owner_id: str | None = None,
                  artifact_workspace_id: str | None = None, allowed_tools=None,
                  browser_backend=None, browser_enabled: bool = False,
                  browser_submit_enabled: bool = False, conversation_service=None,
@@ -259,6 +260,7 @@ class ToolBroker:
         self.artifact_workspace_id = artifact_workspace_id or resource_id
         self.artifact_store = artifact_store
         self.diagnostics = diagnostics
+        self.service_logs = service_logs
         self.lease_owner_id = lease_owner_id
         self.browser_backend = browser_backend
         self.browser_enabled = bool(browser_enabled)
@@ -284,6 +286,7 @@ class ToolBroker:
     @classmethod
     def tool_definitions(cls, allowed_tools=None, *, browser_enabled: bool = False,
                          browser_submit_enabled: bool = False,
+                         service_logs_available: bool = True,
                          service_actions_enabled: bool = False, web_agent_enabled: bool = False,
                          mcp_catalog=None, mcp_enabled: bool = False, mcp_owner_id: str | None = None,
                          mcp_workspace_id: str | None = None, mcp_pins: object = _UNSET_MCP_PINS,
@@ -303,6 +306,8 @@ class ToolBroker:
         if not service_actions_enabled:
             definitions = [item for item in definitions
                            if item["name"] not in cls.SERVICE_ACTION_TOOLS]
+        if not service_logs_available:
+            definitions = [item for item in definitions if item["name"] != "service.read_logs"]
         available_tools = cls.TOOLS | (cls.CODE_TOOLS if workflow_code_inputs else frozenset())
         allowed = available_tools if allowed_tools is None else available_tools.intersection(allowed_tools)
         definitions = [item for item in definitions if item["name"] in allowed]
@@ -499,6 +504,9 @@ class ToolBroker:
                         self.diagnostics.get_health(owner_id, arguments.get("service_id")),
                     ))
                 if tool == "service.read_logs":
+                    if self.service_logs is not None:
+                        return self.service_logs.execute(command_id=command_id, tool=tool,
+                            arguments=arguments, owner_id=owner_id, epoch=epoch)
                     return with_command_id(ToolReceipt(
                         command_id, "succeeded",
                         self.diagnostics.read_logs(

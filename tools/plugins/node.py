@@ -14,7 +14,7 @@ import time
 from fleet_core.locking import LockBusy, OwnedLock
 from fleet_core.plugins import OFFICIAL_PLUGINS
 from fleet_core.workspace_execution import valid_hub_origin as valid_origin
-from fleet_core.node_action_contract import SERVICE_COMMAND_ACTIONS
+from fleet_core.node_action_contract import SERVICE_NODE_ACTIONS
 from tools.platform.node_runtime import NodeRuntime, NodeRuntimeConfig
 from tools.platform.node_registration import workflow_test_settings
 from tools.platform.workspace_registration import workspace_settings
@@ -87,7 +87,7 @@ def load_runtime(path, *, transport=None):
     state = Path(data['state_directory']).expanduser()
     service_actions = data.get('service_actions', [])
     if (type(service_actions) is not list
-            or any(type(action) is not str or 'service.' + action not in SERVICE_COMMAND_ACTIONS
+            or any(type(action) is not str or 'service.' + action not in SERVICE_NODE_ACTIONS
                    for action in service_actions)
             or len(service_actions) != len(set(service_actions))):
         raise ValueError('invalid_service_actions')

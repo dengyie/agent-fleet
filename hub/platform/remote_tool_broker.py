@@ -165,7 +165,11 @@ class RemoteToolBroker:
             result, error = payload, None
         if allow_pending and status in {'queued', 'leased', 'accepted', 'running'}:
             return ToolReceipt(command_id, 'waiting_node', attribution)
-        self._event('node_receipt', command_id, tool, status=status, **attribution)
+        # Recovery may observe a service Node different from the Run's
+        # workspace Node. The original command owns execution attribution.
+        self._event('node_receipt', command_id, tool, status=status,
+                    node_id=row.get('target_node', self.node_id) if isinstance(row, Mapping) else self.node_id,
+                    **attribution)
         if status == 'succeeded':
             return ToolReceipt(command_id, 'succeeded', {**result, **attribution}, truncated=truncated)
         if status in {'failed', 'expired'}:

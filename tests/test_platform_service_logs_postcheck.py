@@ -32,7 +32,7 @@ class _Transport:
         return response.status_code, response.get_json()
 
 
-def _unknown_logs(app, *, command_id="logs-1"):
+def _unknown_logs(app, *, command_id="logs-1", native=False):
     repo = app.extensions["fleet"]["platform_repository"]
     commands = app.extensions["fleet"]["platform_commands"]
     repo.upsert_node(OWNER, {"node_id": "node-a", "label": "A"})
@@ -43,19 +43,36 @@ def _unknown_logs(app, *, command_id="logs-1"):
         "allowed_actions": ["inspect"],
     })
     service = health.repository.get_service(OWNER, "api")
+    arguments = {
+        "window_s": 60, "max_bytes": 1024, "adapter": service["adapter"],
+        "target_alias": service["target_alias"], "service_version": service["version"],
+    }
+    arguments.update({"action": "logs"} if native else {"service_id": "api"})
     command = PlatformCommand.create(
         command_id=command_id, target_node="node-a", owner_id=OWNER,
-        action="tool.service.read_logs", resource_id="workspace",
-        arguments={
-            "service_id": "api", "window_s": 60, "max_bytes": 1024,
-            "adapter": service["adapter"], "target_alias": service["target_alias"],
-            "service_version": service["version"],
-        },
+        action="service.logs" if native else "tool.service.read_logs",
+        resource_id="api" if native else "workspace", arguments=arguments,
         retry_class="read_only", expires_at=9_999_999_999,
     )
     commands.enqueue(command, idempotency_key=command_id)
     commands.mark_unknown(command_id, reason="receipt_timeout")
     return commands, service
+
+
+def test_native_service_log_postcheck_uses_original_service_identity_without_replay(tmp_path):
+    app = _app(tmp_path)
+    commands, _ = _unknown_logs(app, native=True)
+    client = app.test_client()
+    requested = client.post('/api/platform/v1/commands/logs-1/postcheck')
+    assert requested.status_code == 202
+    check_id = requested.get_json()['postcheck']['check_command_id']
+    node = _node(app, tmp_path, lambda _: {'text': 'current-log-evidence'})
+    assert node.poll_once()['commands'] == 1
+    result = client.get('/api/platform/v1/commands/logs-1/postcheck').get_json()['postcheck']
+    assert result['state'] == 'matched' and result['result']['text'] == 'current-log-evidence'
+    assert commands.get('logs-1')['status'] == 'unknown'
+    assert client.post('/api/platform/v1/commands/logs-1/postcheck').get_json()['postcheck']['check_command_id'] == check_id
+    assert node.poll_once()['commands'] == 0
 
 
 def _node(app, tmp_path, reader):

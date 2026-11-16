@@ -34,6 +34,7 @@ from hub.application.platform_memory_context_service import (
 from hub.platform.tool_broker import ToolBroker
 from hub.platform.assistant_tool_broker import AssistantToolBroker
 from hub.platform.remote_tool_broker import RemoteToolBroker
+from hub.platform.service_log_broker import ServiceLogBroker
 from fleet_core.web_agent_contract import WEB_AGENT_TOOLS
 from hub.domain.platform import ACCEPTANCE_TOOL_POLICY
 from hub.domain.workflow_summary_generation import SUMMARY_GENERATION_MARKER, SUMMARY_TOOL_POLICY
@@ -342,6 +343,18 @@ class LocalRunWorkerService:
             remote_submit_enabled = False
             remote_web_agent_enabled = False
             assistant_node = None
+            service_logs = None
+            local_logs_available = self.diagnostics is not None and self.diagnostics.log_reader is not None
+            if (policy is None and native_memory is None and not summary_mode
+                    and self.diagnostics is not None and self.remote_execution_enabled
+                    and self.remote_delivery is not None and not local_logs_available):
+                service_logs = ServiceLogBroker(
+                    self.diagnostics, self.repository, self.remote_delivery,
+                    run_id=claim['run_id'], clock=self.clock,
+                    timing_policy=self.remote_timing_policy, should_cancel=remote_wait_cancelled,
+                    event_sink=lambda kind, payload: self._event(claim, kind, payload))
+            service_logs_available = local_logs_available or bool(
+                service_logs and service_logs.available(claim['owner_id']))
             if remote:
                 agent_node = self.repository.get_node(claim["owner_id"], execution_node_id)
                 assistant_node = agent_node or {"node_id": execution_node_id}
@@ -360,7 +373,9 @@ class LocalRunWorkerService:
                         hub_allowed_tools.update(ToolBroker.CONVERSATION_TOOLS)
                     if self.diagnostics is not None:
                         hub_allowed_tools.update({'fleet.list_services', 'service.get_health',
-                                                  'service.read_logs', 'incident.get_evidence'})
+                                                  'incident.get_evidence'})
+                        if service_logs_available:
+                            hub_allowed_tools.add('service.read_logs')
                     if self.service_actions is not None:
                         hub_allowed_tools.update(ToolBroker.SERVICE_ACTION_TOOLS)
             if remote and self.browser_enabled:
@@ -445,13 +460,15 @@ class LocalRunWorkerService:
                             lease_owner_id=lease_owner, allowed_tools=hub_allowed_tools,
                             defaults_service=self.defaults_service,
                             conversation_service=self.conversation_service,
-                            diagnostics=self.diagnostics, service_actions=self.service_actions),
+                            diagnostics=self.diagnostics, service_logs=service_logs,
+                            service_actions=self.service_actions),
                         broker, hub_tools=hub_allowed_tools)
             else:
                 broker = ToolBroker(
                     backend, leases, resource_id=resource_id,
                     lease_owner_id=lease_owner, artifact_store=self.artifact_store,
                     diagnostics=self.diagnostics,
+                    service_logs=service_logs,
                     artifact_workspace_id=workspace["workspace_id"],
                     allowed_tools=allowed_tools,
                     conversation_service=self.conversation_service,
@@ -493,6 +510,7 @@ class LocalRunWorkerService:
                 browser_enabled=remote_browser_enabled, browser_submit_enabled=remote_submit_enabled,
                 web_agent_enabled=remote_web_agent_enabled,
                 service_actions_enabled=not summary_mode and self.service_actions is not None,
+                service_logs_available=service_logs_available,
                 mcp_catalog=self.mcp_catalog if not remote else None,
                 mcp_enabled=self.mcp_enabled if not remote and not summary_mode else False,
                 mcp_owner_id=claim["owner_id"] if not remote else None,

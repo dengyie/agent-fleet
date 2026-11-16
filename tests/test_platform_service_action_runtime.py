@@ -136,6 +136,7 @@ def test_action_status_tools_are_gated_and_read_only():
 
 @pytest.mark.parametrize('service_actions,accepted', [
     (['inspect'], True), (['restart'], True), (['inspect', 'restart'], True),
+    (['logs'], True), (['inspect', 'logs'], True), (['logs', 'logs'], False),
     (['inspect', 'inspect'], False), (['destroy'], False), ('inspect', False),
     ([None], False), ([{}], False), ([], False),
 ])

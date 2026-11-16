@@ -85,6 +85,9 @@ def tool_activity(tool, arguments, receipt=None):
             text = preview(result.get('sha256'))
         elif tool in {'service.request_action', 'service.get_action', 'service.get_approval'}:
             text = _service_action_result(result)
+        elif tool == 'service.read_logs':
+            logs = result.get('logs', result)
+            text = preview(logs.get('text')) if isinstance(logs, dict) else ''
         else:
             text = ''
         if text:

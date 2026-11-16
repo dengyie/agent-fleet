@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 from fleet_core.backends.sandbox import SandboxBackend
 from fleet_core.backends.vm import VMBackend
 from fleet_core.workspace_execution import validate_execution_mode
-from fleet_core.node_action_contract import SERVICE_COMMAND_ACTIONS
+from fleet_core.node_action_contract import SERVICE_COMMAND_ACTIONS, SERVICE_LOG_ACTION, SERVICE_NODE_ACTIONS
 from fleet_core.web_agent_contract import WEB_AGENT_TOOLS
 from tools.browser_bridge.contract import WebAgentExecutor
 from tools.browser_bridge.muse import MuseBridge
@@ -46,7 +46,7 @@ from fleet_core.remote_workflow_test import REMOTE_TEST_ACTION
 from .workflow_remote_test import NodeRemoteTestExecutor
 
 
-NODE_RUNTIME_CAPABILITIES = frozenset(NODE_TOOLS | POSTCHECK_ACTIONS | SERVICE_COMMAND_ACTIONS | {
+NODE_RUNTIME_CAPABILITIES = frozenset(NODE_TOOLS | POSTCHECK_ACTIONS | SERVICE_NODE_ACTIONS | {
     BROWSER_SESSION_CAPABILITY, "artifact.receive", "artifact.export",
     REMOTE_TEST_ACTION,
 })
@@ -131,7 +131,7 @@ class NodeRuntimeConfig:
         if any(capability not in NODE_RUNTIME_CAPABILITIES
                for capability in capabilities):
             raise ValueError("unknown capability")
-        if capabilities & SERVICE_COMMAND_ACTIONS and not self.public_key:
+        if capabilities & SERVICE_NODE_ACTIONS and not self.public_key:
             raise ValueError("service actions require command signing")
         if "artifact.receive" in capabilities and (not self.public_key or not self.artifact_inputs):
             raise ValueError("artifact receive requires signed input aliases")
@@ -305,9 +305,9 @@ class NodeRuntime:
             workspace_backends=self.workspace_backends,
             allowed_tools=allowed_tools,
             allowed_postcheck_actions=allowed_postchecks,
-            allowed_service_actions=config.capabilities & SERVICE_COMMAND_ACTIONS,
+            allowed_service_actions=config.capabilities & SERVICE_NODE_ACTIONS,
             service_executor=service_executor,
-            log_reader=self.log_reader if SERVICE_LOGS_POSTCHECK_ACTION in config.capabilities else None,
+            log_reader=self.log_reader if config.capabilities & {SERVICE_LOGS_POSTCHECK_ACTION, SERVICE_LOG_ACTION} else None,
             browser_backend=browser_backend,
             browser_enabled=config.browser_enabled,
             web_agent_executor=web_agent_executor,

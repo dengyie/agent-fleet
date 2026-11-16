@@ -33,6 +33,8 @@ def test_reader_uses_shell_false_and_bounds_utf8_output():
 
     class Result:
         stdout = "日志行" * 1000
+        returncode = 0
+        stderr = ""
 
     def runner(argv, **kwargs):
         calls.append((argv, kwargs))
@@ -78,6 +80,7 @@ def test_default_reader_runner_is_the_launch_policy(monkeypatch):
     class Result:
         stdout = "行"
         stderr = ""
+        returncode = 0
 
     def fake_run(argv, **kwargs):
         seen.append((argv, kwargs))
@@ -89,3 +92,20 @@ def test_default_reader_runner_is_the_launch_policy(monkeypatch):
     assert result["text"] == "行"
     assert seen and seen[0][0] == list(fixed_log_argv("systemd", "api.service", 60))
     assert seen[0][1]["text"] is True
+
+
+@pytest.mark.parametrize('adapter', ['systemd', 'supervisor', 'docker'])
+def test_nonzero_reader_exit_is_a_failure_not_empty_logs(adapter):
+    result = subprocess.CompletedProcess([], 1, stdout='', stderr='permission denied token=private')
+    with pytest.raises(ServiceLogReaderError) as failure:
+        FixedServiceLogReader(runner=lambda *args, **kwargs: result)(_command(adapter=adapter))
+    assert failure.value.code == 'reader_failed'
+    assert 'private' not in str(failure.value)
+
+
+def test_docker_reader_includes_application_stderr_within_byte_bound():
+    result = subprocess.CompletedProcess([], 0, stdout='stdout-ready\n', stderr='stderr-ready\n' * 100)
+    logs = FixedServiceLogReader(runner=lambda *args, **kwargs: result)(
+        _command(adapter='docker', max_bytes=100))
+    assert 'stdout-ready' in logs['text'] and 'stderr-ready' in logs['text']
+    assert len(logs['text'].encode('utf-8')) <= 100 and logs['truncated']

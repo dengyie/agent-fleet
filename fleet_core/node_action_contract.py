@@ -13,6 +13,8 @@ POSTCHECK_ACTION = "reconcile.workspace.digest"
 SERVICE_POSTCHECK_ACTION = "reconcile.service.inspect"
 SERVICE_LOGS_POSTCHECK_ACTION = "reconcile.service.logs"
 SERVICE_COMMAND_ACTIONS = frozenset({"service.inspect", "service.restart"})
+SERVICE_LOG_ACTION = "service.logs"
+SERVICE_NODE_ACTIONS = SERVICE_COMMAND_ACTIONS | {SERVICE_LOG_ACTION}
 POSTCHECK_ACTIONS = frozenset({
     POSTCHECK_ACTION,
     SERVICE_POSTCHECK_ACTION,

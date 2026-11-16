@@ -125,7 +125,7 @@ class ApprovalRepository:
         if not isinstance(arguments, Mapping):
             raise ApprovalRepositoryError("invalid_arguments")
         encoded = _json(arguments)
-        grant_id = "grant_" + secrets.token_urlsafe(18)
+        grant_id = "grant_" + secrets.token_hex(18)
         conn = None
         try:
             conn = self._connect()

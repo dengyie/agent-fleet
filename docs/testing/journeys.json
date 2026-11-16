@@ -935,7 +935,7 @@
       "id": "ACTION-01",
       "title": "只读诊断和审批操作",
       "layer": "integration",
-      "acceptance": "inspect无任意参数；restart必须有一次性审批；owner和资源版本校验阻止过期执行；签名命令经标准Node执行并回传状态，未知操作不重放",
+      "acceptance": "inspect无任意参数；restart必须有一次性审批；日志读取定位实际服务Node并保留原回执；owner和资源版本校验阻止过期执行；未知操作不重放",
       "boundary": "disposable Hub and real Node journal/process; adapter executables are local fixtures",
       "tests": [
         "tests/test_platform_service_actions.py::test_restart_requires_approval_and_is_one_time",
@@ -956,7 +956,16 @@
         "tests/test_assistant_tool_routing.py::test_vm_service_management_reads_hub_evidence_and_preserves_restart_approval",
         "tests/test_assistant_live_feedback.py::test_service_activity_explains_actual_tool_before_dispatch",
         "tests/test_assistant_live_feedback.py::test_service_activity_distinguishes_request_approval_and_execution",
-        "tests/test_assistant_live_feedback.py::test_service_activity_ignores_malformed_and_unrecognized_result_values"
+        "tests/test_assistant_live_feedback.py::test_service_activity_ignores_malformed_and_unrecognized_result_values",
+        "tests/test_native_service_logs.py::test_normal_service_logs_suspend_resume_on_service_node_without_replay",
+        "tests/test_native_service_logs.py::test_worker_does_not_offer_logs_without_reader_or_capable_service",
+        "tests/test_native_service_logs.py::test_service_log_admission_rejects_invalid_target_without_enqueue",
+        "tests/test_native_service_logs.py::test_normal_log_action_requires_its_own_capability_and_reports_known_failures",
+        "tests/test_native_service_logs.py::test_waiting_log_receipt_terminal_outcomes_do_not_recall_provider_or_enqueue",
+        "tests/test_platform_service_log_adapters.py::test_nonzero_reader_exit_is_a_failure_not_empty_logs",
+        "tests/test_platform_service_log_adapters.py::test_docker_reader_includes_application_stderr_within_byte_bound",
+        "tests/test_platform_service_logs_postcheck.py::test_native_service_log_postcheck_uses_original_service_identity_without_replay",
+        "tests/test_platform_service_actions.py::test_generated_service_action_identifiers_always_pass_their_own_validation"
       ]
     },
     {
