@@ -55,6 +55,11 @@ def project_progress(previous, kind, payload, sequence):
                            final=payload.get('response_kind') == 'final')
         elif not segment.get('complete'):
             offset = payload.get('offset')
+            index = payload.get('request_index')
+            if type(index) is int and index > segment.get('request_index', 1) and offset == 0:
+                # Retain the last partial draft until a new attempt actually
+                # produces text, including when retries fail before any body.
+                segment.update(text='', request_index=index)
             if type(offset) is int and offset == len(segment['text']):
                 text = payload.get('text')
                 delta = _text(text, 4096)
@@ -84,6 +89,9 @@ def project_progress(previous, kind, payload, sequence):
         result['retry'] = {key: payload[key] for key in
             ('step', 'retry_index', 'max_retries', 'retry_in_ms', 'provider_status')
             if type(payload.get(key)) is int}
+        if payload.get('provider_error') in {'timeout', 'network_error', 'transient_http',
+                'provider_stream_error', 'provider_stream_incomplete', 'rate_limit'}:
+            result['retry']['provider_error'] = payload['provider_error']
     elif kind in {'assistant_response', 'run_finished', 'run_unknown', 'run_failed'}:
         result.pop('retry', None)
     if len(segments) > 128:

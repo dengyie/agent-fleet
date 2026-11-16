@@ -144,6 +144,12 @@ const [origin, conversation, runId, outcome = 'succeeded'] = process.argv.slice(
       if (!host.textContent.includes('部分过程记录已省略') || host.querySelector('tool-call-badge') !== badge) {
         throw new Error('retained progress must disclose omission without rebuilding tool cards');
       }
+      run.state='running';
+      run.progress.retry={provider_error:'timeout',provider_status:200,retry_index:1,max_retries:3};
+      const retryNotice=renderProgress(host,run);
+      if (!retryNotice.includes('模型响应超时') || !retryNotice.includes('正在自动重试 1/3') || retryNotice.includes('HTTP 200')) {
+        throw new Error('interrupted accepted generations must explain timeout and live retry');
+      }
       host.remove();
     });
     assert.deepEqual(errors,[]);

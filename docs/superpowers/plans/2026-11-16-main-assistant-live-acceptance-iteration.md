@@ -78,6 +78,18 @@
 - [ ] Repeat deployment and exact-profile acceptance after each root-cause fix until all required checks pass.
 - [ ] Record any capability that cannot be exercised in production as blocked/not-run with concrete evidence; do not report it as passed.
 
+### Task 7: Recover incomplete model generations without replaying tools
+
+**Evidence:** PR73 mixed Run ended unknown after a received HTTP 200 timed out during the model stream. Two real loopback HTTP/Native regressions reproduce the terminal timeout despite configured retries, including a complete-looking tool call whose stream never completes. A progress projection regression shows that a retry's offset-zero text would be ignored after a partial draft.
+
+**Root cause and minimal design:** Provider retry handling surrounds only request admission; body-consumption errors bypass it. Retry configured transient timeout/network failures and explicitly transient stream errors within the same provider call, before any ModelResponse reaches Native/tool execution. Close each response before retrying, retain per-request unknown usage/correlation, preserve committed tools and checkpoints, and replace only the current incomplete narration when the next request actually produces offset-zero text. Unknown tool outcomes and process-crash recovery remain non-replayed. Exhausted attempts remain unknown; cancellation prevents another dispatch.
+
+- [x] Reproduce two real HTTP generation failures and one progress reset failure.
+- [x] Apply provider retry handling and current-draft replacement, then rerun original failures.
+- [x] Verify exhaustion, cancellation, response closure, transient-vs-malformed stream errors, cost metadata and no tool replay. Related provider/HTTP/worker/checkpoint regressions: 285 passed; two real Chromium feedback/reload cases passed.
+- [x] Reproduce four cases where local progress storage OSError/TimeoutError was mistaken for model transport failure; restrict error conversion to response iteration and verify the original exception, one dispatch and response closure.
+- [ ] Publish after regression/CI, then perform exact-release real model and mixed-operation acceptance.
+
 ### Task 6: Route ordinary registered-service log reads to the service Node
 
 **Evidence:** Three API/worker/Node regressions failed: normal log reads had no configured reader, while the tool was still advertised. Four adapter regressions additionally showed nonzero log-command exits being reported as successful empty logs and successful Docker stderr being discarded.
@@ -89,8 +101,8 @@
 - [x] Verify original three failures turn green without duplicate execution or extended deadlines.
 - [x] Capture nonzero log-exit and Docker stderr failures before fixing the adapter.
 - [x] Verify target ownership, capability gates, failure/unknown/cancellation, original receipt recovery and CLI configuration. Focused worker/runtime/service regression: 362 passed; selected Ruff checks, diff and UTF-8/no-BOM checks passed.
-- [ ] Update existing capability docs, release notes and journey gate; run affected regressions and CI.
-- [ ] Publish through the existing release flow and verify real service logs on the dedicated test Node.
+- [x] Update existing capability docs, release notes and journey gate; run affected regressions and CI.
+- [x] Publish through the existing release flow and verify real service logs on the dedicated test Node. PR74 main `1d2296f7cd7dd61ff98b2917972a44f5e586466e`, CI/deploy `43873296262` passed. Independent deployed source hashes, manifest and SQLite quick/FK checks passed. Main-assistant Run `run_aa659977a97e559fd3501fd5` queried the original approval/action and read the real service-Node log marker with redaction, live SSE and conversation recovery. Independent command inventory proved one logs execution and no repeated restart; the original test-service PID stayed 259749.
 
 **Additional observed evidence:** Release `26763de` passed exact deployment and all four selected-model read-only checks. The ordinary mixed Run `run_be7699a5e25c64c09e103e99` successfully retried one HTTP 503, then became unknown after a later model stream timed out; do not resubmit it. Independent service acceptance confirmed actual inspect, pending approval, one operator-approved restart and a changed dedicated process PID. Final observation Run `run_34d8f6fadc23947c4386aeac` read the original successful action, then failed on `service.read_logs/diagnostics_unavailable`, reproducing this log defect online. Separate regression exposed service command/grant URL-safe random IDs containing forbidden reserved substrings; hex generation fixes the two deterministic failures.
 

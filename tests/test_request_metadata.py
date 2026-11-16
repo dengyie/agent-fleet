@@ -85,7 +85,7 @@ def test_response_request_ids_distinguish_failed_and_successful_attempts(stream)
     assert not any(secret in json.dumps(events) for secret in ('private-cookie', 'private-header', 'private-fixture-key'))
 
 
-def test_accepted_stream_failure_keeps_request_ids_without_replay():
+def test_accepted_stream_failure_keeps_request_ids_for_each_retry():
     events, closed = [], []
     def chunks():
         try:
@@ -93,8 +93,8 @@ def test_accepted_stream_failure_keeps_request_ids_without_replay():
             raise TimeoutError('private failure detail')
         finally:
             closed.append(True)
-    transport = Transport(TransportResponse(200, {'X-Oneapi-Request-Id': 'gateway-interrupted',
-        'X-Upstream-Request-Id': 'upstream-interrupted'}, chunks()))
+    transport = Transport(*(TransportResponse(200, {'X-Oneapi-Request-Id': 'gateway-interrupted',
+        'X-Upstream-Request-Id': 'upstream-interrupted'}, chunks()) for _ in range(4)))
     with pytest.raises(ProviderError) as caught:
         provider(transport, stream=True, max_retries=3).complete(
             [], [], request_observer=lambda kind, data: events.append((kind, data)))
@@ -103,7 +103,8 @@ def test_accepted_stream_failure_keeps_request_ids_without_replay():
     assert finished.get('upstream_request_id') == 'upstream-interrupted'
     assert caught.value.diagnostic()['gateway_request_id'] == 'gateway-interrupted'
     assert finished['status'] == 'unknown'
-    assert len(transport.calls) == 1 and closed == [True]
+    assert len(transport.calls) == 4 and closed == [True] * 4
+    assert len([p for k, p in events if k == 'provider_request_finished']) == 4
     assert 'private failure detail' not in json.dumps(events)
 
 
@@ -206,7 +207,7 @@ def test_stream_failure_is_recorded_closed_and_never_retried():
 
 @pytest.mark.parametrize('content', ['text', 'tool'])
 @pytest.mark.parametrize('ending', ['done', 'eof', 'finish-then-done'])
-def test_inband_stream_error_rejects_partial_response_without_replay(content, ending):
+def test_inband_stream_error_retries_without_committing_partial_response(content, ending):
     events, closed = [], []
     delta = ({'content': 'partial public answer'} if content == 'text' else
         {'tool_calls': [{'index': 0, 'id': 'partial-call', 'function': {
@@ -221,19 +222,19 @@ def test_inband_stream_error_rejects_partial_response_without_replay(content, en
                 yield b'data: [DONE]\n\n'
         finally:
             closed.append(True)
-    transport = Transport(TransportResponse(200, {'X-Oneapi-Request-Id': 'gateway-stream-error'}, chunks()))
+    transport = Transport(*(TransportResponse(200, {'X-Oneapi-Request-Id': 'gateway-stream-error'}, chunks()) for _ in range(4)))
     with pytest.raises(ProviderError) as caught:
         provider(transport, stream=True, max_retries=3).complete([], [{'name': 'workspace.list'}],
             request_observer=lambda k, d: events.append((k, d)))
-    assert caught.value.code == 'provider_stream_error' and caught.value.retryable is False
+    assert caught.value.code == 'provider_stream_error' and caught.value.retryable is True
     assert caught.value.diagnostic()['upstream_code'] == 'system_cpu_overloaded'
     finished = events[-1][1]
     assert finished['status'] == 'unknown' and finished['http_status'] == 200
     assert finished['provider_error'] == 'provider_stream_error'
     assert finished['gateway_request_id'] == 'gateway-stream-error'
-    assert len(transport.calls) == 1 and closed == [True]
+    assert len(transport.calls) == 4 and closed == [True] * 4
     if content == 'text':
-        assert ''.join(d['text'] for k, d in events if k == 'assistant_text_delta') == 'partial public answer'
+        assert ''.join(d['text'] for k, d in events if k == 'assistant_text_delta') == 'partial public answer' * 4
     assert 'private-stream-error-sentinel' not in json.dumps(events) + str(caught.value)
 
 
@@ -291,7 +292,7 @@ def test_sse_done_stops_consumption_and_closes_instead_of_waiting():
 
 def test_sse_truncated_partial_answer_is_not_success():
     raw = b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
-    with pytest.raises(ProviderError, match='invalid_response'):
+    with pytest.raises(ProviderError, match='provider_stream_incomplete'):
         provider(Transport(TransportResponse(200, {}, [raw])), stream=True).complete([], [])
 
 
@@ -325,7 +326,7 @@ def test_unsupported_cache_tier_does_not_get_uniform_estimate():
 
 
 @pytest.mark.parametrize('failure', [TimeoutError, OSError])
-def test_accepted_nonstream_read_failure_is_closed_and_never_retried(monkeypatch, failure):
+def test_accepted_nonstream_read_failure_closes_each_retry(monkeypatch, failure):
     from hub.platform.providers import openai_compatible as adapter
     sent, closed, events = [], [], []
     class Accepted:
@@ -342,7 +343,8 @@ def test_accepted_nonstream_read_failure_is_closed_and_never_retried(monkeypatch
         api_key='fixture', allow_network=True, max_retries=2, sleeper=lambda _: None)
     with pytest.raises(ProviderError):
         p.complete([], [], request_observer=lambda kind,data: events.append((kind,data)))
-    assert len(sent) == 1
-    assert closed == [True]
+    assert len(sent) == 3
+    assert closed == [True] * 3
+    assert len([p for k, p in events if k == 'provider_request_finished']) == 3
     assert events[-1][1]['status'] == 'unknown'
     assert events[-1][1]['http_status'] == 200

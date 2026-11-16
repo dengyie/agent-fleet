@@ -377,7 +377,7 @@ def test_run_stream_is_owner_scoped_and_releases_capacity(tmp_path):
     assert client.get('/api/platform/v1/runs/other-run/stream').status_code == 404
 
 
-def test_partial_stream_failure_flushes_pending_text_without_replaying():
+def test_partial_stream_failure_flushes_pending_text_when_retries_are_disabled():
     import pytest
     from hub.platform.providers.openai_compatible import ProviderError
     observed = []
@@ -387,7 +387,7 @@ def test_partial_stream_failure_flushes_pending_text_without_replaying():
         raise OSError('lost upstream')
     transport = FakeTransport([TransportResponse(200, {}, body())])
     provider = OpenAICompatibleProvider(model='test', endpoint='http://localhost', api_key='x',
-        stream=True, max_retries=3, transport=transport)
+        stream=True, max_retries=0, transport=transport)
     with pytest.raises(ProviderError):
         provider.complete([], [], request_observer=lambda k, p: observed.append((k,p)))
     assert ''.join(p['text'] for k,p in observed if k == 'assistant_text_delta') == '第一段未完成'
@@ -414,7 +414,7 @@ def test_interrupted_stream_discloses_provider_text_clipping_in_history(tmp_path
     transport = FakeTransport([TransportResponse(200, {}, body())])
     worker = app.extensions['fleet']['services']['platform_worker']
     worker.provider_factory = lambda _: OpenAICompatibleProvider(model='fixture', endpoint='http://fixture',
-        api_key='fixture', stream=True, max_retries=3, transport=transport)
+        api_key='fixture', stream=True, max_retries=0, transport=transport)
     assert worker.run_once(OWNER)['state'] == 'unknown'
     before = client.get(f"/api/platform/v1/runs/{run['run_id']}").get_json()
     progress = before['progress']
