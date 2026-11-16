@@ -266,3 +266,71 @@ def test_repeated_missing_reads_stop_at_frozen_step_budget(tmp_path):
     result = worker.run_once(OWNER)
     assert result['state'] == 'failed' and '上限' in result['result_text']
     assert len(calls) == 3
+
+
+@pytest.mark.parametrize('tool,operation,state,code,expected', [
+    ('platform.admin_mutate', 'settings.save', 'failed', 'revision_conflict', 'succeeded'),
+    ('platform.admin_mutate', 'nodes.remove', 'failed', 'node_in_use', 'succeeded'),
+    ('platform.admin_mutate', 'settings.save_runtime', 'failed', 'revision_conflict', 'succeeded'),
+    ('session.send_message', None, 'failed', 'session_not_managed', 'succeeded'),
+    ('platform.admin_mutate', 'settings.save', 'failed', 'forbidden', 'failed'),
+    ('platform.admin_mutate', 'settings.save', 'unknown', 'revision_conflict', 'unknown'),
+    ('platform.admin_mutate', 'plugins.submit', 'failed', 'revision_conflict', 'failed'),
+    ('platform.admin_mutate', 'settings.save', 'failed', 'platform_store', 'failed'),
+    ('platform.admin_mutate', 'settings.save', 'failed', 'lease_mismatch', 'failed'),
+    ('session.send_message', None, 'failed', 'supervisor_unavailable', 'failed'),
+])
+def test_only_proven_pre_effect_management_failures_continue(tool, operation, state, code, expected):
+    calls = []
+    class Provider:
+        def complete(self, messages, tools, **kwargs):
+            calls.append(messages)
+            assert messages[-1]['result'] == {'state': 'failed', 'error_code': code}
+            return ModelResponse(kind='final', text='已收到拒绝，可重新核对。')
+    checkpoint = _receipt_checkpoint(tool=tool, state=state, code=code)
+    checkpoint['response']['arguments'] = {'operation': operation} if operation else {'session_id': 's1'}
+    result = NativeAssistantRuntime(Provider(), None, checkpoint=checkpoint).run(
+        run_id='run', owner_id=OWNER, epoch=0, messages=[], tools=[])
+    assert result.state == expected
+    assert len(calls) == (1 if expected == 'succeeded' else 0)
+
+
+@pytest.mark.parametrize('phase', ['receipt', 'ready'])
+def test_management_conflict_checkpoint_resumes_without_replaying_write(tmp_path, monkeypatch, phase):
+    from hub.platform.tool_broker import ToolBroker
+    app = _app(tmp_path, worker=True)
+    repo = _catalog(app, tmp_path)
+    repo.upsert_node(OWNER, {'node_id': 'existing', 'label': 'concurrent value'})
+    run = _queued(app)
+    calls, writes = [], []
+    execute = ToolBroker.execute
+    def counted(self, **kwargs):
+        writes.append(kwargs['command_id'])
+        return execute(self, **kwargs)
+    monkeypatch.setattr(ToolBroker, 'execute', counted)
+    class Provider:
+        def complete(self, messages, tools, **kwargs):
+            calls.append(json.loads(json.dumps(messages)))
+            if len(calls) == 1:
+                return ModelResponse(kind='tool_call', tool='platform.admin_mutate', arguments={
+                    'operation': 'settings.save', 'payload': {'kind': 'nodes', 'identifier': 'existing',
+                    'expected_digest': '', 'value': {'label': 'rejected'}}})
+            assert messages[-1]['result']['error_code'] == 'revision_conflict'
+            return ModelResponse(kind='final', text='保留并发修改。')
+    worker = app.extensions['fleet']['services']['platform_worker']
+    worker.provider_factory = lambda _: Provider()
+    save = repo.save_runtime_checkpoint
+    def crash(*args, **kwargs):
+        result = save(*args, **kwargs)
+        if args[2]['phase'] == phase:
+            raise Crash()
+        return result
+    monkeypatch.setattr(repo, 'save_runtime_checkpoint', crash)
+    with pytest.raises(Crash):
+        worker.run_once(OWNER)
+    monkeypatch.setattr(repo, 'save_runtime_checkpoint', save)
+    with repo._connect() as conn:
+        conn.execute('UPDATE runs SET lease_expires_at=0 WHERE run_id=?', (run['run_id'],))
+    assert worker.run_once(OWNER)['state'] == 'succeeded'
+    assert len(writes) == 1 and len(calls) == 2
+    assert repo.get_node(OWNER, 'existing')['label'] == 'concurrent value'

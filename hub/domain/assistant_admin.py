@@ -1,5 +1,20 @@
 """Fixed administration contracts; no user-selected methods or HTTP routes."""
 ADMIN_TOOLS = frozenset({'platform.get_system_info', 'platform.admin_inspect', 'platform.admin_mutate'})
+# Only errors proven to reject before a business mutation commits. Storage,
+# authorization and uncertain remote outcomes deliberately have no entry.
+CORRECTABLE_MUTATION_ERRORS = {
+    'settings.save': frozenset({'revision_conflict', 'reference_forbidden'}),
+    'settings.save_runtime': frozenset({'revision_conflict'}),
+    'settings.save_hosts': frozenset({'revision_conflict'}),
+    'nodes.remove': frozenset({'revision_conflict', 'node_in_use', 'node_must_be_disabled', 'node_not_found'}),
+    'nodes.enroll': frozenset({'plugin_node_exists'}),
+    'plugins.configure': frozenset({'revision_conflict'}),
+    'plugins.set_target': frozenset({'node_not_found'}),
+    'memory.update': frozenset({'revision_conflict'}),
+    'memory.delete': frozenset({'revision_conflict'}),
+    'schedules.update': frozenset({'revision_conflict'}),
+    'workflows.control': frozenset({'revision_conflict'}),
+}
 TEXT = {'type': 'string', 'minLength': 1, 'maxLength': 2048}
 IDENTIFIER = {'type': 'string', 'minLength': 1, 'maxLength': 128}
 OBJECT = {'type': 'object'}
