@@ -385,6 +385,12 @@ class AccountStore:
             row = db.execute('SELECT active FROM users WHERE id=?', (user_id,)).fetchone()
             return bool(row and row['active'])
 
+    def is_active_admin(self, user_id):
+        """Recheck fleet authority for background assistant tool calls."""
+        with self.connect(write=False) as db:
+            row = db.execute('SELECT role,active FROM users WHERE id=?', (user_id,)).fetchone()
+            return bool(row and row['active'] and row['role'] == 'admin')
+
     @contextmanager
     def background_operation(self, user_id):
         """Fence bounded autonomous work against account deactivation."""

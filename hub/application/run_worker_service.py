@@ -78,7 +78,7 @@ class LocalRunWorkerService:
                  workflow_review_executor: WorkflowReviewExecutionService | None = None,
                  workflow_memory_guard: NativeWorkflowMemoryGuard | None = None,
                  workflow_code_inputs: WorkflowCodeInputs | None = None,
-                 workflow_summary_generation_guard=None):
+                 workflow_summary_generation_guard=None, agent_sessions=None, assistant_admin=None):
         self.repository = repository
         self.run_events = run_events
         self.worker_id = worker_id or ("local-worker_" + secrets.token_hex(8))
@@ -114,6 +114,8 @@ class LocalRunWorkerService:
         self.workflow_memory_guard = workflow_memory_guard
         self.workflow_code_inputs = workflow_code_inputs
         self.workflow_summary_generation_guard = workflow_summary_generation_guard
+        self.agent_sessions = agent_sessions
+        self.assistant_admin = assistant_admin
 
     def configure_workspace_concurrency(self, capacity: int) -> None:
         """Align tool lease capacity with the scheduler's durable admission."""
@@ -256,6 +258,10 @@ class LocalRunWorkerService:
             remote_allowed_tools = (allowed_tools if allowed_tools is not None else
                                     ToolBroker.TOOLS & NODE_TOOLS)
             hub_allowed_tools = set()
+            agent_sessions = self.agent_sessions if policy is None and native_memory is None and not summary_mode else None
+            assistant_admin = self.assistant_admin if policy is None and native_memory is None and not summary_mode else None
+            admin_tools = assistant_admin.available_tools(claim['owner_id']) if assistant_admin is not None else frozenset()
+            session_tools = agent_sessions.available_tools(claim['owner_id']) if agent_sessions is not None else frozenset()
             workspace_id = config.get("workspace_id") or claim.get("conversation_workspace_id")
             if not workspace_id:
                 raise RuntimeError("workspace_unavailable")
@@ -367,6 +373,7 @@ class LocalRunWorkerService:
                 remote_allowed_tools &= executable | BROWSER_TOOLS
                 remote_web_agent_enabled = bool(remote_allowed_tools & WEB_AGENT_TOOLS)
                 if policy is None and native_memory is None:
+                    hub_allowed_tools.update(session_tools | admin_tools)
                     if self.defaults_service is not None:
                         hub_allowed_tools.update({'platform.get_defaults', 'platform.update_defaults'})
                     if self.conversation_service is not None:
@@ -461,7 +468,8 @@ class LocalRunWorkerService:
                             defaults_service=self.defaults_service,
                             conversation_service=self.conversation_service,
                             diagnostics=self.diagnostics, service_logs=service_logs,
-                            service_actions=self.service_actions),
+                            service_actions=self.service_actions, agent_sessions=agent_sessions,
+                            assistant_admin=assistant_admin),
                         broker, hub_tools=hub_allowed_tools)
             else:
                 broker = ToolBroker(
@@ -477,6 +485,7 @@ class LocalRunWorkerService:
                     mcp_catalog=self.mcp_catalog, mcp_enabled=self.mcp_enabled and not summary_mode,
                     mcp_pins=config.get("mcp_tools", {}),
                     workflow_code_view=source_view,
+                    agent_sessions=agent_sessions, assistant_admin=assistant_admin,
                 )
             runtime = NativeAssistantRuntime(
                 provider, broker, limits=RuntimeLimits(max_steps=1, max_tokens=self.limits.max_tokens) if summary_mode else self.limits,
@@ -516,7 +525,7 @@ class LocalRunWorkerService:
                 mcp_owner_id=claim["owner_id"] if not remote else None,
                 mcp_workspace_id=workspace["workspace_id"] if not remote else None,
                 mcp_pins=config.get("mcp_tools", {}),
-                workflow_code_inputs=source_view is not None)
+                workflow_code_inputs=source_view is not None, session_tools=session_tools, admin_tools=admin_tools)
             if not remote and not self.sandbox_launcher:
                 # File tools remain usable. Do not offer an exec that the
                 # backend must reject; preserve policy/MCP selections as-is.

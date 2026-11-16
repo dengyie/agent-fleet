@@ -170,6 +170,49 @@ class PlatformCatalogMixin:
         finally:
             if conn is not None: conn.close()
 
+    def remove_node(self, owner_id: str, node_id: str, expected_digest: str) -> None:
+        """Delete an explicitly disabled, unreferenced catalog entry atomically.
+
+        Historical command receipts remain intact. Capability bindings/policies,
+        configured workspace/default references and live commands block removal.
+        """
+        from contextlib import closing
+        owner_id = validate_owner_id(owner_id)
+        node_id = validate_id(node_id, 'node_id')
+        try:
+            with closing(self._connect()) as conn, conn:
+                conn.execute('BEGIN IMMEDIATE')
+                row = conn.execute('SELECT * FROM nodes WHERE owner_id=? AND node_id=?', (owner_id, node_id)).fetchone()
+                if row is None:
+                    raise PlatformRepositoryError('node_not_found')
+                if catalog_digest(self._row_node(row)) != expected_digest:
+                    raise PlatformRepositoryError('revision_conflict')
+                if row['enabled']:
+                    raise PlatformRepositoryError('node_must_be_disabled')
+                for query in (
+                    'SELECT 1 FROM workspaces WHERE owner_id=? AND default_node_id=? LIMIT 1',
+                    'SELECT 1 FROM owner_defaults WHERE owner_id=? AND execution_node_id=? LIMIT 1',
+                ):
+                    if conn.execute(query, (owner_id, node_id)).fetchone():
+                        raise PlatformRepositoryError('node_in_use')
+                tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if 'platform_commands' in tables and conn.execute(
+                        "SELECT 1 FROM platform_commands WHERE owner_id=? AND target_node=? "
+                        "AND status NOT IN ('succeeded','failed','cancelled','expired') LIMIT 1",
+                        (owner_id, node_id)).fetchone():
+                    raise PlatformRepositoryError('node_in_use')
+                if 'capability_node_policies' in tables and conn.execute(
+                        'SELECT 1 FROM capability_node_policies WHERE owner_id=? AND node_id=?',
+                        (owner_id, node_id)).fetchone():
+                    raise PlatformRepositoryError('node_in_use')
+                conn.execute('DELETE FROM node_credentials WHERE owner_id=? AND node_id=?', (owner_id, node_id))
+                conn.execute('DELETE FROM nodes WHERE owner_id=? AND node_id=?', (owner_id, node_id))
+                conn.commit()
+        except sqlite3.IntegrityError:
+            raise PlatformRepositoryError('node_in_use') from None
+        except sqlite3.Error:
+            raise PlatformRepositoryError('platform_store') from None
+
     def get_node(self, owner_id: str, node_id: str) -> dict[str, Any] | None:
         owner_id = validate_owner_id(owner_id)
         node_id = validate_id(node_id, "node_id")

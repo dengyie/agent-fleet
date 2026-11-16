@@ -8,6 +8,8 @@ from fleet_core.workspace import WorkspaceError
 from hub.application.errors import ApplicationError
 from .artifacts import ArtifactError
 from .resource_lease import ResourceLeaseError
+from .admin_tools import ADMIN_TOOLS, ADMIN_TOOL_DEFINITIONS
+from .session_tools import SESSION_TOOLS, SESSION_TOOL_DEFINITIONS
 
 from hub.domain.mcp_tool_pins import MCPToolPin, MCPToolPinError, parse_mcp_tool_pins
 from .connectors.mcp import MCPConnectorError
@@ -23,6 +25,8 @@ def _parse_mcp_pins(value: object) -> tuple[MCPToolPin, ...]:
 
 
 class ToolBroker:
+    ADMIN_TOOLS = ADMIN_TOOLS
+    SESSION_TOOLS = SESSION_TOOLS
     SERVICE_ACTION_TOOLS = frozenset({
         "service.request_action", "service.get_action", "service.get_approval",
     })
@@ -36,7 +40,7 @@ class ToolBroker:
         "service.read_logs", "incident.get_evidence",
         "platform.get_defaults", "platform.update_defaults",
     }) | BROWSER_TOOLS | WEB_AGENT_TOOLS
-    TOOLS = TOOLS | CONVERSATION_TOOLS | SERVICE_ACTION_TOOLS
+    TOOLS = TOOLS | CONVERSATION_TOOLS | SERVICE_ACTION_TOOLS | SESSION_TOOLS | ADMIN_TOOLS
     CODE_TOOLS = frozenset({"workflow.input.list", "workflow.input.read"})
     _CODE_TOOL_DEFINITIONS = (
         {"name": "workflow.input.list", "risk": "read_only", "scope_kind": "workflow_input",
@@ -253,7 +257,7 @@ class ToolBroker:
                  browser_submit_enabled: bool = False, conversation_service=None,
                  service_actions=None, defaults_service=None, mcp_catalog=None,
                  mcp_enabled: bool = False, mcp_pins: object = _UNSET_MCP_PINS,
-                 workflow_code_view=None):
+                 workflow_code_view=None, agent_sessions=None, assistant_admin=None):
         self.backend = backend
         self.leases = leases
         self.resource_id = resource_id
@@ -268,6 +272,8 @@ class ToolBroker:
         self.conversation_service = conversation_service
         self.service_actions = service_actions
         self.defaults_service = defaults_service
+        self.agent_sessions = agent_sessions
+        self.assistant_admin = assistant_admin
         self.mcp_catalog = mcp_catalog
         self.workflow_code_view = workflow_code_view
         self.mcp_enabled = bool(mcp_enabled and mcp_catalog is not None)
@@ -281,6 +287,10 @@ class ToolBroker:
                 if self.mcp_pins is not None else mcp_catalog.revision_pins(workspace_id=self.artifact_workspace_id))
         self.allowed_mcp_tools = frozenset(self.mcp_revisions) if allowed_tools is None else frozenset(self.mcp_revisions).intersection(allowed_tools)
         available_tools = self.TOOLS | (self.CODE_TOOLS if workflow_code_view is not None else frozenset())
+        if assistant_admin is None:
+            available_tools -= self.ADMIN_TOOLS
+        if agent_sessions is None:
+            available_tools -= self.SESSION_TOOLS
         self.allowed_tools = available_tools if allowed_tools is None else available_tools.intersection(allowed_tools)
 
     @classmethod
@@ -290,11 +300,13 @@ class ToolBroker:
                          service_actions_enabled: bool = False, web_agent_enabled: bool = False,
                          mcp_catalog=None, mcp_enabled: bool = False, mcp_owner_id: str | None = None,
                          mcp_workspace_id: str | None = None, mcp_pins: object = _UNSET_MCP_PINS,
-                         workflow_code_inputs: bool = False):
+                         workflow_code_inputs: bool = False, session_tools=(), admin_tools=()):
         pins = _parse_mcp_pins(mcp_pins) if mcp_pins is not _UNSET_MCP_PINS else None
         if pins and not (mcp_enabled and mcp_catalog is not None):
             raise MCPConnectorError("mcp_disabled")
         definitions = [dict(item) for item in cls._BASE_TOOL_DEFINITIONS]
+        definitions.extend(dict(item) for item in SESSION_TOOL_DEFINITIONS if item['name'] in session_tools)
+        definitions.extend(dict(item) for item in ADMIN_TOOL_DEFINITIONS if item['name'] in admin_tools)
         if workflow_code_inputs:
             definitions.extend(dict(item) for item in cls._CODE_TOOL_DEFINITIONS)
         if web_agent_enabled:
@@ -317,7 +329,9 @@ class ToolBroker:
             selected = [item for item in mcp_catalog.tool_definitions(owner_id=mcp_owner_id, workspace_id=mcp_workspace_id,
                 expected_pins=pins)
                         if allowed_tools is None or item["name"] in allowed_tools]
-            definitions.extend(selected[:max(0, 20 - len(definitions))])
+            # Fleet management must not displace already configured connectors.
+            base_count = sum(item['name'] not in cls.SESSION_TOOLS | cls.ADMIN_TOOLS for item in definitions)
+            definitions.extend(selected[:max(0, 20 - base_count)])
         return definitions
 
 
@@ -391,6 +405,16 @@ class ToolBroker:
             return ToolReceipt(command_id, receipt.state, receipt.result, receipt.error_code, receipt.truncated)
 
         try:
+            if tool in self.ADMIN_TOOLS:
+                if self.assistant_admin is None:
+                    return ToolReceipt(command_id, 'failed', {}, 'tool_not_allowed')
+                return ToolReceipt(command_id, 'succeeded', self.assistant_admin.execute(
+                    tool=tool, arguments=arguments, owner_id=owner_id, command_id=command_id))
+            if tool in self.SESSION_TOOLS:
+                if self.agent_sessions is None:
+                    return ToolReceipt(command_id, 'failed', {}, 'tool_not_allowed')
+                return ToolReceipt(command_id, 'succeeded', self.agent_sessions.execute(
+                    tool=tool, arguments=arguments, owner_id=owner_id, command_id=command_id))
             if tool == "platform.get_defaults":
                 if self.defaults_service is None:
                     return ToolReceipt(command_id, "failed", {}, "platform_controls_unavailable")
