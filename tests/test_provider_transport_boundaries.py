@@ -345,7 +345,7 @@ def test_real_http_stream_observes_thinking_and_text_before_next_chunk() -> None
 
 
 @pytest.mark.parametrize('stage', ['headers', 'body'])
-def test_trickle_is_bounded_by_total_deadline_without_replay(stage: str) -> None:
+def test_trickle_is_bounded_by_configured_attempt_deadlines(stage: str) -> None:
     stop = Event()
     attempts: list[bool] = []
     events: list[dict[str, Any]] = []
@@ -375,8 +375,9 @@ def test_trickle_is_bounded_by_total_deadline_without_replay(stage: str) -> None
                 provider(origin, max_retries=2, sleeper=lambda _: None).complete([], [],
                     request_observer=lambda kind, data: events.append(data))
             assert caught.value.code == 'timeout'
-            assert time.monotonic() - start < 1.4
-            assert len(attempts) == 1 and len(events) == 2
+            assert time.monotonic() - start < 4.5
+            assert len(attempts) == 3
+            assert len([e for e in events if e.get('status') == 'unknown']) == 3
             assert events[-1]['status'] == 'unknown'
         finally:
             stop.set()
@@ -401,7 +402,8 @@ def test_worker_secret_failure_retains_safe_cause_chain(tmp_path: Path, caplog: 
     assert 'private-boundary-sentinel' not in caplog.text + json.dumps(result) + json.dumps(events)
 
 
-def test_request_timeout_releases_scheduler_slot_and_next_run_executes(tmp_path: Path) -> None:
+@pytest.mark.parametrize('max_retries', [0, 1])
+def test_request_timeout_releases_scheduler_slot_and_next_run_executes(tmp_path: Path, max_retries) -> None:
     from threading import enumerate as threads
     from test_platform_run_scheduler import _queued, _scheduler, OWNER_A
     from hub.infrastructure.platform_db import PlatformRepository
@@ -411,7 +413,7 @@ def test_request_timeout_releases_scheduler_slot_and_next_run_executes(tmp_path:
         def do_POST(self) -> None:
             self.drain()
             attempts.append(True)
-            if len(attempts) > 1:
+            if len(attempts) > max_retries + 1:
                 self.reply()
                 return
             self.send_response(200)
@@ -429,14 +431,14 @@ def test_request_timeout_releases_scheduler_slot_and_next_run_executes(tmp_path:
         repo = PlatformRepository(tmp_path / 'platform.db')
         repo.init()
         _queued(repo, OWNER_A, 'run-slow', 'home', tmp_path / 'work')
-        scheduler = _scheduler(repo, provider_factory=lambda profile: provider(origin, max_retries=2))
+        scheduler = _scheduler(repo, provider_factory=lambda profile: provider(origin, max_retries=max_retries))
         try:
             start = time.monotonic()
             assert scheduler.run_once()[0]['state'] == 'unknown'
-            assert time.monotonic() - start < 1.6
+            assert time.monotonic() - start < 1.6 * (max_retries + 1)
             _queued(repo, OWNER_A, 'run-next', 'home', tmp_path / 'work')
             assert scheduler.run_once()[0]['state'] == 'succeeded'
-            assert len(attempts) == 2
+            assert len(attempts) == max_retries + 2
         finally:
             stop.set()
             if scheduler._pool is not None:

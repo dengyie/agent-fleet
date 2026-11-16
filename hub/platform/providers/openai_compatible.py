@@ -54,7 +54,7 @@ PROVIDER_ERROR_CODES = frozenset({
     'auth_error', 'rate_limit', 'transient_http', 'request_rejected',
     'provider_http_error', 'timeout', 'network_error', 'invalid_response',
     'response_too_large', 'request_too_large', 'provider_unavailable', 'provider_network_disabled',
-    'provider_secret_missing', 'provider_secret_unavailable', 'provider_stream_error',
+    'provider_secret_missing', 'provider_secret_unavailable', 'provider_stream_error', 'provider_stream_incomplete',
     'provider_tools_invalid', 'provider_message_invalid', 'redirect_rejected',
 })
 
@@ -161,7 +161,7 @@ class _ResponseBody:
 def _transport_error(exc: Exception) -> ProviderError:
     reason = exc.reason if isinstance(exc, URLError) else exc
     # A POST may already have been accepted, even without response headers.
-    return ProviderError('timeout' if isinstance(reason, TimeoutError) else 'network_error')
+    return ProviderError('timeout' if isinstance(reason, TimeoutError) else 'network_error', retryable=True)
 
 
 def _http_error(status: int) -> ProviderError:
@@ -693,39 +693,40 @@ class OpenAICompatibleProvider:
             observation = RequestObservation(request_observer, model=self.model,
                 provider='openai_compatible', index=attempt + 1,
                 parameters={'stream': self.stream, 'timeout_s': self.timeout_s})
+            response = None
+            request_ids = {}
             try:
                 response = self._request(body)
+                request_ids = _response_request_ids(response.headers)
+                try:
+                    result = self._parse_response(response, tool_names, request_observer, attempt + 1)
+                except (TimeoutError, OSError) as exc:
+                    raise ProviderError('timeout' if isinstance(exc, TimeoutError) else 'network_error',
+                                        retryable=True) from exc
+                finally:
+                    _close_body(response.body)
             except ProviderError as exc:
-                observation.finish(error=exc, http_status=exc.status)
+                exc.request_ids.update(request_ids)
+                # A generation has not crossed the tool boundary until a full
+                # ModelResponse returns to Native. Retrying an interrupted body
+                # cannot replay a committed tool; failed attempt billing remains
+                # unknown in the individual request observations.
+                if response is not None and exc.code in {'timeout', 'network_error'}:
+                    exc.retryable = True
+                observation.finish(error=exc, http_status=response.status if response is not None else exc.status)
                 if exc.retryable and attempt < self.max_retries:
                     if request_observer is not None:
                         request_observer('provider_retry_scheduled', {
                             'request_index': attempt + 1,
                             'retry_index': attempt + 1,
                             'max_retries': self.max_retries,
-                            'provider_status': exc.status,
+                            'provider_status': response.status if response is not None else exc.status,
                             'provider_error': exc.code,
                             'retry_in_ms': round(min(2000.0, 100.0 * (2 ** attempt))),
                         })
                     self.sleeper(min(2.0, 0.1 * (2 ** attempt)))
                     continue
                 raise
-            # Once a response body is being consumed, failure is ambiguous and
-            # must never automatically replay an already accepted request.
-            request_ids = _response_request_ids(response.headers)
-            try:
-                result = self._parse_response(response, tool_names, request_observer, attempt + 1)
-            except ProviderError as exc:
-                exc.request_ids.update(request_ids)
-                observation.finish(error=exc, http_status=response.status)
-                raise
-            except (TimeoutError, OSError) as exc:
-                error = ProviderError('timeout' if isinstance(exc, TimeoutError) else 'network_error',
-                                      request_ids=request_ids)
-                observation.finish(error=error, http_status=response.status)
-                raise error from exc
-            finally:
-                _close_body(response.body)
             result.metadata.update(request_ids)
             observation.finish(metadata={**result.metadata, 'finish_reason': result.finish_reason},
                                http_status=response.status)
@@ -789,6 +790,7 @@ class OpenAICompatibleProvider:
                     code = detail.get('code') if isinstance(detail, Mapping) else None
                     if isinstance(code, str) and code in UPSTREAM_ERROR_CODES:
                         error.upstream_code = code
+                        error.retryable = True
                     raise error
                 for key in ('model', 'id'):
                     if payload.get(key) is not None:
@@ -835,7 +837,7 @@ class OpenAICompatibleProvider:
         finally:
             text_observation.flush()
         if not completed and not finish_reason:
-            raise ProviderError('invalid_response')
+            raise ProviderError('provider_stream_incomplete', retryable=True)
         metadata = _metadata(metadata_payload, self.pricing)
         first = tool_calls[min(tool_calls)] if tool_calls else None
         tool_name = first['name'] if first else ''

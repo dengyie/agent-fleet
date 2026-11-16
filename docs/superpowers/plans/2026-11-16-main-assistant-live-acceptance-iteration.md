@@ -78,6 +78,17 @@
 - [ ] Repeat deployment and exact-profile acceptance after each root-cause fix until all required checks pass.
 - [ ] Record any capability that cannot be exercised in production as blocked/not-run with concrete evidence; do not report it as passed.
 
+### Task 7: Recover incomplete model generations without replaying tools
+
+**Evidence:** PR73 mixed Run ended unknown after a received HTTP 200 timed out during the model stream. Two real loopback HTTP/Native regressions reproduce the terminal timeout despite configured retries, including a complete-looking tool call whose stream never completes. A progress projection regression shows that a retry's offset-zero text would be ignored after a partial draft.
+
+**Root cause and minimal design:** Provider retry handling surrounds only request admission; body-consumption errors bypass it. Retry configured transient timeout/network failures and explicitly transient stream errors within the same provider call, before any ModelResponse reaches Native/tool execution. Close each response before retrying, retain per-request unknown usage/correlation, preserve committed tools and checkpoints, and replace only the current incomplete narration when its next request actually starts. Unknown tool outcomes and process-crash recovery remain non-replayed. Exhausted attempts remain unknown; cancellation prevents another dispatch.
+
+- [x] Reproduce two real HTTP generation failures and one progress reset failure.
+- [ ] Apply provider retry handling and current-draft replacement, then rerun original failures.
+- [ ] Verify exhaustion, cancellation, response closure, transient-vs-malformed stream errors, cost metadata and no tool replay.
+- [ ] Publish after regression/CI, then perform exact-release real model and mixed-operation acceptance.
+
 ### Task 6: Route ordinary registered-service log reads to the service Node
 
 **Evidence:** Three API/worker/Node regressions failed: normal log reads had no configured reader, while the tool was still advertised. Four adapter regressions additionally showed nonzero log-command exits being reported as successful empty logs and successful Docker stderr being discarded.

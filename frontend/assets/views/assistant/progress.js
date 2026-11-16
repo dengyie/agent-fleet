@@ -42,7 +42,12 @@ export function renderProgress(host, run) {
   host._segments.forEach((node,key) => { if (!keep.has(key)) {node.remove();host._segments.delete(key);} });
   const retry = progress.retry;
   if (!active) return '';
-  if (retry) return '上游暂时不可用' + (retry.provider_status ? '（HTTP ' + retry.provider_status + '）' : '') + '，正在自动重试 ' + retry.retry_index + '/' + retry.max_retries + '…';
+  if (retry) {
+    const reason = retry.provider_error === 'timeout' ? '模型响应超时' :
+      retry.provider_error === 'network_error' ? '模型连接中断' : '上游暂时不可用';
+    const status = retry.provider_status && retry.provider_status >= 400 ? '（HTTP ' + retry.provider_status + '）' : '';
+    return reason + status + '，正在自动重试 ' + retry.retry_index + '/' + retry.max_retries + '…';
+  }
   const phases = {waiting:'正在等待模型响应…', thinking:'模型正在思考…',
     responding:'正在生成回复…', tool_call:'正在准备工具调用…'};
   return phases[progress.activity?.phase] || '';
