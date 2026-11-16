@@ -60,4 +60,3 @@
 - [x] Run prompt, tool availability, runtime checkpoint and provider request contract tests.
 - [x] Run the full test directory locally; 32 failures exposed stale message-position assumptions and host environment gaps. Relevant Worker/Workflow regressions were corrected and rerun; host-only browser/dependency failures remain noted in verification evidence.
 - [x] Inspect whitespace and final diff.
-

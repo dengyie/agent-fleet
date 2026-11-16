@@ -68,4 +68,3 @@ def test_prompt_context_is_allowlisted_and_untrusted_labels_are_json_data():
     assert "/private" not in content
     assert "secret" not in content
     assert "hidden metadata" not in content
-
