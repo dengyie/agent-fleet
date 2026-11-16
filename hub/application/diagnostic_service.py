@@ -115,7 +115,8 @@ class DiagnosticService:
             "evidence": [self._without_owner(item) for item in evidence[:100]],
         }
 
-    def read_logs(self, owner_id: str, service_id: str, *, window_s: Any = None, max_bytes: Any = None) -> dict[str, Any]:
+    def prepare_log_query(self, owner_id: str, service_id: str, *, window_s: Any = None, max_bytes: Any = None):
+        """Resolve the owner-scoped target and bounds before local or durable reading."""
         owner_id = self._owner(owner_id)
         try:
             service_id = validate_id(service_id, "service_id")
@@ -129,8 +130,13 @@ class DiagnosticService:
             service = self.service_repository.get_service(owner_id, service_id)
         except Exception:
             raise ApplicationError("diagnostics_unavailable", "日志证据不可用", 503) from None
-        if service is None:
+        if service is None or not service.get("enabled", True):
             raise ApplicationError("not_found", "服务不存在", 404)
+        return service, float(window), int(byte_limit)
+
+    def read_logs(self, owner_id: str, service_id: str, *, window_s: Any = None, max_bytes: Any = None) -> dict[str, Any]:
+        service, window, byte_limit = self.prepare_log_query(
+            owner_id, service_id, window_s=window_s, max_bytes=max_bytes)
         if self.log_reader is None:
             raise ApplicationError("diagnostics_unavailable", "日志证据不可用", 503)
         try:

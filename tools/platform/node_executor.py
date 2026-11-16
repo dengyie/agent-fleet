@@ -15,12 +15,13 @@ from fleet_core.capability_execution import CAPABILITY_ARGUMENT
 from fleet_core.remote_workflow_test import REMOTE_TEST_ACTION, RemoteTestError
 from fleet_core.platform_command import MAX_COMMAND_RESULT_BYTES
 from .browser_backend import BrowserExecutionError
+from .services.logs import ServiceLogReaderError
 
 
 from fleet_core.node_action_contract import (
     BROWSER_SESSION_CAPABILITY, NODE_TOOLS, POSTCHECK_ACTION,
     SERVICE_POSTCHECK_ACTION, SERVICE_LOGS_POSTCHECK_ACTION, POSTCHECK_ACTIONS,
-    SERVICE_COMMAND_ACTIONS,
+    SERVICE_COMMAND_ACTIONS, SERVICE_LOG_ACTION, SERVICE_NODE_ACTIONS,
 )
 
 
@@ -62,7 +63,7 @@ class NodeToolExecutor:
         self.browser_enabled = bool(browser_enabled)
         self.allowed_tools = frozenset(NODE_TOOLS if allowed_tools is None else allowed_tools)
         self.service_executor = service_executor
-        self.allowed_service_actions = frozenset(allowed_service_actions) & SERVICE_COMMAND_ACTIONS
+        self.allowed_service_actions = frozenset(allowed_service_actions) & SERVICE_NODE_ACTIONS
         self.log_reader = log_reader
         self.allowed_postcheck_actions = frozenset(
             POSTCHECK_ACTIONS if allowed_postcheck_actions is None
@@ -226,7 +227,11 @@ class NodeToolExecutor:
             return {"state": wire_state,
                     "result": safe, "error_code": result.get("error_code"),
                     "command_id": command_id}
-        if action == SERVICE_LOGS_POSTCHECK_ACTION:
+        if action == SERVICE_LOG_ACTION and (
+                action not in self.allowed_service_actions or self.log_reader is None):
+            return {"state": "failed", "result": {},
+                    "error_code": "capability_unavailable", "command_id": command_id}
+        if action in {SERVICE_LOGS_POSTCHECK_ACTION, SERVICE_LOG_ACTION}:
             arguments = command.get("arguments")
             required = {"adapter", "target_alias", "service_version", "action", "window_s", "max_bytes"}
             if (self.log_reader is None or not isinstance(arguments, Mapping)
@@ -266,8 +271,8 @@ class NodeToolExecutor:
                     safe["observed_at"] = float(observed_at)
                 return self._bound_receipt({"state": "succeeded", "result": safe,
                         "command_id": command_id}, 'text', nested_truncated=True)
-            except Exception:
-                raise
+            except ServiceLogReaderError as exc:
+                return {"state": "failed", "result": {}, "error_code": exc.code, "command_id": command_id}
         if not action.startswith("tool."):
             return {"state": "failed", "result": {}, "error_code": "unknown_tool", "command_id": command_id}
         tool = action[5:]

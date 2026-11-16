@@ -33,6 +33,26 @@ def test_actions_gate_is_closed_by_default(tmp_path):
     assert app.test_client().post("/api/platform/v1/services/api/actions", json={"action": "inspect"}, headers={"X-Operator-Identity": "owner-a@example.test"}).status_code == 404
 
 
+@pytest.mark.parametrize('action', ['inspect', 'restart'])
+def test_generated_service_action_identifiers_always_pass_their_own_validation(tmp_path, monkeypatch, action):
+    import secrets
+    from platform_schema import validate_id
+
+    app = _app(tmp_path, actions=True)
+    _service(app)
+    # A valid URL-safe random token can contain a reserved ID substring.
+    monkeypatch.setattr(secrets, 'token_urlsafe', lambda _: 'abcKEYdef0123456789012345')
+    response = app.test_client().post('/api/platform/v1/services/api/actions', json={'action': action})
+    assert response.status_code == 200
+    payload = response.get_json()
+    if action == 'inspect':
+        validate_id(payload['command']['command_id'])
+    else:
+        grant_id = payload['grant']['grant_id']
+        validate_id(grant_id)
+        assert app.test_client().get('/api/platform/v1/approvals/' + grant_id).status_code == 200
+
+
 def test_restart_requires_approval_and_is_one_time(tmp_path):
     app = _app(tmp_path, actions=True)
     _service(app)

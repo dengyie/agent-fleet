@@ -289,14 +289,17 @@ class CommandPostcheckService:
             raise ApplicationError("command_not_found", "命令不存在", 404)
         if original.get("status") != "unknown":
             raise ApplicationError("reconcile_requires_unknown", "只有 unknown 命令可以执行 post-check", 409)
-        if original.get("action") != "tool.service.read_logs":
+        native_logs = original.get("action") == "service.logs"
+        if not native_logs and original.get("action") != "tool.service.read_logs":
             raise ApplicationError("postcheck_not_supported", "该命令没有可用的服务日志 post-check", 409)
         args = original.get("arguments")
-        allowed = {"service_id", "window_s", "max_bytes", "adapter", "target_alias", "service_version"}
-        if not isinstance(args, Mapping) or set(args) - allowed:
+        allowed = {"window_s", "max_bytes", "adapter", "target_alias", "service_version"}
+        allowed.add("action" if native_logs else "service_id")
+        if (not isinstance(args, Mapping) or set(args) - allowed
+                or native_logs and (set(args) != allowed or args.get("action") != "logs")):
             raise ApplicationError("postcheck_not_supported", "服务日志参数不是固定合同", 409)
         try:
-            service_id = validate_id(args.get("service_id"), "service_id")
+            service_id = validate_id(original.get("resource_id") if native_logs else args.get("service_id"), "service_id")
             window_s = float(args.get("window_s", 300.0))
             max_bytes = int(args.get("max_bytes", 16 * 1024))
             original_version = int(args["service_version"]) if "service_version" in args else None
@@ -350,7 +353,8 @@ class CommandPostcheckService:
             and check.get("resource_id") == row.get("service_id")
             and check.get("action") == SERVICE_LOGS_POSTCHECK_ACTION
             and arguments.get("action") == "logs"
-            and original_arguments.get("service_id") == row.get("service_id")
+            and (original.get("resource_id") if original.get("action") == "service.logs"
+                 else original_arguments.get("service_id")) == row.get("service_id")
             and current.get("adapter") == arguments.get("adapter")
             and current.get("target_alias") == arguments.get("target_alias")
             and identity_matches
@@ -488,7 +492,7 @@ class CommandPostcheckService:
             original = self.repository.get_for_owner(owner_id, command_id)
             if original is not None and original.get("action") == "service.inspect":
                 return self.request_service(owner_id, command_id)
-            if original is not None and original.get("action") == "tool.service.read_logs":
+            if original is not None and original.get("action") in {"service.logs", "tool.service.read_logs"}:
                 return self.request_service_logs(owner_id, command_id)
             return self.request(owner_id, command_id)
         except ApplicationError:

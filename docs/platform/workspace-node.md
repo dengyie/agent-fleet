@@ -39,13 +39,15 @@
 
 ### 受管服务动作
 
-标准 Node 也可执行服务目录中声明的固定动作。需先升级到支持服务动作的发布版，在现有私有 `node.json` 增加所需动作，并在 Hub 对同一 Node 显式登记相应的 `service.inspect` / `service.restart` 能力。例如只启用检查：
+标准 Node 也可执行服务目录中声明的固定动作与日志读取。需先升级到支持这些能力的发布版，在现有私有 `node.json` 增加所需动作，并在 Hub 对同一 Node 显式登记相应的 `service.inspect` / `service.restart` / `service.logs` 能力。例如启用只读检查与日志：
 
 ```json
-{"service_actions": ["inspect"]}
+{"service_actions": ["inspect", "logs"]}
 ```
 
-保留其余字段、工作区绑定、凭据和原 `commands.db`。`service_actions` 只接受不重复的 `inspect`、`restart`，默认不启用；它可以与普通工作区共用 Node，但不能与专用 Workflow fixed-test 配置混用。执行账号必须能访问对应的 systemd、Supervisor 或 Docker 管理端；此配置不会授予 OS 权限。设置页下载的工作区接入文件不会自动开启服务动作。
+保留其余字段、工作区绑定、凭据和原 `commands.db`。`service_actions` 只接受不重复的 `inspect`、`restart`、`logs`，默认不启用；它可以与普通工作区共用 Node，但不能与专用 Workflow fixed-test 配置混用。执行账号必须能访问对应的 systemd、Supervisor 或 Docker 管理端；此配置不会授予 OS 权限。设置页下载的工作区接入文件不会自动开启服务动作。
+
+普通主助手的 `service.read_logs` 由 Hub 定位服务目录的实际 Node，再以签名 `service.logs` 命令读取固定 adapter/alias 的有限日志；服务 Node 可以不同于工作区 Node。等待期间保存原检查点，恢复只观察原回执，不重新执行。Node 返回的文本经过脱敏和字节截断，工具卡片显示日志预览；读取程序非零退出是明确失败，成功的 Docker 日志包含 stdout 和 stderr。未配置本地 reader 且不存在支持日志的服务 Node 时，不向模型声明日志工具。普通 `service.logs` 与 `reconcile.service.logs` 各自授权；unknown 的日志命令可以申请现有只读 post-check，补充当前证据后原命令仍保留 unknown。
 
 Hub 服务目录的 `adapter`、`target_alias`、`allowed_actions` 和服务版本决定固定命令；模型不能增加 argv。重启先创建现有审批单，用户批准后才派发签名命令；Node 持久 journal 对同一命令只执行一次。普通 inspect 与 reconcile inspect 使用独立能力，互相不授予权限。inspect 明确返回不健康进程状态时，命令已完成且结果为 unhealthy；重启超时或中断保持 unknown，不自动重放。
 

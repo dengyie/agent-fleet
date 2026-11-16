@@ -78,6 +78,22 @@
 - [ ] Repeat deployment and exact-profile acceptance after each root-cause fix until all required checks pass.
 - [ ] Record any capability that cannot be exercised in production as blocked/not-run with concrete evidence; do not report it as passed.
 
+### Task 6: Route ordinary registered-service log reads to the service Node
+
+**Evidence:** Three API/worker/Node regressions failed: normal log reads had no configured reader, while the tool was still advertised. Four adapter regressions additionally showed nonzero log-command exits being reported as successful empty logs and successful Docker stderr being discarded.
+
+**Root cause and scope:** The normal diagnostic composition lacks a Node log reader; the existing fixed adapter was wired only to reconciliation. Reuse signed commands, exact service Node identity, existing timing, journals, checkpoint suspension and receipt recovery. Keep service logs read-only and explicitly capability-gated; do not route them to the selected workspace Node or create a separate task framework.
+
+- [x] Capture failing ordinary local/remote workspace tests and unavailable-tool advertisement.
+- [x] Wire a per-Run service log broker to the existing delivery and worker checkpoint lifecycle.
+- [x] Verify original three failures turn green without duplicate execution or extended deadlines.
+- [x] Capture nonzero log-exit and Docker stderr failures before fixing the adapter.
+- [x] Verify target ownership, capability gates, failure/unknown/cancellation, original receipt recovery and CLI configuration. Focused worker/runtime/service regression: 362 passed; selected Ruff checks, diff and UTF-8/no-BOM checks passed.
+- [ ] Update existing capability docs, release notes and journey gate; run affected regressions and CI.
+- [ ] Publish through the existing release flow and verify real service logs on the dedicated test Node.
+
+**Additional observed evidence:** Release `26763de` passed exact deployment and all four selected-model read-only checks. The ordinary mixed Run `run_be7699a5e25c64c09e103e99` successfully retried one HTTP 503, then became unknown after a later model stream timed out; do not resubmit it. Independent service acceptance confirmed actual inspect, pending approval, one operator-approved restart and a changed dedicated process PID. Final observation Run `run_34d8f6fadc23947c4386aeac` read the original successful action, then failed on `service.read_logs/diagnostics_unavailable`, reproducing this log defect online. Separate regression exposed service command/grant URL-safe random IDs containing forbidden reserved substrings; hex generation fixes the two deterministic failures.
+
 ### Task 5: Resolve observed environment and management gaps
 
 **Evidence:** On release `8c2df56`, VM coding Run `run_297d33cd255c4cef62d844f9` guessed an unrelated absolute path and initially discovered zero tests before correcting both. Earlier archive acceptance could not find a target outside the bounded conversation list. The worker currently excludes Hub controls whenever a remote execution node is selected.

@@ -121,7 +121,14 @@ class FixedServiceLogReader:
             raise ServiceLogReaderError("permission_denied") from None
         except OSError:
             raise ServiceLogReaderError("reader_failed") from None
-        text, truncated = _bounded_text(getattr(result, "stdout", ""), max_bytes)
+        if result.returncode != 0:
+            raise ServiceLogReaderError("reader_failed")
+        output = result.stdout or ""
+        # Docker preserves the application's stderr on the CLI's stderr even
+        # when reading logs succeeds. Other adapters use it for diagnostics.
+        if arguments.get("adapter") == "docker":
+            output += result.stderr or ""
+        text, truncated = _bounded_text(output, max_bytes)
         return {"text": text, "truncated": truncated,
                 "observed_at": float(self.clock()),
                 "duration_s": round(max(0.0, float(self.clock()) - started), 3)}
