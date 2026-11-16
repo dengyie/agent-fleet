@@ -27,6 +27,6 @@ Node removal is an explicit catalog deletion of a disabled, unreferenced Node, n
 
 ## Local verification before submission
 
-- Initial five administration tests failed on the absent service; implemented the adapter and expanded to 14 cases covering real stores, remote-worker routing, account demotion, Node credential behavior, Workflow idempotency and guarded removal.
+- Initial five administration tests failed on the absent service; implemented the adapter and expanded to 15 cases covering real stores, remote-worker routing, account demotion, Node credential behavior, Workflow idempotency and guarded removal.
 - The affected integration suite passed **612 tests and 3 subtests**, including original VM-session, adoption, settings, account, connector, Workflow, Memory and schedule behavior. Ruff with CI rules and whitespace checks passed.
-- Production release and real remote receipt acceptance require the subsequent GitHub main workflow and dedicated live evidence; local tests do not claim those results. Release identity and live evidence are maintained in the canonical deployment runbook after publication.
+- A follow-up shared-settings gate check and affected settings/prompt suite passed **64 tests** after exposing existing append-turn, local-profile and schedule toggles. Production release and real remote receipt acceptance require the subsequent GitHub main workflow and dedicated live evidence; local tests do not claim those results. Release identity and live evidence are maintained in the canonical deployment runbook after publication.

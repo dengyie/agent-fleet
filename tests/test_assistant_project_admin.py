@@ -275,3 +275,14 @@ def test_settings_catalog_pages_without_exposing_credentials(app):
     assert [r['node_id'] for r in first['items'] + second['items']] == ['page-0', 'page-1', 'page-2']
     assert second['next_offset'] is None and second['total'] == 3
     assert all('owner_id' not in r for r in first['items'])
+
+
+def test_management_feature_gates_are_editable_in_shared_runtime_settings(app):
+    current = invoke(app, 'platform.admin_inspect', operation='settings.runtime')
+    keys = {row['key'] for row in current['settings']}
+    assert {'AGENT_FLEET_APPEND_USER_TURN_ENABLED', 'AGENT_FLEET_APPLY_LOCAL_PROFILE_ENABLED',
+            'AGENT_FLEET_PLATFORM_SCHEDULES_ENABLED'} <= keys
+    result = invoke(app, 'platform.admin_mutate', operation='settings.save_runtime', payload={
+        'digest': current['digest'], 'values': {'AGENT_FLEET_APPEND_USER_TURN_ENABLED': True}})
+    row = next(row for row in result['settings'] if row['key'] == 'AGENT_FLEET_APPEND_USER_TURN_ENABLED')
+    assert row['saved'] == '1' and row['effective'] is False
