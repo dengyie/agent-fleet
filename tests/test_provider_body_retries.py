@@ -71,6 +71,64 @@ def test_real_http_incomplete_generation_retries_with_live_output_and_one_tool(p
     assert attempts[0]['provider_error'] == 'timeout' and attempts[0]['retryable'] is True
 
 
+@pytest.mark.parametrize('code', ['bad_response_body', 'stream_interrupted'])
+def test_real_http_upstream_scoped_stream_error_retries_without_committing_draft(code):
+    calls, executed, events = [], [], []
+
+    class Peer(QuietHandler):
+        def do_POST(self):
+            self.drain()
+            calls.append(True)
+            if len(calls) == 1:
+                frames = [
+                    {'choices': [{'delta': {'content': 'abandoned', 'tool_calls': [{
+                        'index': 0, 'function': {'name': 'workspace_write',
+                            'arguments': '{"path":"wrong.txt","content":"uncommitted"}'},
+                    }]}}]},
+                    {'error': {'type': 'upstream_error', 'code': code,
+                               'message': 'private upstream stream failure'}},
+                ]
+            elif len(calls) == 2:
+                frames = [{'choices': [{'delta': {'tool_calls': [{
+                    'index': 0, 'id': 'committed', 'function': {'name': 'workspace_write',
+                        'arguments': '{"path":"once.txt","content":"done"}'},
+                }]}, 'finish_reason': 'tool_calls'}]}]
+            else:
+                frames = [{'choices': [{'delta': {'content': 'finished'}, 'finish_reason': 'stop'}]}]
+            body = (''.join('data: ' + json.dumps(frame) + '\n\n' for frame in frames)
+                    + 'data: [DONE]\n\n').encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('X-Oneapi-Request-Id', 'stream-scope-' + str(len(calls)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    class Broker:
+        def execute(self, **kwargs):
+            executed.append(kwargs)
+            return ToolReceipt(kwargs['command_id'], 'succeeded', {'size': 4})
+
+    with serve(Peer) as server:
+        p = provider(server, stream=True, max_retries=1, sleeper=lambda _: None)
+        result = NativeAssistantRuntime(p, Broker()).run(
+            run_id='run-stream-scope', owner_id='owner', epoch=1,
+            messages=[{'role': 'user', 'content': 'write once'}],
+            tools=[{'name': 'workspace.write'}],
+            event_sink=lambda kind, payload: events.append((kind, payload)),
+        )
+
+    assert result.state == 'succeeded' and result.text == 'finished'
+    assert len(calls) == 3 and len(executed) == 1
+    assert executed[0]['arguments'] == {'path': 'once.txt', 'content': 'done'}
+    finished = [payload for kind, payload in events if kind == 'provider_request_finished']
+    assert [item['status'] for item in finished] == ['unknown', 'succeeded', 'succeeded']
+    assert finished[0]['http_status'] == 200 and finished[0]['retryable'] is True
+    assert finished[0]['provider_error'] == 'provider_stream_error'
+    assert finished[0]['gateway_request_id'] == 'stream-scope-1'
+    assert 'private upstream stream failure' not in json.dumps(events)
+
+
 def test_request_start_for_retry_replaces_only_its_incomplete_draft():
     progress = project_progress({}, 'assistant_text_delta', {'step': 1, 'text': 'earlier', 'offset': 0}, 1)
     progress = project_progress(progress, 'assistant_response', {'step': 1, 'text': 'earlier', 'response_kind': 'tool_call'}, 2)
@@ -82,7 +140,7 @@ def test_request_start_for_retry_replaces_only_its_incomplete_draft():
     assert [s['text'] for s in progress['segments']] == ['earlier', 'recovered']
 
 
-@pytest.mark.parametrize('failure', ['timeout', 'network', 'http-read', 'url-timeout', 'eof', 'transient-frame'])
+@pytest.mark.parametrize('failure', ['timeout', 'network', 'http-read', 'url-timeout', 'eof', 'transient-frame', 'upstream-frame'])
 def test_exhausted_incomplete_generations_close_each_body_and_never_execute_tool(failure):
     from hub.platform.providers.openai_compatible import OpenAICompatibleProvider, TransportResponse
     from hub.platform.runtime.native import ProviderBoundaryUnknown
@@ -105,6 +163,8 @@ def test_exhausted_incomplete_generations_close_each_body_and_never_execute_tool
                 raise URLError(TimeoutError('private-error'))
             if failure == 'transient-frame':
                 yield b'data: {"error":{"code":"system_cpu_overloaded","message":"private-error"}}\n\n'
+            if failure == 'upstream-frame':
+                yield b'data: {"error":{"type":"upstream_error","code":"bad_response_body","message":"private-error"}}\n\n'
         finally:
             closed.append(index)
 
@@ -128,6 +188,29 @@ def test_exhausted_incomplete_generations_close_each_body_and_never_execute_tool
     assert [d['status'] for k, d in events if k == 'provider_request_finished'] == ['unknown', 'unknown']
     assert len([k for k, _ in events if k == 'provider_retry_scheduled']) == 1
     assert 'private-error' not in json.dumps(events)
+
+
+@pytest.mark.parametrize('detail', [
+    {'type': 'invalid_request_error', 'code': 'invalid_parameter'},
+    {'type': 'authentication_error', 'code': 'invalid_api_key'},
+    {'message': 'upstream_error'},
+    {'type': {'upstream_error': True}},
+    'upstream_error',
+])
+def test_stream_error_without_explicit_upstream_scope_does_not_retry(detail):
+    from hub.platform.providers.openai_compatible import OpenAICompatibleProvider, ProviderError, TransportResponse
+    from tests.test_platform_provider import FakeTransport
+
+    body = ('data: ' + json.dumps({'error': detail}) + '\n\ndata: [DONE]\n\n').encode()
+    transport = FakeTransport([TransportResponse(200, {}, body)])
+    p = OpenAICompatibleProvider(model='test', endpoint='http://fixture', api_key='private',
+        transport=transport, stream=True, max_retries=2)
+
+    with pytest.raises(ProviderError) as caught:
+        p.complete([], [])
+
+    assert caught.value.code == 'provider_stream_error' and caught.value.retryable is False
+    assert len(transport.calls) == 1
 
 
 def test_cancellation_after_partial_generation_closes_body_and_prevents_retry():
