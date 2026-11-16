@@ -631,7 +631,11 @@ class TranscriptRepository:
         with closing(self._connect()) as conn:
             row = conn.execute('SELECT MIN(o.cursor) FROM redacted_event_order o '
                                'JOIN redacted_events e USING(session_id,event_id) '
-                               'WHERE o.session_id=? AND e.sequence>=?', (session_id, sequence)).fetchone()
+                               'WHERE o.session_id=? AND e.sequence=?', (session_id, sequence)).fetchone()
+            if row[0] is None:
+                row = conn.execute('SELECT MIN(o.cursor) FROM redacted_event_order o '
+                                   'JOIN redacted_events e USING(session_id,event_id) '
+                                   'WHERE o.session_id=? AND e.sequence>?', (session_id, sequence)).fetchone()
             if row[0] is not None:
                 return int(row[0]) - 1
             return int(conn.execute('SELECT COALESCE(MAX(cursor),0) FROM redacted_event_order WHERE session_id=?',

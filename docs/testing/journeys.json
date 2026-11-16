@@ -1112,7 +1112,8 @@
         "tests/test_root_cause_regressions.py::test_missing_sessions_cannot_starve_later_projection_batches",
         "tests/test_transcript_cursors.py::test_equal_source_sequences_and_late_lower_sequences_are_all_pageable",
         "tests/test_transcript_cursors.py::test_legacy_backfill_and_reopen_preserve_cursors_and_append_order",
-        "tests/test_transcript_cursors.py::test_assistant_and_http_cursor_continue_across_streams_and_late_ingestion"
+        "tests/test_transcript_cursors.py::test_assistant_and_http_cursor_continue_across_streams_and_late_ingestion",
+        "tests/test_transcript_cursors.py::test_sequence_deep_link_starts_at_late_lower_sequence"
       ]
     },
     {

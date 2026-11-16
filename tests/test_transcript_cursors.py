@@ -73,3 +73,17 @@ def test_assistant_and_http_cursor_continue_across_streams_and_late_ingestion(ap
     assert third['events'][0]['payload']['text'] == 'late'
     assert int(third['next_cursor']) > int(second['next_cursor'])
     assert third['has_more'] is False
+
+
+def test_sequence_deep_link_starts_at_late_lower_sequence(app):
+    sessions = app.extensions['fleet']['services']['sessions']
+    for index in range(102):
+        row = event(10, 'assistant_message', {'text': str(index), 'is_complete': True})
+        row.update(stream_id='anchor-' + str(index), event_id='anchor-' + str(index))
+        sessions.ingest_events([row])
+    row = event(3, 'assistant_message', {'text': 'late exact target', 'is_complete': True})
+    row.update(stream_id='anchor-late', event_id='anchor-late')
+    sessions.ingest_events([row])
+    page = app.test_client().get('/api/sessions/s1/events?limit=100&at_sequence=3').json
+    assert page['events'][0]['payload']['text'] == 'late exact target'
+    assert page['events'][0]['sequence'] == 3

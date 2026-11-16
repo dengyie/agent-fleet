@@ -73,6 +73,8 @@ const origin = process.argv[2];
     await page.getByText('Cursor message 0', {exact:true}).waitFor();
     await page.getByRole('button', {name:'下一页', exact:true}).click();
     await page.getByText('Late stream message', {exact:true}).waitFor();
+    await page.goto(origin + '/session/cursor-session?sequence=1');
+    await page.locator('#session-event-1.session-event-match').waitFor();
     assert.deepEqual(errors, []);
   } finally { await browser.close(); }
 })().catch(error => {console.error(error); process.exit(1);});
