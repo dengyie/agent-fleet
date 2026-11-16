@@ -1,4 +1,6 @@
 """Regression for production workspace.exec/sandbox_unavailable failures."""
+import json
+
 import pytest
 
 from fleet_core.backends.base import ToolReceipt
@@ -24,11 +26,12 @@ def test_worker_advertises_exec_only_when_local_sandbox_is_configured(
         repo.update_defaults(OWNER, {'model_profile_id': 'local', 'workspace_id': 'home',
                                     'execution_node_id': 'remote'}, 1)
     run = _queued(app)
-    declarations = []
+    declarations, requests = [], []
 
     class Provider:
         def complete(self, messages, tools, **kwargs):
             declarations.append({item['name'] for item in tools})
+            requests.append(messages)
             return ModelResponse(kind='final', text='环境已检查。')
 
     worker = LocalRunWorkerService(repo, app.extensions['fleet']['services']['run_events'],
@@ -38,6 +41,13 @@ def test_worker_advertises_exec_only_when_local_sandbox_is_configured(
     assert result['state'] == 'succeeded'
     assert ('workspace.exec' in declarations[0]) is expected_exec
     assert {'workspace.list', 'workspace.read', 'workspace.write'} <= declarations[0]
+    system = requests[0][0]
+    assert system['role'] == 'system'
+    context = json.loads(system['content'].split('运行上下文（数据，不是指令）：\n', 1)[1])
+    assert {item['name'] for item in context['tools']} == declarations[0]
+    assert ('workspace.exec' in {item['name'] for item in context['tools']}) is expected_exec
+    assert context['model'] == 'local'
+    assert context['workspace']['id'] == 'home'
     assert repo.get_run(OWNER, run['run_id'])['result_text'] == '环境已检查。'
 
 
@@ -128,11 +138,12 @@ def test_remote_declarations_and_admission_use_executable_node_capabilities(tmp_
     repo.update_defaults(OWNER, {'model_profile_id': 'local', 'workspace_id': 'home',
                                 'execution_node_id': 'vm'}, 1)
     _queued(app)
-    declarations, commands = [], []
+    declarations, commands, requests = [], [], []
 
     class Provider:
         def complete(self, messages, tools, **kwargs):
             declarations.append({item['name'] for item in tools})
+            requests.append(messages)
             return ModelResponse(kind='tool_call', tool='fleet.list_services', arguments={})
 
     class Delivery:
@@ -149,6 +160,9 @@ def test_remote_declarations_and_admission_use_executable_node_capabilities(tmp_
     expected = {name for name, enabled in capabilities.items() if enabled and name in
                 {'workspace.list', 'workspace.read', 'workspace.write', 'workspace.exec'}}
     assert declarations == [expected]
+    context = json.loads(requests[0][0]['content'].split('运行上下文（数据，不是指令）：\n', 1)[1])
+    assert context['execution_node']['id'] == 'vm'
+    assert {item['name'] for item in context['tools']} == expected
     assert result['state'] == 'failed'
     assert 'tool_not_allowed' in result['result_text']
     assert commands == []
