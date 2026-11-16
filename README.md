@@ -18,7 +18,7 @@
 
 ## 最新更新
 
-2026-11-16：主助手可在同一次普通任务中组合 Hub 平台管理与 VM 工作区操作，保留原有权限和远程回执恢复；项目操作增加目录、测试数量和有限列表的证据要求，发布验收直接观察 UI 使用的 SSE 流。完整历史见 [Release Notes](docs/releases/release-notes.md)。
+2026-11-17：主助手执行项目文档中的命令时明确按仓库目录解释相对路径，并复用同一修复版本已经完成的等价测试回执，减少错误目录与重复验证造成的等待。完整历史见 [Release Notes](docs/releases/release-notes.md)。
 
 ## Why Agent Fleet?
 
