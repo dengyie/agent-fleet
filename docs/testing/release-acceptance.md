@@ -39,13 +39,14 @@ these values before dispatch:
 | Secret | `AGENT_FLEET_USERNAME` | Dedicated acceptance account login |
 | Secret | `AGENT_FLEET_PASSWORD` | Dedicated acceptance account password |
 
-Dispatch with `expected_release` set to the exact deployed release SHA. The
-workflow runs one read-only `workspace.list` task for every enabled model,
-checks logout revocation and the served release manifest, then retains the
-bounded JSON report as a workflow artifact. A dispatch from a non-main ref is
-skipped. The report contains model/run identifiers and statuses but no
-credentials, cookies, file listing or reply text; restrict access to the
-workflow artifact accordingly.
+Dispatch with `expected_release` set to the exact deployed release SHA and
+`model_profiles` set to a comma-separated list of exact profile IDs. The
+workflow runs one read-only `workspace.list` task per selected profile; it does
+not call every enabled model implicitly. It checks logout revocation and the
+served release manifest, then retains the bounded JSON report as a workflow
+artifact. A dispatch from a non-main ref is skipped. The report contains
+model/run identifiers and statuses but no credentials, cookies, file listing
+or reply text; restrict access to the workflow artifact accordingly.
 
 This workflow does not automate MAIL-LIVE, NODE-LIVE or the isolated rollback
 portion of DEPLOY-LIVE. Those still require an explicitly designated mailbox

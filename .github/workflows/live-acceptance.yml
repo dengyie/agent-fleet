@@ -7,6 +7,10 @@ on:
         description: Exact deployed RELEASE_ORIGIN commit SHA
         required: true
         type: string
+      model_profiles:
+        description: Comma-separated exact model profile IDs to test (for example deepseek-v4-flash,glm-5.3-flash)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -38,9 +42,10 @@ jobs:
           AGENT_FLEET_USERNAME: ${{ secrets.AGENT_FLEET_USERNAME }}
           AGENT_FLEET_PASSWORD: ${{ secrets.AGENT_FLEET_PASSWORD }}
           EXPECTED_RELEASE: ${{ inputs.expected_release }}
+          MODEL_PROFILES: ${{ inputs.model_profiles }}
         run: |
           set -euo pipefail
-          for name in AGENT_FLEET_ENDPOINT AGENT_FLEET_WORKSPACE AGENT_FLEET_USERNAME AGENT_FLEET_PASSWORD; do
+          for name in AGENT_FLEET_ENDPOINT AGENT_FLEET_WORKSPACE AGENT_FLEET_USERNAME AGENT_FLEET_PASSWORD MODEL_PROFILES; do
             if [[ -z "${!name:-}" ]]; then
               echo "::error title=Missing live acceptance configuration::$name is not configured in the live-acceptance environment."
               exit 2
@@ -69,21 +74,32 @@ jobs:
           }), encoding="utf-8")
           path.chmod(0o600)
           PY
-      - name: Run read-only acceptance against every enabled model
+      - name: Run read-only acceptance against selected models
         env:
           AGENT_FLEET_ENDPOINT: ${{ vars.AGENT_FLEET_ENDPOINT }}
           AGENT_FLEET_WORKSPACE: ${{ vars.AGENT_FLEET_WORKSPACE }}
           EXPECTED_RELEASE: ${{ inputs.expected_release }}
+          MODEL_PROFILES: ${{ inputs.model_profiles }}
           CREDENTIALS_FILE: ${{ runner.temp }}/fleet-live-acceptance-credentials.json
           REPORT_FILE: ${{ runner.temp }}/fleet-live-acceptance/model.json
         run: |
           set -euo pipefail
           trap 'rm -f "$CREDENTIALS_FILE"' EXIT
+          IFS=',' read -r -a model_ids <<< "$MODEL_PROFILES"
+          model_args=()
+          for model_id in "${model_ids[@]}"; do
+            model_id="${model_id//[[:space:]]/}"
+            if [[ ! "$model_id" =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
+              echo 'Invalid model profile list; use comma-separated profile IDs.' >&2
+              exit 2
+            fi
+            model_args+=(--model "$model_id")
+          done
           PYTHONPATH=. python -m tools.platform.acceptance_check \
             --endpoint "$AGENT_FLEET_ENDPOINT" \
             --credentials-file "$CREDENTIALS_FILE" \
             --workspace "$AGENT_FLEET_WORKSPACE" \
-            --all-models \
+            "${model_args[@]}" \
             --expected-release "$EXPECTED_RELEASE" \
             --report "$REPORT_FILE"
       - name: Summarize model results

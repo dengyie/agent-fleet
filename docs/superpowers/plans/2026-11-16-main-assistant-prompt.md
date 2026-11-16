@@ -60,3 +60,13 @@
 - [x] Run prompt, tool availability, runtime checkpoint and provider request contract tests.
 - [x] Run the full test directory locally; 32 failures exposed stale message-position assumptions and host environment gaps. Relevant Worker/Workflow regressions were corrected and rerun; host-only browser/dependency failures remain noted in verification evidence.
 - [x] Inspect whitespace and final diff.
+
+### Task 4: Make live model acceptance explicit
+
+**Files:**
+- Modify: `.github/workflows/live-acceptance.yml`
+- Modify: `docs/testing/release-acceptance.md`
+
+- [x] Require a comma-separated model-profile selection for manual live acceptance instead of probing every enabled model.
+- [x] Validate profile ID syntax and pass each selected profile as an independent CLI argument.
+- [x] Confirm the current `live-acceptance` GitHub environment has no variables or secrets configured; real MODEL-LIVE remains blocked until its dedicated environment is provisioned.
