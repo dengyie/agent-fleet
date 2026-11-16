@@ -286,3 +286,27 @@ def test_management_feature_gates_are_editable_in_shared_runtime_settings(app):
         'digest': current['digest'], 'values': {'AGENT_FLEET_APPEND_USER_TURN_ENABLED': True}})
     row = next(row for row in result['settings'] if row['key'] == 'AGENT_FLEET_APPEND_USER_TURN_ENABLED')
     assert row['saved'] == '1' and row['effective'] is False
+
+
+def test_workspace_save_cannot_bind_node_removed_after_settings_validation(app, monkeypatch):
+    """Interleave a second admin's retirement between validation and commit."""
+    from hub.infrastructure.platform_db_catalog import catalog_digest
+    repo = app.extensions['fleet']['platform_repository']
+    repo.upsert_node(OWNER, {'node_id': 'retiring', 'label': 'retiring'})
+    original = repo.upsert_workspace
+
+    def retire_before_commit(owner, value, **kwargs):
+        # SettingsService has already read and accepted the live Node. A
+        # separate operation now disables/deletes it before this writer begins.
+        repo.upsert_node(owner, {'node_id': 'retiring', 'enabled': False})
+        repo.remove_node(owner, 'retiring', catalog_digest(repo.get_node(owner, 'retiring')))
+        return original(owner, value, **kwargs)
+
+    monkeypatch.setattr(repo, 'upsert_workspace', retire_before_commit)
+    with pytest.raises(ApplicationError) as rejected:
+        invoke(app, 'platform.admin_mutate', operation='settings.save', payload={
+            'kind': 'workspaces', 'identifier': 'racing-workspace', 'expected_digest': '',
+            'value': {'root_path': '/tmp/racing-workspace', 'default_node_id': 'retiring'}})
+    assert rejected.value.code == 'reference_forbidden'
+    assert repo.get_node(OWNER, 'retiring') is None
+    assert repo.get_workspace(OWNER, 'racing-workspace') is None

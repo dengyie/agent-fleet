@@ -139,6 +139,13 @@ class PlatformCatalogMixin:
                 previous = conn.execute("SELECT * FROM workspaces WHERE owner_id=? AND workspace_id=?", (owner_id, normalized["workspace_id"])).fetchone()
                 if catalog_digest(self._row_workspace(previous) if previous else None) != expected_digest:
                     raise PlatformRepositoryError("revision_conflict")
+            # Keep the reference check and save under one writer lock: a
+            # concurrent Node removal must never leave a dangling binding.
+            node_id = normalized['default_node_id']
+            if node_id is not None and conn.execute(
+                    'SELECT 1 FROM nodes WHERE owner_id=? AND node_id=?',
+                    (owner_id, node_id)).fetchone() is None:
+                raise PlatformRepositoryError('reference_forbidden')
             conn.execute("INSERT INTO workspaces(owner_id,workspace_id,name,backend,root_path,default_node_id,enabled) VALUES(?,?,?,?,?,?,?) ON CONFLICT(owner_id,workspace_id) DO UPDATE SET name=excluded.name,backend=excluded.backend,root_path=excluded.root_path,default_node_id=excluded.default_node_id,enabled=excluded.enabled", (owner_id, normalized["workspace_id"], normalized["name"], normalized["backend"], normalized["root_path"], normalized["default_node_id"], int(normalized["enabled"])))
             conn.execute("COMMIT")
             return normalized | {"owner_id": owner_id}

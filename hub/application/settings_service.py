@@ -98,9 +98,6 @@ class SettingsService:
             root_path = value.get('root_path')
             if not isinstance(root_path, str) or not (PurePosixPath(root_path).is_absolute() or PureWindowsPath(root_path).is_absolute()):
                 raise ApplicationError('invalid_settings', '工作目录需要使用绝对路径', 400)
-            node_id = value.get('default_node_id')
-            if node_id and not self.repository.get_node(owner, node_id):
-                raise ApplicationError('reference_forbidden', '默认执行节点不存在', 409)
         validate(value)
         saved = getattr(self.repository, 'upsert_' + singular)(owner, value, expected_digest=body['expected_digest'])
         return {'ok': True, 'value': self.public(kind, saved)}

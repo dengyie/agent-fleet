@@ -27,6 +27,10 @@ Node removal is an explicit catalog deletion of a disabled, unreferenced Node, n
 
 ## Local verification before submission
 
-- Initial five administration tests failed on the absent service; implemented the adapter and expanded to 15 cases covering real stores, remote-worker routing, account demotion, Node credential behavior, Workflow idempotency and guarded removal.
+- Initial five administration tests failed on the absent service; implemented the adapter and expanded to 16 cases covering real stores, remote-worker routing, account demotion, Node credential behavior, Workflow idempotency and guarded removal.
 - The affected integration suite passed **612 tests and 3 subtests**, including original VM-session, adoption, settings, account, connector, Workflow, Memory and schedule behavior. Ruff with CI rules and whitespace checks passed.
 - A follow-up shared-settings gate check and affected settings/prompt suite passed **64 tests** after exposing existing append-turn, local-profile and schedule toggles. Production release and real remote receipt acceptance require the subsequent GitHub main workflow and dedicated live evidence; local tests do not claim those results. Release identity and live evidence are maintained in the canonical deployment runbook after publication.
+
+## Publication follow-up: workspace/Node reference race
+
+A deterministic interleaving test failed before the fix: after settings validation, a second administrator disabled/removed the Node, and the original workspace save still inserted its dangling Node reference. Move reference validation into `upsert_workspace` under the same `BEGIN IMMEDIATE` transaction as version validation and persistence; remove the obsolete application precheck. All repository workspace writes now follow this invariant. Update one setup fixture to create its referenced Node, preserving every existing labels/history assertion. Fresh affected verification: **232 tests passed**. The initial main publication was stopped before deployment so the production release can include this fix.

@@ -58,6 +58,7 @@ def test_workflow_setup_existing_labels_overrides_and_history_are_preserved(tmp_
     command, db = setup_command(tmp_path)
     repository = PlatformRepository(db)
     repository.init()
+    repository.upsert_node(OWNER, {"node_id": "existing-node"})
     repository.upsert_workspace(OWNER, {"workspace_id": WORKSPACE, "name": "Existing user workspace",
         "root_path": str(tmp_path.resolve()), "default_node_id": "existing-node"})
     repository.create_conversation(OWNER, "develop-chat", title="User title", workspace_id=WORKSPACE,
