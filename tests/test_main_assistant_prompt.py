@@ -123,6 +123,9 @@ def test_prompt_requires_environment_evidence_and_meaningful_test_execution():
     assert "实际执行数量" in prompt
     assert "零项测试不能证明验证通过" in prompt
     assert "输出截断" in prompt
+    assert "每次命令的 cwd 固定为工作区根目录" in prompt
+    assert "读取子目录不会切换" in prompt
+    assert "git -C" in prompt and "unittest discover -s" in prompt
 
 
 def test_prompt_does_not_treat_bounded_conversation_list_as_complete_inventory():
