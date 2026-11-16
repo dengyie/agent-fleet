@@ -97,3 +97,17 @@ def test_prompt_uses_available_controls_without_claiming_vm_lifecycle():
     assert "service.request_action" in prompt
     assert "VM 生命周期" in prompt
     assert "不得声称能执行这些操作" in prompt
+
+
+def test_prompt_distinguishes_platform_use_and_development_and_resumes_real_work():
+    prompt = build_assistant_messages(
+        [], model="model", workspace={}, node=None, tools=[],
+    )[0]["content"]
+
+    assert "区分使用平台完成工作与修改平台本身" in prompt
+    assert "不要为了使用平台而擅自修改平台代码" in prompt
+    assert "用户说“继续”时" in prompt
+    assert "原任务、命令和回执" in prompt
+    assert "不存在可查询的后台任务时" in prompt
+    assert "不得声称已委派其他 Agent" in prompt
+    assert "健康检查通过不等于功能验收通过" in prompt
