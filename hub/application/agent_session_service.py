@@ -119,7 +119,7 @@ class AgentSessionService:
             'fleet.list_machines': ({'offset', 'limit'}, set()),
             'session.list': ({'machine_id', 'active', 'limit'}, set()),
             'session.get': ({'session_id'}, {'session_id'}),
-            'session.read_events': ({'session_id', 'limit', 'after_sequence'}, {'session_id'}),
+            'session.read_events': ({'session_id', 'limit', 'after_cursor'}, {'session_id'}),
             'session.send_message': ({'session_id', 'text'}, {'session_id', 'text'}),
             'session.control': ({'session_id', 'action'}, {'session_id', 'action'}),
             'session.get_command': ({'session_id', 'command_id'}, {'session_id', 'command_id'}),
@@ -160,11 +160,12 @@ class AgentSessionService:
             return {'session': session}
         if tool == 'session.read_events':
             limit = _integer(args.get('limit', 20), 1, 100)
-            after = args.get('after_sequence', '0')
+            after = args.get('after_cursor', '0')
             if (not isinstance(after, str) or not after.isascii() or not after.isdecimal()
                     or not 1 <= len(after) <= 19 or int(after) > (1 << 63) - 1):
                 _invalid()
-            rows = self.sessions.session_events(session_id, limit=limit, after_sequence=int(after))['events']
+            page = self.sessions.session_events(session_id, limit=limit, after_cursor=int(after))
+            rows = page['events']
             events, size = [], 0
             for row in rows:
                 event_size = len(json.dumps(row, ensure_ascii=False).encode('utf-8'))
@@ -172,8 +173,8 @@ class AgentSessionService:
                     break
                 events.append(row)
                 size += event_size
-            return {'events': events, 'next_sequence': str(events[-1]['sequence']) if events else after,
-                    'has_more': len(events) < len(rows) or len(rows) == limit}
+            return {'events': events, 'next_cursor': events[-1]['cursor'] if events else after,
+                    'has_more': len(events) < len(rows) or page['has_more']}
         if tool == 'session.send_message':
             text = args.get('text')
             if not isinstance(text, str) or not text.strip() or len(text) > 2000:

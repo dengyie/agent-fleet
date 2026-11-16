@@ -172,22 +172,18 @@ FleetStore.prototype.setSessionSummary = function (sessionId, summary) {
     var incomingSequence = (typeof summary.sequence === 'number' &&
       isFinite(summary.sequence) && summary.sequence >= 0)
       ? summary.sequence : null;
-    // Global event_seq ordering cannot order events within one session: an
-    // out-of-order capture (2 before 1) can legitimately deliver a later
-    // frame with a lower session sequence.  Keep the newest per-session
-    // durable summary instead of regressing the operator view.
+    var currentEventSeq = (typeof current.event_seq === 'number' &&
+      isFinite(current.event_seq)) ? current.event_seq : 0;
+    var incomingEventSeq = (typeof summary.event_seq === 'number' &&
+      isFinite(summary.event_seq)) ? summary.event_seq : 0;
+    if (incomingEventSeq > 0 && currentEventSeq > incomingEventSeq) return;
+    // A later ingestion notification may carry a lower source sequence
+    // (another stream or delayed delivery). Preserve the sequence high-water
+    // mark, but advance event_seq so the view reloads its durable cursor page.
     if (currentSequence !== null &&
         (incomingSequence === null || incomingSequence < currentSequence)) {
-      return;
-    }
-    if (currentSequence !== null && incomingSequence === currentSequence) {
-      var currentEventSeq = (typeof current.event_seq === 'number' &&
-        isFinite(current.event_seq)) ? current.event_seq : 0;
-      var incomingEventSeq = (typeof summary.event_seq === 'number' &&
-        isFinite(summary.event_seq)) ? summary.event_seq : 0;
-      if (incomingEventSeq > 0 && currentEventSeq > incomingEventSeq) {
-        return;
-      }
+      if (incomingEventSeq <= currentEventSeq) return;
+      summary = Object.assign({}, summary, {sequence: current.sequence});
     }
   }
   this._state.sessionSummaries[sessionId] = summary;

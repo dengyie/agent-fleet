@@ -45,9 +45,9 @@ def test_discovery_uses_machine_identity_and_redacted_session_stream(app):
     assert detail['machine_id'] == 'm1'
     assert 'append_user_turn' in detail['allowed_actions']
     first = execute(app, 'session.read_events', {'session_id': 's1', 'limit': 1})
-    assert len(first['events']) == 1 and first['next_sequence'] == '1'
+    assert len(first['events']) == 1 and first['next_cursor'] == '1'
     second = execute(app, 'session.read_events', {
-        'session_id': 's1', 'after_sequence': first['next_sequence'], 'limit': 1})
+        'session_id': 's1', 'after_cursor': first['next_cursor'], 'limit': 1})
     assert second['events'][0]['payload']['text'] == 'remote output'
     assert not any(key in str(machines) for key in ('exe_path', 'cmdline', 'signature'))
 
@@ -79,7 +79,7 @@ def test_command_is_durable_idempotent_and_waits_for_original_receipt(app, tool,
 @pytest.mark.parametrize('tool,args', [
     ('session.control', {'session_id': 's1', 'action': 'exec_shell'}),
     ('session.control', {'session_id': 's1', 'action': 'pause_session', 'machine_id': 'other'}),
-    ('session.read_events', {'session_id': 's1', 'after_sequence': '-1'}),
+    ('session.read_events', {'session_id': 's1', 'after_cursor': '-1'}),
     ('session.list', {'limit': True}),
     ('session.send_message', {'session_id': 's1', 'text': 'x' * 2001}),
 ])
@@ -276,7 +276,7 @@ def test_event_byte_budget_keeps_cursor_before_unreturned_events(app):
     first = execute(app, 'session.read_events', {'session_id': 's1', 'limit': 100})
     assert len(json.dumps(first).encode()) < 132 * 1024
     assert first['has_more'] is True
-    second = execute(app, 'session.read_events', {'session_id': 's1', 'after_sequence': first['next_sequence']})
+    second = execute(app, 'session.read_events', {'session_id': 's1', 'after_cursor': first['next_cursor']})
     assert [e['sequence'] for e in first['events'] + second['events']] == list(range(1, 9))
 
 

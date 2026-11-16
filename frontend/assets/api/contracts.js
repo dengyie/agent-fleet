@@ -99,7 +99,7 @@ var SESSION_FIELDS = ['machine_id', 'session_id', 'managed', 'capture_quality',
 
 // 每个 session event 的可见 envelope 字段（公开事件行；payload 有逐 kind 白名单）
 var SESSION_EVENT_FIELDS = ['schema_version', 'event_id', 'stream_id',
-                            'machine_id', 'session_id', 'sequence', 'kind',
+                            'machine_id', 'session_id', 'sequence', 'cursor', 'kind',
                             'capture_quality', 'emitted_at', 'source'];
 
 // 通用 event 的 payload 允许含的字段：数字/字符串/布尔值都会被 bound，
@@ -653,6 +653,17 @@ export function parseSessionEvents(data) {
   if (Array.isArray(data.events)) {
     out.events = data.events.map(parseSessionEventRow);
   }
+  for (var field of ['after_cursor', 'next_cursor']) {
+    if (typeof data[field] !== 'string' || !/^(0|[1-9][0-9]{0,18})$/.test(data[field]) ||
+        BigInt(data[field]) > 9223372036854775807n) {
+      throw new ContractError('invalid_session_cursor', '事件分页游标无效');
+    }
+    out[field] = data[field];
+  }
+  if (typeof data.has_more !== 'boolean') {
+    throw new ContractError('invalid_session_cursor', '事件分页状态无效');
+  }
+  out.has_more = data.has_more;
   return out;
 }
 
@@ -1197,6 +1208,10 @@ function parseSessionEventRow(row) {
   requireObject(row, 'session_event');
   rejectInternalKey(row, 'session_event');
   var out = pick(row, SESSION_EVENT_FIELDS);
+  if (typeof out.cursor !== 'string' || !/^[1-9][0-9]{0,18}$/.test(out.cursor) ||
+      BigInt(out.cursor) > 9223372036854775807n) {
+    throw new ContractError('invalid_session_cursor', '事件缺少有效入库游标');
+  }
   if (typeof out.event_id !== 'string') {
     out.event_id = '';
   }

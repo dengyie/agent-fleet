@@ -66,9 +66,9 @@ def _query_limit(default: int = 100) -> int:
     return max(1, min(limit, _MAX_QUERY_LIMIT))
 
 
-def _query_after_sequence() -> int:
+def _query_position(name: str) -> int:
     try:
-        return max(0, min(int(request.args.get("after_sequence", 0)), 2**63 - 1))
+        return max(0, min(int(request.args.get(name, 0)), 2**63 - 1))
     except (TypeError, ValueError):
         return 0
 
@@ -203,7 +203,8 @@ def api_session_events_query(session_id):
     try:
         result = _sessions().session_events(
             session_id, limit=_query_limit(),
-            after_sequence=_query_after_sequence())
+            after_cursor=_query_position('after_cursor'),
+            at_sequence=_query_position('at_sequence') if 'at_sequence' in request.args else None)
     except SessionServiceError as exc:
         return _session_error(exc)
     return jsonify(result)

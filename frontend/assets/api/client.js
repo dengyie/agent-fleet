@@ -435,10 +435,10 @@ export async function getSession(sessionId) {
     API.sessions + '/' + encodeURIComponent(sessionId)));
 }
 
-export async function getSessionEvents(sessionId, limit, afterSequence) {
+export async function getSessionEvents(sessionId, limit, afterCursor, atSequence) {
   return parseSessionEvents(await request(
     API.sessions + '/' + encodeURIComponent(sessionId) + '/events' +
-    queryString({ limit: limit || 100, after_sequence: afterSequence || 0 })));
+    queryString({ limit: limit || 100, after_cursor: afterCursor || '0', at_sequence: atSequence })));
 }
 
 export async function sendSessionMessage(sessionId, text) {

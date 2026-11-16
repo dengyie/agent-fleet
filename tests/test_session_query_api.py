@@ -343,8 +343,8 @@ if __name__ == "__main__":
 class SessionPaginationTests(SessionQueryTestBase):
     def test_cursor_reads_later_events_without_repeating_first_page(self):
         first = self.client.get('/api/sessions/sess_q_1/events?limit=2').get_json()
-        second = self.client.get('/api/sessions/sess_q_1/events?limit=2&after_sequence=2').get_json()
+        second = self.client.get('/api/sessions/sess_q_1/events', query_string={'limit': 2, 'after_cursor': first['next_cursor']}).get_json()
         self.assertEqual([e['sequence'] for e in first['events']], [1, 2])
         self.assertEqual([e['sequence'] for e in second['events']], [3, 4])
-        empty = self.client.get('/api/sessions/sess_q_1/events?after_sequence=4').get_json()
+        empty = self.client.get('/api/sessions/sess_q_1/events', query_string={'after_cursor': second['next_cursor']}).get_json()
         self.assertEqual(empty['events'], [])
