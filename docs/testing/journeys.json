@@ -72,7 +72,36 @@
       "boundary": "real browser + Hub + HTTP adapter; only model service scripted",
       "tests": [
         "tests/test_full_flow_browser.py::test_browser_account_model_tool_artifact_and_failure_journey",
-        "tests/test_frontend_browser.py::test_assistant_live_model_stream_retry_and_reload"
+        "tests/test_frontend_browser.py::test_assistant_live_model_stream_retry_and_reload",
+        "tests/test_assistant_project_admin.py::test_capabilities_and_system_info_are_truthful",
+        "tests/test_assistant_project_admin.py::test_settings_are_shared_with_real_settings_page",
+        "tests/test_assistant_project_admin.py::test_runtime_write_uses_existing_backup_and_revision",
+        "tests/test_assistant_project_admin.py::test_admin_rechecks_authorization_and_rejects_cross_owner_or_unknown_operations",
+        "tests/test_assistant_project_admin.py::test_node_removal_requires_disabled_unreferenced_node_and_preserves_history",
+        "tests/test_assistant_project_admin.py::test_admin_tools_route_to_hub_from_remote_worker",
+        "tests/test_assistant_project_admin.py::test_acceptance_cannot_gain_admin_tools",
+        "tests/test_assistant_project_admin.py::test_real_account_demotion_revokes_admin_tool_execution",
+        "tests/test_assistant_project_admin.py::test_memory_and_schedules_use_real_scoped_stores_and_stable_creation_ids",
+        "tests/test_assistant_project_admin.py::test_node_enrollment_duplicate_cannot_rotate_credentials",
+        "tests/test_assistant_project_admin.py::test_workflow_admin_uses_original_idempotent_admission_and_revision_controls",
+        "tests/test_assistant_project_admin.py::test_admin_activity_never_echoes_secret_arguments_or_enrollment_receipts",
+        "tests/test_assistant_project_admin.py::test_admin_declarations_preserve_mcp_and_hide_unwired_tools",
+        "tests/test_assistant_project_admin.py::test_settings_catalog_pages_without_exposing_credentials",
+        "tests/test_assistant_project_admin.py::test_management_feature_gates_are_editable_in_shared_runtime_settings",
+        "tests/test_assistant_project_admin.py::test_workspace_save_cannot_bind_node_removed_after_settings_validation",
+        "tests/test_assistant_project_admin.py::test_worker_returns_conflict_to_model_for_reread_and_correction",
+        "tests/test_assistant_project_admin.py::test_settings_inspection_activity_never_claims_a_save",
+        "tests/test_assistant_project_admin.py::test_settings_save_activity_depends_on_successful_mutation",
+        "tests/test_native_tool_recovery.py::test_missing_workspace_path_returns_to_model_and_preserves_failed_progress",
+        "tests/test_native_tool_recovery.py::test_recovered_read_failure_resumes_without_reexecuting_tool",
+        "tests/test_native_tool_recovery.py::test_only_confirmed_workspace_read_failures_can_continue",
+        "tests/test_native_tool_recovery.py::test_read_failure_does_not_override_cancellation_or_step_limit",
+        "tests/test_native_tool_recovery.py::test_read_failure_reaches_openai_wire_with_matching_tool_call_id",
+        "tests/test_native_tool_recovery.py::test_remote_missing_read_continues_from_receipt_without_new_command",
+        "tests/test_native_tool_recovery.py::test_recovered_read_failure_cancellation_needs_no_provider_or_workspace",
+        "tests/test_native_tool_recovery.py::test_repeated_missing_reads_stop_at_frozen_step_budget",
+        "tests/test_native_tool_recovery.py::test_only_proven_pre_effect_management_failures_continue",
+        "tests/test_native_tool_recovery.py::test_management_conflict_checkpoint_resumes_without_replaying_write"
       ]
     },
     {
@@ -1080,7 +1109,10 @@
         "tests/test_supervisor_process.py::RealProcessGroupTests::test_control_client_default_grace_allows_real_cleanup",
         "tests/test_discovery.py::test_process_start_time_is_utc_under_non_utc_parent_timezone",
         "tests/test_discovery.py::test_ps_uses_utc_at_collection_boundary",
-        "tests/test_root_cause_regressions.py::test_missing_sessions_cannot_starve_later_projection_batches"
+        "tests/test_root_cause_regressions.py::test_missing_sessions_cannot_starve_later_projection_batches",
+        "tests/test_transcript_cursors.py::test_equal_source_sequences_and_late_lower_sequences_are_all_pageable",
+        "tests/test_transcript_cursors.py::test_legacy_backfill_and_reopen_preserve_cursors_and_append_order",
+        "tests/test_transcript_cursors.py::test_assistant_and_http_cursor_continue_across_streams_and_late_ingestion"
       ]
     },
     {
@@ -1558,7 +1590,14 @@
         "tests/test_github_cli_plugin.py::test_context_mutations_wait_for_previous_worker_cleanup",
         "tests/test_github_cli_plugin.py::test_json_exit_zero_with_auth_errors_is_not_success",
         "tests/test_github_cli_plugin.py::test_cli_failure_modes_are_distinct",
-        "tests/test_github_cli_plugin.py::test_login_cancel_and_parent_loss_reap_owned_process"
+        "tests/test_github_cli_plugin.py::test_login_cancel_and_parent_loss_reap_owned_process",
+        "tests/test_node_retirement.py::test_service_binding_blocks_retirement_even_when_service_is_disabled",
+        "tests/test_node_retirement.py::test_enabled_plugin_binding_blocks_retirement",
+        "tests/test_node_retirement.py::test_reenrollment_does_not_inherit_disabled_targets_offers_or_observations",
+        "tests/test_node_retirement.py::test_target_admission_rechecks_node_after_service_validation",
+        "tests/test_node_retirement.py::test_late_authenticated_report_cannot_repopulate_replacement_inventory",
+        "tests/test_node_retirement.py::test_late_receipt_preserves_history_but_cannot_restore_old_observation",
+        "tests/test_node_retirement.py::test_service_registration_and_retirement_serialize"
       ]
     },
     {
