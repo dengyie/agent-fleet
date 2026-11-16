@@ -8,8 +8,9 @@ on:
         required: true
         type: string
       model_profiles:
-        description: Comma-separated exact model profile IDs to test (for example deepseek-v4-flash,glm-5.3-flash)
-        required: true
+        description: Exact approved profiles in priority order; gpt-6-luna is the fallback
+        default: deepseek-v4-flash,glm-5.3-flash,deepseek-v4-pro,gpt-6-luna
+        required: false
         type: string
 
 permissions:
@@ -87,12 +88,23 @@ jobs:
           trap 'rm -f "$CREDENTIALS_FILE"' EXIT
           IFS=',' read -r -a model_ids <<< "$MODEL_PROFILES"
           model_args=()
+          allowed_model_ids=',deepseek-v4-flash,glm-5.3-flash,deepseek-v4-pro,gpt-6-luna,'
+          seen_model_ids=','
           for model_id in "${model_ids[@]}"; do
             model_id="${model_id//[[:space:]]/}"
             if [[ ! "$model_id" =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
               echo 'Invalid model profile list; use comma-separated profile IDs.' >&2
               exit 2
             fi
+            if [[ "$allowed_model_ids" != *",$model_id,"* ]]; then
+              echo "Model profile is not approved for live acceptance: $model_id" >&2
+              exit 2
+            fi
+            if [[ "$seen_model_ids" == *",$model_id,"* ]]; then
+              echo "Duplicate model profile in live acceptance selection: $model_id" >&2
+              exit 2
+            fi
+            seen_model_ids+="$model_id,"
             model_args+=(--model "$model_id")
           done
           PYTHONPATH=. python -m tools.platform.acceptance_check \
@@ -100,6 +112,7 @@ jobs:
             --credentials-file "$CREDENTIALS_FILE" \
             --workspace "$AGENT_FLEET_WORKSPACE" \
             "${model_args[@]}" \
+            --require-streaming \
             --expected-release "$EXPECTED_RELEASE" \
             --report "$REPORT_FILE"
       - name: Summarize model results

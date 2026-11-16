@@ -1,16 +1,21 @@
 """Wall-clock deadlines apply to HTTP headers, bodies and all model checks."""
-from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import socket
 import socketserver
 import ssl
-from threading import Event, Thread
 import time
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Event, Thread
+from urllib.parse import urlsplit
 
 import pytest
 
-from tools.platform.acceptance_check import AcceptanceFailure, AccountClient, check_model
+from tools.platform.acceptance_check import (
+    AcceptanceFailure,
+    AccountClient,
+    check_model,
+)
 
 
 @contextmanager
@@ -31,17 +36,23 @@ def delayed_target(stage, mode):
 
         def respond(self):
             requests.append(self.path)
+            path = urlsplit(self.path).path
             status = 200
-            if self.path.endswith('/conversations'):
+            if path.endswith('/conversations'):
                 current = 'create'
                 payload = {'conversation': {'conversation_id': 'conv-deadline'}}
-            elif self.path.endswith(('/turns', '/acceptance-turns')):
+            elif path.endswith(('/turns', '/acceptance-turns')):
                 current, status = 'submit', 202
-                payload = {'run': {'run_id': 'run-deadline'}}
-            elif self.path.endswith('/events'):
+                payload = {'run': {'run_id': 'run-deadline', 'state': 'queued'}}
+            elif path.endswith('/events'):
                 current = 'events'
-                payload = {'events': [{'kind': 'tool_result', 'payload': {'tool': 'workspace.list', 'state': 'succeeded'}}]}
-            elif '/runs/' in self.path:
+                payload = {'events': [
+                    {'sequence': 1, 'kind': 'tool_result',
+                     'payload': {'tool': 'workspace.list', 'state': 'succeeded'}},
+                    {'sequence': 2, 'kind': 'run_finished',
+                     'payload': {'run_id': 'run-deadline', 'state': 'succeeded'}},
+                ]}
+            elif '/runs/' in path:
                 current = 'status'
                 payload = {'state': 'succeeded', 'result_text': 'done'}
             else:

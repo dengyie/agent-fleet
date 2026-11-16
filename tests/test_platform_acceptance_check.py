@@ -2,22 +2,21 @@
 import json
 
 import pytest
+from support.full_flow import PASSWORD, FullFlowHub
+from support.strict_provider import StrictProvider
 
 from tools.platform.acceptance_check import main
-from support.full_flow import FullFlowHub, PASSWORD
-from support.strict_provider import StrictProvider
 
 
 @pytest.fixture
 def release_target(tmp_path, monkeypatch):
     monkeypatch.setenv('FLEET_FULL_FLOW_SECRET', 'full-flow-provider-secret')
-    with StrictProvider() as provider:
-        with FullFlowHub(tmp_path, provider) as hub:
-            credentials = tmp_path / 'credentials.json'
-            credentials.write_text(json.dumps({'username': 'mango', 'password': PASSWORD}))
-            credentials.chmod(0o600)
-            args = ['--endpoint', hub.origin, '--credentials-file', str(credentials), '--workspace', 'home', '--timeout', '5']
-            yield hub, credentials, args
+    with StrictProvider() as provider, FullFlowHub(tmp_path, provider) as hub:
+        credentials = tmp_path / 'credentials.json'
+        credentials.write_text(json.dumps({'username': 'mango', 'password': PASSWORD}))
+        credentials.chmod(0o600)
+        args = ['--endpoint', hub.origin, '--credentials-file', str(credentials), '--workspace', 'home', '--timeout', '5']
+        yield hub, credentials, args
 
 
 def test_release_cli_requires_real_tool_final_reply_and_revocation(release_target, capsys):
@@ -61,8 +60,9 @@ def test_release_cli_rejects_unexpected_writing_tools(release_target, capsys):
 ])
 def test_acceptance_denies_tools_before_side_effects(release_target, capsys, monkeypatch, tool, arguments):
     from support.full_flow import Client
-    from hub.platform.providers.base import ModelResponse
+
     from fleet_core.backends.sandbox import SandboxBackend
+    from hub.platform.providers.base import ModelResponse
 
     hub, _, args = release_target
     original = b'original workspace bytes\x00\xff'
@@ -111,7 +111,10 @@ def test_release_cli_private_credentials_and_catalog_are_required(release_target
     assert json.loads(capsys.readouterr().out)['error'] == 'credentials_file_not_private'
     credentials.chmod(0o600)
     assert main(args + ['--model', 'missing']) == 1
-    assert json.loads(capsys.readouterr().out)['error'] == 'selected_model_unavailable'
+    report = json.loads(capsys.readouterr().out)
+    assert report['models'] == [{
+        'model_profile_id': 'missing', 'status': 'failed', 'error': 'selected_model_unavailable',
+    }]
     assert hub.provider.requests == []
 
 
@@ -126,6 +129,161 @@ def test_release_cli_all_models_reports_each_failure_and_keeps_testing(release_t
     assert len({r['run_id'] for r in report['models']}) == 3
     assert len(hub.provider.requests) == 5
     assert report['checks']['logout'] == 'passed'
+
+
+def test_unavailable_selected_profile_does_not_skip_later_fallback(release_target, capsys):
+    hub, _, args = release_target
+
+    assert main(args + ['--model', 'missing-primary', '--model', 'read-only']) == 1
+
+    report = json.loads(capsys.readouterr().out)
+    assert [(row['model_profile_id'], row['status'], row.get('error'))
+            for row in report['models']] == [
+                ('missing-primary', 'failed', 'selected_model_unavailable'),
+                ('read-only', 'passed', None),
+            ]
+    assert len(hub.provider.requests) == 2
+
+
+def test_failed_primary_profile_still_runs_later_fallback(release_target, capsys):
+    hub, _, args = release_target
+
+    assert main(args + ['--model', 'broken', '--model', 'read-only']) == 1
+
+    report = json.loads(capsys.readouterr().out)
+    assert [(row['model_profile_id'], row['status']) for row in report['models']] == [
+        ('broken', 'failed'), ('read-only', 'passed'),
+    ]
+    assert hub.provider.requests[-1]['model'] == 'read-only'
+    assert sum(request['model'] == 'read-only' for request in hub.provider.requests) == 2
+
+
+def test_live_acceptance_workflow_defaults_to_only_requested_profiles():
+    from pathlib import Path
+
+    workflow = Path('.github/workflows/live-acceptance.yml').read_text()
+    assert 'default: deepseek-v4-flash,glm-5.3-flash,deepseek-v4-pro,gpt-6-luna' in workflow
+    assert '--require-streaming' in workflow
+    assert '--all-models' not in workflow
+
+
+def test_live_acceptance_requires_progress_and_explained_tool_receipt(monkeypatch):
+    import tools.platform.acceptance_check as acceptance
+    from tools.platform.acceptance_check import check_model
+
+    monkeypatch.setattr(acceptance.time, 'sleep', lambda _: None)
+
+    class Client:
+        def __init__(self):
+            self.run_reads = 0
+
+        def request(self, path, body=None, *, expected=200, deadline=None):
+            if path == '/api/platform/v1/conversations':
+                return {'conversation': {'conversation_id': 'conversation-1'}}
+            if path.endswith('/acceptance-turns'):
+                return {'run': {'run_id': 'run-1', 'state': 'queued'}}
+            if path == '/api/platform/v1/runs/run-1':
+                self.run_reads += 1
+                state = 'running' if self.run_reads == 1 else 'succeeded'
+                return {'state': state, 'result_text': '工作区检查完成'}
+            if path.startswith('/api/platform/v1/runs/run-1/events'):
+                return {'events': [
+                    {'sequence': 1, 'kind': 'provider_request_started', 'payload': {}},
+                    {'sequence': 2, 'kind': 'assistant_activity', 'payload': {'phase': 'thinking'}},
+                    {'sequence': 3, 'kind': 'assistant_text_delta', 'payload': {'text': '正在检查'}},
+                    {'sequence': 4, 'kind': 'tool_call', 'payload': {
+                        'tool': 'workspace.list', 'title': '列出目录 · .'}},
+                    {'sequence': 5, 'kind': 'tool_result', 'payload': {
+                        'tool': 'workspace.list', 'state': 'succeeded'}},
+                    {'sequence': 6, 'kind': 'run_finished', 'payload': {
+                        'run_id': 'run-1', 'state': 'succeeded'}},
+                ]}
+            if path == '/api/platform/v1/conversations/conversation-1':
+                return {'conversation': {'runs': [{
+                    'run_id': 'run-1', 'state': 'succeeded', 'result_text': '工作区检查完成',
+                }]}}
+            raise AssertionError(f'unexpected path: {path}')
+
+    row = check_model(Client(), 'read-only', 'acceptance', 5, require_streaming=True)
+
+    assert row['status'] == 'passed'
+    assert row['streamed_progress_before_terminal'] is True
+    assert row['activity_phase_seen'] is True
+    assert row['explained_tool_call_seen'] is True
+    assert row['read_only_tool_succeeded'] is True
+
+
+def test_live_acceptance_fails_when_text_only_arrives_after_terminal(monkeypatch):
+    import tools.platform.acceptance_check as acceptance
+    from tools.platform.acceptance_check import check_model
+
+    monkeypatch.setattr(acceptance.time, 'sleep', lambda _: None)
+
+    class Client:
+        def request(self, path, body=None, *, expected=200, deadline=None):
+            if path == '/api/platform/v1/conversations':
+                return {'conversation': {'conversation_id': 'conversation-1'}}
+            if path.endswith('/acceptance-turns'):
+                return {'run': {'run_id': 'run-1', 'state': 'queued'}}
+            if path == '/api/platform/v1/runs/run-1':
+                return {'state': 'succeeded', 'result_text': '完成'}
+            if path.startswith('/api/platform/v1/runs/run-1/events'):
+                return {'events': [
+                    {'sequence': 1, 'kind': 'assistant_text_delta', 'payload': {'text': '完成'}},
+                    {'sequence': 2, 'kind': 'tool_call', 'payload': {
+                        'tool': 'workspace.list', 'title': '列出目录 · .'}},
+                    {'sequence': 3, 'kind': 'tool_result', 'payload': {
+                        'tool': 'workspace.list', 'state': 'succeeded'}},
+                    {'sequence': 4, 'kind': 'run_finished', 'payload': {
+                        'run_id': 'run-1', 'state': 'succeeded'}},
+                ]}
+            if path == '/api/platform/v1/conversations/conversation-1':
+                return {'conversation': {'runs': [{
+                    'run_id': 'run-1', 'state': 'succeeded', 'result_text': '完成',
+                }]}}
+            raise AssertionError(f'unexpected path: {path}')
+
+    row = check_model(Client(), 'read-only', 'acceptance', 5, require_streaming=True)
+
+    assert row['status'] == 'failed'
+    assert row['error'] == 'live_progress_missing'
+
+
+def test_live_acceptance_does_not_count_events_fetched_after_terminal_state(monkeypatch):
+    import tools.platform.acceptance_check as acceptance
+    from tools.platform.acceptance_check import check_model
+
+    monkeypatch.setattr(acceptance.time, 'sleep', lambda _: None)
+
+    class Client:
+        def request(self, path, body=None, *, expected=200, deadline=None):
+            if path == '/api/platform/v1/conversations':
+                return {'conversation': {'conversation_id': 'conversation-1'}}
+            if path.endswith('/acceptance-turns'):
+                return {'run': {'run_id': 'run-1', 'state': 'queued'}}
+            if path == '/api/platform/v1/runs/run-1':
+                return {'state': 'succeeded', 'result_text': '完成'}
+            if path.startswith('/api/platform/v1/runs/run-1/events'):
+                return {'events': [
+                    {'sequence': 1, 'kind': 'assistant_text_delta', 'payload': {'text': '完成'}},
+                    {'sequence': 2, 'kind': 'tool_call', 'payload': {
+                        'tool': 'workspace.list', 'title': '列出目录 · .'}},
+                    {'sequence': 3, 'kind': 'tool_result', 'payload': {
+                        'tool': 'workspace.list', 'state': 'succeeded'}},
+                    {'sequence': 4, 'kind': 'run_finished', 'payload': {
+                        'run_id': 'run-1', 'state': 'succeeded'}},
+                ]}
+            if path == '/api/platform/v1/conversations/conversation-1':
+                return {'conversation': {'runs': [{
+                    'run_id': 'run-1', 'state': 'succeeded', 'result_text': '完成',
+                }]}}
+            raise AssertionError(f'unexpected path: {path}')
+
+    row = check_model(Client(), 'read-only', 'acceptance', 5, require_streaming=True)
+
+    assert row['status'] == 'failed'
+    assert row['error'] == 'live_progress_missing'
+    assert row['streamed_progress_before_terminal'] is False
 
 
 def test_release_cli_timeout_preserves_queued_run_without_resubmission(release_target, capsys):
@@ -173,7 +331,7 @@ def test_release_cli_manifest_is_checked_before_login(release_target, capsys, ex
 
 @pytest.mark.parametrize('status', [302, 307, 308])
 def test_release_cli_does_not_forward_credentials_on_redirect(release_target, capsys, status):
-    from flask import request, redirect
+    from flask import redirect, request
     hub, _, args = release_target
     forwarded = []
 

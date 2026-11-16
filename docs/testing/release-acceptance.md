@@ -17,7 +17,11 @@ PYTHONPATH=. python -m tools.platform.acceptance_check \
   --endpoint https://fleet.example.com \
   --credentials-file /private/path/acceptance-account.json \
   --workspace acceptance \
-  --all-models \
+  --model deepseek-v4-flash \
+  --model glm-5.3-flash \
+  --model deepseek-v4-pro \
+  --model gpt-6-luna \
+  --require-streaming \
   --expected-release FULL_RELEASE_SHA \
   --report /private/path/evidence/model-acceptance.json
 ```
@@ -39,14 +43,20 @@ these values before dispatch:
 | Secret | `AGENT_FLEET_USERNAME` | Dedicated acceptance account login |
 | Secret | `AGENT_FLEET_PASSWORD` | Dedicated acceptance account password |
 
-Dispatch with `expected_release` set to the exact deployed release SHA and
-`model_profiles` set to a comma-separated list of exact profile IDs. The
-workflow runs one read-only `workspace.list` task per selected profile; it does
-not call every enabled model implicitly. It checks logout revocation and the
-served release manifest, then retains the bounded JSON report as a workflow
-artifact. A dispatch from a non-main ref is skipped. The report contains
-model/run identifiers and statuses but no credentials, cookies, file listing
-or reply text; restrict access to the workflow artifact accordingly.
+Dispatch with `expected_release` set to the exact deployed release SHA. The
+default ordered selection is `deepseek-v4-flash`, `glm-5.3-flash`,
+`deepseek-v4-pro`, then the `gpt-6-luna` fallback. An explicit override may
+select a subset or reorder these four approved profiles; any other ID and
+duplicates are rejected before login. The workflow runs one read-only
+`workspace.list` task per available selected profile and continues to later
+profiles when an earlier profile is unavailable or fails. It requires streamed
+text and activity progress before terminal completion, an explained tool call,
+a successful tool receipt, a nonempty final reply, conversation recovery,
+logout revocation, and the served release manifest. It retains a bounded JSON
+report as a workflow artifact. A dispatch from a non-main ref is skipped. The
+report contains model/run identifiers and status evidence but no credentials,
+cookies, file listing or reply text; restrict access to the workflow artifact
+accordingly.
 
 This workflow does not automate MAIL-LIVE, NODE-LIVE or the isolated rollback
 portion of DEPLOY-LIVE. Those still require an explicitly designated mailbox
@@ -54,16 +64,17 @@ with inbox access, a configured test Node, and a separate staging target. The
 existing `CI` workflow continues to run tests on pull requests and to deploy
 only from `main`; a deployment success is not substituted for those checks.
 
-只验证明确指定的模型时重复 `--model PROFILE_ID`，不要同时传 `--all-models`。`--timeout` 默认每模型 150 秒，范围 1–600 秒；同一截止时间覆盖创建对话、提交、状态轮询、事件读取和对话恢复。DNS 等待、逐地址 TCP 连接、TLS 握手、响应头和响应体读取均使用剩余预算，缓慢传输不能重置预算；截止后返回成功终态仍视为未确认。与 provider 共用有界 HTTP 截止机制；同一 host/port 的阻塞 DNS 查询共享一个后台解析线程，全进程最多 8 个查询，等待容量也计入预算。超时后的 DNS 结果不能建立连接或发送请求；连续验收失败不会不断新增线程。验收客户端仍直连配置的 origin，不使用环境代理。登录、目录预检和最终退出校验独立于每模型预算。选项全部显式提供；该工具不从源码读取固定管理员密码，不推断生产域名，也不配置模型、用户或工作区。
+只验证明确指定的模型时重复 `--model PROFILE_ID`，不要同时传 `--all-models`；线上验收还需传 `--require-streaming`，以确认非终态期间收到文本增量和阶段事件。每个 Run 期间按事件游标增量读取公开事件，只在终态后查询事件不能证明实时反馈。profile 未启用时记为单项失败并继续后续 profile，不能阻断兜底模型。`--timeout` 默认每模型 150 秒，范围 1–600 秒；同一截止时间覆盖创建对话、提交、状态轮询、事件读取和对话恢复。DNS 等待、逐地址 TCP 连接、TLS 握手、响应头和响应体读取均使用剩余预算，缓慢传输不能重置预算；截止后返回成功终态仍视为未确认。与 provider 共用有界 HTTP 截止机制；同一 host/port 的阻塞 DNS 查询共享一个后台解析线程，全进程最多 8 个查询，等待容量也计入预算。超时后的 DNS 结果不能建立连接或发送请求；连续验收失败不会不断新增线程。验收客户端仍直连配置的 origin，不使用环境代理。登录、目录预检和最终退出校验独立于每模型预算。选项全部显式提供；该工具不从源码读取固定管理员密码，不推断生产域名，也不配置模型、用户或工作区。
 
 每个模型必须同时满足：
 
 1. release manifest 与指定版本相符；账密登录、服务端会话校验和 readiness 成功。
 2. 指定模型/工作区确实在当前账号目录中。
 3. 创建 Run 后轮询终态为 `succeeded`；202 接收或 `running` 均不算通过。
-4. 真实 `workspace.list` 的 tool_result 为 succeeded；没有其他工具调用结果。
-5. 最终回复非空，重新读取对话时 Run、结果和终态一致。
-6. 退出后，用刚才的旧 Cookie 访问会话接口必须返回 401。
+4. Run 非终态期间至少收到一段真实 `assistant_text_delta` 和可见 activity 阶段；模型原始思维链不作为验收内容。
+5. `tool_call` 带有面向用户的操作标题；真实 `workspace.list` 的 tool_result 为 succeeded，且没有其他工具调用结果。
+6. 最终回复非空，重新读取对话时 Run、结果和终态一致。
+7. 退出后，用刚才的旧 Cookie 访问会话接口必须返回 401。
 
 任意模型失败，整体进程退出码为 1，并逐模型输出 `status/error/run_state/conversation_id/run_id`（以已经获得的信息为准）。报告不含回复全文、文件列表、密码或 Cookie。超时记录 `error=acceptance_timeout`、`outcome=unconfirmed`，保留已知 Run ID；提交响应丢失时保留对话 ID 与 `client_token` 以便查询定位。`unknown` 和超时不自动重发；超时不代表 Run 已取消或失败。完成后保留报告和对话证据，按指定验收数据保留策略清理。
 
