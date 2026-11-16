@@ -87,6 +87,9 @@ class ToolBroker:
       'risk': 'restricted_exec',
       'scope_kind': 'workspace',
       'description': 'Execute argv with the selected workspace as cwd on its execution node. '
+                     'Each call starts at the workspace root; reading a subdirectory does not change cwd. '
+                     'For a nested repository use git -C <relative-directory>; for unittest discovery '
+                     'use -s <relative-directory> -t <relative-directory>. '
                      'Requires a configured sandbox or direct VM execution. Output includes stdout/stderr '
                      'and returncode (maximum 64 KiB). Timeout is at most 30 seconds. A nonzero exit '
                      'returns output so you can correct the next command; it is never automatically replayed.',
