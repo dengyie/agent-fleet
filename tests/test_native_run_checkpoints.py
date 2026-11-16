@@ -52,6 +52,10 @@ def test_completed_native_progress_survives_new_worker(tmp_path, monkeypatch, cr
     assert result['state'] == 'succeeded'
     assert result['result_text'] == 'complete'
     assert len(calls) == 2
+    for messages in calls:
+        assert sum(message.get('role') == 'system'
+                   and message.get('content', '').startswith('你是 Agent Fleet 主助手：')
+                   for message in messages) == 1
     assert calls[1][-1]['role'] == 'tool'
     assert (tmp_path / 'workspace' / 'once.txt').read_text() == 'preserved'
     assert result['usage']['total_tokens'] == 12
