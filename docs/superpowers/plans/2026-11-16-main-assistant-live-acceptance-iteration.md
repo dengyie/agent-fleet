@@ -149,3 +149,17 @@
 - [x] Add the targeted classification and rerun the same cases; assert that the recovered tool executes exactly once and the failed draft never executes.
 - [x] Run provider transport, body-retry, progress, worker and checkpoint regressions, including existing generic stream-error rejection. Related set: 249 passed; selected Ruff and diff checks passed. Explicit upstream-error exhaustion retains unknown state, and parameter/auth/message-only/malformed scopes do not retry.
 - [ ] Release through required CI, then verify the original application scenario and the full exact-release acceptance matrix.
+
+### Task 10: Preserve repository-relative command meaning
+
+**Evidence:** Exact production `ec6d2e3` repaired repository Run `run_407275c058fb4f4fff86f653` passed the immutable four-test suite, but first copied its AGENTS `unittest discover -s .` at workspace root and discovered zero tests. After repairing the source and passing the explicit-directory suite, it reran the equivalent documented command through subprocess cwd. The policy already explains fixed workspace cwd but does not connect that fact to commands quoted by repository instructions. Original event evidence is retained in `repository-ec6d2e31055f/tool-evidence.json`; this is model behavior, not a failed backend directory switch.
+
+**Minimal design:** Add one policy clause interpreting repository command paths relative to their repository, translating only directory context while retaining test scope/arguments/assertions. Reuse a successful equivalent verification receipt on unchanged repaired source; failures, changed code or insufficient coverage still require verification. Do not add command interception, cwd inference, tool limits or a new execution protocol.
+
+**Files:** `hub/platform/runtime/assistant_prompt.py`, the existing platform architecture document, and release notes. Existing prompt/worker/checkpoint tests check integration; live immutable-repository Runs establish actual model behavior, not prompt-string assertions.
+
+- [x] Capture the zero-test invocation and redundant post-fix invocation from the actual completed Run.
+- [x] Add the scoped instruction and document the distinction between policy and verified model behavior.
+- [x] Run prompt, worker, checkpoint and tool-routing regressions and inspect the complete diff. Six related modules: 102 passed (7.04s); changed-file Ruff, UTF-8/no-BOM and diff checks passed. Live command behavior remains to be measured after deployment.
+- [ ] Publish through main CI and verify exact deployment identity.
+- [ ] Run the unchanged repository scenario with the three selected primary models; independently inspect tests, HEAD/index preservation, wrong-directory/zero-test commands and redundant successful verification. Keep failures visible and iterate on evidence.
