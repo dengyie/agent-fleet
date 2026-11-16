@@ -20,6 +20,7 @@ from .browser_backend import BrowserExecutionError
 from fleet_core.node_action_contract import (
     BROWSER_SESSION_CAPABILITY, NODE_TOOLS, POSTCHECK_ACTION,
     SERVICE_POSTCHECK_ACTION, SERVICE_LOGS_POSTCHECK_ACTION, POSTCHECK_ACTIONS,
+    SERVICE_COMMAND_ACTIONS,
 )
 
 
@@ -39,6 +40,7 @@ class NodeToolExecutor:
                  artifact_receiver=None, artifact_exporter=None,
                  capability_prepare=None,
                  workflow_test_executor=None,
+                 allowed_service_actions: frozenset[str] | set[str] = frozenset(),
                  workspace_id: str | None = None, workspace_backends: Mapping[str, Any] | None = None,
                  allowed_postcheck_actions: frozenset[str] | set[str] | None = None):
         self.backend = backend
@@ -60,6 +62,7 @@ class NodeToolExecutor:
         self.browser_enabled = bool(browser_enabled)
         self.allowed_tools = frozenset(NODE_TOOLS if allowed_tools is None else allowed_tools)
         self.service_executor = service_executor
+        self.allowed_service_actions = frozenset(allowed_service_actions) & SERVICE_COMMAND_ACTIONS
         self.log_reader = log_reader
         self.allowed_postcheck_actions = frozenset(
             POSTCHECK_ACTIONS if allowed_postcheck_actions is None
@@ -184,12 +187,18 @@ class NodeToolExecutor:
             if not isinstance(receipt, ToolReceipt):
                 return {"state": "failed", "result": {}, "error_code": "invalid_backend_receipt", "command_id": command_id}
             return self._wire(command_id, receipt)
-        if action == SERVICE_POSTCHECK_ACTION:
+        if action in SERVICE_COMMAND_ACTIONS and (
+                action not in self.allowed_service_actions or self.service_executor is None):
+            return {"state": "failed", "result": {},
+                    "error_code": "capability_unavailable", "command_id": command_id}
+        if action == SERVICE_POSTCHECK_ACTION or action in SERVICE_COMMAND_ACTIONS:
             arguments = command.get("arguments")
             required = {"adapter", "target_alias", "service_version", "action"}
+            expected_action = "restart" if action == "service.restart" else "inspect"
             if (self.service_executor is None or not isinstance(arguments, Mapping)
-                    or set(arguments) != required or arguments.get("action") != "inspect"
-                    or command.get("resource_id") is None):
+                    or set(arguments) != required or arguments.get("action") != expected_action
+                    or command.get("resource_id") is None
+                    or (action == "service.restart" and not command.get("grant_id"))):
                 return {"state": "failed", "result": {}, "error_code": "invalid_arguments", "command_id": command_id}
             try:
                 version = int(arguments.get("service_version"))

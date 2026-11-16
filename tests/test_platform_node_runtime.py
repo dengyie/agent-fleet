@@ -206,12 +206,12 @@ class _Transport:
         return response.status_code, payload
 
 
-def _write_shim(directory: Path, name: str, record: Path):
+def _write_shim(directory: Path, name: str, record: Path, *, output="token=runtime-secret /tmp/runtime-private"):
     path = directory / name
     path.write_text(
         "#!/bin/sh\n"
         f"printf '%s\n' \"$0|$@\" >> {str(record)!r}\n"
-        "printf 'token=runtime-secret /tmp/runtime-private\n'\n",
+        f"printf '%s\\n' {output!r}\n",
         encoding="utf-8",
     )
     path.chmod(0o755)
@@ -365,7 +365,8 @@ def test_runtime_executes_fixed_inspect_adapter_through_subprocess_and_journal(
     shim_dir = tmp_path / "shims"
     shim_dir.mkdir()
     record = tmp_path / "argv.txt"
-    _write_shim(shim_dir, shim, record)
+    _write_shim(shim_dir, shim, record,
+                output="running" if adapter == "docker" else "active token=runtime-secret /tmp/runtime-private")
     config = NodeRuntimeConfig(
         node_id="node-a", credential="node-a:secret",
         workspace_root=tmp_path / "workspace",

@@ -169,7 +169,8 @@ def test_vm_service_management_reads_hub_evidence_and_preserves_restart_approval
     class Provider:
         def complete(self, messages, tools, **kwargs):
             calls.append(messages)
-            assert {'fleet.list_services', 'service.get_health', 'service.request_action'} <= {
+            assert {'fleet.list_services', 'service.get_health', 'service.request_action',
+                    'service.get_action', 'service.get_approval'} <= {
                 item['name'] for item in tools}
             if len(calls) == 1:
                 return ModelResponse(kind='tool_call', tool='fleet.list_services', arguments={})
@@ -179,6 +180,10 @@ def test_vm_service_management_reads_hub_evidence_and_preserves_restart_approval
             if len(calls) == 3:
                 return ModelResponse(kind='tool_call', tool='service.request_action',
                                      arguments={'service_id': 'api', 'action': 'restart'})
+            if len(calls) == 4:
+                assert messages[-1]['result']['grant']['state'] == 'pending'
+                return ModelResponse(kind='tool_call', tool='service.get_approval', arguments={
+                    'grant_id': messages[-1]['result']['grant']['grant_id']})
             assert messages[-1]['result']['grant']['state'] == 'pending'
             return ModelResponse(kind='final', text='Restart requested, awaiting approval.')
 
@@ -187,7 +192,7 @@ def test_vm_service_management_reads_hub_evidence_and_preserves_restart_approval
         diagnostics=services['diagnostics'], service_actions=services['service_actions'],
         provider_factory=lambda _: Provider()).run_once(owner)
     assert result['state'] == 'succeeded', result
-    assert len(calls) == 4
+    assert len(calls) == 5
     events = repo.list_run_events(owner, run['run_id'])['events']
     assert not any(event['kind'] == 'node_command_queued' for event in events)
     assert app.test_client().get('/api/platform/v1/services/api').status_code == 200

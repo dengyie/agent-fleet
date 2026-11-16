@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
 from tools.platform.services.actions import (
@@ -86,3 +88,83 @@ def test_fixed_argv_and_shell_false(tmp_path):
         calls.append((argv, kwargs)); return type("R", (), {"stdout": "active", "stderr": "", "returncode": 0})()
     execute_service_action(command, runner=runner)
     assert calls[0][1]["shell"] is False
+
+
+def test_completed_inspect_nonzero_status_is_unhealthy_evidence():
+    command = {"action": "service.inspect", "resource_id": "api", "arguments": {
+        "adapter": "systemd", "target_alias": "api.service", "service_version": 1,
+        "action": "inspect",
+    }}
+
+    def runner(argv, **kwargs):
+        return type("Result", (), {"stdout": "inactive", "stderr": "", "returncode": 3})()
+
+    result = execute_service_action(command, runner=runner)
+    assert result["state"] == "unhealthy"
+    assert result["returncode"] == 3
+
+
+@pytest.mark.parametrize('output,expected', [
+    ('running', 'healthy'), ('exited', 'unhealthy'), ('paused', 'unhealthy'),
+    ('restarting', 'unhealthy'), ('dead', 'unhealthy'), ('created', 'unhealthy'),
+    ('removing', 'unhealthy'), ('unexpected-output', 'unknown'), ('', 'unknown'),
+])
+@pytest.mark.parametrize('action', ['service.inspect', 'reconcile.service.inspect'])
+def test_docker_inspect_health_uses_container_state_not_cli_success(output, expected, action):
+    command = {'action': action, 'resource_id': 'api', 'arguments': {
+        'adapter': 'docker', 'target_alias': 'api', 'service_version': 1, 'action': 'inspect',
+    }}
+    result = execute_service_action(command, runner=lambda *args, **kwargs: type('Result', (), {
+        'stdout': output, 'stderr': '', 'returncode': 0,
+    })())
+    assert result['state'] == expected
+
+
+def test_action_observation_is_owner_target_scoped_and_does_not_replay(tmp_path):
+    from hub.application.task_service import ApplicationError
+
+    owner = 'owner-a@example.test'
+    app = _app(tmp_path, actions=True)
+    _service(app)
+    service = app.extensions['fleet']['services']['service_actions']
+    command = service.request(owner, 'api', 'inspect')['command']
+    observed = service.get_action(owner, 'api', command['command_id'])
+    assert observed['command']['status'] == 'queued'
+    commands = app.extensions['fleet']['platform_commands']
+    commands.mark_unknown(command['command_id'], reason='receipt_timeout')
+    assert service.get_action(owner, 'api', command['command_id'])['command']['status'] == 'unknown'
+    assert service.get_action(owner, 'api', command['command_id'])['command']['status'] == 'unknown'
+    assert commands.get(command['command_id'])['status'] == 'unknown'
+    for actor, target in [('owner-b@example.test', 'api'), (owner, 'another-service')]:
+        with pytest.raises(ApplicationError) as error:
+            service.get_action(actor, target, command['command_id'])
+        assert error.value.code == 'command_not_found'
+
+
+def test_action_observation_keeps_only_bounded_execution_fields(tmp_path, monkeypatch):
+    app = _app(tmp_path, actions=True)
+    _service(app)
+    service = app.extensions['fleet']['services']['service_actions']
+    row = {'resource_id': 'api', 'action': 'service.inspect', 'status': 'succeeded',
+           'result': {'state': 'succeeded', 'result': {
+               'state': 'healthy', 'returncode': 0, 'output': 'private output', 'token': 'private-key',
+           }}}
+    monkeypatch.setattr(service.command_repository, 'get_for_owner', lambda *args: row)
+    result = service.get_action('owner-a@example.test', 'api', 'cmd-fixture')
+    assert result['result'] == {'state': 'healthy', 'returncode': 0}
+    assert 'private' not in str(result)
+    row['result']['result']['state'] = {'invalid': 'value'}
+    assert service.get_action('owner-a@example.test', 'api', 'cmd-fixture')['result'] == {'returncode': 0}
+
+
+def test_action_observation_rejects_a_non_service_command(tmp_path, monkeypatch):
+    from hub.application.task_service import ApplicationError
+
+    app = _app(tmp_path, actions=True)
+    _service(app)
+    service = app.extensions['fleet']['services']['service_actions']
+    monkeypatch.setattr(service.command_repository, 'get_for_owner', lambda *args: {
+        'resource_id': 'api', 'action': 'tool.workspace.exec', 'status': 'succeeded'})
+    with pytest.raises(ApplicationError) as error:
+        service.get_action('owner-a@example.test', 'api', 'cmd-fixture')
+    assert error.value.code == 'command_not_found'

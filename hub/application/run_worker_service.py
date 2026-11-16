@@ -362,7 +362,7 @@ class LocalRunWorkerService:
                         hub_allowed_tools.update({'fleet.list_services', 'service.get_health',
                                                   'service.read_logs', 'incident.get_evidence'})
                     if self.service_actions is not None:
-                        hub_allowed_tools.add('service.request_action')
+                        hub_allowed_tools.update(ToolBroker.SERVICE_ACTION_TOOLS)
             if remote and self.browser_enabled:
                 node = self.repository.get_node(claim["owner_id"], execution_node_id)
                 capabilities = node.get("capabilities") if isinstance(node, dict) else {}

@@ -12,6 +12,7 @@ NODE_TOOLS = frozenset({
 POSTCHECK_ACTION = "reconcile.workspace.digest"
 SERVICE_POSTCHECK_ACTION = "reconcile.service.inspect"
 SERVICE_LOGS_POSTCHECK_ACTION = "reconcile.service.logs"
+SERVICE_COMMAND_ACTIONS = frozenset({"service.inspect", "service.restart"})
 POSTCHECK_ACTIONS = frozenset({
     POSTCHECK_ACTION,
     SERVICE_POSTCHECK_ACTION,
