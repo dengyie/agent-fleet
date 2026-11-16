@@ -7,11 +7,11 @@ credentials, prompts, response bodies and file listings.
 import argparse
 import http.client
 import json
-from pathlib import Path
 import secrets
 import time
-from urllib.parse import urlsplit, quote
+from pathlib import Path
 from urllib.error import URLError
+from urllib.parse import quote, urlsplit
 from urllib.request import Request
 
 from fleet_core.http_transport import open_http
@@ -60,7 +60,7 @@ class AccountClient:
                     self.cookie = cookie.split(';', 1)[0]
                 payload = json.loads(raw)
                 if not isinstance(payload, dict):
-                    raise ValueError()
+                    raise TypeError()
                 return payload
         except AcceptanceFailure as exc:
             if exc.code == 'acceptance_timeout' and (deadline is None or time.monotonic() < deadline):
@@ -74,7 +74,7 @@ class AccountClient:
             raise AcceptanceFailure('invalid_response') from None
 
 
-def check_model(client, model, workspace, timeout):
+def check_model(client, model, workspace, timeout, *, require_streaming=False):
     row = {'model_profile_id': model, 'status': 'failed'}
     deadline = time.monotonic() + timeout
 
@@ -95,26 +95,96 @@ def check_model(client, model, workspace, timeout):
             'client_token': row['client_token'],
             'overrides': {'model_profile_id': model},
         }, expected=202)
-        run_id = turn['run']['run_id']; row['run_id'] = run_id
+        submission = turn.get('run')
+        if not isinstance(submission, dict):
+            raise AcceptanceFailure('invalid_submission_response')
+        run_id = submission.get('run_id')
+        if not isinstance(run_id, str) or not run_id:
+            raise AcceptanceFailure('invalid_submission_response')
+        row['run_id'] = run_id
+        row['submission_acknowledged'] = submission.get('state') in {
+            'queued', 'running', 'waiting_node', 'waiting_approval', 'waiting_task',
+        }
+        if not row['submission_acknowledged']:
+            raise AcceptanceFailure('submission_not_immediate')
+        event_cursor = 0
+        observed_events = []
+        streamed_progress_before_terminal = False
+        activity_phase_seen = False
+        explained_tool_call_seen = False
+        terminal_event_seen = False
         while True:
             run = request('/api/platform/v1/runs/' + quote(run_id, safe=''))
             state = run['state']; row['run_state'] = state
-            if state in ('succeeded', 'failed', 'cancelled', 'unknown'):
+            event_page = request(
+                '/api/platform/v1/runs/' + quote(run_id, safe='')
+                + '/events?after=' + str(event_cursor) + '&limit=100',
+            )
+            events = event_page.get('events')
+            if not isinstance(events, list):
+                raise AcceptanceFailure('invalid_event_response')
+            terminal_state_seen = state in ('succeeded', 'failed', 'cancelled', 'unknown')
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                sequence = event.get('sequence')
+                if type(sequence) is not int or sequence <= event_cursor:
+                    continue
+                event_cursor = sequence
+                observed_events.append(event)
+                kind = event.get('kind')
+                payload = event.get('payload')
+                payload = payload if isinstance(payload, dict) else {}
+                if kind in {'run_finished', 'run_failed', 'run_unknown'}:
+                    terminal_event_seen = True
+                    continue
+                if not terminal_state_seen and not terminal_event_seen:
+                    if kind == 'assistant_text_delta' and isinstance(payload.get('text'), str) and payload['text']:
+                        streamed_progress_before_terminal = True
+                    if kind == 'assistant_activity' and payload.get('phase') in {
+                            'thinking', 'responding', 'tool_call'}:
+                        activity_phase_seen = True
+                    if kind == 'tool_call' and isinstance(payload.get('title'), str) and payload['title'].strip():
+                        explained_tool_call_seen = True
+            if terminal_state_seen and terminal_event_seen:
                 break
-            time.sleep(min(1.0, remaining(deadline)))
+            if terminal_state_seen and not events:
+                raise AcceptanceFailure('terminal_event_missing')
+            time.sleep(min(0.25, remaining(deadline)))
         if state != 'succeeded':
             raise AcceptanceFailure('run_' + state)
         if not isinstance(run.get('result_text'), str) or not run['result_text'].strip():
             raise AcceptanceFailure('missing_final_reply')
-        events = request('/api/platform/v1/runs/' + quote(run_id, safe='') + '/events')['events']
-        results = [e['payload'] for e in events if e['kind'] == 'tool_result']
-        if not results or any(p.get('tool') != 'workspace.list' or p.get('state') != 'succeeded' for p in results):
-            raise AcceptanceFailure('read_only_tool_verification_failed')
+        results = [e.get('payload') for e in observed_events if e.get('kind') == 'tool_result']
+        read_only_tool_succeeded = bool(results) and all(
+            isinstance(p, dict) and p.get('tool') == 'workspace.list' and p.get('state') == 'succeeded'
+            for p in results
+        )
         recovered = request('/api/platform/v1/conversations/' + quote(conversation, safe=''))['conversation']
-        if not any(r['run_id'] == run_id and r['state'] == 'succeeded' and r['result_text'] == run['result_text'] for r in recovered['runs']):
+        conversation_recovered = any(
+            r['run_id'] == run_id and r['state'] == 'succeeded' and r['result_text'] == run['result_text']
+            for r in recovered['runs']
+        )
+        row.update(
+            reply_present=True,
+            read_only_tool_succeeded=read_only_tool_succeeded,
+            recovered=conversation_recovered,
+            streamed_progress_before_terminal=streamed_progress_before_terminal,
+            activity_phase_seen=activity_phase_seen,
+            explained_tool_call_seen=explained_tool_call_seen,
+        )
+        if not read_only_tool_succeeded:
+            raise AcceptanceFailure('read_only_tool_verification_failed')
+        if require_streaming and not streamed_progress_before_terminal:
+            raise AcceptanceFailure('live_progress_missing')
+        if require_streaming and not activity_phase_seen:
+            raise AcceptanceFailure('live_activity_missing')
+        if require_streaming and not explained_tool_call_seen:
+            raise AcceptanceFailure('tool_activity_missing')
+        if not conversation_recovered:
             raise AcceptanceFailure('conversation_recovery_failed')
         remaining(deadline)
-        row.update(status='passed', reply_present=True, read_only_tool_succeeded=True, recovered=True)
+        row['status'] = 'passed'
     except AcceptanceFailure as exc:
         row.update(error=exc.code, http_status=exc.status)
         if exc.code in ('acceptance_timeout', 'transport_unknown'):
@@ -133,6 +203,8 @@ def main(argv=None):
     selection.add_argument('--model', action='append', dest='models')
     selection.add_argument('--all-models', action='store_true')
     parser.add_argument('--timeout', type=int, default=150)
+    parser.add_argument('--require-streaming', action='store_true',
+                        help='Require model text and activity events before the Run reaches a terminal state')
     parser.add_argument('--report')
     parser.add_argument('--expected-release', help='Require the served frontend manifest version to equal this release')
     args = parser.parse_args(argv)
@@ -140,8 +212,8 @@ def main(argv=None):
         url = urlsplit(args.endpoint)
         valid = (url.scheme in ('http', 'https') and url.hostname and not url.username and not url.password
                  and url.path in ('', '/') and not url.query and not url.fragment
-                 and (url.scheme == 'https' or url.hostname in ('localhost', '127.0.0.1', '::1')))
-        url.port
+                 and (url.scheme == 'https' or url.hostname in ('localhost', '127.0.0.1', '::1'))
+                 and (url.port is None or url.port > 0))
     except ValueError:
         valid = False
     if not valid:
@@ -180,11 +252,21 @@ def main(argv=None):
         catalog = client.request('/api/platform/v1/defaults')
         available = {m['profile_id'] for m in catalog['models'] if m.get('enabled', True)}
         selected = sorted(available) if args.all_models else list(dict.fromkeys(args.models))
-        if not selected or not set(selected) <= available:
-            raise AcceptanceFailure('selected_model_unavailable')
+        if not selected:
+            raise AcceptanceFailure('no_models_selected')
         if args.workspace not in {w['workspace_id'] for w in catalog['workspaces'] if w.get('enabled', True)}:
             raise AcceptanceFailure('selected_workspace_unavailable')
-        report['models'] = [check_model(client, model, args.workspace, args.timeout) for model in selected]
+        for model in selected:
+            if model not in available:
+                report['models'].append({
+                    'model_profile_id': model, 'status': 'failed',
+                    'error': 'selected_model_unavailable',
+                })
+                continue
+            report['models'].append(check_model(
+                client, model, args.workspace, args.timeout,
+                require_streaming=args.require_streaming,
+            ))
         report['status'] = 'passed' if all(row['status'] == 'passed' for row in report['models']) else 'failed'
     except AcceptanceFailure as exc:
         report.update(error=exc.code, http_status=exc.status)
