@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from fleet_core.backends.sandbox import SandboxBackend
 from fleet_core.backends.vm import VMBackend
 from fleet_core.workspace_execution import validate_execution_mode
+from fleet_core.node_action_contract import SERVICE_COMMAND_ACTIONS
 from fleet_core.web_agent_contract import WEB_AGENT_TOOLS
 from tools.browser_bridge.contract import WebAgentExecutor
 from tools.browser_bridge.muse import MuseBridge
@@ -45,7 +46,7 @@ from fleet_core.remote_workflow_test import REMOTE_TEST_ACTION
 from .workflow_remote_test import NodeRemoteTestExecutor
 
 
-NODE_RUNTIME_CAPABILITIES = frozenset(NODE_TOOLS | POSTCHECK_ACTIONS | {
+NODE_RUNTIME_CAPABILITIES = frozenset(NODE_TOOLS | POSTCHECK_ACTIONS | SERVICE_COMMAND_ACTIONS | {
     BROWSER_SESSION_CAPABILITY, "artifact.receive", "artifact.export",
     REMOTE_TEST_ACTION,
 })
@@ -130,6 +131,8 @@ class NodeRuntimeConfig:
         if any(capability not in NODE_RUNTIME_CAPABILITIES
                for capability in capabilities):
             raise ValueError("unknown capability")
+        if capabilities & SERVICE_COMMAND_ACTIONS and not self.public_key:
+            raise ValueError("service actions require command signing")
         if "artifact.receive" in capabilities and (not self.public_key or not self.artifact_inputs):
             raise ValueError("artifact receive requires signed input aliases")
         if "artifact.export" in capabilities and (not self.public_key or not self.artifact_outputs):
@@ -245,7 +248,7 @@ class NodeRuntime:
             )
         service_executor = (
             ServiceActionExecutor(path_prefix=config.service_path_prefix)
-            if SERVICE_POSTCHECK_ACTION in config.capabilities else None
+            if config.capabilities & (SERVICE_COMMAND_ACTIONS | {SERVICE_POSTCHECK_ACTION}) else None
         )
         browser_available = bool(
             browser_backend is not None and browser_backend.available
@@ -302,6 +305,7 @@ class NodeRuntime:
             workspace_backends=self.workspace_backends,
             allowed_tools=allowed_tools,
             allowed_postcheck_actions=allowed_postchecks,
+            allowed_service_actions=config.capabilities & SERVICE_COMMAND_ACTIONS,
             service_executor=service_executor,
             log_reader=self.log_reader if SERVICE_LOGS_POSTCHECK_ACTION in config.capabilities else None,
             browser_backend=browser_backend,
@@ -354,6 +358,7 @@ class NodeRuntime:
             and (tool not in BROWSER_TOOLS or browser_available)
             and (tool not in WEB_AGENT_TOOLS or self.web_agent_executor is not None)}
         actions.update(self.executor.allowed_postcheck_actions)
+        actions.update(self.executor.allowed_service_actions)
         if self.workflow_test_executor is not None and self.workflow_test_executor.available:
             actions.add(REMOTE_TEST_ACTION)
         return frozenset(actions)

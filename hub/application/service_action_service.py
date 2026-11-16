@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from hub.application.task_service import ApplicationError
 from fleet_core.platform_command import PlatformCommand, args_hash
 from hub.infrastructure.approval_repository import ApprovalRepository, ApprovalRepositoryError
+from hub.infrastructure.command_repository import CommandRepositoryError
 from hub.infrastructure.service_repository import ServiceRepositoryError
 from platform_schema import validate_id, validate_owner_id
 
@@ -46,6 +47,7 @@ class ServiceActionService:
             "service_not_found": 404, "unsupported_action": 400,
             "action_not_allowed": 409, "approval_required": 409,
             "grant_not_found": 404, "grant_not_pending": 409,
+            "command_not_found": 404,
             "grant_not_usable": 409, "approval_expired": 409,
             "service_version_conflict": 409, "grant_state_conflict": 409,
             "idempotency_conflict": 409, "command_conflict": 409,
@@ -57,6 +59,7 @@ class ServiceActionService:
             "action_not_allowed": "服务未声明该动作",
             "approval_required": "该动作需要审批",
             "grant_not_found": "授权不存在",
+            "command_not_found": "服务命令不存在",
             "grant_not_pending": "授权已处理",
             "grant_not_usable": "授权不可消费",
             "approval_expired": "授权已过期",
@@ -150,6 +153,34 @@ class ServiceActionService:
             return {"ok": True, "grant": self._public_grant(grant)}
         except ApprovalRepositoryError as exc:
             raise self._translate(exc) from None
+
+    def get_action(self, owner_id: str, service_id: str, command_id: str):
+        """Observe one original service command without enqueueing or replaying it."""
+        owner_id = self._owner(owner_id)
+        try:
+            service_id = validate_id(service_id, "service_id")
+            command_id = validate_id(command_id, "command_id")
+        except ValueError:
+            raise ApplicationError("invalid_command", "服务命令标识不合法", 400) from None
+        try:
+            row = self.command_repository.get_for_owner(owner_id, command_id)
+        except CommandRepositoryError as exc:
+            raise self._translate(exc) from None
+        if (row is None or row.get("resource_id") != service_id
+                or row.get("action") not in {"service.inspect", "service.restart"}):
+            raise ApplicationError("command_not_found", "服务命令不存在", 404)
+        wire = row.get("result")
+        result = wire.get("result") if isinstance(wire, Mapping) else None
+        safe = {}
+        if isinstance(result, Mapping):
+            if isinstance(result.get("state"), str) and result["state"] in {
+                    "healthy", "unhealthy", "degraded", "unsupported", "unknown", "succeeded", "failed"}:
+                safe["state"] = result["state"]
+            if type(result.get("returncode")) is int:
+                safe["returncode"] = result["returncode"]
+        if isinstance(wire, Mapping) and isinstance(wire.get("error_code"), str):
+            safe["error_code"] = wire["error_code"][:80]
+        return {"ok": True, "command": self._command_public(row), "result": safe}
 
     def decide(self, owner_id: str, grant_id: str, *, approve: bool):
         owner_id = self._owner(owner_id)

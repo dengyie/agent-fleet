@@ -23,6 +23,9 @@ def _parse_mcp_pins(value: object) -> tuple[MCPToolPin, ...]:
 
 
 class ToolBroker:
+    SERVICE_ACTION_TOOLS = frozenset({
+        "service.request_action", "service.get_action", "service.get_approval",
+    })
     CONVERSATION_TOOLS = frozenset({
         "conversation.list", "conversation.rename", "conversation.archive",
         "conversation.restore",
@@ -30,10 +33,10 @@ class ToolBroker:
     TOOLS = frozenset({
         "workspace.list", "workspace.read", "workspace.write", "workspace.exec",
         "workspace.artifact", "fleet.list_services", "service.get_health",
-        "service.read_logs", "incident.get_evidence", "service.request_action",
+        "service.read_logs", "incident.get_evidence",
         "platform.get_defaults", "platform.update_defaults",
     }) | BROWSER_TOOLS | WEB_AGENT_TOOLS
-    TOOLS = TOOLS | CONVERSATION_TOOLS
+    TOOLS = TOOLS | CONVERSATION_TOOLS | SERVICE_ACTION_TOOLS
     CODE_TOOLS = frozenset({"workflow.input.list", "workflow.input.read"})
     _CODE_TOOL_DEFINITIONS = (
         {"name": "workflow.input.list", "risk": "read_only", "scope_kind": "workflow_input",
@@ -183,7 +186,16 @@ class ToolBroker:
       'parameters': {'type': 'object', 'properties': {
           'service_id': {'type': 'string'},
           'action': {'type': 'string', 'enum': ['inspect', 'restart']}},
-          'required': ['service_id', 'action'], 'additionalProperties': False}},)
+          'required': ['service_id', 'action'], 'additionalProperties': False}},
+     {'name': 'service.get_action', 'risk': 'read_only', 'scope_kind': 'service',
+      'description': 'Read the original service action command status and bounded result using its command_id. A queued request is not a completed action. Never resubmit an unknown command.',
+      'parameters': {'type': 'object', 'properties': {
+          'service_id': {'type': 'string'}, 'command_id': {'type': 'string'}},
+          'required': ['service_id', 'command_id'], 'additionalProperties': False}},
+     {'name': 'service.get_approval', 'risk': 'read_only', 'scope_kind': 'service',
+      'description': 'Read an existing service approval grant by grant_id. This does not approve it or execute an action.',
+      'parameters': {'type': 'object', 'properties': {'grant_id': {'type': 'string'}},
+          'required': ['grant_id'], 'additionalProperties': False}},)
     _BROWSER_TOOL_DEFINITIONS = (
         {'name': 'browser.open', 'risk': 'read_only', 'scope_kind': 'browser',
          'description': 'Open an allowed URL in an isolated browser session.',
@@ -290,7 +302,7 @@ class ToolBroker:
                 definitions.append(dict(cls._SUBMIT_TOOL_DEFINITION))
         if not service_actions_enabled:
             definitions = [item for item in definitions
-                           if item["name"] != "service.request_action"]
+                           if item["name"] not in cls.SERVICE_ACTION_TOOLS]
         available_tools = cls.TOOLS | (cls.CODE_TOOLS if workflow_code_inputs else frozenset())
         allowed = available_tools if allowed_tools is None else available_tools.intersection(allowed_tools)
         definitions = [item for item in definitions if item["name"] in allowed]
@@ -453,9 +465,19 @@ class ToolBroker:
                     "archived_at": row["archived_at"],
                     "archived": row["archived_at"] is not None,
                 })
-            if tool == "service.request_action":
+            if tool in self.SERVICE_ACTION_TOOLS:
                 if self.service_actions is None:
                     return ToolReceipt(command_id, "failed", {}, "service_actions_disabled")
+                if tool == "service.get_action":
+                    if set(arguments) != {"service_id", "command_id"}:
+                        return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
+                    return ToolReceipt(command_id, "succeeded", self.service_actions.get_action(
+                        owner_id, arguments["service_id"], arguments["command_id"]))
+                if tool == "service.get_approval":
+                    if set(arguments) != {"grant_id"}:
+                        return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
+                    return ToolReceipt(command_id, "succeeded", self.service_actions.get_grant(
+                        owner_id, arguments["grant_id"]))
                 if set(arguments) != {"service_id", "action"}:
                     return ToolReceipt(command_id, "failed", {}, "invalid_arguments")
                 result = self.service_actions.request(

@@ -95,6 +95,21 @@ def run_fixed_command(
     return "ok", stdout or stderr, getattr(result, "returncode", None), max(0.0, float(now()) - started)
 
 
+def command_health_state(source: str, output: str, returncode: int | None) -> str:
+    if returncode is None:
+        return "unknown"
+    if returncode != 0:
+        return "unhealthy"
+    if source == "docker":
+        state = output.strip()
+        if state == "running":
+            return "healthy"
+        if state in {"created", "restarting", "removing", "paused", "exited", "dead"}:
+            return "unhealthy"
+        return "unknown"
+    return "healthy"
+
+
 def command_evidence(
     *, service_id: str, source: str, alias: str, argv: Sequence[str],
     dimension: str = "process_state", timeout_s: float = 5.0, ttl_s: float = 180.0,
@@ -104,7 +119,7 @@ def command_evidence(
         argv, timeout_s=timeout_s, runner=runner, now=now,
     )
     if status == "ok":
-        state = "healthy" if returncode == 0 else "unhealthy"
+        state = command_health_state(source, output, returncode)
     elif status == "unsupported":
         state = "unsupported"
     elif status == "timeout":

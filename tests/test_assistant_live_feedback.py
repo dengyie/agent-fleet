@@ -569,3 +569,57 @@ def test_exec_activity_is_available_before_dispatch_and_result_is_bounded():
     public = project_progress(public,'tool_result',{'command_id':'cmd','tool':'workspace.exec','state':'failed','error_code':'process_failed',**result},2)
     assert public['segments'][0]['input']==call['input']
     assert public['segments'][0]['output']==result['output']
+
+
+@pytest.mark.parametrize('tool,arguments,title', [
+    ('service.get_health', {'service_id': 'fixture-service'}, '查看服务健康'),
+    ('service.read_logs', {'service_id': 'fixture-service'}, '读取服务日志'),
+    ('service.request_action', {'service_id': 'fixture-service', 'action': 'inspect'}, '检查服务'),
+    ('service.request_action', {'service_id': 'fixture-service', 'action': 'restart'}, '申请重启服务'),
+    ('service.get_action', {'service_id': 'fixture-service', 'command_id': 'cmd-original'}, '查看服务操作'),
+    ('service.get_approval', {'grant_id': 'grant-original'}, '查看服务审批'),
+])
+def test_service_activity_explains_actual_tool_before_dispatch(tool, arguments, title):
+    from hub.domain.tool_activity import tool_activity
+
+    activity = tool_activity(tool, {**arguments, 'api_key': 'never-public'})
+    assert activity['title'].startswith(title + ' · ')
+    assert ('fixture-service' if 'service_id' in arguments else 'grant-original') in activity['input']
+    assert 'never-public' not in str(activity)
+
+
+@pytest.mark.parametrize('tool,payload,expected', [
+    ('service.request_action', {'command': {'status': 'queued'}}, '命令状态：等待执行'),
+    ('service.request_action', {'approval_required': True, 'grant': {'state': 'pending'}}, '审批状态：等待审批'),
+    ('service.get_approval', {'grant': {'state': 'consumed'}}, '审批状态：已消费'),
+    ('service.get_action', {'command': {'status': 'succeeded'}, 'result': {'state': 'healthy', 'returncode': 0}}, '服务状态：健康'),
+    ('service.get_action', {'command': {'status': 'unknown'}, 'result': {}}, '命令状态：结果未知'),
+])
+def test_service_activity_distinguishes_request_approval_and_execution(tool, payload, expected):
+    from fleet_core.backends.base import ToolReceipt
+    from hub.domain.run_progress import project_progress
+    from hub.domain.tool_activity import tool_activity
+
+    args = {'service_id': 'fixture-service', 'action': 'restart', 'grant_id': 'grant-original'}
+    result = tool_activity(tool, args, ToolReceipt('cmd-read', 'succeeded', {
+        **payload, 'secret': 'never-public', 'output': 'never-public',
+    }))
+    assert expected in result['output']
+    assert 'never-public' not in str(result)
+    if tool == 'service.get_approval':
+        assert '操作完成' not in result['output']
+    public = project_progress({}, 'tool_result', {
+        'command_id': 'cmd-read', 'tool': tool, 'state': 'succeeded', **result,
+    }, 1)
+    assert public['segments'][0]['output'] == result['output']
+
+
+def test_service_activity_ignores_malformed_and_unrecognized_result_values():
+    from fleet_core.backends.base import ToolReceipt
+    from hub.domain.tool_activity import tool_activity
+
+    activity = tool_activity('service.get_action', {'service_id': 'fixture-service'},
+        ToolReceipt('cmd-read', 'succeeded', {
+            'command': {'status': {}}, 'result': {'state': ['never-public']},
+        }))
+    assert 'output' not in activity

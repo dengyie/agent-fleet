@@ -5,7 +5,7 @@ import re
 from collections.abc import Mapping
 from typing import Any, Callable, Sequence
 
-from .base import CollectorError, run_fixed_command
+from .base import CollectorError, command_health_state, run_fixed_command
 
 
 class ServiceActionError(RuntimeError):
@@ -72,9 +72,10 @@ def execute_service_action(command: Mapping[str, Any], *, runner: Callable[..., 
                            path_prefix: Sequence[str | Any] | None = None) -> dict[str, Any]:
     """Execute a command using ``shell=False`` and bounded output.
 
-    Any failed, unsupported, timed out, or interrupted process is surfaced as
+    Any failed mutation, unsupported, timed out, or interrupted process is surfaced as
     an exception so the existing NodeClient journal records the outcome as
-    ``unknown`` until health evidence reconciles the service.
+    ``unknown`` until health evidence reconciles the service. A completed
+    inspect reports process health even when its exit status is nonzero.
     """
     try:
         argv = action_argv_from_command(command)
@@ -93,9 +94,9 @@ def execute_service_action(command: Mapping[str, Any], *, runner: Callable[..., 
                     "state": health_state, "error_code": status,
                     "duration_s": round(float(duration_s), 3)}
         raise ServiceActionError("action_failed")
-    if returncode != 0 and not (is_postcheck and inspect):
+    if returncode != 0 and not inspect:
         raise ServiceActionError("action_failed")
-    health_state = "healthy" if returncode == 0 else "unhealthy"
+    health_state = command_health_state(command["arguments"]["adapter"], output, returncode)
     return {
         "action": command["action"],
         "resource_id": command["resource_id"],

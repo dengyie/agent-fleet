@@ -38,7 +38,8 @@ def _runner(calls, result=None, error=None):
 )
 def test_fixed_collectors_only_use_adapter_owned_argv(collector, expected):
     calls = []
-    evidence = collector.collect("svc-api", "api.service" if isinstance(collector, SystemdCollector) else "api", runner=_runner(calls))
+    result = _Result(stdout="running" if isinstance(collector, DockerCollector) else "active")
+    evidence = collector.collect("svc-api", "api.service" if isinstance(collector, SystemdCollector) else "api", runner=_runner(calls, result=result))
     assert calls[0][0] == expected
     assert calls[0][1]["shell"] is not True
     assert evidence["state"] == "healthy"
@@ -54,6 +55,15 @@ def test_fixed_collectors_distinguish_unhealthy_unsupported_and_timeout():
     timeout = SystemdCollector().collect("svc", "api", runner=_runner([], error=subprocess.TimeoutExpired(["systemctl"], 1)))
     assert timeout["state"] == "unknown"
     assert timeout["detail"]["collector_status"] == "timeout"
+
+
+@pytest.mark.parametrize('output,expected', [
+    ('running', 'healthy'), ('exited', 'unhealthy'), ('paused', 'unhealthy'),
+    ('unexpected-output', 'unknown'), ('', 'unknown'),
+])
+def test_docker_collector_uses_container_state_not_cli_success(output, expected):
+    evidence = DockerCollector().collect('svc', 'api', runner=_runner([], result=_Result(stdout=output)))
+    assert evidence['state'] == expected
 
 
 class _Response:

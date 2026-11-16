@@ -31,11 +31,29 @@
 - 单条命令最长 30 秒，stdout/stderr 合并，原始读取最多 64 KiB。远程结果还受整个 JSON 回执 64 KiB 界限约束，包含信封和转义开销，因此文本实际保留量可能更少；截断通过 `truncated` 标记，不改变退出码、错误或执行状态。文件读取和目录列表遵守同一界限，列表只删除末尾完整条目。
 - Linux VM 直接执行需要支持 `cgroup.kill` 的 cgroup v2 委派，Windows 使用 Job Object；macOS 不提供此直接执行模式。Linux 每条命令先进入自己的 cgroup，成功、失败、超时和取消返回前均递归停止全部后代，包括 `setsid` 和双重 fork；确认范围为空后才移除它。缺少委派时命令不启动，返回 `command_scope_unavailable`；不能确认停止时返回 unknown。后台常驻服务应通过专用服务管理，不靠命令遗留子进程。
 - 启动命令前的控制观察最多尝试 3 次，退避分别为 0.1、0.2 秒，每次 HTTP 仍受两秒传输边界及原命令截止时间/取消约束。明确拒绝不重试；传输故障耗尽返回 `command_control_unavailable`。已开始或结果不确定的命令不因重试而重放。
-- 非零退出保留 returncode、输出及 failed 工具卡片，模型可据此修改下一条命令。没有自动重放失败命令。超时、取消、权限/路径错误和未知执行仍按原终止语义处理；模型步骤预算继续生效。
+- 非零退出保留 returncode、输出及 failed 工具卡片，模型可据此修改下一条命令。没有自动重放失败命令。超时、取消、权限/路径错误和未知执行仍按原终止语义处理；普通对话不设固定步骤或累计Token上限，显式任务预算由其合同指定。
 - 模型正文、重试提示及工具状态沿现有运行事件实时反馈；本版不宣称逐行流式转发命令 stdout。VM 文件读写可用，普通远程工作区不因此新增产物上传或浏览器能力。固定 Workflow 测试 Node 的配置及沙盒规则仍独立。
 - 远程模型工具声明与 broker admission 使用同一集合：只有 Node 执行器已实现且节点能力明确启用的工具才允许投递。服务目录、健康、日志、incident 和普通产物发布不会作为不存在的 Node 工具暴露给模型。
 
 ## 常驻服务、更新与回滚
+
+### 受管服务动作
+
+标准 Node 也可执行服务目录中声明的固定动作。需先升级到支持服务动作的发布版，在现有私有 `node.json` 增加所需动作，并在 Hub 对同一 Node 显式登记相应的 `service.inspect` / `service.restart` 能力。例如只启用检查：
+
+```json
+{"service_actions": ["inspect"]}
+```
+
+保留其余字段、工作区绑定、凭据和原 `commands.db`。`service_actions` 只接受不重复的 `inspect`、`restart`，默认不启用；它可以与普通工作区共用 Node，但不能与专用 Workflow fixed-test 配置混用。执行账号必须能访问对应的 systemd、Supervisor 或 Docker 管理端；此配置不会授予 OS 权限。设置页下载的工作区接入文件不会自动开启服务动作。
+
+Hub 服务目录的 `adapter`、`target_alias`、`allowed_actions` 和服务版本决定固定命令；模型不能增加 argv。重启先创建现有审批单，用户批准后才派发签名命令；Node 持久 journal 对同一命令只执行一次。普通 inspect 与 reconcile inspect 使用独立能力，互相不授予权限。inspect 明确返回不健康进程状态时，命令已完成且结果为 unhealthy；重启超时或中断保持 unknown，不自动重放。
+
+Docker 的 inspect 命令成功仅表示查询成功；容器状态为 `running` 才记为进程健康，`exited`、`paused` 等停止/过渡状态记为 unhealthy，未识别或空输出记为 unknown。普通检查、复核和采集器使用同一解释规则；这不代表应用级健康检查通过。
+
+主助手的 `service.request_action` 成功仅表示请求已受理。它可用 `service.get_action` 查询原 command_id 的状态与有限结果，或用只读的 `service.get_approval` 查询 grant_id；这两个查询留在 Hub，不会变成工作区命令，也不能批准重启。相关流程门禁为 [ACTION-01](../testing/journeys.json)。生产验收应使用明确命名的独立测试服务，不重启 Hub 或 Node 自身来证明功能。
+
+### Node 常驻与升级
 
 Linux 使用 systemd，指定执行账号、发布目录、Python 和 `--config` 绝对路径；配置 `Restart=on-failure`、`KillMode=mixed`、`Delegate=yes`，停止宽限应大于命令执行与回执收尾时间。Node 自动使用自身服务的 cgroup；显式委派其他范围时可设置 `FLEET_COMMAND_CGROUP_ROOT`，Node 本身必须已经处于该委派子树内。只修改目录所有者而把 Node 留在子树外不能授予跨子树迁移权限。源码/依赖与 state/工作区分离，切换发布目录前保留上一版。
 

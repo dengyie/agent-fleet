@@ -935,12 +935,28 @@
       "id": "ACTION-01",
       "title": "只读诊断和审批操作",
       "layer": "integration",
-      "acceptance": "inspect无任意参数；restart必须有一次性审批；owner和资源版本校验阻止过期执行",
-      "boundary": "disposable Hub; external services simulated",
+      "acceptance": "inspect无任意参数；restart必须有一次性审批；owner和资源版本校验阻止过期执行；签名命令经标准Node执行并回传状态，未知操作不重放",
+      "boundary": "disposable Hub and real Node journal/process; adapter executables are local fixtures",
       "tests": [
         "tests/test_platform_service_actions.py::test_restart_requires_approval_and_is_one_time",
         "tests/test_platform_service_actions.py::test_version_fence_and_owner_scope",
-        "tests/test_platform_service_actions.py::test_inspect_command_is_read_only_and_rejects_user_arguments"
+        "tests/test_platform_service_actions.py::test_inspect_command_is_read_only_and_rejects_user_arguments",
+        "tests/test_platform_service_actions.py::test_completed_inspect_nonzero_status_is_unhealthy_evidence",
+        "tests/test_platform_service_actions.py::test_docker_inspect_health_uses_container_state_not_cli_success",
+        "tests/test_platform_collectors.py::test_docker_collector_uses_container_state_not_cli_success",
+        "tests/test_platform_service_actions.py::test_action_observation_is_owner_target_scoped_and_does_not_replay",
+        "tests/test_platform_service_actions.py::test_action_observation_keeps_only_bounded_execution_fields",
+        "tests/test_platform_service_actions.py::test_action_observation_rejects_a_non_service_command",
+        "tests/test_platform_service_action_runtime.py::test_approved_service_action_crosses_hub_node_process_and_receipt",
+        "tests/test_platform_service_action_runtime.py::test_service_action_requires_explicit_node_capability",
+        "tests/test_platform_service_action_runtime.py::test_action_status_tools_are_gated_and_read_only",
+        "tests/test_platform_service_action_runtime.py::test_normal_node_cli_loads_explicit_service_actions",
+        "tests/test_platform_service_action_runtime.py::test_uncertain_restart_is_journaled_once_without_replay",
+        "tests/test_platform_service_action_runtime.py::test_restart_rejects_missing_grant_or_malformed_envelope",
+        "tests/test_assistant_tool_routing.py::test_vm_service_management_reads_hub_evidence_and_preserves_restart_approval",
+        "tests/test_assistant_live_feedback.py::test_service_activity_explains_actual_tool_before_dispatch",
+        "tests/test_assistant_live_feedback.py::test_service_activity_distinguishes_request_approval_and_execution",
+        "tests/test_assistant_live_feedback.py::test_service_activity_ignores_malformed_and_unrecognized_result_values"
       ]
     },
     {
