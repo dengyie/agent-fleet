@@ -798,8 +798,14 @@ class OpenAICompatibleProvider:
                 if payload.get('error') is not None:
                     # A later DONE/finish marker cannot turn a rejected stream
                     # into a committed answer or executable partial tool call.
-                    error = ProviderError('provider_stream_error')
                     detail = payload['error']
+                    # Gateways can report an upstream failure inside an
+                    # already-started HTTP200 stream. Its explicit scope is
+                    # retryable even when the gateway-specific code is not
+                    # one of our public diagnostic codes; never infer this
+                    # from arbitrary error-message text.
+                    error = ProviderError('provider_stream_error', retryable=(
+                        isinstance(detail, Mapping) and detail.get('type') == 'upstream_error'))
                     code = detail.get('code') if isinstance(detail, Mapping) else None
                     if isinstance(code, str) and code in UPSTREAM_ERROR_CODES:
                         error.upstream_code = code

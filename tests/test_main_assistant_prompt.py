@@ -152,3 +152,16 @@ def test_prompt_does_not_treat_bounded_conversation_list_as_complete_inventory()
 
     assert "用户已给出明确会话 ID" in prompt
     assert "有限列表未命中不能证明会话不存在" in prompt
+
+
+def test_prompt_separates_code_delivery_from_unrequested_git_mutations():
+    prompt = build_assistant_messages(
+        [{"role": "user", "content": "在项目里实现功能并运行测试"}],
+        model="glm-5.3-flash", workspace={}, node=None,
+        tools=[{"name": "workspace.exec", "risk": "restricted_exec"}],
+    )[0]["content"]
+
+    assert "代码交付与 Git 提交、推送是不同的任务" in prompt
+    assert "仅在用户或适用仓库约定明确要求时" in prompt
+    assert "git add、commit 或 push" in prompt
+    assert "不要编造作者身份或修改全局 Git 配置" in prompt

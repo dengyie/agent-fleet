@@ -122,3 +122,30 @@
 - [ ] On the deployed release, run an ordinary mixed management/VM task, independently check the file and conversation changes, and re-run the four exact model profiles and UI progress/recovery checks.
 
 **Verified baseline (before Task 5 deployment):** PR69 main `8c2df56b7dbc60ab5be0df1779eb754ec74f4a63`, CI/deploy `43811885952`, deployment receipt `status=deployed/phase=succeeded`, served version and selected source hashes match; production SQLite quick/FK checks passed. All four approved profiles passed SSE/read-only tool/final reply/recovery checks. Ordinary management continuation, archive/restore, unchanged-default save, VM file generation with independent six-test execution, and local artifact byte download passed as separate scenarios. Chrome verified immediate user feedback, unfinished live GLM text, folded 14-request metadata, readable exec results, desktop/mobile reload, no overflow/page errors and logout revocation. These establish the named baseline capabilities only; mixed Hub/VM routing and new prompt behavior remain unverified online until the Task 5 release.
+
+### Task 8: Keep ordinary code delivery within the requested Git scope
+
+**Evidence:** Ordinary GLM application Run `run_0811eb100de1895184657261` completed its 14 tests, then staged files and attempted an unrequested commit. The missing author configuration caused another failed command, followed by a made-up command-local identity and a successful commit. The application request and repository instructions required implementation, a feature branch and tests, but did not require staging or committing. The current policy does not distinguish code delivery from Git publication.
+
+**Minimal design:** Clarify that code delivery ends with changes and validation unless the user or applicable repository instructions explicitly require staging, committing or pushing. Explicit Git delivery remains supported. Author identity must come from existing configuration or supplied instructions, not an invented value. Keep the tool contract and authority unchanged; no command interception or new execution framework.
+
+**Files:** `hub/platform/runtime/assistant_prompt.py`, `tests/test_main_assistant_prompt.py`, `docs/platform/agent-fleet-self-hosted-platform.md`, and `docs/releases/release-notes.md`.
+
+- [x] Add a prompt-contract regression asserting separate authorization for staging/commit/push and evidence-backed author identity; run `python3 -m pytest -q tests/test_main_assistant_prompt.py` and observe failure before implementation (1 failed, 8 passed).
+- [x] Add the targeted policy clause, rerun the failing test and relevant ordinary-worker/checkpoint regressions, and document the delivery boundary. Related regressions: 102 passed; selected Ruff checks and diff check passed.
+- [ ] Publish after required CI, verify the exact deployed policy, and run an ordinary repository repair without requesting a commit. Independently confirm meaningful tests, preserved unrelated work, a feature branch, unchanged HEAD and an unchanged index.
+- [ ] Complete the original multi-file application's isolation repair through the main assistant and independently rerun its immutable regression; preserve the original interrupted Run and evidence.
+- [ ] Repeat exact-release model, mixed-operation, management, artifact, cancellation and UI acceptance, recording each result without substituting older-release evidence.
+
+### Task 9: Retry explicitly upstream-scoped SSE errors before committing a generation
+
+**Evidence:** On exact deployed release `6c958bf`, application continuation `run_41e68aaa8f64754f55127e3e` ended `unknown/provider_stream_error` after one HTTP200 request and no tools. Gateway request `202611161526506539779725890cb636Til49Fc` records channel366 EOF/interrupted stream, HTTP502 `bad_response_body` internally and an already-committed HTTP200 response externally. The gateway's OpenAI terminal-error writer emits `error.type=upstream_error`; Fleet currently ignores this structured scope and only retries three specific error codes. Unknown/message-only errors must retain their existing non-retryable behavior.
+
+**Minimal design:** Treat the explicit SSE `error.type=upstream_error` contract as retryable within the existing provider generation loop. Preserve response closure, request correlation, per-attempt unknown billing, cancellation, configured retry count and the boundary before any executable ModelResponse. Do not inspect arbitrary error-message text or retry malformed/client errors.
+
+**Files:** `hub/platform/providers/openai_compatible.py`, `tests/test_provider_body_retries.py`, and existing release notes.
+
+- [x] Reproduce failure through real loopback HTTP with upstream-scoped `bad_response_body` and `stream_interrupted` errors after an uncommitted tool draft (both fail before implementation).
+- [x] Add the targeted classification and rerun the same cases; assert that the recovered tool executes exactly once and the failed draft never executes.
+- [x] Run provider transport, body-retry, progress, worker and checkpoint regressions, including existing generic stream-error rejection. Related set: 249 passed; selected Ruff and diff checks passed. Explicit upstream-error exhaustion retains unknown state, and parameter/auth/message-only/malformed scopes do not retry.
+- [ ] Release through required CI, then verify the original application scenario and the full exact-release acceptance matrix.
