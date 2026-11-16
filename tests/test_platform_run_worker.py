@@ -201,9 +201,11 @@ def test_worker_injects_frozen_memory_and_journals_redacted_evidence(tmp_path):
 
     first_messages = provider.messages[0]
     assert first_messages[0]["role"] == "system"
-    assert "Use the stable workspace." in first_messages[0]["content"]
-    assert len(first_messages[0]["content"].encode("utf-8")) <= 512
-    assert first_messages[1]["role"] == "user"
+    assert "Agent Fleet 主助手" in first_messages[0]["content"]
+    assert first_messages[1]["role"] == "system"
+    assert "Use the stable workspace." in first_messages[1]["content"]
+    assert len(first_messages[1]["content"].encode("utf-8")) <= 512
+    assert first_messages[2]["role"] == "user"
     events = client.get(f"/api/platform/v1/runs/{run['run_id']}/events").get_json()["events"]
     selected = next(event for event in events if event["kind"] == "memory_context_selected")
     assert selected["payload"]["memory_ids"] == ["memory-worker"]
@@ -246,8 +248,9 @@ def test_worker_uses_snapshot_after_live_memory_changes(tmp_path):
     worker = app.extensions["fleet"]["services"]["platform_worker"]
     worker.provider_factory = lambda profile: provider
     assert worker.run_once(OWNER)["state"] == "succeeded"
-    assert "Original frozen value." in provider.messages[0][0]["content"]
-    assert "Changed live value." not in provider.messages[0][0]["content"]
+    frozen_message = next(message for message in provider.messages[0]
+                          if message["role"] == "system" and "Original frozen value." in message["content"])
+    assert "Changed live value." not in frozen_message["content"]
 
 
 def test_worker_artifact_is_listed_and_downloadable_in_conversation_workspace(tmp_path):
@@ -574,8 +577,6 @@ def test_default_worker_rejects_unsandboxed_host_exec(tmp_path):
 
     class Provider:
         def complete(self, messages, tools, *, request_observer=None):
-            if len(messages) > 1:
-                return ModelResponse(kind='final', text=str(messages[-1]))
             return ModelResponse(kind='tool_call', tool='workspace.exec',
                                  arguments={'argv': ['cat', str(outside)]})
 
@@ -659,7 +660,7 @@ def test_queued_turns_use_trigger_cutoff_and_durable_assistant_history(tmp_path)
 
     class Provider:
         def complete(self, messages, tools, *, request_observer=None):
-            captured.append([(m['role'], m['content']) for m in messages])
+            captured.append([(m['role'], m['content']) for m in messages if m['role'] != 'system'])
             return ModelResponse(kind='final', text='ANSWER-' + messages[-1]['content'])
 
     worker = app.extensions['fleet']['services']['platform_worker']

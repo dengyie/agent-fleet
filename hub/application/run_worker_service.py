@@ -26,6 +26,7 @@ from hub.platform.runtime.base import RuntimeLimits
 from hub.platform.runtime.native import (
     NativeAssistantRuntime, ProviderBoundaryUnknown, can_continue_after_tool_failure,
 )
+from hub.platform.runtime.assistant_prompt import build_assistant_messages
 from hub.application.platform_memory_context_service import (
     PlatformMemoryContextError,
     build_context_message,
@@ -338,8 +339,10 @@ class LocalRunWorkerService:
             remote_browser_enabled = False
             remote_submit_enabled = False
             remote_web_agent_enabled = False
+            assistant_node = None
             if remote:
                 agent_node = self.repository.get_node(claim["owner_id"], execution_node_id)
+                assistant_node = agent_node or {"node_id": execution_node_id}
                 agent_caps = agent_node.get("capabilities", {}) if agent_node and agent_node.get("enabled") else {}
                 # Browser actions share a session capability and retain their
                 # separate policy gates below. Every other tool must have both
@@ -480,6 +483,14 @@ class LocalRunWorkerService:
                 # File tools remain usable. Do not offer an exec that the
                 # backend must reject; preserve policy/MCP selections as-is.
                 tools = [tool for tool in tools if tool["name"] != "workspace.exec"]
+            if not summary_mode and native_memory is None and policy is None:
+                messages = build_assistant_messages(
+                    messages,
+                    model=provider_profile.get("model") if isinstance(provider_profile, dict) else None,
+                    workspace=workspace,
+                    node=assistant_node,
+                    tools=tools,
+                )
             result = worker.execute(
                 run_id=claim["run_id"], owner_id=claim["owner_id"],
                 epoch=lease["epoch"], messages=messages, tools=tools,

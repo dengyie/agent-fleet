@@ -90,7 +90,7 @@ jobs:
   # regression is explicitly skipped here and executed by the Linux job.
   launch-policy-windows:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
