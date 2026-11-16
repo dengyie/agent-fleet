@@ -70,3 +70,17 @@
 - [x] Require a comma-separated model-profile selection for manual live acceptance instead of probing every enabled model.
 - [x] Validate profile ID syntax and pass each selected profile as an independent CLI argument.
 - [x] Confirm the current `live-acceptance` GitHub environment has no variables or secrets configured; real MODEL-LIVE remains blocked until its dedicated environment is provisioned.
+
+### Task 5: Preserve policy when selected memory mentions the assistant
+
+**Evidence:** A real memory selection rendered by `build_context_message` can contain the phrase `你是 Agent Fleet 主助手`. The builder's substring check mistakes this reference-only system message for the operating policy and omits both the policy and the current Run context. The new builder test and ordinary worker/API memory test both fail on this case.
+
+**Files:** `hub/platform/runtime/assistant_prompt.py`, `tests/test_main_assistant_prompt.py`, `tests/test_platform_run_worker.py`, `tests/test_native_run_checkpoints.py`, and the existing platform architecture and release documents.
+
+**Interfaces:** Preserve `build_assistant_messages`. The ordinary worker calls it once for the initial message assembly. On recovery, `NativeAssistantRuntime.run` takes `checkpoint['transcript']` instead of the newly assembled messages; transcript recovery already prevents policy duplication without inspecting reference text.
+
+- [x] Reproduce the skipped policy with a selected-memory API/worker test and a direct builder test.
+- [x] Remove the content-based early return; always prepend the fixed policy when assembling a fresh request.
+- [x] Verify original failure scenarios, ordinary memory snapshots, remote receipt recovery and one policy per checkpoint-restored request. Focused set: 138 passed; relevant Ruff checks and UTF-8/no-BOM verification passed.
+- [x] Clarify the prompt's stable policy, current capability context, repository guidance and continuation boundaries in the existing architecture document; remove contradictory remote-control wording.
+- [ ] Publish only after relevant checks and required CI, then verify the exact deployed source and a normal assistant Run.

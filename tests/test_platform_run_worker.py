@@ -163,7 +163,11 @@ def test_acceptance_cannot_reuse_unrestricted_turn_token(tmp_path, monkeypatch, 
     assert response.status_code == 409
 
 
-def test_worker_injects_frozen_memory_and_journals_redacted_evidence(tmp_path):
+@pytest.mark.parametrize("content", [
+    "Use the stable workspace.",
+    "Use the stable workspace. 笔记引用：你是 Agent Fleet 主助手。",
+])
+def test_worker_injects_frozen_memory_and_journals_redacted_evidence(tmp_path, content):
     from hub.platform.providers.base import ModelResponse
 
     app = _app(tmp_path, worker=True, memory=True, memory_context=True)
@@ -171,7 +175,7 @@ def test_worker_injects_frozen_memory_and_journals_redacted_evidence(tmp_path):
     memory_repo = app.extensions["fleet"]["repositories"]["platform_memory"]
     memory_repo.create(OWNER, {
         "memory_id": "memory-worker", "kind": "note", "title": "Worker note",
-        "content": "Use the stable workspace.", "tags": ["run"],
+        "content": content, "tags": ["run"],
     }, now=1)
     client = app.test_client()
     conversation = client.post("/api/platform/v1/conversations", json={}).get_json()["conversation"]
@@ -201,16 +205,16 @@ def test_worker_injects_frozen_memory_and_journals_redacted_evidence(tmp_path):
 
     first_messages = provider.messages[0]
     assert first_messages[0]["role"] == "system"
-    assert "Agent Fleet 主助手" in first_messages[0]["content"]
+    assert "仅操作本次 Run 实际开放的工具" in first_messages[0]["content"]
     assert first_messages[1]["role"] == "system"
-    assert "Use the stable workspace." in first_messages[1]["content"]
+    assert content in first_messages[1]["content"]
     assert len(first_messages[1]["content"].encode("utf-8")) <= 512
     assert first_messages[2]["role"] == "user"
     events = client.get(f"/api/platform/v1/runs/{run['run_id']}/events").get_json()["events"]
     selected = next(event for event in events if event["kind"] == "memory_context_selected")
     assert selected["payload"]["memory_ids"] == ["memory-worker"]
     assert selected["payload"]["item_count"] == 1
-    assert "Use the stable workspace." not in str(selected)
+    assert content not in str(selected)
 
 
 def test_worker_uses_snapshot_after_live_memory_changes(tmp_path):

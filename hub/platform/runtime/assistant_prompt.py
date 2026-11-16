@@ -57,11 +57,8 @@ def build_assistant_messages(
     node: Mapping[str, Any] | None,
     tools: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Prepend one fixed policy and allowlisted, non-secret Run facts."""
+    """Assemble fresh messages; checkpoint recovery uses its saved transcript."""
     existing = [dict(message) for message in messages]
-    if any(message.get("role") == "system" and "你是 Agent Fleet 主助手" in str(message.get("content", ""))
-           for message in existing):
-        return existing
 
     workspace = workspace if isinstance(workspace, Mapping) else {}
     node = node if isinstance(node, Mapping) else {}
