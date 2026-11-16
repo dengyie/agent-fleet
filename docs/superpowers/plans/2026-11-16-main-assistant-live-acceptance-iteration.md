@@ -13,7 +13,7 @@
 - Preserve existing worktree changes and develop from the latest `origin/main` in an isolated feature branch.
 - Ordinary assistant Runs retain unbounded step and token defaults; explicit workflow contracts retain their declared budgets.
 - Live acceptance calls only exact model profile IDs supplied by the user or workflow input; never implicitly enumerate enabled models.
-- The live acceptance route remains restricted to `workspace.list`; production tests must not write files, execute commands, inspect secrets, or mutate services.
+- The live acceptance route remains restricted to `workspace.list`. Separate ordinary assistant acceptance uses explicitly designated test conversations and directories; it may create test files or save unchanged defaults, but must not inspect secrets or mutate unrelated services/data.
 - Unknown or timed-out Runs are evidence of an unconfirmed outcome and must not be resubmitted automatically.
 - A successful deployment, `/healthz`, or static manifest alone does not prove main-assistant functionality.
 - Do not claim full live acceptance until all selected primary profiles and the configured fallback have passed the required Run evidence checks.
@@ -77,3 +77,20 @@
 - [ ] For each failure, inspect its Run/events and provider request metadata before changing code; do not duplicate timed-out Runs.
 - [ ] Repeat deployment and exact-profile acceptance after each root-cause fix until all required checks pass.
 - [ ] Record any capability that cannot be exercised in production as blocked/not-run with concrete evidence; do not report it as passed.
+
+### Task 5: Resolve observed environment and management gaps
+
+**Evidence:** On release `8c2df56`, VM coding Run `run_297d33cd255c4cef62d844f9` guessed an unrelated absolute path and initially discovered zero tests before correcting both. Earlier archive acceptance could not find a target outside the bounded conversation list. The worker currently excludes Hub controls whenever a remote execution node is selected.
+
+**Files:** `hub/platform/runtime/assistant_prompt.py`, `hub/platform/assistant_tool_broker.py`, `hub/application/run_worker_service.py`, `tests/test_main_assistant_prompt.py`, `tests/test_assistant_tool_availability.py`, `tests/test_assistant_tool_routing.py`, and the existing platform architecture document.
+
+**Interfaces:** Keep the existing prompt builder signature. `AssistantToolBroker(hub, remote, *, hub_tools)` dispatches `execute` to the existing scoped Hub broker for the explicitly selected management tools and to the existing remote broker otherwise; `observe` observes the original remote command. `LocalRunWorkerService` derives Hub tools only from installed management services and only for ordinary main-assistant Runs. It passes the exact union of Hub controls and Node-capable tools to the provider. Dedicated acceptance, summary and Workflow contracts retain their allowlists.
+
+- [x] Add failing prompt-contract tests for relative paths, test discovery/counts and bounded conversation lookup; implement guidance and verify the existing worker tests.
+- [x] Add a worker regression that reads defaults on Hub, executes a real fixture workspace tool on Node, then renames the owned test conversation on Hub in the same Run; assert Node never receives management commands.
+- [x] Verify absent services remain unadvertised, other-owner targets are rejected and a remote receipt checkpoint resumes without repeating earlier management mutations.
+- [x] Implement the explicit tool router and effective tool union without adding VM lifecycle, remote artifact or MCP claims.
+- [ ] Run prompt, broker, worker, checkpoint, cancellation and dedicated acceptance regressions; inspect full diff and publish through CI.
+- [ ] On the deployed release, run an ordinary mixed management/VM task, independently check the file and conversation changes, and re-run the four exact model profiles and UI progress/recovery checks.
+
+**Verified baseline (before Task 5 deployment):** PR69 main `8c2df56b7dbc60ab5be0df1779eb754ec74f4a63`, CI/deploy `43811885952`, deployment receipt `status=deployed/phase=succeeded`, served version and selected source hashes match; production SQLite quick/FK checks passed. All four approved profiles passed SSE/read-only tool/final reply/recovery checks. Ordinary management continuation, archive/restore, unchanged-default save, VM file generation with independent six-test execution, and local artifact byte download passed as separate scenarios. Chrome verified immediate user feedback, unfinished live GLM text, folded 14-request metadata, readable exec results, desktop/mobile reload, no overflow/page errors and logout revocation. These establish the named baseline capabilities only; mixed Hub/VM routing and new prompt behavior remain unverified online until the Task 5 release.

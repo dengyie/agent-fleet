@@ -18,7 +18,7 @@
 
 ## 最新更新
 
-2026-11-16：主助手进一步区分平台使用与项目开发，能够沿当前目标恢复未完成工作，并以部署和功能验收证据判断是否完成；线上只读任务已验证流式反馈、工具调用和对话恢复。完整历史见 [Release Notes](docs/releases/release-notes.md)。
+2026-11-16：主助手可在同一次普通任务中组合 Hub 平台管理与 VM 工作区操作，保留原有权限和远程回执恢复；项目操作增加目录、测试数量和有限列表的证据要求，发布验收直接观察 UI 使用的 SSE 流。完整历史见 [Release Notes](docs/releases/release-notes.md)。
 
 ## Why Agent Fleet?
 
