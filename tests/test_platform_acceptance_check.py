@@ -184,9 +184,14 @@ def test_live_acceptance_requires_progress_and_explained_tool_receipt(monkeypatc
                 return {'run': {'run_id': 'run-1', 'state': 'queued'}}
             if path == '/api/platform/v1/runs/run-1':
                 self.run_reads += 1
-                state = 'running' if self.run_reads == 1 else 'succeeded'
+                state = 'running' if self.run_reads <= 2 else 'succeeded'
                 return {'state': state, 'result_text': '工作区检查完成'}
             if path.startswith('/api/platform/v1/runs/run-1/events'):
+                if self.run_reads > 2:
+                    return {'events': [
+                        {'sequence': 6, 'kind': 'run_finished', 'payload': {
+                            'run_id': 'run-1', 'state': 'succeeded'}},
+                    ]}
                 return {'events': [
                     {'sequence': 1, 'kind': 'provider_request_started', 'payload': {}},
                     {'sequence': 2, 'kind': 'assistant_activity', 'payload': {'phase': 'thinking'}},
@@ -195,8 +200,6 @@ def test_live_acceptance_requires_progress_and_explained_tool_receipt(monkeypatc
                         'tool': 'workspace.list', 'title': '列出目录 · .'}},
                     {'sequence': 5, 'kind': 'tool_result', 'payload': {
                         'tool': 'workspace.list', 'state': 'succeeded'}},
-                    {'sequence': 6, 'kind': 'run_finished', 'payload': {
-                        'run_id': 'run-1', 'state': 'succeeded'}},
                 ]}
             if path == '/api/platform/v1/conversations/conversation-1':
                 return {'conversation': {'runs': [{
@@ -249,20 +252,27 @@ def test_live_acceptance_fails_when_text_only_arrives_after_terminal(monkeypatch
     assert row['error'] == 'live_progress_missing'
 
 
-def test_live_acceptance_does_not_count_events_fetched_after_terminal_state(monkeypatch):
+@pytest.mark.parametrize('terminal_kind', ['run_finished', 'run_failed', 'run_unknown'])
+@pytest.mark.parametrize('terminal_status_read', [2, 3])
+def test_live_acceptance_does_not_count_terminal_event_page_as_live(monkeypatch, terminal_kind, terminal_status_read):
     import tools.platform.acceptance_check as acceptance
     from tools.platform.acceptance_check import check_model
 
     monkeypatch.setattr(acceptance.time, 'sleep', lambda _: None)
 
     class Client:
+        def __init__(self):
+            self.run_reads = 0
+
         def request(self, path, body=None, *, expected=200, deadline=None):
             if path == '/api/platform/v1/conversations':
                 return {'conversation': {'conversation_id': 'conversation-1'}}
             if path.endswith('/acceptance-turns'):
                 return {'run': {'run_id': 'run-1', 'state': 'queued'}}
             if path == '/api/platform/v1/runs/run-1':
-                return {'state': 'succeeded', 'result_text': '完成'}
+                self.run_reads += 1
+                return {'state': 'running' if self.run_reads < terminal_status_read else 'succeeded',
+                        'result_text': '完成'}
             if path.startswith('/api/platform/v1/runs/run-1/events'):
                 return {'events': [
                     {'sequence': 1, 'kind': 'assistant_text_delta', 'payload': {'text': '完成'}},
@@ -270,7 +280,7 @@ def test_live_acceptance_does_not_count_events_fetched_after_terminal_state(monk
                         'tool': 'workspace.list', 'title': '列出目录 · .'}},
                     {'sequence': 3, 'kind': 'tool_result', 'payload': {
                         'tool': 'workspace.list', 'state': 'succeeded'}},
-                    {'sequence': 4, 'kind': 'run_finished', 'payload': {
+                    {'sequence': 4, 'kind': terminal_kind, 'payload': {
                         'run_id': 'run-1', 'state': 'succeeded'}},
                 ]}
             if path == '/api/platform/v1/conversations/conversation-1':

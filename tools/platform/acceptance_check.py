@@ -124,6 +124,17 @@ def check_model(client, model, workspace, timeout, *, require_streaming=False):
             if not isinstance(events, list):
                 raise AcceptanceFailure('invalid_event_response')
             terminal_state_seen = state in ('succeeded', 'failed', 'cancelled', 'unknown')
+            # Bracket event delivery with a fresh status read. A stale running
+            # snapshot or a terminal event on a later page cannot prove live
+            # delivery. Be conservative when completion races the observation.
+            if not terminal_state_seen:
+                run = request('/api/platform/v1/runs/' + quote(run_id, safe=''))
+                state = run['state']; row['run_state'] = state
+                terminal_state_seen = state in ('succeeded', 'failed', 'cancelled', 'unknown')
+            terminal_page = any(
+                isinstance(event, dict) and event.get('kind') in {
+                    'run_finished', 'run_failed', 'run_unknown'} for event in events
+            )
             for event in events:
                 if not isinstance(event, dict):
                     continue
@@ -138,7 +149,7 @@ def check_model(client, model, workspace, timeout, *, require_streaming=False):
                 if kind in {'run_finished', 'run_failed', 'run_unknown'}:
                     terminal_event_seen = True
                     continue
-                if not terminal_state_seen and not terminal_event_seen:
+                if not terminal_state_seen and not terminal_event_seen and not terminal_page:
                     if kind == 'assistant_text_delta' and isinstance(payload.get('text'), str) and payload['text']:
                         streamed_progress_before_terminal = True
                     if kind == 'assistant_activity' and payload.get('phase') in {

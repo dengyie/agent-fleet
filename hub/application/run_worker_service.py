@@ -483,7 +483,7 @@ class LocalRunWorkerService:
                 # File tools remain usable. Do not offer an exec that the
                 # backend must reject; preserve policy/MCP selections as-is.
                 tools = [tool for tool in tools if tool["name"] != "workspace.exec"]
-            if not summary_mode and native_memory is None and policy is None:
+            if not summary_mode and native_memory is None and policy in (None, ACCEPTANCE_TOOL_POLICY):
                 messages = build_assistant_messages(
                     messages,
                     model=provider_profile.get("model") if isinstance(provider_profile, dict) else None,
