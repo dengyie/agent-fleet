@@ -218,6 +218,19 @@ def test_adopt_is_idempotent(service, candidate):
     assert len(service.supervisor.commands) == count
 
 
+def test_revoked_process_can_be_readopted_with_a_fresh_session_id(service, candidate):
+    previous = service.adopt("m1", candidate.pid, candidate.started_at, "op-1")
+    service.revoke(previous.session_id, "op-1")
+    assert service.adoption_repo.get(previous.session_id).status == "revoked"
+
+    current = service.adopt("m1", candidate.pid, candidate.started_at, "op-2")
+
+    assert current.session_id != previous.session_id
+    assert current.status == "pending"
+    assert service.adoption_repo.get(previous.session_id).status == "revoked"
+    assert service.supervisor.commands[-1]["action"] == "adopt"
+
+
 # ---------------------------------------------------------------------------
 # adopt — validation and persistence details
 # ---------------------------------------------------------------------------

@@ -179,6 +179,15 @@ def test_prompt_treats_cross_vm_agent_management_as_a_real_scoped_capability():
     assert '必须基于用户明确要求' in prompt
 
 
+def test_prompt_recovers_revoked_session_access_with_fresh_adoption():
+    prompt = build_assistant_messages([], model='model', workspace={}, node=None, tools=[])[0]['content']
+    assert 'revoked 是旧纳管座席的终态，不代表候选进程永久不可纳管' in prompt
+    assert '重新调用 adoption.candidates' in prompt
+    assert '用当前候选的 machine_id、pid、started_at 调用 adoption.adopt' in prompt
+    assert '创建新的 session_id' in prompt
+    assert '确认新会话的 adoption_status=adopted' in prompt
+
+
 def test_main_assistant_owns_project_management_and_discovers_actual_capabilities():
     prompt = build_assistant_messages([], model='model', workspace={}, node=None, tools=[])[0]['content']
     assert '全面负责本项目的核心管理 Agent' in prompt
