@@ -151,6 +151,7 @@ class ServiceRepository:
         conn = None
         try:
             conn = self._connect()
+            conn.execute('BEGIN IMMEDIATE')
             node = conn.execute(
                 "SELECT enabled FROM nodes WHERE owner_id=? AND node_id=?",
                 (owner_id, normalized["node_id"]),
@@ -171,6 +172,7 @@ class ServiceRepository:
                 (owner_id, normalized["service_id"], normalized["node_id"], normalized["name"], normalized["adapter"], normalized["target_alias"], self._json(normalized["checks"]), normalized["control_authority"], self._json(normalized["allowed_actions"]), version, int(normalized["enabled"]), now),
             )
             row = conn.execute("SELECT * FROM service_definitions WHERE owner_id=? AND service_id=?", (owner_id, normalized["service_id"])).fetchone()
+            conn.commit()
             return self._service_row(row)
         except (ServiceRepositoryError, ServiceValidationError):
             raise

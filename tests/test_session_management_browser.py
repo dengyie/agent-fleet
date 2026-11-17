@@ -17,7 +17,7 @@ def test_session_management_browser(tmp_path):
     if not os.environ.get("FLEET_PLAYWRIGHT_MODULE"):
         pytest.skip("Set FLEET_PLAYWRIGHT_MODULE for Chromium acceptance")
     app = create_app(FleetConfig.from_root(tmp_path, frontend_dir=ROOT / "frontend",
-        dev_operator="browser@example.test", session_repositories_enabled=True,
+        dev_operator="browser@example.test", ingest_token='browser-ingest', session_repositories_enabled=True,
         session_encryption_raw=b"s" * 32, supervisor_enabled=True,
         supervisor_signing_raw=b"a" * 32, supervisor_credentials={"m1": "browser-receipt"},
         append_user_turn_enabled=True))
@@ -37,6 +37,14 @@ def test_session_management_browser(tmp_path):
                     {"id": "a", "label": "选项甲"}, {"id": "b", "label": "选项乙"}],
                 "allow_custom": kind == "text"}))
         sessions.ingest_events(rows)
+    # Independent streams deliberately reuse sequence 1 across a page boundary.
+    for index in range(102):
+        row = {'schema_version': 1, 'event_id': f'cursor-{index}', 'session_id': 'cursor-session',
+               'machine_id': 'm1', 'process_group_id': 'g1', 'stream_id': f'cursor-stream-{index}',
+               'sequence': 1, 'kind': 'assistant_message', 'capture_quality': 'structured',
+               'source': 'hooks', 'emitted_at': '2026-11-17T00:00:00Z',
+               'payload': {'text': f'Cursor message {index}', 'is_complete': True}}
+        assert sessions.ingest_events([row])['rejected'] == []
     server = make_server("127.0.0.1", 0, app, threaded=True)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()

@@ -20,7 +20,7 @@ def invoke(fn):
     try:
         return fn()
     except PluginError as exc:
-        status = 404 if exc.code in {'plugin_not_found', 'node_not_found', 'operation_not_found', 'login_not_found'} else (
+        status = 403 if exc.code == 'node_credential_revoked' else 404 if exc.code in {'plugin_not_found', 'node_not_found', 'operation_not_found', 'login_not_found'} else (
             400 if exc.code.startswith('invalid_') or exc.code in {'unknown_plugin_action', 'duplicate_plugin'} else 409)
         details = {
             'plugin_disabled': '请先启用插件及目标节点', 'not_installed': '节点尚未接入此插件',

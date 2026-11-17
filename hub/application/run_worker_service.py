@@ -220,7 +220,7 @@ class LocalRunWorkerService:
             if checkpoint and checkpoint['phase'] == 'receipt' and (
                     (checkpoint['receipt']['state'] != 'succeeded' and not can_continue_after_tool_failure(
                         checkpoint['response'].get('tool'), checkpoint['receipt']['state'],
-                        checkpoint['receipt'].get('error_code')))
+                        checkpoint['receipt'].get('error_code'), checkpoint['response'].get('arguments')))
                     or self.repository.run_cancel_requested(claim['owner_id'], claim['run_id'], lease_id=lease_id)):
                 # A terminal tool outcome needs no new provider, sandbox or
                 # workspace. Runtime owns outcome/cancellation precedence.

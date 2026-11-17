@@ -115,14 +115,14 @@ if (fixture === 'session_parsers') {
   // 5) events surface keeps payload text but drops unknown and secret keys
   assertModel(() => contracts.parseSessionEvents({ events: [
     { schema_version: 1, event_id: 'e1', stream_id: 'st', machine_id: 'm',
-      session_id: 's', sequence: 1, kind: 'user_message',
+      session_id: 's', sequence: 1, cursor: '10', kind: 'user_message',
       capture_quality: 'structured', emitted_at: '2026-08-26T00:00:00Z',
       payload: { text: 'hello', is_complete: true, raw_log: 'x' } },
     { schema_version: 1, event_id: 'e2', stream_id: 'st', machine_id: 'm',
-      session_id: 's', sequence: 2, kind: 'capture_gap',
+      session_id: 's', sequence: 2, cursor: '11', kind: 'capture_gap',
       capture_quality: 'structured', emitted_at: '2026-08-26T00:00:01Z',
       payload: { start_sequence: 2, end_sequence: 4, reason: 'degraded',
-                 quality: 'best_effort' } } ] }),
+                 quality: 'best_effort' } } ], after_cursor: '0', next_cursor: '11', has_more: false }),
     (m) => m.events.length === 2 && m.events[0].kind === 'user_message' &&
       m.events[0].payload.text === 'hello' &&
       !Object.prototype.hasOwnProperty.call(m.events[0].payload, 'raw_log') &&
@@ -131,7 +131,7 @@ if (fixture === 'session_parsers') {
     'session_parsers.events_bounded');
   // 6) events surface rejects a top-level nonce / token
   assertThrows(() => contracts.parseSessionEvents({ events: [
-    { event_id: 'e3', session_id: 's', sequence: 1, kind: 'user_message',
+    { event_id: 'e3', session_id: 's', sequence: 1, cursor: '10', kind: 'user_message',
       nonce: 'n-2' } ] }), 'session_parsers.events_reject_nonce');
   // 7) policy signals keep only the bounded index
   assertModel(() => contracts.parseSessionSignals({ signals: [
@@ -225,7 +225,8 @@ if (fixture === 'session_parsers') {
     session_id: 's-oo', sequence: 1, event_seq: 2, ts: 11 } });
   const oo = storeOutOfOrder.getState();
   if (oo.sessionSummaries['s-oo'] &&
-      oo.sessionSummaries['s-oo'].sequence === 2) {
+      oo.sessionSummaries['s-oo'].sequence === 2 &&
+      oo.sessionSummaries['s-oo'].event_seq === 2) {
     ok('store.summary_sequence_monotonic');
   } else {
     fail('store.summary_sequence_monotonic',

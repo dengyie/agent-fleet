@@ -121,10 +121,14 @@ def tool_activity(tool, arguments, receipt=None):
         elif tool == 'session.list':
             text = '找到 ' + str(len(result.get('sessions', []))) + ' 个远端 Agent 会话'
         elif tool in {'platform.admin_inspect', 'platform.admin_mutate', 'platform.get_system_info'}:
-            text = '管理服务已返回结果'
-            if result.get('restart_required'):
-                text += '；配置已保存，需要重启后生效'
-            if result.get('removed'):
+            text = '管理操作失败' if receipt.state != 'succeeded' else (
+                '已读取管理信息' if tool != 'platform.admin_mutate' else '管理服务已返回结果')
+            if (receipt.state == 'succeeded' and tool == 'platform.admin_mutate'
+                    and arguments.get('operation') in {'settings.save_runtime', 'settings.save_hosts'}):
+                text = '配置已保存'
+                if result.get('restart_required'):
+                    text += '，需要重启后生效'
+            if receipt.state == 'succeeded' and result.get('removed'):
                 text = '节点登记已移除（云 VM 未销毁）'
         elif tool == 'fleet.list_machines':
             text = '已读取 ' + str(len(result.get('machines', []))) + ' 台机器的状态'

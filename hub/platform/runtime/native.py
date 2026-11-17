@@ -17,6 +17,7 @@ from ..providers.base import ModelResponse
 
 from hub.infrastructure.usage_repository import UsageLimitExceeded, normalize_usage
 from hub.domain.tool_activity import tool_activity
+from hub.domain.assistant_admin import CORRECTABLE_MUTATION_ERRORS
 
 
 class ProviderBoundaryUnknown(RuntimeError):
@@ -30,16 +31,23 @@ class _RunCancelled(Exception):
     """Stop consuming narration or dispatching retries after user cancellation."""
 
 
-def can_continue_after_tool_failure(tool: str, state: str, error_code: str | None) -> bool:
-    """Known read failures and confirmed command exits can return to the model.
+def can_continue_after_tool_failure(tool: str, state: str, error_code: str | None, arguments=None) -> bool:
+    """Known read failures, pre-effect rejections and command exits reach the model.
 
     Continue with the committed receipt, never by automatically replaying it.
-    Policy, lease, write, timeout and uncertain outcomes remain terminal.
+    Policy, lease, storage, timeout and uncertain outcomes remain terminal.
     """
+    arguments = arguments if isinstance(arguments, dict) else {}
     return state == 'failed' and (
         (tool in {'workspace.list', 'workspace.read'} and error_code == 'not_found')
         or (tool == 'workspace.read' and error_code == 'read_failed')
-        or (tool == 'workspace.exec' and error_code == 'process_failed'))
+        or (tool == 'workspace.exec' and error_code == 'process_failed')
+        or (tool in {'platform.admin_inspect', 'platform.admin_mutate'}
+            and error_code in {'invalid_arguments', 'operation_unavailable'})
+        or (tool == 'platform.admin_mutate' and isinstance(arguments.get('operation'), str)
+            and error_code in CORRECTABLE_MUTATION_ERRORS.get(arguments['operation'], ()))
+        or (tool in {'session.control', 'session.send_message'}
+            and error_code in {'session_not_managed', 'session_action_unavailable', 'invalid_arguments'}))
 
 
 class NativeAssistantRuntime:
@@ -195,7 +203,7 @@ class NativeAssistantRuntime:
             if should_cancel is not None and should_cancel():
                 return finish("cancelled", "运行已取消。", step, input_tokens, output_tokens, measured_total_tokens, provider_requests)
             if receipt.state != "succeeded" and not can_continue_after_tool_failure(
-                    response.tool, receipt.state, receipt.error_code):
+                    response.tool, receipt.state, receipt.error_code, response.arguments):
                 code = str(receipt.error_code or "tool_failed")[:128]
                 text = f"工具 {response.tool} 执行失败（{code}）。"
                 if code == "sandbox_unavailable":

@@ -137,7 +137,7 @@ def test_replayed_id_cannot_replace_persisted_state(service):
 def test_public_large_sequence_is_decimal_string(service):
     seq = (1 << 53) + 7
     service.ingest_events([event(seq, "assistant_message", {"text": "Large sequence", "is_complete": True})])
-    result = service.session_events("s1", after_sequence=seq - 1)
+    result = service.session_events("s1", at_sequence=seq)
     assert result["events"][0]["sequence"] == str(seq)
 
 

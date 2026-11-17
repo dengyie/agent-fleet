@@ -81,8 +81,8 @@ class TranscriptRepositoryBasicTests(unittest.TestCase):
         self.repo.init()
 
     def test_schema_version_recorded(self):
-        self.assertEqual(SCHEMA_VERSION, 1)
-        self.assertEqual(self.repo.schema_version(), 1)
+        self.assertEqual(SCHEMA_VERSION, 2)
+        self.assertEqual(self.repo.schema_version(), 2)
 
     def test_ingest_accepts_valid_event(self):
         result = self.repo.ingest(_event(seq=1))

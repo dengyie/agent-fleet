@@ -61,7 +61,7 @@ from hub.infrastructure.sqlite import connect as sqlite_connect
 from fleet_core.session.crypto import AeadBox
 from fleet_core.session.redact import Redactor, redact_event_secrets
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DEFAULT_MAX_RAW_BYTES = 256 * 1024 * 1024  # 256 MiB default Hub raw budget
 DEFAULT_RAW_RETENTION_DAYS = 14
@@ -236,12 +236,36 @@ class TranscriptRepository:
                     "CREATE UNIQUE INDEX IF NOT EXISTS uq_redacted_stream_sequence "
                     "ON redacted_events(machine_id, session_id, COALESCE(stream_id,''), sequence)")
             self._init_raw_bytes_counter(conn)
-            conn.execute(
-                "INSERT OR REPLACE INTO meta (key, value)"
-                " VALUES ('schema_version', ?)",
-                (str(SCHEMA_VERSION),))
+            self._init_event_order(conn)
         finally:
             conn.close()
+
+    @staticmethod
+    def _init_event_order(conn) -> None:
+        """Assign durable ingestion positions, including pre-migration events.
+
+        Keep the payload schema intact. The insert trigger also covers writers
+        from the previous release during rollback; AUTOINCREMENT never reuses a
+        consumed cursor after retention or VACUUM.
+        """
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='redacted_event_order'").fetchone()
+            conn.execute('CREATE TABLE IF NOT EXISTS redacted_event_order ('
+                         'cursor INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, event_id TEXT NOT NULL, '
+                         'UNIQUE(session_id,event_id), FOREIGN KEY(session_id,event_id) '
+                         'REFERENCES redacted_events(session_id,event_id) ON DELETE CASCADE)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_redacted_ingestion ON redacted_event_order(session_id,cursor)')
+            if not exists:
+                conn.execute('INSERT INTO redacted_event_order(session_id,event_id) '
+                             'SELECT session_id,event_id FROM redacted_events ORDER BY rowid')
+            conn.execute('CREATE TRIGGER IF NOT EXISTS trg_redacted_ingestion AFTER INSERT ON redacted_events BEGIN '
+                         'INSERT INTO redacted_event_order(session_id,event_id) VALUES(NEW.session_id,NEW.event_id); END')
+            conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
 
     @staticmethod
     def _init_raw_bytes_counter(conn) -> None:
@@ -600,20 +624,37 @@ class TranscriptRepository:
         finally:
             conn.close()
 
-    def read_redacted(self, session_id: str, *, limit: int = 100, after_sequence: int = 0) -> list[dict]:
+    def event_cursor_before_sequence(self, session_id: str, sequence: int) -> int:
+        """Resolve a source-sequence deep link once, then continue by ingestion."""
+        from contextlib import closing
+        self._validate_session_id(session_id)
+        with closing(self._connect()) as conn:
+            row = conn.execute('SELECT MIN(o.cursor) FROM redacted_event_order o '
+                               'JOIN redacted_events e USING(session_id,event_id) '
+                               'WHERE o.session_id=? AND e.sequence=?', (session_id, sequence)).fetchone()
+            if row[0] is None:
+                row = conn.execute('SELECT MIN(o.cursor) FROM redacted_event_order o '
+                                   'JOIN redacted_events e USING(session_id,event_id) '
+                                   'WHERE o.session_id=? AND e.sequence>?', (session_id, sequence)).fetchone()
+            if row[0] is not None:
+                return int(row[0]) - 1
+            return int(conn.execute('SELECT COALESCE(MAX(cursor),0) FROM redacted_event_order WHERE session_id=?',
+                                    (session_id,)).fetchone()[0])
+
+    def read_redacted(self, session_id: str, *, limit: int = 100, after_cursor: int = 0) -> list[dict]:
         self._validate_session_id(session_id)
         try:
-            bounded = max(1, min(int(limit), 1000))
+            bounded = max(1, min(int(limit), 1001))  # Public 1000-row page plus one lookahead.
         except (TypeError, ValueError):
             bounded = 100
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT event_id, session_id, stream_id, machine_id, sequence,"
+                "SELECT o.cursor,e.event_id, e.session_id, stream_id, machine_id, sequence,"
                 " kind, capture_quality, emitted_at, redacted_json"
-                " FROM redacted_events WHERE session_id=? AND sequence>?"
-                " ORDER BY sequence ASC LIMIT ?",
-                (session_id, max(0, int(after_sequence)), bounded)).fetchall()
+                " FROM redacted_event_order o JOIN redacted_events e USING(session_id,event_id)"
+                " WHERE o.session_id=? AND o.cursor>? ORDER BY o.cursor ASC LIMIT ?",
+                (session_id, max(0, int(after_cursor)), bounded)).fetchall()
         finally:
             conn.close()
         out: list[dict[str, Any]] = []
@@ -625,6 +666,7 @@ class TranscriptRepository:
                 # Never poison: a corrupt payload row still yields a row.
                 payload = None
             out.append({
+                "cursor": row["cursor"],
                 "event_id": row["event_id"],
                 "session_id": row["session_id"],
                 "stream_id": row["stream_id"],

@@ -612,16 +612,23 @@ class SessionService:
         return {"session_id": session_id, "command_id": command["command_id"], "status": "pending"}
 
     def session_events(self, session_id: str,
-                       limit: int = DEFAULT_QUERY_LIMIT, after_sequence: int = 0) -> dict:
-        """Return the bounded redacted event stream for one session."""
+                       limit: int = DEFAULT_QUERY_LIMIT, after_cursor: int = 0,
+                       at_sequence: int | None = None) -> dict:
+        """Page by stable Hub ingestion order, independent of source sequences."""
+        limit = _bounded_limit(limit)
         try:
+            if at_sequence is not None:
+                after_cursor = self.transcript_repo.event_cursor_before_sequence(session_id, at_sequence)
             rows = self.transcript_repo.read_redacted(
-                session_id, limit=_bounded_limit(limit), after_sequence=after_sequence)
+                session_id, limit=limit + 1, after_cursor=after_cursor)
         except TranscriptError as exc:
             raise SessionServiceError(exc.code) from None
         except Exception:
             raise SessionServiceError("session_unavailable") from None
-        return {"events": [self._public_event_row(r) for r in rows]}
+        events = [{**self._public_event_row(r), 'cursor': str(r['cursor'])} for r in rows[:limit]]
+        return {'events': events, 'after_cursor': str(after_cursor),
+                'next_cursor': events[-1]['cursor'] if events else str(after_cursor),
+                'has_more': len(rows) > limit}
 
     def policy_signals(self, session_id: str) -> dict:
         """Return the bounded policy-signal index for one session."""

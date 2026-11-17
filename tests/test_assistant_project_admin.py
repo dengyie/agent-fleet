@@ -310,3 +310,59 @@ def test_workspace_save_cannot_bind_node_removed_after_settings_validation(app, 
     assert rejected.value.code == 'reference_forbidden'
     assert repo.get_node(OWNER, 'retiring') is None
     assert repo.get_workspace(OWNER, 'racing-workspace') is None
+
+
+def test_worker_returns_conflict_to_model_for_reread_and_correction(app):
+    import json
+    from hub.platform.providers.base import ModelResponse
+    from tests.test_platform_run_worker import _queued
+    repo = app.extensions['fleet']['platform_repository']
+    repo.upsert_node(OWNER, {'node_id': 'existing', 'label': 'original'})
+    _queued(app)
+    calls = []
+
+    class Provider:
+        def complete(self, messages, tools, **kwargs):
+            calls.append(json.loads(json.dumps(messages)))
+            step = len(calls)
+            if step in {1, 3}:
+                if step == 3:
+                    assert messages[-1]['result'] == {'state': 'failed', 'error_code': 'revision_conflict'}
+                    assert repo.get_node(OWNER, 'existing')['label'] == 'parallel change'
+                return ModelResponse(kind='tool_call', tool='platform.admin_inspect', arguments={
+                    'operation': 'settings.catalog', 'payload': {'kind': 'nodes'}})
+            if step in {2, 4}:
+                old = messages[-1]['result']['items'][0]
+                if step == 2:
+                    repo.upsert_node(OWNER, {'node_id': 'existing', 'label': 'parallel change'})
+                return ModelResponse(kind='tool_call', tool='platform.admin_mutate', arguments={
+                    'operation': 'settings.save', 'payload': {'kind': 'nodes', 'identifier': 'existing',
+                    'expected_digest': old['digest'], 'value': {'label': 'desired'}}})
+            return ModelResponse(kind='final', text='已重新读取并修改。')
+
+    worker = app.extensions['fleet']['services']['platform_worker']
+    worker.provider_factory = lambda _: Provider()
+    assert worker.run_once(OWNER)['state'] == 'succeeded'
+    assert len(calls) == 5
+    assert repo.get_node(OWNER, 'existing')['label'] == 'desired'
+
+
+@pytest.mark.parametrize('operation', ['settings.runtime', 'settings.hosts'])
+def test_settings_inspection_activity_never_claims_a_save(app, operation):
+    from hub.domain.tool_activity import tool_activity
+    from fleet_core.backends.base import ToolReceipt
+    result = invoke(app, 'platform.admin_inspect', operation=operation)
+    activity = tool_activity('platform.admin_inspect', {'operation': operation},
+        ToolReceipt('step', 'succeeded', result))
+    assert '已保存' not in activity['output']
+    assert '已读取' in activity['output']
+
+
+@pytest.mark.parametrize('operation', ['settings.save_runtime', 'settings.save_hosts'])
+@pytest.mark.parametrize('state', ['succeeded', 'failed'])
+def test_settings_save_activity_depends_on_successful_mutation(operation, state):
+    from hub.domain.tool_activity import tool_activity
+    from fleet_core.backends.base import ToolReceipt
+    activity = tool_activity('platform.admin_mutate', {'operation': operation},
+        ToolReceipt('step', state, {'restart_required': True}, error_code='revision_conflict' if state == 'failed' else None))
+    assert ('已保存' in activity.get('output', '')) == (state == 'succeeded')

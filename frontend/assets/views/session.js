@@ -239,8 +239,12 @@ function renderEventList(host, events) {
     return;
   }
   var list = h('ul', 'session-timeline');
+  var sequences = new Set();
   for (var i = 0; i < shown.length; i += 1) {
-    list.appendChild(renderEventRow(shown[i]));
+    var row = renderEventRow(shown[i]);
+    if (sequences.has(String(shown[i].sequence))) row.id += '-cursor-' + shown[i].cursor;
+    sequences.add(String(shown[i].sequence));
+    list.appendChild(row);
   }
   host.appendChild(list);
   if (all.length > MAX_EVENT_RENDER) {
@@ -847,9 +851,19 @@ export function mountSession(root, sessionId, store, client, routeSequence) {
     receiptTimer: null,
     localProfiles: [],
     followUpText: '',
-    pageStarts: [targetSequence ? String(BigInt(targetSequence) - 1n) : 0],
+    pageStarts: ['0'],
+    eventAnchor: targetSequence || undefined,
+    nextCursor: '0',
     hasNextPage: false,
   };
+
+  function applyEventPage(page) {
+    viewState.events = page.events;
+    viewState.hasNextPage = page.has_more;
+    viewState.nextCursor = page.next_cursor;
+    viewState.pageStarts[viewState.pageStarts.length - 1] = page.after_cursor;
+    viewState.eventAnchor = undefined;
+  }
 
   var lastSummaryKey = '';
   var summaryRefreshInFlight = false;
@@ -883,13 +897,12 @@ export function mountSession(root, sessionId, store, client, routeSequence) {
     lastSummaryKey = key;
     summaryRefreshInFlight = true;
     var generation = pageGeneration;
-    var afterSequence = viewState.pageStarts[viewState.pageStarts.length - 1];
+    var afterCursor = viewState.pageStarts[viewState.pageStarts.length - 1];
     var jobs = [];
     if (typeof clientMethods.getSessionEvents === 'function') {
-      jobs.push(clientMethods.getSessionEvents(sessionId, 101, afterSequence).then(function (events) {
+      jobs.push(clientMethods.getSessionEvents(sessionId, 100, afterCursor, viewState.eventAnchor).then(function (events) {
         if (!viewState.disposed && generation === pageGeneration && events && Array.isArray(events.events)) {
-          viewState.hasNextPage = events.events.length > 100;
-          viewState.events = events.events.slice(0, 100);
+          applyEventPage(events);
         }
       }));
     }
@@ -1018,7 +1031,7 @@ export function mountSession(root, sessionId, store, client, routeSequence) {
     var next = h('button', null, '下一页');
     next.disabled = !viewState.hasNextPage;
     next.addEventListener('click', function () {
-      viewState.pageStarts.push(viewState.events[viewState.events.length - 1].sequence);
+      viewState.pageStarts.push(viewState.nextCursor);
       pageGeneration += 1;
       viewState.loading = true; render(); loadSync();
     });
@@ -1057,7 +1070,7 @@ export function mountSession(root, sessionId, store, client, routeSequence) {
     var generation = pageGeneration;
     var jobs = [
       clientMethods.getSession(sessionId),
-      clientMethods.getSessionEvents(sessionId, 101, viewState.pageStarts[viewState.pageStarts.length - 1]),
+      clientMethods.getSessionEvents(sessionId, 100, viewState.pageStarts[viewState.pageStarts.length - 1], viewState.eventAnchor),
       clientMethods.getSessionSignals(sessionId),
     ];
     if (typeof clientMethods.getStatus === 'function' &&
@@ -1080,9 +1093,7 @@ export function mountSession(root, sessionId, store, client, routeSequence) {
         if (detail && detail.session) {
           viewState.session = detail.session;
         }
-        viewState.hasNextPage = Boolean(events && events.events && events.events.length > 100);
-        viewState.events = (events && Array.isArray(events.events)) ?
-          events.events.slice(0, 100) : [];
+        applyEventPage(events);
         viewState.signals = (signals && Array.isArray(signals.signals)) ?
           signals.signals : [];
         viewState.loading = false;
@@ -1129,7 +1140,8 @@ export function mountSession(root, sessionId, store, client, routeSequence) {
     jumpPending = Boolean(nextSequence);
     var currentMatch = root.querySelector('.session-event-match');
     if (currentMatch) currentMatch.classList.remove('session-event-match');
-    viewState.pageStarts = [nextSequence ? String(BigInt(nextSequence) - 1n) : 0];
+    viewState.pageStarts = ['0'];
+    viewState.eventAnchor = nextSequence || undefined;
     pageGeneration += 1;
     viewState.loading = true;
     viewState.error = null;

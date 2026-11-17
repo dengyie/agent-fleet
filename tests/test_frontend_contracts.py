@@ -247,63 +247,63 @@ if (fixture === 'task_reject') {
       unmanaged.session.state_confidence === 'low') ok('session_state.unmanaged_degrades');
   else fail('session_state.unmanaged_degrades', JSON.stringify(unmanaged));
   const stateEvent = contracts.parseSessionEvents({ events: [{
-    event_id: 'evt_1', session_id: 'sess_1', sequence: 1,
+    event_id: 'evt_1', session_id: 'sess_1', sequence: 1, cursor: '1',
     kind: 'agent_state_changed', capture_quality: 'structured',
     payload: { state: 'waiting_for_user', source: 'hook', confidence: 'medium',
       reason: 'prompt_required' }
-  }]});
+  }], after_cursor: '0', next_cursor: '8', has_more: false });
   if (stateEvent.events[0].payload.state === 'waiting_for_user') ok('session_state.event');
   else fail('session_state.event', JSON.stringify(stateEvent));
   const request = contracts.parseSessionEvents({ events: [{
-    event_id: 'evt_2', session_id: 'sess_1', sequence: 2,
+    event_id: 'evt_2', session_id: 'sess_1', sequence: 2, cursor: '2',
     kind: 'interaction_request', capture_quality: 'structured',
     payload: { request_id: 'req_1', question_type: 'single', prompt: 'Pick',
       options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
       allow_custom: true }
-  }]});
+  }], after_cursor: '0', next_cursor: '8', has_more: false });
   if (request.events[0].payload.options.length === 2 &&
       request.events[0].payload.allow_custom === true) ok('interaction_request.clean');
   else fail('interaction_request.clean', JSON.stringify(request));
   const response = contracts.parseSessionEvents({ events: [{
-    event_id: 'evt_3', session_id: 'sess_1', sequence: 3,
+    event_id: 'evt_3', session_id: 'sess_1', sequence: 3, cursor: '3',
     kind: 'interaction_response', capture_quality: 'structured',
     payload: { request_id: 'req_1', selected: ['a', 'b'], text: 'A and B' }
-  }]});
+  }], after_cursor: '0', next_cursor: '8', has_more: false });
   if (response.events[0].payload.selected.length === 2) ok('interaction_response.clean');
   else fail('interaction_response.clean', JSON.stringify(response));
   assertThrows(() => contracts.parseSessionEvents({ events: [{
-    event_id: 'evt_4', session_id: 'sess_1', sequence: 4,
+    event_id: 'evt_4', session_id: 'sess_1', sequence: 4, cursor: '4',
     kind: 'agent_state_changed', payload: {
       state: 'waiting_for_secret', source: 'hook', confidence: 'high'
     }
-  }] }), 'session_state.rejects_unknown');
+  }], after_cursor: '0', next_cursor: '8', has_more: false }), 'session_state.rejects_unknown');
   assertThrows(() => contracts.parseSessionEvents({ events: [{
-    event_id: 'evt_5', session_id: 'sess_1', sequence: 5,
+    event_id: 'evt_5', session_id: 'sess_1', sequence: 5, cursor: '5',
     kind: 'interaction_request', payload: {
       request_id: 'req_2', question_type: 'single', prompt: 'Pick',
       options: [{ id: 'a', label: 'A' }, { id: 'a', label: 'Again' }]
     }
-  }] }), 'interaction_request.rejects_duplicate');
+  }], after_cursor: '0', next_cursor: '8', has_more: false }), 'interaction_request.rejects_duplicate');
   const tooMany = [];
   for (let i = 0; i < 33; i += 1) tooMany.push({ id: 'option_' + i, label: 'x' });
   assertThrows(() => contracts.parseSessionEvents({ events: [{
-    event_id: 'evt_6', session_id: 'sess_1', sequence: 6,
+    event_id: 'evt_6', session_id: 'sess_1', sequence: 6, cursor: '6',
     kind: 'interaction_request', payload: {
       request_id: 'req_3', question_type: 'multi', prompt: 'Pick', options: tooMany
     }
-  }] }), 'interaction_request.rejects_limit');
+  }], after_cursor: '0', next_cursor: '8', has_more: false }), 'interaction_request.rejects_limit');
   assertThrows(() => contracts.parseSessionEvents({ events: [{
-    event_id: 'evt_7', session_id: 'sess_1', sequence: 7,
+    event_id: 'evt_7', session_id: 'sess_1', sequence: 7, cursor: '7',
     kind: 'interaction_response', payload: {
       request_id: 'req_1', text: { raw: 'x' }
     }
-  }] }), 'interaction_response.rejects_raw_object');
+  }], after_cursor: '0', next_cursor: '8', has_more: false }), 'interaction_response.rejects_raw_object');
   assertThrows(() => contracts.parseSessionEvents({ events: [{
-    event_id: 'evt_8', session_id: 'sess_1', sequence: 8,
+    event_id: 'evt_8', session_id: 'sess_1', sequence: 8, cursor: '8',
     kind: 'interaction_response', payload: {
       request_id: 'req_1', text: 'ok', unexpected: 'field'
     }
-  }] }), 'interaction_response.rejects_unknown');
+  }], after_cursor: '0', next_cursor: '8', has_more: false }), 'interaction_response.rejects_unknown');
 } else if (fixture === 'store_lifecycle') {
   const storeMod = await import(process.env.FLEET_STORE_URL);
   const S = storeMod.FleetStore;
