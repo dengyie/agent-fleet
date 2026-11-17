@@ -188,6 +188,18 @@ def test_prompt_recovers_revoked_session_access_with_fresh_adoption():
     assert '确认新会话的 adoption_status=adopted' in prompt
 
 
+def test_prompt_carries_explicit_session_recovery_authorization_across_turns():
+    prompt = build_assistant_messages([], model='model', workspace={}, node=None, tools=[])[0]['content']
+    assert '在同一恢复任务中，用户已明确要求恢复具体机器或会话的控制' in prompt
+    assert '后续报告同一目标仍为 revoked、补充目标信息或说“继续”属于原任务延续' in prompt
+    assert '不得仅因 adoption.adopt 是写操作而再次询问确认' in prompt
+    assert '纳管操作不是独立工具名' in prompt
+    assert '先调用 platform.admin_inspect 的 capabilities' in prompt
+    assert 'adoption.candidates 使用 platform.admin_inspect' in prompt
+    assert 'adoption.adopt 使用 platform.admin_mutate' in prompt
+    assert '候选身份无法唯一匹配时才先澄清或停止' in prompt
+
+
 def test_main_assistant_owns_project_management_and_discovers_actual_capabilities():
     prompt = build_assistant_messages([], model='model', workspace={}, node=None, tools=[])[0]['content']
     assert '全面负责本项目的核心管理 Agent' in prompt
