@@ -176,7 +176,10 @@ def test_prompt_treats_cross_vm_agent_management_as_a_real_scoped_capability():
     assert '远端任务交付还要读取后续会话事件验证' in prompt
     assert 'adoption.candidates' in prompt and 'adoption.adopt' in prompt
     assert '等待真实纳管状态后使用 session.*' in prompt
-    assert '必须基于用户明确要求' in prompt
+    assert '用户当前要求或持续的项目管理委托' in prompt
+    assert '不要仅因工具是写操作就再次索取许可' in prompt
+    assert 'session.read_logs' in prompt
+    assert '不能提升采集级别' in prompt
 
 
 def test_prompt_recovers_revoked_session_access_with_fresh_adoption():

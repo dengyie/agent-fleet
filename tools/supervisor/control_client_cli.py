@@ -229,6 +229,8 @@ def main(argv=None):
                         default=str(DEFAULT_INGEST_TOKEN))
     parser.add_argument("--spool-key-file", default=str(DEFAULT_SPOOL_KEY))
     parser.add_argument("--spool-root", default=str(DEFAULT_SPOOL_ROOT))
+    parser.add_argument('--no-native-sync', action='store_true',
+                        help='关闭默认的原生会话历史/日志同步；保留已纳管会话采集')
     args = parser.parse_args(argv)
 
     try:
@@ -253,9 +255,16 @@ def main(argv=None):
     lock = _acquire_instance_lock(cfg)
     if lock is None:
         return EXIT_ALREADY_RUNNING
+    archives = None
     try:
+        if not args.once and not args.no_native_sync:
+            from tools.session.sync import NativeArchiveSync
+            archives = NativeArchiveSync(cfg)
+            archives.start()
         return _run(client, args, interval)
     finally:
+        if archives is not None:
+            archives.close()
         lock.release()
 
 

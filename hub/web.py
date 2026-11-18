@@ -137,19 +137,19 @@ def _gate_conf_text(env: str) -> str:
     return ""
 
 
-def _feature_on(value: bool | None, *, env: str) -> bool:
+def _feature_on(value: bool | None, *, env: str, default: bool = False) -> bool:
     """Resolve the boolean feature switch from an explicit arg, env, or file.
 
     ``None`` (the default) falls back to the ``AGENT_FLEET_*_ENABLED``
     environment variable, then to the ``fleet-gates.conf`` line for the same
     key; either way ``1``/``true``/``yes``/``on`` (case-insensitive) are
     truthy and everything else is off.  An explicit bool always wins — the
-    compatibility callers that pass no value keep the current default.
+    callers without an override use the supplied feature default.
     """
     if value is not None:
         return bool(value)
     text = os.environ.get(env, "") or _gate_conf_text(env)
-    return text.strip().lower() in ("1", "true", "yes", "on")
+    return text.strip().lower() in ("1", "true", "yes", "on") if text.strip() else default
 
 
 def _optional_setting(value, *, env: str):
@@ -271,9 +271,9 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
     adoption_on = _feature_on(
         adoption_repositories_enabled, env=_ADOPTION_ENABLE_ENV)
     append_turn_on = _feature_on(
-        append_user_turn_enabled, env=_APPEND_TURN_ENABLE_ENV)
+        append_user_turn_enabled, env=_APPEND_TURN_ENABLE_ENV, default=supervisor_on)
     apply_profile_on = _feature_on(
-        apply_local_profile_enabled, env=_APPLY_PROFILE_ENABLE_ENV)
+        apply_local_profile_enabled, env=_APPLY_PROFILE_ENABLE_ENV, default=supervisor_on)
     platform_on = _feature_on(
         platform_enabled, env="AGENT_FLEET_PLATFORM_ENABLED")
     service_monitoring_on = _feature_on(

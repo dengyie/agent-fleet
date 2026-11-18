@@ -124,6 +124,8 @@ class SupervisorCommandRepository:
                     ON supervisor_commands(machine_id, status, lease_until_s, issued_s, command_id);
                 CREATE INDEX IF NOT EXISTS idx_supervisor_target
                     ON supervisor_commands(session_id, attempt_id, status);
+                CREATE INDEX IF NOT EXISTS idx_supervisor_session_history
+                    ON supervisor_commands(session_id);
                 CREATE INDEX IF NOT EXISTS idx_supervisor_expiry
                     ON supervisor_commands(expires_s, command_id)
                     WHERE status NOT IN ('succeeded','already_finished','failed','rejected','expired');
@@ -197,6 +199,37 @@ class SupervisorCommandRepository:
             return decoded
         except (sqlite3.Error, OSError) as exc:
             raise SupervisorCommandRepositoryError("command_unavailable") from exc
+        finally:
+            conn.close()
+
+    def session_logs(self, session_id: str, *, limit: int = 20, before: int = 0) -> dict:
+        """Page durable commands without exposing signed envelopes or payloads.
+
+        rowid is an ingestion cursor, independent of clocks and command IDs.
+        Audit storage already retains at most 5000 records across the fleet.
+        """
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                'SELECT rowid AS cursor, * FROM supervisor_commands WHERE session_id=? '
+                'AND (?=0 OR rowid<?) ORDER BY rowid DESC LIMIT ?',
+                (session_id, before, before, limit + 1)).fetchall()
+            selected = rows[:limit]
+            ids = [row['command_id'] for row in selected]
+            audit = []
+            if ids:
+                placeholders = ','.join('?' for _ in ids)
+                audit_rows = conn.execute(
+                    'SELECT event_json FROM supervisor_audit_events '
+                    f"WHERE json_extract(event_json, '$.command_id') IN ({placeholders}) "
+                    'ORDER BY event_id DESC LIMIT 201', ids).fetchall()
+                audit = [json.loads(row['event_json']) for row in audit_rows]
+            return {'commands': [self._decode(row) for row in selected],
+                    'has_more': len(rows) > limit,
+                    'next_cursor': str(selected[-1]['cursor']) if len(rows) > limit else None,
+                    'audit': audit[:200], 'audit_truncated': len(audit) > 200}
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            raise SupervisorCommandRepositoryError('command_unavailable') from exc
         finally:
             conn.close()
 

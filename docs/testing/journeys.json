@@ -1490,7 +1490,21 @@
         "tests/test_session_access_consistency.py::test_list_authority_lookup_is_batched",
         "tests/test_session_access_consistency.py::test_adoption_connection_failure_is_bounded",
         "tests/test_session_access_consistency.py::test_http_managed_control_uses_session_identity",
-        "tests/test_session_access_browser.py::test_session_access_browser"
+        "tests/test_session_access_browser.py::test_session_access_browser",
+        "tests/test_assistant_session_capabilities.py::test_profile_control_exposed_and_idempotent",
+        "tests/test_assistant_session_capabilities.py::test_rejected_command_diagnostics_do_not_require_service_registration",
+        "tests/test_assistant_session_capabilities.py::test_profile_discovery_is_session_machine_and_family_scoped",
+        "tests/test_assistant_session_capabilities.py::test_zcode_metadata_does_not_advertise_native_delivery",
+        "tests/test_assistant_session_capabilities.py::test_enabled_supervisor_defaults_to_administrator_message_and_profile_controls",
+        "tests/test_assistant_session_capabilities.py::test_logs_paginate_only_target_session_and_revalidate_admin",
+        "tests/test_assistant_session_capabilities.py::test_profile_payload_cannot_be_used_on_process_controls",
+        "tests/test_zcode_session_binding.py::test_desktop_host_is_not_a_single_controllable_conversation",
+        "tests/test_zcode_session_binding.py::test_zcode_explicit_resume_binds_matching_transcript",
+        "tests/test_zcode_session_binding.py::test_zcode_logs_normalize_current_turn_and_tool_results_without_replaying_context",
+        "tests/test_zcode_session_binding.py::test_default_archive_sync_reads_zcode_history_without_adoption",
+        "tests/test_zcode_session_binding.py::test_archive_worker_only_skips_fully_uploaded_unchanged_files",
+        "tests/test_assistant_session_capabilities.py::test_unknown_agent_family_cannot_advertise_followup_support",
+        "tests/test_assistant_session_capabilities.py::test_assistant_event_pages_default_to_conversation_and_keep_full_source_opt_in"
       ]
     },
     {

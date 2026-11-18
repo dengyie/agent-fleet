@@ -527,6 +527,12 @@ def classify_family(exe_path: str, cmdline: str) -> str | None:
            for token in _argv_tokens(cmdline or "")):
         return None
     base = _token_basename(exe_path).strip().lower()
+    # The desktop host multiplexes many conversations. It is not a CLI seat,
+    # and controlling its process group would affect unrelated conversations.
+    normalized_exe = exe_path.replace('\\', '/').lower()
+    if (normalized_exe.endswith('/zcode.app/contents/macos/zcode')
+            or normalized_exe.endswith('/zcode/zcode.exe')) and _token_basename(_argv1(cmdline or '')).lower() != 'zcode.cjs':
+        return None
     if base.endswith(".exe"):
         base = base[:-4]
     if base:
@@ -790,6 +796,31 @@ _PROFILE_NATIVE_RESOLVERS = {
     "claude_code": _claude_native_path,
     "pi": _pi_native_path,
 }
+
+
+def _zcode_native_path(cmdline: str) -> str | None:
+    """Bind an explicit native session ID, never the most recently used file."""
+    session_id = _option_token(cmdline, ('--resume',))
+    if not session_id or not session_id.startswith('sess_'):
+        return None
+    base = os.path.expanduser('~/.zcode/cli/rollout')
+    path = _native_path_under(base, os.path.join(base, f'model-io-{session_id}.jsonl'))
+    if path is None:
+        return None
+    try:
+        with open(path, encoding='utf-8') as stream:
+            line = stream.readline((16 << 20) + 1)
+        if len(line.encode('utf-8')) > 16 << 20:
+            return None
+        record = json.loads(line)
+        if record.get('type') == 'model_io' and record.get('sessionId') == session_id:
+            return path
+    except (OSError, ValueError, AttributeError):
+        pass
+    return None
+
+
+_PROFILE_NATIVE_RESOLVERS['zcode'] = _zcode_native_path
 
 
 def native_path_for(row: ProcRow) -> str | None:

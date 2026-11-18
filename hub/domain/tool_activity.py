@@ -50,6 +50,7 @@ def tool_activity(tool, arguments, receipt=None):
               'fleet.list_machines': '查看 VM 清单', 'session.list': '查找远端 Agent 会话',
               'session.get': '查看远端 Agent 会话', 'session.read_events': '读取远端会话记录',
               'session.send_message': '向远端 Agent 发送任务', 'session.get_command': '核对远端控制回执',
+              'session.read_logs': '读取会话控制日志', 'session.list_profiles': '查看本地模型配置',
               'conversation.list': '查找会话', 'conversation.rename': '重命名会话',
               'browser.open': '打开网页', 'browser.close': '关闭网页'}
     title = titles.get(tool, '调用工具 · ' + tool)
@@ -58,7 +59,8 @@ def tool_activity(tool, arguments, receipt=None):
     if tool == 'session.control':
         title = {'pause_session': '暂停远端 Agent', 'resume_session': '恢复远端 Agent 进程',
                  'terminate_session': '终止远端 Agent', 'quarantine_session': '隔离远端 Agent',
-                 'cancel_attempt': '取消远端 Agent 执行'}.get(arguments.get('action'), '控制远端 Agent')
+                 'cancel_attempt': '取消远端 Agent 执行',
+                 'apply_local_profile': '切换本地模型配置'}.get(arguments.get('action'), '控制远端 Agent')
     if tool == 'service.request_action':
         action = arguments.get('action')
         if action == 'inspect':

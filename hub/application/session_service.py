@@ -41,6 +41,7 @@ from hub.infrastructure.session_repository import SessionError
 from hub.infrastructure.transcript_repository import TranscriptError
 from hub.domain.interaction import normalize_answer, validate_answer_ids
 from hub.domain.agent_session import SESSION_CONTROL_ACTIONS
+from agent_profiles import NATIVE_RESUME_AGENT_TYPES
 from hub.application.adoption_service import AdoptionServiceError
 from hub.infrastructure.adoption_repository import AdoptionRepositoryError
 from fleet_core.session.redact import Redactor
@@ -48,7 +49,7 @@ from fleet_core.session.redact import Redactor
 DEFAULT_QUERY_LIMIT = 100
 _MAX_QUERY_LIMIT = 1000
 _MAX_SQLITE_SEQUENCE = (1 << 63) - 1
-_SESSION_ACTIONS = frozenset((*SESSION_CONTROL_ACTIONS, 'append_user_turn', 'apply_local_profile'))
+_SESSION_ACTIONS = frozenset((*SESSION_CONTROL_ACTIONS, 'append_user_turn'))
 
 
 class SessionServiceError(RuntimeError):
@@ -515,8 +516,30 @@ class SessionService:
                 allowed.clear()
         elif not dto['managed']:
             allowed.clear()
-        if dto.get('agent_family') == 'hermes':
+        family = dto.get('agent_family')
+        family = 'claude_code' if family == 'claude' else family
+        delivery_reason = ''
+        if family not in NATIVE_RESUME_AGENT_TYPES:
+            delivery_reason = 'native_resume_unsupported'
+        elif adoption is not None and not adoption.native_file_path:
+            delivery_reason = 'native_session_unbound'
+        if delivery_reason:
             allowed.discard('append_user_turn')
+        if family == 'zcode' and adoption is not None and not adoption.native_file_path:
+            # Legacy discovery could adopt a whole desktop host, which owns
+            # multiple conversations. Do not signal that shared process as if
+            # it were the selected conversation. Preserve its audit history.
+            allowed.clear()
+            dto['control_unavailable_reason'] = 'native_session_unbound'
+        dto['message_delivery'] = {
+            'available': 'append_user_turn' in allowed,
+            'reason': delivery_reason or ('node_receipt_required' if 'append_user_turn' in allowed else 'control_unavailable'),
+            'mechanism': 'native_session_resume' if not delivery_reason else 'unavailable',
+        }
+        if adoption is not None:
+            dto['capture'] = {'native_source_bound': bool(adoption.native_file_path),
+                              'history': 'retained_source_from_checkpoint' if adoption.native_file_path else 'unavailable',
+                              'provider_profile_changes_capture': False}
         dto['allowed_actions'] = sorted(allowed)
         dto['control_capability'] = 'available' if allowed else 'unavailable'
         return dto
@@ -573,7 +596,7 @@ class SessionService:
             raise SessionServiceError('session_not_managed')
         if self.supervisor is None:
             raise SessionServiceError('control_unavailable')
-        if action == 'append_user_turn' and session.get('agent_family') == 'hermes':
+        if action == 'append_user_turn' and session.get('message_delivery', {}).get('reason') == 'native_resume_unsupported':
             raise SessionServiceError('unsupported_action')
         if action not in session['allowed_actions']:
             raise SessionServiceError('session_action_unavailable')
@@ -684,14 +707,15 @@ class SessionService:
 
     def session_events(self, session_id: str,
                        limit: int = DEFAULT_QUERY_LIMIT, after_cursor: int = 0,
-                       at_sequence: int | None = None) -> dict:
+                       at_sequence: int | None = None, include_source: bool = True) -> dict:
         """Page by stable Hub ingestion order, independent of source sequences."""
         limit = _bounded_limit(limit)
         try:
             if at_sequence is not None:
                 after_cursor = self.transcript_repo.event_cursor_before_sequence(session_id, at_sequence)
             rows = self.transcript_repo.read_redacted(
-                session_id, limit=limit + 1, after_cursor=after_cursor)
+                session_id, limit=limit + 1, after_cursor=after_cursor,
+                **({'include_source': False} if not include_source else {}))
         except TranscriptError as exc:
             raise SessionServiceError(exc.code) from None
         except Exception:

@@ -120,7 +120,7 @@ def test_managed_session_message_queues_for_its_machine_without_adoption(tmp_pat
         supervisor_credentials={'pxed':'secret'}))
     sessions=app.extensions['fleet']['services']['sessions']
     sessions.session_repo.upsert_session({'session_id':'s1','machine_id':'pxed',
-        'process_group_id':'g1','managed':True,'capture_quality':'structured'})
+        'process_group_id':'g1','managed':True,'capture_quality':'structured', 'agent_family':'codex'})
     client=app.test_client()
     response=client.post('/api/sessions/s1/messages',json={'text':'continue'})
     assert response.status_code==202,response.get_json()

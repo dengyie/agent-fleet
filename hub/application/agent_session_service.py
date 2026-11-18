@@ -15,6 +15,7 @@ from hub.repositories import MACHINE_NAME_RE
 from hub.application.errors import ApplicationError
 from hub.application.session_service import SessionServiceError
 from hub.application.supervisor_service import SupervisorServiceError
+from hub.application.observe_service import ObserveError
 from hub.domain.agent_session import SESSION_CONTROL_ACTIONS
 
 logger = logging.getLogger(__name__)
@@ -47,8 +48,10 @@ class AgentSessionService:
         tools = {'session.list', 'session.get', 'session.read_events'}
         if self.observe is not None:
             tools.add('fleet.list_machines')
+            tools.add('session.list_profiles')
         if self.supervisor is not None:
             tools.add('session.get_command')
+            tools.add('session.read_logs')
             actions = self.supervisor.available_actions()
             if set(SESSION_CONTROL_ACTIONS) & actions:
                 tools.add('session.control')
@@ -63,7 +66,7 @@ class AgentSessionService:
             raise ApplicationError('tool_not_allowed', 'tool_not_allowed', 403)
         try:
             return self._execute(tool, arguments, owner_id, command_id)
-        except (SessionServiceError, SupervisorServiceError) as exc:
+        except (SessionServiceError, SupervisorServiceError, ObserveError) as exc:
             raise ApplicationError(exc.code, exc.code, getattr(exc, 'status', 400)) from exc
 
     def _original_command(self, key, session_id, action, payload):
@@ -80,10 +83,12 @@ class AgentSessionService:
             'fleet.list_machines': ({'offset', 'limit'}, set()),
             'session.list': ({'machine_id', 'active', 'limit'}, set()),
             'session.get': ({'session_id'}, {'session_id'}),
-            'session.read_events': ({'session_id', 'limit', 'after_cursor'}, {'session_id'}),
+            'session.read_events': ({'session_id', 'limit', 'after_cursor', 'include_source'}, {'session_id'}),
             'session.send_message': ({'session_id', 'text'}, {'session_id', 'text'}),
-            'session.control': ({'session_id', 'action'}, {'session_id', 'action'}),
+            'session.control': ({'session_id', 'action', 'profile_id'}, {'session_id', 'action'}),
             'session.get_command': ({'session_id', 'command_id'}, {'session_id', 'command_id'}),
+            'session.read_logs': ({'session_id', 'limit', 'before_cursor'}, {'session_id'}),
+            'session.list_profiles': ({'session_id'}, {'session_id'}),
         }[tool]
         if not isinstance(args, dict) or set(args) - keys or not required <= args.keys():
             _invalid()
@@ -119,13 +124,31 @@ class AgentSessionService:
         session = self.sessions.get_session(session_id)['session']
         if tool == 'session.get':
             return {'session': session}
+        if tool == 'session.list_profiles':
+            machine = self.observe.machine_detail(session['machine_id'])
+            family = session.get('agent_family')
+            family = 'claude_code' if family == 'claude' else family
+            return {'machine_id': session['machine_id'],
+                    'profiles': [p for p in machine.get('current', {}).get('local_profiles', []) if p['family'] == family],
+                    'purpose': 'local_provider_selection_not_capture'}
+        if tool == 'session.read_logs':
+            limit = _integer(args.get('limit', 20), 1, 100)
+            before = args.get('before_cursor', '0')
+            if (not isinstance(before, str) or not before.isascii() or not before.isdecimal()
+                    or not 1 <= len(before) <= 19 or int(before) > (1 << 63) - 1):
+                _invalid()
+            return self.supervisor.session_logs(session_id, limit=limit, before=int(before))
         if tool == 'session.read_events':
             limit = _integer(args.get('limit', 20), 1, 100)
             after = args.get('after_cursor', '0')
             if (not isinstance(after, str) or not after.isascii() or not after.isdecimal()
                     or not 1 <= len(after) <= 19 or int(after) > (1 << 63) - 1):
                 _invalid()
-            page = self.sessions.session_events(session_id, limit=limit, after_cursor=int(after))
+            include_source = args.get('include_source', False)
+            if type(include_source) is not bool:
+                _invalid()
+            page = self.sessions.session_events(session_id, limit=limit, after_cursor=int(after),
+                                                include_source=include_source)
             rows = page['events']
             events, size = [], 0
             for row in rows:
@@ -144,6 +167,13 @@ class AgentSessionService:
         else:
             action, payload = args.get('action'), None
             if not isinstance(action, str) or action not in SESSION_CONTROL_ACTIONS:
+                _invalid()
+            if action == 'apply_local_profile':
+                profile = args.get('profile_id')
+                if not isinstance(profile, str) or not profile or len(profile) > 128:
+                    _invalid()
+                payload = {'profile_id': profile}
+            elif 'profile_id' in args:
                 _invalid()
         if not isinstance(command_id, str) or not command_id:
             _invalid()
