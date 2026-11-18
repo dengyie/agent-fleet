@@ -1203,6 +1203,7 @@
       "boundary": "disposable Hub; external services simulated",
       "tests": [
         "tests/test_frontend_browser.py::test_console_in_real_browser",
+        "tests/test_navigation_sessions.py::test_navigation_session_browser[sidebar-motion]",
         "tests/test_frontend_browser.py::test_assistant_workspace_regressions",
         "tests/test_frontend_browser.py::test_request_metadata_in_real_browser"
       ]

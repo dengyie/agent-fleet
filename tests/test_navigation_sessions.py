@@ -49,7 +49,7 @@ def test_upgrade_preserves_valid_sessions_without_reviving_expired_ones(tmp_path
     assert later.identity('expired') is None
 
 
-@pytest.mark.parametrize('scenario', ['feature-401', 'logout-loading', 'login-loading', 'menus'])
+@pytest.mark.parametrize('scenario', ['feature-401', 'logout-loading', 'login-loading', 'menus', 'sidebar-motion'])
 def test_navigation_session_browser(tmp_path, scenario):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE for browser acceptance')

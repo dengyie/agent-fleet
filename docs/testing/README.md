@@ -4,6 +4,8 @@
 
 请求级模型、五项 Token、耗时、费用来源、重试与交互验收详见[请求元数据测试矩阵](request-metadata.md)。
 
+侧栏收放归入 `UI-01`：`test_navigation_session_browser[sidebar-motion]` 在真实浏览器中暂停原生过渡，验证侧栏与主内容处于中间位置、同一个切换按钮的纵向位置和尺寸保持一致、快速反向无跳变、收起状态刷新后保留，以及 768/767px 断点、390px 抽屉焦点循环、Esc/遮罩关闭和减少动画偏好。复用现有 UiIcon，不增加动画库或后台接口。
+
 尚未完成的真实浏览器、接管、凭据、Browserbase 与通知工作见[待确认实施决策](browser-notification-proposal.md)；该提案不是已批准规格或通过证明。
 
 这份文档是测试入口。可执行范围定义在 [journeys.json](journeys.json)；逐阶段断言、审查回归和证据核验见 [test-chains.md](test-chains.md)；外部验收见 [release-acceptance.md](release-acceptance.md)。测试用例、门禁和文档必须随功能一起更新。

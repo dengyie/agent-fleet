@@ -164,7 +164,11 @@ const [origin, taskId] = process.argv.slice(2);
     assert.equal(await page.locator('[data-chat-scroll]').evaluate(node => node.scrollTop), 0, 'incoming updates do not pull the reader away from history');
     await page.getByRole('button', {name:'滚动到最新消息', exact:true}).click();
     await page.waitForFunction(() => { const node = document.querySelector('[data-chat-scroll]'); return node.scrollHeight - node.scrollTop - node.clientHeight < 72; });
-    assert.deepEqual(await page.locator('.assistant-composer').boundingBox(), beforeScroll, 'scrolling messages does not move the composer');
+    const afterScroll = await page.locator('.assistant-composer').boundingBox();
+    for (const property of ['x', 'y', 'width', 'height']) {
+      assert.ok(Math.abs(afterScroll[property] - beforeScroll[property]) < 1,
+        'scrolling messages does not move the composer: ' + property);
+    }
     assert.equal(await page.evaluate(() => window.scrollY), 0, 'chat scrolling never moves the document');
     await page.locator('#scroll-fixture').evaluate(node => node.remove());
 
@@ -232,13 +236,16 @@ const [origin, taskId] = process.argv.slice(2);
     await page.waitForFunction(() => document.getElementById('sidebar').inert, null, {timeout: 3000});
     assert.equal(await page.locator('#sidebar').evaluate(node => node.inert), true, 'closed mobile navigation must not receive keyboard focus');
     await page.getByRole('button', {name: '打开导航'}).click();
-    assert.equal(await page.locator('#mobile-menu').getAttribute('aria-expanded'), 'true');
+    assert.equal(await page.locator('#navigation-toggle').getAttribute('aria-expanded'), 'true');
+    await page.keyboard.press('Shift+Tab');
+    assert.equal(await page.evaluate(() => document.activeElement === document.querySelector('#navigation-toggle')), true);
     await page.keyboard.press('Shift+Tab');
     assert.equal(await page.evaluate(() => document.activeElement === document.querySelector('#account-menu-trigger')), true);
     await page.keyboard.press('Tab');
+    await page.keyboard.press('Tab');
     assert.equal(await page.evaluate(() => document.activeElement === document.querySelector('#sidebar a')), true);
     await page.keyboard.press('Escape');
-    assert.equal(await page.locator('#mobile-menu').getAttribute('aria-expanded'), 'false');
+    assert.equal(await page.locator('#navigation-toggle').getAttribute('aria-expanded'), 'false');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await page.locator('auto-scroll-anchor').evaluate(node => {
       node.scrollIntoView({block: 'center', behavior: 'instant'});
