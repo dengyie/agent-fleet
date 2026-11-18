@@ -54,8 +54,8 @@ def account_identity(req):
 
 
 def cookie(response, token='', *, clear=False):
-    # Browsers cap persistent cookies at 400 days. Renew on session checks;
-    # the server-side credential remains valid until explicit revocation.
+    # Browsers cap persistent cookies at 400 days. Only explicit login writes
+    # a credential: a delayed read response must not overwrite a newer login.
     response.set_cookie(cookie_name(), token, max_age=0 if clear else 400 * 86400,
                         secure=current_app.config['ACCOUNT_COOKIE_SECURE'], httponly=True,
                         samesite='Lax', path='/')
@@ -149,8 +149,6 @@ def init_accounts(app, config):
 
     @app.after_request
     def private_response(response):
-        if request.path == '/api/operator/session' and response.status_code == 200 and g.get('account'):
-            cookie(response, request.cookies[cookie_name()])
         if response.is_streamed and request.path.startswith('/api/') and g.get('account'):
             account_store = store()
             token = request.cookies.get(cookie_name(), '')
