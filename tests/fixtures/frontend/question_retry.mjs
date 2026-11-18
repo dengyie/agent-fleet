@@ -11,11 +11,11 @@ class Element {
   find(predicate) { return predicate(this) ? this : this.children.map(child => child.find(predicate)).find(Boolean); }
 }
 globalThis.document = {createElement: tag => new Element(tag)};
-const {renderQuestions, disposeQuestions} = await import(process.argv[2]);
+const {renderQuestions, disposeQuestions, suspendQuestions} = await import(process.argv[2]);
 const scenario = process.argv[3];
 const host = new Element('root');
 const state = {disposed:false};
-const session = {session_id:'session-a',managed:true,status:'running',current_state:'waiting_for_user',capabilities:['interactive_questions']};
+const session = {session_id:'session-a',managed:true,status:'running',current_state:'waiting_for_user',capabilities:['interactive_questions'],allowed_actions:['append_user_turn']};
 let id = 'q-1', calls = [];
 const api = {answerSessionQuestion: async (sessionId, body) => {
   calls.push(structuredClone(body));
@@ -34,6 +34,33 @@ function paint() {
 }
 const button = text => host.find(element => element.tagName === 'button' && element.textContent === text);
 const flush = () => new Promise(resolve => setImmediate(resolve));
+if (scenario === 'receipt_lifecycle') {
+  const timers = new Map(); let nextTimer = 0, reads = 0;
+  globalThis.setTimeout = callback => { timers.set(++nextTimer, callback); return nextTimer; };
+  globalThis.clearTimeout = timer => timers.delete(timer);
+  api.answerSessionQuestion = async () => ({command_id:'command-a', status:'queued'});
+  api.getControlReceipt = async () => ({status:++reads > 35 ? 'succeeded' : 'executing'});
+  paint(); button('First').click(); await flush();
+  for (let i = 0; i < 40; i++) {
+    const queued = [...timers.values()]; timers.clear();
+    queued.forEach(callback => callback()); await flush();
+  }
+  assert.equal(state.questions.get(id).status, 'succeeded', 'long-running question receipts keep polling to a terminal result');
+  assert.equal(reads, 36);
+  assert.equal(timers.size, 0, 'terminal receipt releases polling timers');
+  id = 'suspend-question';
+  let releaseFirst, currentReads = 0;
+  const oldReceipt = new Promise(resolve => { releaseFirst = resolve; });
+  api.getControlReceipt = async () => ++currentReads === 1 ? oldReceipt : {status:'succeeded'};
+  paint(); button('First').click(); await flush();
+  state.suspended = true; suspendQuestions(state);
+  assert.equal(timers.size, 0);
+  state.suspended = false; paint(); await flush();
+  assert.equal(state.questions.get(id).status, 'succeeded');
+  releaseFirst({status:'executing'}); await flush();
+  assert.equal(state.questions.get(id).status, 'succeeded', 'late response cannot undo resumed question receipt');
+  assert.equal(timers.size, 0);
+}
 paint();
 if (scenario === 'network_retry') {
   button('First').click(); await flush();

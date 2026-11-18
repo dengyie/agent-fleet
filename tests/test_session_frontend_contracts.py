@@ -79,7 +79,7 @@ if (fixture === 'session_parsers') {
   // 1) managed session DTO
   assertModel(() => contracts.parseSession({ session: {
     machine_id: 'mac-1', session_id: 's-1', managed: true,
-    capture_quality: 'exact', control_capability: 'available',
+    capture_quality: 'exact', control_capability: 'available', allowed_actions: ['pause_session'],
     attempt_id: 'att-1', process_group_id: 'grp-1',
     agent_family: 'codex', status: 'running' } }),
     (m) => m.session.managed === true &&
@@ -88,6 +88,21 @@ if (fixture === 'session_parsers') {
       m.session.attempt_id === 'att-1' &&
       !Object.prototype.hasOwnProperty.call(m.session, 'nonce'),
     'session_parsers.managed');
+  assertModel(() => contracts.parseSession({ session: {
+    machine_id: 'mac-1', session_id: 's-1', managed: true,
+    control_capability: 'available' } }),
+    m => m.session.allowed_actions.length === 0 && m.session.control_capability === 'unavailable',
+    'session_parsers.no_inferred_actions');
+  assertModel(() => contracts.parseSession({ session: {
+    machine_id: 'mac-1', session_id: 'adopt_old', managed: true, adoption_status: 'revoked',
+    control_capability: 'available', allowed_actions: ['pause_session'] } }),
+    m => m.session.allowed_actions.length === 0 && m.session.adoption_status === 'revoked' &&
+      m.session.control_capability === 'unavailable', 'session_parsers.revoked');
+  assertModel(() => contracts.parseSession({ session: {
+    machine_id: 'mac-1', session_id: 'adopt_new', managed: false, adoption_status: 'adopted',
+    control_capability: 'available', allowed_actions: ['pause_session', 'shell', 'pause_session'] } }),
+    m => JSON.stringify(m.session.allowed_actions) === '["pause_session"]' &&
+      m.session.control_capability === 'available', 'session_parsers.adoption_without_capture');
   // 2) unmanaged forced to best_effort and control unavailable
   assertModel(() => contracts.parseSession({ session: {
     machine_id: 'mac-2', session_id: 's-2', managed: false,

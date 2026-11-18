@@ -8,7 +8,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize("scenario", ["network_retry", "validation_retry", "bounded_pages", "bounded_submissions"])
+@pytest.mark.parametrize("scenario", ["network_retry", "validation_retry", "bounded_pages", "bounded_submissions", "receipt_lifecycle"])
 def test_question_retry_and_memory_boundaries(scenario):
     if not shutil.which("node"):
         pytest.skip("Node is optional for the production frontend")

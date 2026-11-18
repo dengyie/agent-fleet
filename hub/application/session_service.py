@@ -40,11 +40,15 @@ from session_schema import (
 from hub.infrastructure.session_repository import SessionError
 from hub.infrastructure.transcript_repository import TranscriptError
 from hub.domain.interaction import normalize_answer, validate_answer_ids
+from hub.domain.agent_session import SESSION_CONTROL_ACTIONS
+from hub.application.adoption_service import AdoptionServiceError
+from hub.infrastructure.adoption_repository import AdoptionRepositoryError
 from fleet_core.session.redact import Redactor
 
 DEFAULT_QUERY_LIMIT = 100
 _MAX_QUERY_LIMIT = 1000
 _MAX_SQLITE_SEQUENCE = (1 << 63) - 1
+_SESSION_ACTIONS = frozenset((*SESSION_CONTROL_ACTIONS, 'append_user_turn', 'apply_local_profile'))
 
 
 class SessionServiceError(RuntimeError):
@@ -68,6 +72,13 @@ class SessionServiceError(RuntimeError):
         "interaction_pending": 409,
         "interaction_unavailable": 503,
         "feature_unavailable": 503,
+        "adoption_unavailable": 503,
+        "adoption_store": 503,
+        "unknown_session": 404,
+        "adoption_revoked": 409,
+        "invalid_status_transition": 409,
+        "session_action_unavailable": 409,
+        "unsupported_action": 409,
     }
 
     def __init__(self, code: str, detail: str = "") -> None:
@@ -105,6 +116,7 @@ class SessionService:
         self.event_publisher = event_publisher
         self.search_service = search_service
         self.supervisor = None
+        self.adoptions = None
 
     # -- write use case -----------------------------------------------------
 
@@ -480,6 +492,38 @@ class SessionService:
 
     # -- operator query use cases ----------------------------------------------
 
+    def _adoption_rows(self, session_ids):
+        ids = [sid for sid in session_ids if sid.startswith('adopt_')]
+        if not ids or self.adoptions is None:
+            return {}
+        try:
+            return self.adoptions.adoption_repo.get_many(ids)
+        except AdoptionRepositoryError as exc:
+            raise SessionServiceError(exc.code) from exc
+
+    def _live_session(self, row, adoption, actions):
+        """Capture provenance and current control authority are separate facts."""
+        if adoption is not None:
+            # Control identity/family belongs to the adoption, not the capture.
+            row = {**row, 'machine_id': adoption.machine_id, 'agent_family': adoption.agent_family}
+        dto = public_session_dto(row)
+        allowed = set(actions) & _SESSION_ACTIONS
+        if str(row['session_id']).startswith('adopt_'):
+            dto['adoption_status'] = (adoption.status if adoption is not None else
+                                      'missing' if self.adoptions is not None else 'unavailable')
+            if dto['adoption_status'] != 'adopted':
+                allowed.clear()
+        elif not dto['managed']:
+            allowed.clear()
+        if dto.get('agent_family') == 'hermes':
+            allowed.discard('append_user_turn')
+        dto['allowed_actions'] = sorted(allowed)
+        dto['control_capability'] = 'available' if allowed else 'unavailable'
+        return dto
+
+    def _available_actions(self):
+        return self.supervisor.available_actions() if self.supervisor is not None else frozenset()
+
     def list_sessions(self, machine=None,
                       limit: int = DEFAULT_QUERY_LIMIT,
                       active: bool = False) -> dict:
@@ -496,11 +540,10 @@ class SessionService:
             raise SessionServiceError(exc.code) from None
         except Exception:
             raise SessionServiceError("session_unavailable") from None
-        return {
-            "sessions": [
-                public_session_dto(r) for r in rows if isinstance(r, Mapping)
-            ]
-        }
+        rows = [r for r in rows if isinstance(r, Mapping)]
+        adoptions = self._adoption_rows([r['session_id'] for r in rows])
+        actions = self._available_actions()
+        return {"sessions": [self._live_session(r, adoptions.get(r['session_id']), actions) for r in rows]}
 
     def get_session(self, session_id: str) -> dict:
         """Return a single bounded session DTO or ``session_not_found``."""
@@ -510,24 +553,60 @@ class SessionService:
             raise SessionServiceError(exc.code) from None
         except Exception:
             raise SessionServiceError("session_unavailable") from None
+        adoption = self._adoption_rows([session_id]).get(session_id)
         if not row:
-            raise SessionServiceError("session_not_found")
-        row["capabilities"] = self.session_repo.get_capabilities(session_id)
-        return {"session": public_session_dto(row)}
+            if adoption is None:
+                raise SessionServiceError("session_not_found")
+            row = {'session_id': session_id, 'managed': False,
+                   'started_at': adoption.created_at, 'updated_at': adoption.updated_at}
+        else:
+            row["capabilities"] = self.session_repo.get_capabilities(session_id)
+        return {"session": self._live_session(row, adoption, self._available_actions())}
 
-    def answer_interaction(self, session_id: str, data: Mapping) -> dict:
+    def _check_action(self, session, action):
+        state = session.get('adoption_status')
+        if state and state != 'adopted':
+            code = {'revoked': 'adoption_revoked', 'pending': 'invalid_status_transition',
+                    'missing': 'unknown_session', 'unavailable': 'adoption_unavailable'}[state]
+            raise SessionServiceError(code)
+        if not state and not session.get('managed'):
+            raise SessionServiceError('session_not_managed')
+        if self.supervisor is None:
+            raise SessionServiceError('control_unavailable')
+        if action == 'append_user_turn' and session.get('agent_family') == 'hermes':
+            raise SessionServiceError('unsupported_action')
+        if action not in session['allowed_actions']:
+            raise SessionServiceError('session_action_unavailable')
+
+    def control(self, session_id, *, action, actor, payload=None,
+                reason_code='operator_requested', idempotency_key=None):
+        """All session callers use the same admission path; reads confer no grant."""
+        session = self.get_session(session_id)['session']
+        self._check_action(session, action)
+        if session.get('adoption_status'):
+            try:
+                # Rechecks state under the same lock as revocation.
+                return self.adoptions.control(session_id, action=action, actor=actor,
+                    reason_code=reason_code, payload=payload, idempotency_key=idempotency_key)
+            except AdoptionServiceError as exc:
+                raise SessionServiceError(exc.code) from exc
+        kwargs = {'payload': payload}
+        if idempotency_key is not None:
+            kwargs['idempotency_key'] = idempotency_key
+        command = self.supervisor.enqueue(session['machine_id'], session_id,
+            session.get('attempt_id'), action, reason_code, **kwargs)
+        return {'session_id': session_id, 'command_id': command['command_id'], 'status': 'pending'}
+
+    def answer_interaction(self, session_id: str, data: Mapping, *, actor: str = '') -> dict:
         """Answer once through the signed append-user-turn channel, never PTY input."""
         session = self.get_session(session_id)["session"]
         if getattr(self.session_repo, "management_available", True) is False:
             raise SessionServiceError("feature_unavailable")
-        if not session.get("managed"):
-            raise SessionServiceError("session_not_managed")
+        self._check_action(session, 'append_user_turn')
         if "interactive_questions" not in session.get("capabilities", []):
             raise SessionServiceError("interaction_unavailable")
         if session.get("status") in ("closed", "failed") or session.get("current_state") in ("completed", "failed", "stopped"):
             raise SessionServiceError("interaction_expired")
-        if self.supervisor is None:
-            raise SessionServiceError("control_unavailable")
         enqueue = self.supervisor.enqueue
         try:
             supports_idempotency = "idempotency_key" in inspect.signature(enqueue).parameters
@@ -574,12 +653,12 @@ class SessionService:
         except (sqlite3.Error, OSError) as exc:
             raise SessionServiceError("interaction_unavailable") from exc
         try:
-            enqueue_kwargs = {"payload": {"text": text}}
+            enqueue_kwargs = {"payload": {"text": text}, 'actor': actor}
             if supports_idempotency:
                 enqueue_kwargs["idempotency_key"] = command_key
-            command = enqueue(
-                session["machine_id"], session_id, session.get("attempt_id"),
-                "append_user_turn", "operator_requested", **enqueue_kwargs)
+            command = self.control(session_id, action='append_user_turn', **enqueue_kwargs)
+        except SessionServiceError:
+            raise
         except Exception as exc:
             # Keep the durable reservation in ``dispatching``. A retry looks
             # up the stable command key first, then safely enqueues if the
@@ -599,17 +678,9 @@ class SessionService:
             raise SessionServiceError("interaction_pending") from exc
         return {"session_id": session_id, "command_id": command["command_id"], "status": "queued"}
 
-    def send_message(self, session_id: str, text: str) -> dict:
+    def send_message(self, session_id: str, text: str, *, actor: str = '') -> dict:
         """Queue a follow-up for a managed session through the existing channel."""
-        session = self.get_session(session_id)["session"]
-        if not session.get("managed"):
-            raise SessionServiceError("session_not_managed", "请先纳管此会话")
-        if self.supervisor is None:
-            raise SessionServiceError("control_unavailable", "会话控制未启用")
-        command = self.supervisor.enqueue(
-            session["machine_id"], session_id, session.get("attempt_id"), "append_user_turn",
-            "operator_requested", payload={"text": text})
-        return {"session_id": session_id, "command_id": command["command_id"], "status": "pending"}
+        return self.control(session_id, action='append_user_turn', actor=actor, payload={'text': text})
 
     def session_events(self, session_id: str,
                        limit: int = DEFAULT_QUERY_LIMIT, after_cursor: int = 0,

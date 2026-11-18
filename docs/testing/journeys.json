@@ -1472,14 +1472,24 @@
       "id": "AGENT-MGMT-01",
       "title": "Agent 生命周期状态与迁移降级",
       "layer": "integration",
-      "acceptance": "状态按来源优先级和 sequence 合并；非受管状态降级；PTY 不伪报等待；新管理迁移失败不阻断旧会话采集",
+      "acceptance": "状态按来源优先级和 sequence 合并；非受管状态降级；PTY 不伪报等待；新管理迁移失败不阻断旧会话采集；HTTP 与主助手使用同一实时纳管权限，撤销/缺失/关闭服务不得凭历史采集标记授权；新纳管在首次采集前可查询",
       "boundary": "disposable Hub; external services simulated",
       "tests": [
         "tests/test_agent_lifecycle.py::test_priority_replay_and_restart",
         "tests/test_agent_lifecycle.py::test_unmanaged_state_degrades",
         "tests/test_agent_lifecycle.py::test_pty_cannot_assert_wait_or_high_confidence",
         "tests/test_agent_lifecycle.py::test_new_migration_failure_keeps_legacy_session_store",
-        "tests/test_session_management_review.py::test_capability_replay_cannot_reenable_a_later_revocation"
+        "tests/test_session_management_review.py::test_capability_replay_cannot_reenable_a_later_revocation",
+        "tests/test_session_access_consistency.py::test_revoked_session_has_identical_authority_in_http_list_detail_and_assistant",
+        "tests/test_session_access_consistency.py::test_adoption_detail_exists_before_any_capture",
+        "tests/test_session_access_consistency.py::test_readoption_keeps_old_session_uncontrollable",
+        "tests/test_session_access_consistency.py::test_unknown_authority_never_grants_controls",
+        "tests/test_session_access_consistency.py::test_authoritative_family_overrides_stale_capture",
+        "tests/test_session_access_consistency.py::test_adoption_read_failure_cannot_fall_back_to_capture",
+        "tests/test_session_access_consistency.py::test_list_authority_lookup_is_batched",
+        "tests/test_session_access_consistency.py::test_adoption_connection_failure_is_bounded",
+        "tests/test_session_access_consistency.py::test_http_managed_control_uses_session_identity",
+        "tests/test_session_access_browser.py::test_session_access_browser"
       ]
     },
     {
@@ -1492,7 +1502,12 @@
         "tests/test_session_interactions.py::test_concurrent_answer_only_enqueues_once",
         "tests/test_session_interactions.py::test_interrupted_dispatch_cannot_enqueue_again",
         "tests/test_session_management_review.py::test_response_before_request_does_not_reopen_an_answered_question",
-        "tests/test_session_question_retry.py::test_question_retry_and_memory_boundaries"
+        "tests/test_session_question_retry.py::test_question_retry_and_memory_boundaries",
+        "tests/test_session_access_consistency.py::test_http_cannot_enqueue_to_revoked_adoption",
+        "tests/test_session_access_consistency.py::test_http_hermes_followup_is_rejected_before_enqueue",
+        "tests/test_session_access_consistency.py::test_revocation_between_projection_and_dispatch_rejects_command",
+        "tests/test_session_access_consistency.py::test_adopted_question_keeps_idempotency_and_audit_actor",
+        "tests/test_session_access_consistency.py::test_http_question_recovers_command_after_adoption_audit_failure"
       ]
     },
     {

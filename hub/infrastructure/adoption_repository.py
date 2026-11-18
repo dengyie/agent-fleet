@@ -298,6 +298,31 @@ class AdoptionRepository:
             return None
         return _sql_row(row)
 
+    def get_many(self, session_ids) -> dict[str, Adoption]:
+        """Resolve one bounded session page without opening a connection per row."""
+        ids = list(dict.fromkeys(self._validate_session_id(sid) for sid in session_ids))
+        if len(ids) > 1000:
+            raise AdoptionRepositoryError("invalid_adoption")
+        if not ids:
+            return {}
+        conn = None
+        try:
+            conn = self._connect()
+            result = {}
+            # Stay below SQLite's older 999-variable limit as well.
+            for offset in range(0, len(ids), 500):
+                batch = ids[offset:offset + 500]
+                marks = ','.join('?' for _ in batch)
+                rows = conn.execute(
+                    f"SELECT * FROM adoptions WHERE session_id IN ({marks})", batch).fetchall()
+                result.update((row['session_id'], _sql_row(row)) for row in rows)
+            return result
+        except sqlite3.Error:
+            raise AdoptionRepositoryError("adoption_store") from None
+        finally:
+            if conn is not None:
+                conn.close()
+
     def list(self, machine_id: str) -> list[Adoption]:
         """All records for a machine (including revoked, retained)."""
         if not isinstance(machine_id, str) or not machine_id:

@@ -14,9 +14,7 @@ from session_schema import is_valid_session_id
 from hub.repositories import MACHINE_NAME_RE
 from hub.application.errors import ApplicationError
 from hub.application.session_service import SessionServiceError
-from hub.application.adoption_service import AdoptionServiceError
 from hub.application.supervisor_service import SupervisorServiceError
-from hub.infrastructure.adoption_repository import AdoptionRepositoryError
 from hub.domain.agent_session import SESSION_CONTROL_ACTIONS
 
 logger = logging.getLogger(__name__)
@@ -33,11 +31,10 @@ def _integer(value, minimum, maximum):
 
 
 class AgentSessionService:
-    def __init__(self, sessions, *, observe=None, adoptions=None, supervisor=None,
+    def __init__(self, sessions, *, observe=None, supervisor=None,
                  authorize=None):
         self.sessions = sessions
         self.observe = observe
-        self.adoptions = adoptions
         self.supervisor = supervisor
         self.authorize = authorize
 
@@ -59,41 +56,6 @@ class AgentSessionService:
                 tools.add('session.send_message')
         return frozenset(tools)
 
-    def _adoption(self, session_id):
-        if not session_id.startswith('adopt_'):
-            return None
-        if self.adoptions is None:
-            raise ApplicationError('adoption_unavailable', 'adoption_unavailable', 503)
-        row = self.adoptions.adoption_repo.get(session_id)
-        if row is None:
-            raise ApplicationError('unknown_session', 'unknown_session', 404)
-        return row
-
-    def _session(self, session_id):
-        adoption = self._adoption(session_id)
-        try:
-            session = self.sessions.get_session(session_id)['session']
-        except SessionServiceError as exc:
-            if exc.code != 'session_not_found' or adoption is None:
-                raise
-            # An adoption may be pending before its first captured event.
-            session = {'session_id': session_id, 'machine_id': adoption.machine_id,
-                       'managed': False, 'agent_family': adoption.agent_family,
-                       'capture_quality': adoption.capture_quality, 'current_state': 'unknown'}
-        actions = set(self.supervisor.available_actions()) if self.supervisor is not None else set()
-        actions &= {*SESSION_CONTROL_ACTIONS, 'append_user_turn'}
-        if adoption is not None:
-            session['adoption_status'] = adoption.status
-            if adoption.status != 'adopted':
-                actions.clear()
-            # Adoption control can operate before the capture stream exists.
-        elif not session.get('managed'):
-            actions.clear()
-        if session.get('agent_family') == 'hermes':
-            actions.discard('append_user_turn')
-        session['allowed_actions'] = sorted(actions)
-        return session, adoption
-
     def execute(self, *, tool, arguments, owner_id, command_id):
         if not self._authorized(owner_id):
             raise ApplicationError('forbidden', 'forbidden', 403)
@@ -101,8 +63,7 @@ class AgentSessionService:
             raise ApplicationError('tool_not_allowed', 'tool_not_allowed', 403)
         try:
             return self._execute(tool, arguments, owner_id, command_id)
-        except (SessionServiceError, AdoptionServiceError, SupervisorServiceError,
-                AdoptionRepositoryError) as exc:
+        except (SessionServiceError, SupervisorServiceError) as exc:
             raise ApplicationError(exc.code, exc.code, getattr(exc, 'status', 400)) from exc
 
     def _original_command(self, key, session_id, action, payload):
@@ -155,7 +116,7 @@ class AgentSessionService:
             if receipt['session_id'] != session_id:
                 raise ApplicationError('command_not_found', 'command_not_found', 404)
             return {'receipt': receipt}
-        session, adoption = self._session(session_id)
+        session = self.sessions.get_session(session_id)['session']
         if tool == 'session.get':
             return {'session': session}
         if tool == 'session.read_events':
@@ -191,16 +152,8 @@ class AgentSessionService:
         if original:
             return original
         try:
-            if adoption is not None:
-                # This service owns adoption state, identity-drift and family guards.
-                return self.adoptions.control(session_id, action=action, payload=payload,
-                    reason_code='operator_requested', actor=owner_id, idempotency_key=key)
-            if not session.get('managed'):
-                raise ApplicationError('session_not_managed', 'session_not_managed', 409)
-            if action not in session['allowed_actions']:
-                raise ApplicationError('session_action_unavailable', 'session_action_unavailable', 409)
-            envelope = self.supervisor.enqueue(session['machine_id'], session_id, session.get('attempt_id'),
-                action, 'operator_requested', payload=payload, idempotency_key=key)
+            return self.sessions.control(session_id, action=action, payload=payload,
+                actor=owner_id, idempotency_key=key)
         except Exception as exc:
             # Admission and its Supervisor audit commit atomically. If a later
             # adoption audit/response fails, recover the existing command instead
@@ -212,7 +165,6 @@ class AgentSessionService:
                 'session_id': session_id, 'command_id': original['command_id'],
                 'error_code': getattr(exc, 'code', 'control_response_lost')})
             return original
-        return {'session_id': session_id, 'command_id': envelope['command_id'], 'status': 'pending'}
 
 
 __all__ = ['AgentSessionService']

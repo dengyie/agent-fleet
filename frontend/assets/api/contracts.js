@@ -95,7 +95,7 @@ var SESSION_FIELDS = ['machine_id', 'session_id', 'managed', 'capture_quality',
                       'agent_family', 'status', 'started_at', 'updated_at',
                       'finished_at',
                       'capabilities', 'current_state', 'state_source',
-                      'state_confidence'];
+                      'state_confidence', 'adoption_status', 'allowed_actions'];
 
 // 每个 session event 的可见 envelope 字段（公开事件行；payload 有逐 kind 白名单）
 var SESSION_EVENT_FIELDS = ['schema_version', 'event_id', 'stream_id',
@@ -1151,18 +1151,23 @@ function parseSessionRow(row) {
   var out = pick(row, SESSION_FIELDS);
   var managed = (out.managed === true);
   out.managed = managed;
-  if (typeof out.control_capability === 'undefined') {
-    out.control_capability = managed ? 'available' : 'unavailable';
+  const adoptionStates = ['pending', 'adopted', 'revoked', 'missing', 'unavailable'];
+  if (!adoptionStates.includes(out.adoption_status)) delete out.adoption_status;
+  out.allowed_actions = Array.isArray(out.allowed_actions)
+    ? [...new Set(out.allowed_actions.filter(action => SOURCE_CONTROL_ACTIONS.includes(action)))] : [];
+  if ((out.adoption_status && out.adoption_status !== 'adopted') ||
+      (!managed && out.adoption_status !== 'adopted') ||
+      (String(out.session_id).startsWith('adopt_') && out.adoption_status !== 'adopted')) {
+    out.allowed_actions = [];
   }
-  // 非受管会话强制 best_effort + control unavailable（后端同一钳制）
+  out.control_capability = out.control_capability === 'available' && out.allowed_actions.length
+    ? 'available' : 'unavailable';
+  if (out.control_capability === 'unavailable') out.allowed_actions = [];
+  // Capture provenance does not decide current adoption authority.
   if (!managed) {
     out.capture_quality = 'best_effort';
-    out.control_capability = 'unavailable';
   } else {
     out.capture_quality = clampQuality(out.capture_quality);
-    if (out.control_capability !== 'available') {
-      out.control_capability = 'unavailable';
-    }
   }
   if (!managed) {
     // 非受管会话不应携带 attempt_id（后端 DTO 同样去掉）

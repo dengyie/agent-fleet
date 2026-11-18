@@ -17,7 +17,6 @@ def wire_assistant_management(app, config, platform, sessions, core, control):
 
     service = AgentSessionService(
         sessions.session_service, observe=core.observe_service,
-        adoptions=control.adoption_service,
         supervisor=control.supervisor_service if config.supervisor_enabled else None,
         authorize=accounts.is_active_admin if accounts is not None else None,
     )

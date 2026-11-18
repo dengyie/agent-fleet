@@ -105,4 +105,29 @@ def supervisor_receipt_status(command_id):
     })
 
 
+@bp.route('/api/sessions/<session_id>/control', methods=['POST'])
+@require_operator
+def api_session_control(session_id):
+    from hub.application.session_service import SessionServiceError
+    from hub.http._common import request_json
+    try:
+        sessions = current_app.extensions['fleet']['services'].get('sessions')
+        if sessions is None:
+            raise ApplicationError('session_unavailable', '', 503)
+        data = request_json()
+        if (not isinstance(data, dict) or set(data) - {'action', 'reason_code', 'payload'}
+                or not isinstance(data.get('action'), str)
+                or not isinstance(data.get('reason_code', 'operator_requested'), str)):
+            raise ApplicationError('invalid_request', '无效的会话控制请求', 400)
+        result = sessions.control(session_id, action=data['action'], actor=g.operator,
+            reason_code=data.get('reason_code', 'operator_requested'), payload=data.get('payload'))
+        return jsonify({**result, 'ok': True, 'action': data['action'], 'request_id': get_request_id()}), 202
+    except ApplicationError as exc:
+        return error_response(exc)
+    except SessionServiceError as exc:
+        return error_response(ApplicationError(exc.code, exc.detail, exc.status))
+    except SupervisorServiceError as exc:
+        return error_response(ApplicationError(exc.code, exc.detail, exc.status))
+
+
 __all__ = ["bp"]

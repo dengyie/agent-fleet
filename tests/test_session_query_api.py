@@ -156,7 +156,8 @@ class SessionQueryDtoTests(SessionQueryTestBase):
         self.assertNotIn("/", session.get("session_id", ""))
         self.assertNotIn("/", session.get("machine_id", ""))
         self.assertEqual(session["capture_quality"], "structured")
-        self.assertEqual(session["control_capability"], "available")
+        self.assertEqual(session["control_capability"], "unavailable")
+        self.assertEqual(session['allowed_actions'], [])  # Supervisor is disabled.
 
     def test_active_filter_excludes_terminal_and_idle_sessions(self):
         repo = self.app.extensions["fleet"]["services"]["sessions"].session_repo
@@ -181,7 +182,8 @@ class SessionQueryDtoTests(SessionQueryTestBase):
         self.assertEqual(session["session_id"], "sess_q_1")
         self.assertEqual(session["machine_id"], "mac-q-1")
         self.assertTrue(session["managed"])
-        self.assertEqual(session["control_capability"], "available")
+        self.assertEqual(session["control_capability"], "unavailable")
+        self.assertEqual(session['allowed_actions'], [])
 
     def test_detail_404_bounded(self):
         resp = self.client.get("/api/sessions/no-such-session")

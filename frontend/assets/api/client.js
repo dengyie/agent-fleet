@@ -518,8 +518,10 @@ export async function controlSession(sessionId, action, reasonCode, payload) {
       body.payload = { profile_id: payload.profile_id };
     }
   }
-  return parseControlEnqueue(await request(
-    API.adoptions + '/' + encodeURIComponent(sessionId) + '/source/control', {
+  var path = String(sessionId).startsWith('adopt_')
+    ? API.adoptions + '/' + encodeURIComponent(sessionId) + '/source/control'
+    : API.sessions + '/' + encodeURIComponent(sessionId) + '/control';
+  return parseControlEnqueue(await request(path, {
       method: 'POST',
       headers: JSON_HEADERS,
       body: body,

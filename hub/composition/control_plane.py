@@ -57,9 +57,6 @@ def build_control_plane(config, repositories: dict[str, Any], core,
         command_repository=supervisor_command_repository,
     )
 
-    if session_service is not None and config.supervisor_enabled:
-        session_service.supervisor = supervisor_service
-
     # Task 10: connect task cancel to managed-attempt termination.  Additive
     # and gated: the control router exists only when BOTH the supervisor plane
     # is enabled AND session repositories (managed-session metadata) are on.
@@ -135,6 +132,11 @@ def build_control_plane(config, repositories: dict[str, Any], core,
             core.observation_repository, adoption_repo, supervisor_service,
             sessions.transcript_repo)
         supervisor_service.set_adoption(adoption_service)
+
+    if session_service is not None:
+        session_service.adoptions = adoption_service
+        if config.supervisor_enabled:
+            session_service.supervisor = supervisor_service
 
     return ControlPlane(
         supervisor_service=supervisor_service,

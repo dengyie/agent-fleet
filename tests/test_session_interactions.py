@@ -33,6 +33,9 @@ class Supervisor:
         self.commands.append((args, kwargs))
         return {"command_id": "cmd1"}
 
+    def available_actions(self):
+        return {'append_user_turn'}
+
 
 @pytest.fixture
 def service(tmp_path):

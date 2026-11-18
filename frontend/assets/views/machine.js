@@ -11,6 +11,7 @@
  */
 
 import { pagePath, navigatePage, uiIcon } from '../routes.js';
+import { sessionAccessLabel } from '../ui/session-labels.js';
 
 var MSG_LOADING = '加载中…';
 var MSG_NO_TASKS = '暂无任务';
@@ -346,6 +347,7 @@ var SOURCE_ACTIONS_LABELS = {
 var SOURCE_STATUS_CLASSES = {
   pending: 'st-queued',
   adopted: 'st-ok',
+  managed: 'st-ok',
   revoked: 'st-err',
   terminal: 'st-unknown',
 };
@@ -359,7 +361,7 @@ function sourceStatusClass(statusText) {
   return SOURCE_STATUS_FALLBACK_CLASS;
 }
 
-// 可交互控制只允许在“已纳管”座席上出现（adopted 的五个固定动作令牌）。
+// Adopted sources and native managed sessions use their declared action subset.
 var SOURCE_GATED_STATUS = 'adopted';
 // 非 admitted 状态展示的固定标签（有界常量串，绝不拼接任意状态文本）。
 var SOURCE_PENDING_LABEL = '纳管处理中…';
@@ -370,7 +372,7 @@ var SOURCE_OTHER_LABEL = '无可用控制动作';
  * 渲染源控制面板（有界、DOM-safe）。
  *
  * source 只带视图层已有的有界字段（session_id + 固定 status），actions 是可
- * 执行动作令牌子集。非仅纳管状态把行动按钮团门控到 ``status == adopted``：
+ * 执行动作令牌子集。控制状态必须是 adopted 或原生 managed：
  * pending -> 状态章 + 固定“纳管处理中…”标签（无按钮）；revoked -> 状态章 +
  * 固定“纳管已撤销”标签（无按钮）；其它状态只显示章 + 固定 empty 标签。
  * 点击仅把固定令牌 + session_id 交给 onAction —— 本模块不 fetch、不拼
@@ -387,7 +389,7 @@ export function renderSourceControl(source, actions, onAction) {
   }
   var statusText = fmtValue(source.status);
   panel.appendChild(h('div', 'source-status ' + sourceStatusClass(statusText),
-                      statusText));
+                      statusText === 'managed' ? '受管会话' : statusText));
   if (statusText === 'pending') {
     panel.appendChild(h('div', 'meta', SOURCE_PENDING_LABEL));
     return panel;
@@ -396,7 +398,7 @@ export function renderSourceControl(source, actions, onAction) {
     panel.appendChild(h('div', 'meta', SOURCE_REVOKED_LABEL));
     return panel;
   }
-  if (statusText !== SOURCE_GATED_STATUS) {
+  if (statusText !== SOURCE_GATED_STATUS && statusText !== 'managed') {
     // terminal / 未知状态：只显示，不存在可交互按钮。
     panel.appendChild(h('div', 'meta', SOURCE_OTHER_LABEL));
     return panel;
@@ -787,7 +789,7 @@ function renderMachineSessions(host, sessions, errorText) {
       link.setAttribute('href', href);
     }
     row.appendChild(link);
-    row.appendChild(h('span', 'meta', session.managed ? '受管' : '非受管'));
+    row.appendChild(h('span', 'meta', sessionAccessLabel(session)));
     if (typeof session.capture_quality === 'string' && session.capture_quality) {
       row.appendChild(h('span', 'meta', session.capture_quality));
     }

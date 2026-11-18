@@ -19,6 +19,9 @@ class SupervisorRecorder:
         self.commands.append((args, kwargs))
         return {"command_id": "controlled-command"}
 
+    def available_actions(self):
+        return {'append_user_turn'}
+
 
 @pytest.fixture
 def management(tmp_path):

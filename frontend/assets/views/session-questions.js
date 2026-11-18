@@ -1,8 +1,9 @@
 /* Structured questions: bounded DOM, persistent drafts and signed-command receipts. */
 const MAX_QUESTION_DRAFTS = 100;
-const TERMINAL_RECEIPTS = new Set(['succeeded', 'failed', 'expired', 'rejected', 'cancelled']);
+const TERMINAL_RECEIPTS = new Set(['succeeded', 'already_finished', 'failed', 'expired', 'rejected', 'cancelled']);
 const INPUT_REJECTIONS = new Set(['invalid_interaction_answer', 'invalid_json', 'invalid_message']);
-const CLOSED_QUESTIONS = new Set(['interaction_answered', 'interaction_expired', 'session_not_managed']);
+const CLOSED_QUESTIONS = new Set(['interaction_answered', 'interaction_expired', 'session_not_managed',
+  'adoption_revoked', 'unknown_session', 'session_action_unavailable', 'unsupported_action']);
 
 function el(tag, text, className) {
   const node = document.createElement(tag);
@@ -23,7 +24,7 @@ export function renderQuestions(host, {events, session, api, state, paint, enabl
     clearTimeout(draft.timer);
     state.questions.delete(id);
   }
-  const canAnswer = enabled && session.managed && session.capabilities?.includes('interactive_questions') &&
+  const canAnswer = enabled && session.allowed_actions?.includes('append_user_turn') && session.capabilities?.includes('interactive_questions') &&
     !['closed', 'failed'].includes(session.status) && !['completed', 'failed', 'stopped'].includes(session.current_state);
   const rendered = new Set();
   for (const event of events) {
@@ -129,23 +130,41 @@ export function renderQuestions(host, {events, session, api, state, paint, enabl
     card.append(status);
     if (draft.command) card.append(el('p', draft.command, 'meta'));
     host.append(card);
+    if (draft.command && !TERMINAL_RECEIPTS.has(draft.status) && !draft.polling && !draft.timer && !state.suspended) {
+      poll(api, state, draft, paint, draft.pollCount || 0);
+    }
   }
 }
 
 async function poll(api, state, draft, paint, count) {
-  if (state.disposed || draft.disposed || count >= 30) return;
+  if (state.disposed || state.suspended || draft.disposed || draft.polling || !api.getControlReceipt) return;
+  clearTimeout(draft.timer);
+  draft.timer = null;
+  const pending = {};
+  draft.polling = pending;
+  const current = () => !state.disposed && !state.suspended && !draft.disposed && draft.polling === pending;
   try {
     const receipt = await api.getControlReceipt(draft.command);
-    if (state.disposed || draft.disposed) return;
+    if (!current()) return;
     draft.status = receipt.status;
-    paint();
-    if (!['queued', 'pending', 'delivered', 'accepted', 'executing'].includes(receipt.status)) return;
   } catch (error) {
-    if (state.disposed || draft.disposed) return;
+    if (!current()) return;
     draft.status = '回执暂不可用';
-    paint();
   }
-  draft.timer = setTimeout(() => poll(api, state, draft, paint, count + 1), 1000);
+  draft.polling = null;
+  draft.pollCount = count + 1;
+  if (!TERMINAL_RECEIPTS.has(draft.status)) {
+    draft.timer = setTimeout(() => poll(api, state, draft, paint, count + 1), count < 30 ? 1000 : 5000);
+  }
+  paint();
+}
+
+export function suspendQuestions(state) {
+  for (const draft of state.questions?.values() || []) {
+    clearTimeout(draft.timer);
+    draft.timer = null;
+    draft.polling = null;
+  }
 }
 
 export function disposeQuestions(state) {
