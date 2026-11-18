@@ -6,7 +6,7 @@ import {
 const labels = {
   plugins: ['插件中心', '插件中心', '管理官方插件及其在各节点上的运行状态。', 'PLUGINS'],
   settings: ['设置', '设置', '管理模型源、VM、工作区、集成与系统参数。', 'SETTINGS'],
-  fleet: ['总览', '集群总览', '节点、任务与服务状态，一处掌握。', 'WORKSPACE OVERVIEW'],
+  fleet: ['总览', '工作空间总览', '系统近况，一目了然。', 'WORKSPACE OVERVIEW'],
   assistant: ['主助手', '主助手', '从一个想法开始，让助手把工作推进到完成。', 'ASSISTANT'],
   muse: ['Muse', 'Muse', '连接 Muse，管理你的对话和任务。', 'MUSE'],
   monitoring: ['服务监控', '服务监控', '查看服务健康与待处理事件，按授权执行操作。', 'SERVICE HEALTH'],
@@ -52,7 +52,7 @@ export function mountNavigation(route, store) {
       if (link.dataset.nav === currentRoute.page) link.setAttribute('aria-current', 'page');
       else link.removeAttribute('aria-current');
     });
-    document.querySelectorAll('#sidebar-conversations a, #sidebar-nodes a').forEach(link => {
+    document.querySelectorAll('#sidebar-conversations a').forEach(link => {
       if (new URL(link.href, window.location.href).pathname === window.location.pathname) link.setAttribute('aria-current', 'page');
       else link.removeAttribute('aria-current');
     });
@@ -68,10 +68,6 @@ export function mountNavigation(route, store) {
   const searchStatus = document.getElementById('conversation-search-status');
   const historyHeading = document.getElementById('conversation-heading');
   const archiveToggle = document.getElementById('archived-toggle');
-  const resizeHandle = document.getElementById('sidebar-nodes-resize');
-  const historyList = document.getElementById('sidebar-conversations');
-  const nodeList = document.getElementById('sidebar-nodes');
-  const adjustableLists = document.getElementById('sidebar-adjustable-lists');
   const titleDialog = document.getElementById('conversation-title-dialog');
   const titleInput = document.getElementById('conversation-title-input');
   const titleError = document.getElementById('conversation-title-error');
@@ -97,68 +93,6 @@ export function mountNavigation(route, store) {
   const onExpand = () => setCollapsed(false);
   collapse.addEventListener('click', onCollapse);
   expand.addEventListener('click', onExpand);
-  const MIN_NODE_HEIGHT = 60;
-  const MIN_HISTORY_HEIGHT = 70;
-  function maxNodeHeight() {
-    const group = adjustableLists.getBoundingClientRect();
-    const history = historyList.getBoundingClientRect();
-    const nodes = nodeList.getBoundingClientRect();
-    const fixedHeight = history.top - group.top + nodes.top - history.bottom + Math.max(0, group.bottom - nodes.bottom);
-    return Math.max(MIN_NODE_HEIGHT, Math.floor(Math.min(480, window.innerHeight * 0.5, group.height - fixedHeight - MIN_HISTORY_HEIGHT)));
-  }
-  function setNodeHeight(value, persist = false) {
-    const max = maxNodeHeight();
-    const height = Math.round(Math.max(MIN_NODE_HEIGHT, Math.min(max, value)));
-    sidebar.style.setProperty('--sidebar-nodes-height', height + 'px');
-    resizeHandle.setAttribute('aria-valuemin', String(MIN_NODE_HEIGHT));
-    resizeHandle.setAttribute('aria-valuemax', String(Math.round(max)));
-    resizeHandle.setAttribute('aria-valuenow', String(height));
-    if (persist) {
-      try { localStorage.setItem('fleet-sidebar-nodes-height', String(height)); } catch (_) {}
-    }
-    return height;
-  }
-  let savedNodeHeight = Number.NaN;
-  try { savedNodeHeight = Number(localStorage.getItem('fleet-sidebar-nodes-height')); } catch (_) {}
-  const initialNodeHeight = Number.isFinite(savedNodeHeight) && savedNodeHeight > 0
-    ? savedNodeHeight : window.innerHeight * 0.22;
-  setNodeHeight(initialNodeHeight);
-  let resizeStart = null;
-  function onResizePointerDown(event) {
-    if (!event.isPrimary || event.button !== 0) return;
-    event.preventDefault();
-    resizeHandle.focus();
-    resizeStart = {y: event.clientY, height: nodeList.getBoundingClientRect().height};
-    resizeHandle.setPointerCapture(event.pointerId);
-  }
-  function onResizePointerMove(event) {
-    if (!resizeStart) return;
-    setNodeHeight(resizeStart.height - (event.clientY - resizeStart.y));
-  }
-  function onResizePointerUp(event) {
-    if (!resizeStart) return;
-    resizeStart = null;
-    setNodeHeight(Number(resizeHandle.getAttribute('aria-valuenow')), true);
-    if (resizeHandle.hasPointerCapture(event.pointerId)) resizeHandle.releasePointerCapture(event.pointerId);
-  }
-  function onResizeKeydown(event) {
-    const current = Number(resizeHandle.getAttribute('aria-valuenow'));
-    if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
-      event.preventDefault();
-      setNodeHeight(current + (event.key === 'ArrowUp' ? 16 : -16), true);
-    } else if (event.key === 'Home') {
-      event.preventDefault(); setNodeHeight(MIN_NODE_HEIGHT, true);
-    } else if (event.key === 'End') {
-      event.preventDefault(); setNodeHeight(maxNodeHeight(), true);
-    }
-  }
-  const onViewportResize = () => setNodeHeight(Number(resizeHandle.getAttribute('aria-valuenow')));
-  resizeHandle.addEventListener('pointerdown', onResizePointerDown);
-  resizeHandle.addEventListener('pointermove', onResizePointerMove);
-  resizeHandle.addEventListener('pointerup', onResizePointerUp);
-  resizeHandle.addEventListener('pointercancel', onResizePointerUp);
-  resizeHandle.addEventListener('keydown', onResizeKeydown);
-  window.addEventListener('resize', onViewportResize);
   function filterHistory() {
     const query = search.value.trim().toLocaleLowerCase();
     const links = [...document.querySelectorAll('#sidebar-conversations .conversation-history-entry')];
@@ -377,30 +311,11 @@ export function mountNavigation(route, store) {
     });
   };
   deleteConfirm.addEventListener('click', onDeleteConfirm);
-  let renderedNodes;
   const unsubscribe = store.subscribe(() => {
     const state = store.getState();
     const status = document.getElementById('connection-status');
     status.dataset.state = state.connection;
     status.querySelector('span').textContent = state.connection === 'open' ? '实时连接' : state.connection === 'connecting' ? '正在连接' : '连接中断';
-    if (!state.status) return;
-    const rows = state.status.machines || [];
-    const nodes = JSON.stringify(rows.map(machine => [machine.machine, machine.online]));
-    if (renderedNodes === nodes) return;
-    renderedNodes = nodes;
-    const list = nodeList;
-    list.replaceChildren();
-    document.getElementById('node-count').textContent = String(rows.length);
-    if (!rows.length) {
-      const empty = document.createElement('p'); empty.className = 'sidebar-empty'; empty.textContent = '尚未连接计算节点'; list.appendChild(empty);
-    }
-    for (const machine of rows) {
-      const link = document.createElement('a'); link.href = pagePath('machine', machine.machine);
-      const dot = document.createElement('i'); dot.className = machine.online ? 'node-dot online' : 'node-dot'; link.appendChild(dot);
-      const text = document.createElement('span'); text.textContent = machine.machine; link.appendChild(text);
-      if (currentRoute.page === 'machine' && currentRoute.id === machine.machine) link.setAttribute('aria-current', 'page');
-      list.appendChild(link);
-    }
   });
   const dispose = () => {
     disposed = true;
@@ -411,12 +326,6 @@ export function mountNavigation(route, store) {
     titleSave.removeEventListener('click', onTitleSave);
     deleteConfirm.removeEventListener('click', onDeleteConfirm);
     cancelButtons.forEach(item => item.removeEventListener('click', onDialogCancel));
-    resizeHandle.removeEventListener('pointerdown', onResizePointerDown);
-    resizeHandle.removeEventListener('pointermove', onResizePointerMove);
-    resizeHandle.removeEventListener('pointerup', onResizePointerUp);
-    resizeHandle.removeEventListener('pointercancel', onResizePointerUp);
-    resizeHandle.removeEventListener('keydown', onResizeKeydown);
-    window.removeEventListener('resize', onViewportResize);
     window.removeEventListener('fleet-conversations-updated', refreshHistory);
     window.removeEventListener('focus', refreshHistory);
     unsubscribe();

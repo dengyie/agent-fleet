@@ -33,6 +33,7 @@ function protectConsole() {
   const retry = gate.querySelector('button');
   const routeViews = new Map();
   const MAX_CACHED_ROUTES = 5;
+  let settingsBackgroundView = null, settingsReturnUrl = '/assistant';
   let activeRouteView = null, disposeNavigation, mounted = false, checking = false, redirecting = false, account = null;
   let lastSessionCheckAt = 0;
   let sessionRecheckPending = false;
@@ -73,8 +74,9 @@ function protectConsole() {
     }
     routeViews.clear();
     activeRouteView = null;
+    settingsBackgroundView = null;
     mounted = false;
-    for (const id of ['route-view', 'sidebar-conversations', 'sidebar-nodes']) {
+    for (const id of ['route-view', 'sidebar-conversations']) {
       document.getElementById(id).replaceChildren();
     }
   }
@@ -100,6 +102,7 @@ function protectConsole() {
     }
     // A background submission may finish after the user opens another page.
     // Update its cache identity without navigating away from that page.
+    if (settingsBackgroundView === view) settingsReturnUrl = pagePath('conversation', conversationId);
     if (activeRouteView !== view) return;
     route = nextRoute;
     window.history.replaceState(null, '', pagePath('conversation', conversationId));
@@ -108,10 +111,13 @@ function protectConsole() {
   function mountRoute(view) {
     const target = view.host;
     const mountEntity = {machine: mountMachine, task: mountTask, session: mountSession};
-    if (route.page === 'settings') view.teardown = mountSettings(target, {section: route.id, account});
+    if (route.page === 'settings') view.teardown = mountSettings(target, {section: route.id, account, onClose: () => {
+      navigateTo(settingsReturnUrl);
+      document.querySelector('[data-nav="settings"]')?.focus();
+    }});
     else if (route.page === 'fleet') view.teardown = mountFleet(target, store, client);
     else if (route.page === 'assistant') view.teardown = mountAssistant(target, {
-      conversationId: route.id, account,
+      conversationId: route.id, account, store,
       onConversationCreated: id => adoptConversation(view, id),
     });
     else if (route.page === 'muse') view.teardown = mountMuse(target);
@@ -135,7 +141,18 @@ function protectConsole() {
       if (disposeNavigation && typeof disposeNavigation.updateRoute === 'function') disposeNavigation.updateRoute(route);
       return;
     }
-    suspendRouteView(activeRouteView);
+    if (nextRoute.page === 'settings' && route.page !== 'settings') {
+      settingsBackgroundView = activeRouteView;
+      settingsReturnUrl = route.page === 'assistant'
+        ? (route.id ? pagePath('conversation', route.id) : pagePath('assistant'))
+        : (route.id ? pagePath(route.page, route.id) : pagePath(route.page));
+      if (settingsBackgroundView) settingsBackgroundView.host.inert = true;
+    } else suspendRouteView(activeRouteView);
+    if (nextRoute.page !== 'settings' && settingsBackgroundView) {
+      if (settingsBackgroundView.key !== key) suspendRouteView(settingsBackgroundView);
+      else settingsBackgroundView.host.inert = false;
+      settingsBackgroundView = null;
+    }
     route = nextRoute;
     if (disposeNavigation && typeof disposeNavigation.updateRoute === 'function') {
       disposeNavigation.updateRoute(route);
@@ -161,7 +178,9 @@ function protectConsole() {
     }
     activeRouteView = view;
     while (routeViews.size > MAX_CACHED_ROUTES) {
-      destroyRouteView(routeViews.values().next().value);
+      const oldest = [...routeViews.values()].find(entry => entry !== activeRouteView && entry !== settingsBackgroundView);
+      if (!oldest) break;
+      destroyRouteView(oldest);
     }
   }
   function navigateTo(url, {replace = false, fromHistory = false} = {}) {
@@ -211,9 +230,14 @@ function protectConsole() {
   window.addEventListener('popstate', onPopState);
   function mount() {
     disposeNavigation = mountNavigation(route, store);
-    renderRoute(route);
+    if (route.page === 'settings') {
+      const settingsRoute = route;
+      route = {page: 'assistant'};
+      renderRoute(route);
+      renderRoute(settingsRoute);
+    } else renderRoute(route);
     if ((!account || account.role === 'admin') && route.page !== 'fleet') client.getStatus().then(status => store.setStatus(status)).catch(() => {
-      document.getElementById('sidebar-nodes').textContent = '节点列表暂时不可用';
+      // Status errors are shown by the overview and node panel.
     });
     mounted = true;
   }
@@ -253,7 +277,6 @@ function protectConsole() {
       if (account && account.role !== "admin") {
         document.querySelector('[data-nav="fleet"]').hidden = true;
         document.querySelector('[data-nav="monitoring"]').hidden = true;
-        document.getElementById("sidebar-nodes").textContent = "节点由管理员分配";
         if (!isPageAllowedForAccount(route.page, account)) {
           window.history.replaceState(null, '', '/assistant');
           route = resolveRoute();

@@ -28,12 +28,20 @@ const GROUPS = [
   ['系统', ['runtime']],
   ['个人设置', ['account', 'appearance']],
 ];
-export function mountSettings(root, {section = 'models', account = null} = {}) {
+export function mountSettings(root, {section = 'models', account = null, onClose = () => navigatePage(pagePath('assistant'))} = {}) {
   let disposed = false, suspended = false, views = [], epoch = 0;
   const admin = !account || account.role === 'admin';
   const allowed = SECTIONS.filter(([id]) => admin || ['account', 'appearance'].includes(id));
   const selected = allowed.some(([id]) => id === section) ? section : allowed[0][0];
   root.classList.add('settings-page');
+  const dialog = document.createElement('dialog'); dialog.className = 'settings-dialog';
+  dialog.setAttribute('aria-label', '设置');
+  const close = document.createElement('button'); close.type = 'button'; close.className = 'icon-button settings-close';
+  close.setAttribute('aria-label', '关闭设置'); close.title = '关闭设置 · Esc'; close.append(uiIcon('x', {size: 18}));
+  close.addEventListener('click', onClose);
+  dialog.addEventListener('cancel', event => { event.preventDefault(); onClose(); });
+  const layout = document.createElement('div'); layout.className = 'settings-layout';
+  dialog.append(close, layout); root.append(dialog);
   const nav = document.createElement('nav'); nav.className = 'settings-navigation'; nav.setAttribute('aria-label', '设置分类');
   const navHeader = el('div', null, 'settings-nav-header');
   navHeader.append(el('strong', '设置'), el('span', '配置与偏好'));
@@ -72,7 +80,8 @@ export function mountSettings(root, {section = 'models', account = null} = {}) {
     noResults.hidden = links.some(({link}) => !link.hidden);
   });
   const body = el('div', null, 'settings-content');
-  root.append(nav, body);
+  layout.append(nav, body);
+  dialog.showModal();
   if (['models', 'nodes', 'workspaces', 'defaults'].includes(selected)) views.push(mountCatalog(body, selected));
   else if (['runtime', 'hosts'].includes(selected)) views.push(mountRuntime(body, selected));
   else if (selected === 'account') {
@@ -99,8 +108,8 @@ export function mountSettings(root, {section = 'models', account = null} = {}) {
       const link = el('a', '配置集成运行开关', 'button-secondary'); link.href = pagePath('settings', 'runtime'); body.append(link);
     } catch (error) { if (!disposed) status.textContent = error.detail || '集成配置加载失败，请重新进入此分类重试'; }
   }
-  const dispose = () => { disposed = true; epoch++; views.forEach(view => view?.()); views = []; root.classList.remove('settings-page'); };
-  dispose.suspend = () => { suspended = true; views.forEach(view => view?.suspend?.()); };
-  dispose.resume = () => { suspended = false; views.forEach(view => view?.resume?.()); };
+  const dispose = () => { disposed = true; epoch++; views.forEach(view => view?.()); views = []; dialog.close(); dialog.remove(); root.classList.remove('settings-page'); };
+  dispose.suspend = () => { suspended = true; dialog.close(); views.forEach(view => view?.suspend?.()); };
+  dispose.resume = () => { suspended = false; if (!dialog.open) dialog.showModal(); views.forEach(view => view?.resume?.()); };
   return dispose;
 }

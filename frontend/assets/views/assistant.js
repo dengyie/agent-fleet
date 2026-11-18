@@ -4,6 +4,7 @@ import { uiIcon, pagePath } from '../routes.js';
 import { createAssistantService } from './assistant/service.js';
 import { createConversationState, mergeConversationPage as mergeConversationState } from './assistant/conversation-state.js';
 import { mountWorkflowPanel } from './assistant/workflow.js';
+import { mountNodePanel } from './assistant/nodes.js';
 import { mountInspector } from './assistant/workspace.js';
 import { el, clear, showError, renderMessages, renderEvents, renderExecutionWindow, renderArtifacts, renderLegacyProjection, renderUnknownCommands, memoryReference, renderMemoryItems, renderSelectedMemoryItems } from './assistant/panels.js';
 function token() { if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID(); return 'turn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2); }
@@ -73,11 +74,14 @@ export function mountAssistant(target, options) {
   if (canAdminister) contextSections.push(disclosure(legacySection, '关联任务', false));
   clear(root); root.appendChild(heading); root.appendChild(chat); root.appendChild(inspector); target.appendChild(root);
   var workflowTeardown = null;
+  var nodeSection = el('section', 'workspace-nodes');
+  var nodePanel = canAdminister ? mountNodePanel(nodeSection, options.store) : null;
   var inspectorGroups = [
     {id: 'artifacts', title: '产物', sections: [artifactSection]},
     {id: 'activity', title: '运行', sections: executionSections},
     {id: 'context', title: '上下文', sections: contextSections}
   ];
+  if (canAdminister) inspectorGroups.push({id: 'nodes', title: '节点', sections: [nodeSection], onSelect: () => nodePanel.activate()});
   if (canAdminister) inspectorGroups.push({id: 'workflows', title: '流程', sections: [workflowSection], hidden: true});
   var inspectorUi = mountInspector(root, heading, inspector, inspectorGroups);
   var conversationId = options.conversationId || null; var conversationWorkspaceId = null; var conversationArchived = false; var activeRunId = null; var latestRunId = null; var cursor = 0; var polling = false; var windowEventCursor = 0; var windowPolling = false; var windowState = { loading: false, error: null, window: null, mode: 'disconnected', events: [], holderId: token(), leaseToken: null, leaseExpiresAt: 0 };
@@ -708,7 +712,7 @@ export function mountAssistant(target, options) {
     }
   }
   var settingsDirty = false;
-  function onSettingsUpdated() { settingsDirty = true; }
+  function onSettingsUpdated() { settingsDirty = true; if (!suspended) refreshSettingsCatalog(); }
   window.addEventListener('fleet-settings-updated', onSettingsUpdated);
   async function refreshSettingsCatalog() {
     try {
@@ -737,6 +741,7 @@ export function mountAssistant(target, options) {
     pauseWindowPoll();
     if (workflowTeardown) workflowTeardown();
     inspectorUi.dispose();
+    nodePanel?.();
     timers.forEach(clearTimeout);
     timers.clear();
   }

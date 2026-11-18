@@ -1271,8 +1271,8 @@ class ViewBoundaryTests(unittest.TestCase):
     def test_views_encode_page_navigation_with_page_path(self):
         fleet = (FRONTEND_DIR / 'assets' / 'views' / 'fleet.js').read_text()
         machine = (FRONTEND_DIR / 'assets' / 'views' / 'machine.js').read_text()
-        # 机器导航必须用编码的 pagePath("machine", name)
-        self.assertIn("pagePath('machine', name)", fleet)
+        # 总览节点详情和设置入口必须使用编码后的内部路由。
+        self.assertIn("pagePath('machine', machine.machine)", fleet)
         self.assertIn("import { pagePath } from '../routes.js'", fleet)
         # 任务导航用 pagePath("task", taskId)
         self.assertIn("pagePath('task', task.task_id)", machine)
@@ -1281,10 +1281,11 @@ class ViewBoundaryTests(unittest.TestCase):
         for source in (fleet, machine):
             self.assertIn('setAttribute', source)
 
-    def test_fleet_dispatch_link_targets_create_form_anchor(self):
+    def test_fleet_overview_keeps_node_management_without_duplicate_task_actions(self):
         fleet = (FRONTEND_DIR / 'assets' / 'views' / 'fleet.js').read_text()
-        self.assertIn("pagePath('machine', name) + '#task-create-form'", fleet)
-        self.assertIn('下发任务', fleet)
+        self.assertIn("pagePath('machine', machine.machine)", fleet)
+        self.assertIn("'/settings/nodes'", fleet)
+        self.assertNotIn('下发任务', fleet)
 
     def test_metric_bars_do_not_invent_four_core_load_percent(self):
         fleet = (FRONTEND_DIR / 'assets' / 'views' / 'fleet.js').read_text()
@@ -1295,10 +1296,9 @@ class ViewBoundaryTests(unittest.TestCase):
         self.assertNotIn('function loadPct', fleet)
         self.assertNotIn("appendMetricBar(card, '负载'", fleet)
         self.assertNotIn("appendMetricBar(host, '负载'", machine)
-        self.assertIn("statItem('负载', sys.load)", fleet)
+        self.assertIn("'负载 ' + fmtValue(load)", fleet)
         self.assertIn("kv('负载', fmtValue(sys.load))", machine)
-        self.assertIn("appendMetricBar(card, '内存'", fleet)
-        self.assertIn("appendMetricBar(card, '磁盘'", fleet)
+        self.assertNotIn('appendMetricBar', fleet)
         self.assertIn("appendMetricBar(host, '内存'", machine)
         self.assertIn("appendMetricBar(host, '磁盘'", machine)
 
