@@ -26,7 +26,8 @@ import { pagePath } from '../routes.js';
 import { uiIcon } from '../routes.js';
 import { renderSourceControl } from './machine.js';
 import { mountHandoffPanel } from './session-handoff.js';
-import { renderQuestions, disposeQuestions } from './session-questions.js';
+import { renderQuestions, disposeQuestions, suspendQuestions } from './session-questions.js';
+import { sessionAccessLabel } from '../ui/session-labels.js';
 
 var MSG_LOADING = '加载中…';
 var MSG_ERROR = '加载失败：';
@@ -175,7 +176,7 @@ function metaTime(ts) {
 function sessionHeading(sessionId) {
   var heading = h('h1', 'session-heading');
   heading.appendChild(uiIcon('terminal', { size: 20 }));
-  heading.appendChild(document.createTextNode('会话 ' + String(sessionId)));
+  heading.appendChild(h('span', null, '会话 ' + String(sessionId)));
   return heading;
 }
 
@@ -206,10 +207,10 @@ function renderBadges(host, session) {
   var badges = h('div', 'session-badges');
   badges.appendChild(h('span', 'badge ' +
     (session.managed ? 'badge-managed' : 'badge-unmanaged'),
-    session.managed ? '受管' : '非受管'));
+    sessionAccessLabel(session)));
   badges.appendChild(h('span', 'badge badge-quality',
     '采集 ' + qualityLabel(session.capture_quality)));
-  if (session.managed) {
+  if (session.managed || session.adoption_status) {
     badges.appendChild(h('span', 'badge badge-control ' +
       controlStateClass(session.control_capability),
       session.control_capability === 'available' ? '可控制' : '控制不可用'));
@@ -526,6 +527,7 @@ function enqueueControl(clientMethods, viewState, paint, sid, action, payload) {
     viewState.controlNotice = '已入队 ' + statusText +
       (cmd ? (' · ' + cmd) : '') + '（未执行）';
     viewState.controlError = null;
+    paint();
     if (cmd && typeof clientMethods.getControlReceipt === 'function') {
       pollControlReceipt(clientMethods, viewState, paint, cmd, 0);
     }
@@ -533,15 +535,24 @@ function enqueueControl(clientMethods, viewState, paint, sid, action, payload) {
       paint();
       return;
     }
-    return clientMethods.getSessionEvents(sid, 100)
+    var afterCursor = viewState.pageStarts[viewState.pageStarts.length - 1];
+    var pageDepth = viewState.pageStarts.length;
+    return clientMethods.getSessionEvents(sid, 100, afterCursor)
       .then(function (events) {
-        if (viewState.disposed) {
+        if (viewState.disposed || viewState.pageStarts.length !== pageDepth ||
+            viewState.pageStarts[pageDepth - 1] !== afterCursor) {
           return;
         }
         if (events && Array.isArray(events.events)) {
-          viewState.hasNextPage = events.events.length > 100;
-          viewState.events = events.events.slice(0, 100);
+          viewState.hasNextPage = events.has_more;
+          viewState.nextCursor = events.next_cursor;
+          viewState.events = events.events;
         }
+        paint();
+      }).catch(function () {
+        // Admission already succeeded. A failed read must not invite a duplicate command.
+        if (viewState.disposed) return;
+        viewState.controlError = '事件刷新失败，命令已入队；请查看控制回执。';
         paint();
       });
   }).catch(function (err) {
@@ -557,21 +568,34 @@ function enqueueControl(clientMethods, viewState, paint, sid, action, payload) {
 }
 
 function pollControlReceipt(clientMethods, viewState, paint, commandId, attempt) {
-  if (viewState.disposed || !commandId || attempt > 12 ||
+  if (viewState.disposed || !commandId ||
       typeof clientMethods.getControlReceipt !== 'function') {
     return;
   }
-  viewState.receiptPending = {commandId: commandId, attempt: attempt};
+  var pending = {commandId: commandId, attempt: attempt};
+  viewState.receiptPending = pending;
+  clearTimeout(viewState.receiptTimer);
+  viewState.receiptTimer = null;
   if (viewState.suspended) return;
+  function current() {
+    return !viewState.disposed && !viewState.suspended &&
+      viewState.receiptPending === pending;
+  }
+  function retry() {
+    if (!current()) return;
+    pending.attempt = attempt + 1;
+    viewState.receiptTimer = setTimeout(function () {
+      viewState.receiptTimer = null;
+      if (current()) pollControlReceipt(clientMethods, viewState, paint, commandId, attempt + 1);
+    }, attempt < 12 ? 1000 : 5000);
+  }
   Promise.resolve()
     .then(function () {
       return clientMethods.getControlReceipt(commandId);
     })
     .then(function (receipt) {
-      if (viewState.disposed || viewState.suspended || !receipt || typeof receipt.status !== 'string') {
-        return;
-      }
-      viewState.receiptPending = null;
+      if (!current()) return;
+      if (!receipt || typeof receipt.status !== 'string') { retry(); return; }
       var status = receipt.status;
       var reason = (typeof receipt.reason === 'string' && receipt.reason)
         ? (' · ' + receipt.reason) : '';
@@ -579,17 +603,15 @@ function pollControlReceipt(clientMethods, viewState, paint, commandId, attempt)
       viewState.controlError = null;
       paint();
       if (['queued', 'delivered', 'accepted', 'executing'].indexOf(status) !== -1) {
-        viewState.receiptPending = {commandId: commandId, attempt: attempt + 1};
-        viewState.receiptTimer = setTimeout(function () {
-          viewState.receiptTimer = null;
-          if (viewState.disposed || viewState.suspended) return;
-          pollControlReceipt(clientMethods, viewState, paint, commandId, attempt + 1);
-        }, 1000);
-      }
+        retry();
+      } else viewState.receiptPending = null;
     })
     .catch(function () {
-      // The command remains queued/pending if the read path is temporarily
-      // unavailable; the next refresh can query it again.
+      // Retrying this read cannot re-submit or execute the command.
+      if (!current()) return;
+      viewState.controlNotice = '命令已入队，回执暂不可用，正在重新查询。';
+      paint();
+      retry();
     });
 }
 
@@ -682,25 +704,26 @@ function renderLocalProfilePicker(host, session, profiles, viewState,
 function renderControlPanel(host, events, session, viewState, clientMethods, redraw, store) {
   host.appendChild(h('h3', 'control-heading', '控制状态'));
   var paint = (typeof redraw === 'function') ? redraw : function () {};
-  var canControl = session && session.managed === true &&
+  var actions = session && Array.isArray(session.allowed_actions) ? session.allowed_actions : [];
+  var canControl = session &&
     session.control_capability === 'available' &&
     typeof clientMethods.controlSession === 'function' &&
     typeof session.session_id === 'string' && session.session_id;
   if (canControl) {
     var source = {
       session_id: session.session_id,
-      status: 'adopted',
-      actions: FIVE_CONTROL_ACTIONS,
+      status: session.adoption_status || 'managed',
+      actions: actions,
     };
-    host.appendChild(renderSourceControl(source, FIVE_CONTROL_ACTIONS,
+    host.appendChild(renderSourceControl(source, actions.filter(action => FIVE_CONTROL_ACTIONS.includes(action)),
       function (action, sid) {
         enqueueControl(clientMethods, viewState, paint, sid, action);
       }));
     var flags = controlFeatures(store);
-    if (flags.append_user_turn) {
+    if (flags.append_user_turn && actions.includes('append_user_turn')) {
       renderFollowUpTurn(host, session, viewState, clientMethods, paint);
     }
-    if (flags.apply_local_profile) {
+    if (flags.apply_local_profile && actions.includes('apply_local_profile')) {
       renderLocalProfilePicker(host, session, viewState.localProfiles || [],
         viewState, clientMethods, paint);
     }
@@ -714,7 +737,7 @@ function renderControlPanel(host, events, session, viewState, clientMethods, red
     host.appendChild(h('p', 'err', viewState.controlError));
   }
   if (typeof clientMethods.revokeAdoption === 'function' &&
-      session && session.managed === true &&
+      session && ['pending', 'adopted'].includes(session.adoption_status) &&
       typeof session.session_id === 'string' && session.session_id) {
     var revokeBtn = document.createElement('button');
     revokeBtn.setAttribute('type', 'button');
@@ -1169,6 +1192,7 @@ export function mountSession(root, sessionId, store, client, routeSequence) {
   }
   teardown.suspend = function () {
     viewState.suspended = true;
+    suspendQuestions(viewState);
     if (viewState.receiptTimer) {
       clearTimeout(viewState.receiptTimer);
       viewState.receiptTimer = null;
@@ -1183,7 +1207,7 @@ export function mountSession(root, sessionId, store, client, routeSequence) {
     render();
     refreshFromSummary();
     if (viewState.receiptPending) {
-      pollControlReceipt(clientMethods, viewState, paint, viewState.receiptPending.commandId,
+      pollControlReceipt(clientMethods, viewState, render, viewState.receiptPending.commandId,
         viewState.receiptPending.attempt);
     }
   };

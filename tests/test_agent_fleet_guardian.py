@@ -316,30 +316,29 @@ class TestAgentFleetGuardianWatcher(unittest.IsolatedAsyncioTestCase):
         mock_guardian.failure_threshold = 3
         mock_guardian.failure_count = 0
 
-        # Simulate 3 failures then success
-        health_results = [0, 0, 0, 200, 200]
-        mock_guardian.check_health = AsyncMock(side_effect=health_results)
-        mock_guardian.restart_service = AsyncMock(return_value=True)
+        # Let the watcher own its failure counter. Mutating that counter from
+        # a second timed loop can trigger a restart after only two checks.
+        restarted = asyncio.Event()
+        async def restart():
+            restarted.set()
+            return True
+        mock_guardian.check_health = AsyncMock(side_effect=[0, 0, 0, 200])
+        mock_guardian.restart_service = AsyncMock(side_effect=restart)
         mock_guardian_class.return_value = mock_guardian
 
         task = asyncio.create_task(agent_fleet_guardian_watcher(None))
 
-        # Manually update failure_count to simulate watcher logic
-        for i in range(len(health_results)):
-            await asyncio.sleep(0.15)
-            if health_results[i] != 200 and i < 3:
-                mock_guardian.failure_count += 1
-            elif health_results[i] == 200:
-                mock_guardian.failure_count = 0
-
-        task.cancel()
         try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-        # Should have attempted restart
-        self.assertGreaterEqual(mock_guardian.check_health.call_count, 3)
+            await asyncio.wait_for(restarted.wait(), timeout=5)
+            self.assertEqual(mock_guardian.check_health.await_count, 3)
+            mock_guardian.restart_service.assert_awaited_once()
+            self.assertEqual(mock_guardian.failure_count, 0)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 def run_async_test(coro):

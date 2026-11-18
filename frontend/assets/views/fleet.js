@@ -1,6 +1,7 @@
 /* Overview renders current reachability and keeps operational detail available on demand. */
 
 import { pagePath } from '../routes.js';
+import { sessionAccessLabel } from '../ui/session-labels.js';
 import { uiIcon } from '../routes.js';
 
 var MSG_LOADING = '正在同步集群节点…';
@@ -181,7 +182,7 @@ function renderSessionStrip(sessions, sessionError) {
 
   var counts = h('div', 'meta');
   counts.appendChild(document.createTextNode(
-    '受管 ' + String(managed) + ' · 非受管 ' + String(unmanaged)));
+    '受管采集 ' + String(managed) + ' · 非受管采集 ' + String(unmanaged)));
   panel.appendChild(counts);
 
   if (rows.length === 0) {
@@ -204,7 +205,7 @@ function renderSessionStrip(sessions, sessionError) {
     if (typeof session.machine_id === 'string' && session.machine_id) {
       row.appendChild(h('span', 'meta', session.machine_id));
     }
-    row.appendChild(h('span', 'meta', session.managed ? '受管' : '非受管'));
+    row.appendChild(h('span', 'meta', sessionAccessLabel(session)));
     list.appendChild(row);
   });
   panel.appendChild(list);

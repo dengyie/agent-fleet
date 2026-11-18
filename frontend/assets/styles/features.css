@@ -407,6 +407,10 @@
   letter-spacing: -0.03em;
   margin: 0 0 10px;
 }
+.session-heading > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .reachability {
   display: inline-flex;
   align-items: center;

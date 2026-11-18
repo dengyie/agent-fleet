@@ -107,6 +107,7 @@ sequence 重放、非受管降级、PTY 低置信度和 schema 迁移故障；�
 | 链路 | 主要入口 |
 |---|---|
 | 生命周期和迁移 | test_agent_lifecycle.py、test_session_management_review.py |
+| 实时纳管权限与控制回执 | test_session_access_consistency.py、test_session_access_browser.py |
 | 问题卡片和重试 | test_session_interactions.py、test_session_question_retry.py、test_session_management_browser.py |
 | 接力预览与新任务 | test_handoff.py、test_handoff_routes.py、test_codock_management_security.py |
 | 脱敏搜索与定位 | test_session_search.py、test_session_search_browser.py |
@@ -238,3 +239,21 @@ adoption identities recorded with incorrect local-time Z suffixes are not
 rewritten: identity guards fail closed and an operator must detach/re-adopt.
 
 确认退出回执早于 session_start 时保留投影待办；缺失会话退避 30 秒再尝试，索引按机器和到期时间选择，每次至多 100 条，避免长期缺失的前一批阻塞后续会话。回归覆盖 101 条确认退出、前 100 条会话缺失，以及迟到会话在退避到期后关闭；终态命令始终不再下发。
+
+## 会话控制权限一致性（2026-11-19）
+
+`SessionService` 汇合采集元数据、实时纳管记录与 Supervisor 启用动作，向 HTTP
+和主助手返回相同的 `adoption_status`、`allowed_actions`、`control_capability`。
+`managed` 仅表示采集来源，不能代表当前授权。列表批量读取纳管状态；详情支持首条
+采集事件尚未到达的纳管会话。撤销历史不会在重新纳管时恢复，新旧 session ID 独立。
+
+网页追加消息、结构化问题与主助手控制复用纳管服务的锁内检查；普通受管会话通过
+Supervisor 控制路由。问题回答沿用持久化幂等键，纳管审计响应失败后重试仍找回原命令。
+前端仅展示服务返回的动作，未知权限不补造 `adopted` 或可执行动作。
+
+浏览器使用真实临时 Hub 和签名命令队列，在 390px/1440px 下验证状态、分页、设置浮层、
+缓存页面切回、事件刷新失败及回执查询重试；另验证超过原 13 次轮询后仍继续查询。
+问题卡片的受控计时器测试同样跨过原 30 次中断点，验证终态停止、页面暂停与旧响应隔离。
+入队响应到达即展示确认，不等待后续事件或回执读取；旧查询迟到不得回退新状态。
+查询失败不会伪报命令提交失败，也不会重复提交。临时进程与节点回执不代表真实生产
+会话已恢复控制。实施记录见[修复计划](../superpowers/plans/2026-11-19-session-access-consistency.md)。

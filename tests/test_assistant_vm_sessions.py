@@ -370,7 +370,7 @@ def test_assistant_control_reaches_real_control_client_and_returns_original_rece
     driver = _E2E(app, tmp_path)
     row = driver.adopted_session()
     services = app.extensions['fleet']['services']
-    adapter = AgentSessionService(services['sessions'], adoptions=services['adoptions'],
+    adapter = AgentSessionService(services['sessions'],
                                   supervisor=services['supervisor'])
     if drift:
         driver.process.started_at = '2026-07-31T09:15:00Z'

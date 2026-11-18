@@ -189,8 +189,8 @@ def api_session_message(session_id):
         return error_response(ApplicationError("invalid_message", "text 必须是字符串", 400))
     try:
         if "request_id" in data:
-            return jsonify(_sessions().answer_interaction(session_id, data)), 202
-        return jsonify(_sessions().send_message(session_id, data["text"])), 202
+            return jsonify(_sessions().answer_interaction(session_id, data, actor=g.operator)), 202
+        return jsonify(_sessions().send_message(session_id, data["text"], actor=g.operator)), 202
     except SessionServiceError as exc:
         return _session_error(exc)
     except SupervisorServiceError as exc:
