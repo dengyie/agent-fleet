@@ -100,7 +100,7 @@ def test_reset_and_password_change_revoke_all_sessions(accounts):
     assert repo.identity(token) is None
 
 
-def test_session_expiry_revoke_and_owner_scope(accounts):
+def test_persistent_session_revocation_and_owner_scope(accounts):
     repo, now = accounts
     register(repo)
     register(repo, 'b@example.test')
@@ -112,7 +112,7 @@ def test_session_expiry_revoke_and_owner_scope(accounts):
     repo.logout(token)
     assert repo.identity(token) is None and repo.identity(other)
     now[0] += 604801
-    assert repo.identity(other) is None
+    assert repo.identity(other)['id'] == user2['id']
 
 
 def test_admin_disable_and_last_admin(accounts):

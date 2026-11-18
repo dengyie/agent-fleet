@@ -1,5 +1,6 @@
 import {navigatePage, pagePath} from '../routes.js';
 import {accountRequest} from '../api/accounts.js';
+import {getTheme, setTheme} from '../shell/theme.js';
 import {mountAccount} from './account.js';
 import {mountMCPIntegrations} from './account/integrations.js';
 import {mountIntegrationIdentities} from './account/identities.js';
@@ -90,9 +91,12 @@ export function mountSettings(root, {section = 'models', account = null, onClose
   } else if (selected === 'plugins') views.push(mountPlugins(body));
   else if (selected === 'integrations') loadIntegrations();
   else if (selected === 'appearance') {
-    const section = panel(body, '外观主题', '外观只保存在当前浏览器，与侧栏主题选择同步。');
-    const choice = field(section, 'theme', '配色方案', document.querySelector('[data-theme][aria-pressed="true"]')?.dataset.theme || 'system', {options: [['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']]});
-    choice.addEventListener('change', () => document.querySelector('[data-theme="' + choice.value + '"]')?.click());
+    const section = panel(body, '外观主题', '外观保存在当前浏览器，与右上角主题菜单同步。');
+    const choice = field(section, 'theme', '配色方案', getTheme(), {options: [['system', '自动 · 跟随系统'], ['light', '浅色'], ['dark', '深色']]});
+    choice.addEventListener('change', () => setTheme(choice.value));
+    const syncTheme = () => { choice.value = getTheme(); };
+    window.addEventListener('fleet-theme-changed', syncTheme);
+    views.push(() => window.removeEventListener('fleet-theme-changed', syncTheme));
   }
   async function loadIntegrations() {
     const ticket = ++epoch;

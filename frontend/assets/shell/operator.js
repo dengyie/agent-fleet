@@ -15,22 +15,31 @@ export function safeReturnPath(value) {
   return pagePath('assistant');
 }
 
+export function showAccessState(message, {retry = false} = {}) {
+  const gate = document.getElementById('access-state');
+  gate.querySelector('p').textContent = message;
+  gate.querySelector('button').hidden = !retry;
+  gate.querySelector('.access-loader').hidden = retry;
+  gate.hidden = false;
+}
+
 export function redirectToLogin() {
+  showAccessState('正在前往登录页…');
   setOperatorToken('');
   const returnTo = safeReturnPath(window.location.pathname + window.location.search + window.location.hash);
   window.location.replace(pagePath('login') + '?' + new URLSearchParams({return_to: returnTo}));
 }
 
 export async function mountLogin() {
+  showAccessState('正在加载登录服务…');
   try {
     const options = await accountRequest("options");
     const returnTo = safeReturnPath(new URLSearchParams(window.location.search).get("return_to"));
     if (options.enabled) { mountAccountLogin(options, returnTo); return; }
   } catch (error) {
     if (error.status !== 404) {
+      showAccessState('暂时无法加载登录服务', {retry: true});
       const gate = document.getElementById("access-state");
-      gate.hidden = false;
-      gate.querySelector("p").textContent = "暂时无法加载登录服务";
       const retry = gate.querySelector("button"); retry.hidden = false; retry.onclick = mountLogin;
       return;
     }

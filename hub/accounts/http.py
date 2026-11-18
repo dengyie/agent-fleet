@@ -54,7 +54,9 @@ def account_identity(req):
 
 
 def cookie(response, token='', *, clear=False):
-    response.set_cookie(cookie_name(), token, max_age=0 if clear else 604800,
+    # Browsers cap persistent cookies at 400 days. Only explicit login writes
+    # a credential: a delayed read response must not overwrite a newer login.
+    response.set_cookie(cookie_name(), token, max_age=0 if clear else 400 * 86400,
                         secure=current_app.config['ACCOUNT_COOKIE_SECURE'], httponly=True,
                         samesite='Lax', path='/')
     return response
