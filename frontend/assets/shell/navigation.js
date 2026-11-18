@@ -62,10 +62,8 @@ export function mountNavigation(route, store) {
   updateRouteMetadata();
   const sidebar = document.getElementById('sidebar');
   const backdrop = document.getElementById('sidebar-backdrop');
-  const button = document.getElementById('mobile-menu');
+  const button = document.getElementById('navigation-toggle');
   const mobile = window.matchMedia('(max-width: 767px)');
-  const collapse = document.getElementById('sidebar-collapse');
-  const expand = document.getElementById('desktop-menu');
   const search = document.getElementById('conversation-search');
   const searchStatus = document.getElementById('conversation-search-status');
   const historyHeading = document.getElementById('conversation-heading');
@@ -83,18 +81,19 @@ export function mountNavigation(route, store) {
   try { collapsed = localStorage.getItem('fleet-sidebar-collapsed') === 'true'; } catch (_) {}
   function applyCollapse() {
     document.body.classList.toggle('sidebar-collapsed', collapsed && !mobile.matches);
-    sidebar.inert = mobile.matches ? !sidebar.classList.contains('open') : collapsed;
+    const open = mobile.matches ? sidebar.classList.contains('open') : !collapsed;
+    sidebar.inert = !open;
+    button.setAttribute('aria-expanded', String(open));
+    const label = open ? '收起导航' : mobile.matches ? '打开导航' : '展开导航';
+    button.setAttribute('aria-label', label);
+    button.title = label;
   }
   function setCollapsed(value) {
     collapsed = value;
     try { localStorage.setItem('fleet-sidebar-collapsed', String(value)); } catch (_) {}
     applyCollapse();
-    (value ? expand : collapse).focus();
+    button.focus();
   }
-  const onCollapse = () => mobile.matches ? toggle(false) : setCollapsed(true);
-  const onExpand = () => setCollapsed(false);
-  collapse.addEventListener('click', onCollapse);
-  expand.addEventListener('click', onExpand);
   function filterHistory() {
     const query = search.value.trim().toLocaleLowerCase();
     const links = [...document.querySelectorAll('#sidebar-conversations .conversation-history-entry')];
@@ -119,25 +118,22 @@ export function mountNavigation(route, store) {
   const onArchiveToggle = () => openHistoryMode(!historyArchived);
   archiveToggle.addEventListener('click', onArchiveToggle);
   function resetDrawer() {
+    const restoreFocus = sidebar.contains(document.activeElement);
     document.getElementById('account-menu').hidePopover();
     sidebar.classList.remove('open');
-    sidebar.inert = mobile.matches;
-    backdrop.hidden = true;
-    button.setAttribute('aria-expanded', 'false');
     document.body.classList.remove('navigation-open');
     applyCollapse();
+    if (restoreFocus && sidebar.inert) button.focus();
   }
   resetDrawer();
   mobile.addEventListener('change', resetDrawer);
   function toggle(open) {
     sidebar.classList.toggle('open', open);
-    sidebar.inert = mobile.matches && !open;
-    backdrop.hidden = !open;
-    button.setAttribute('aria-expanded', String(open));
     document.body.classList.toggle('navigation-open', open);
+    applyCollapse();
     if (open) sidebar.querySelector('a').focus(); else button.focus();
   }
-  const onMenu = () => toggle(button.getAttribute('aria-expanded') !== 'true');
+  const onMenu = () => mobile.matches ? toggle(button.getAttribute('aria-expanded') !== 'true') : setCollapsed(!collapsed);
   const onBackdrop = () => toggle(false);
   button.addEventListener('click', onMenu);
   backdrop.addEventListener('click', onBackdrop);
@@ -153,10 +149,10 @@ export function mountNavigation(route, store) {
       search.focus();
       return;
     }
-    if (button.getAttribute('aria-expanded') !== 'true') return;
+    if (!mobile.matches || button.getAttribute('aria-expanded') !== 'true') return;
     if (event.key === 'Escape') toggle(false);
     if (event.key === 'Tab') {
-      const links = [...sidebar.querySelectorAll('a, button, input, summary')].filter(node => !node.hidden && node.getClientRects().length);
+      const links = [button, ...sidebar.querySelectorAll('a, button, input, summary')].filter(node => !node.hidden && !node.disabled && node.getClientRects().length);
       const first = links[0], last = links[links.length - 1];
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
@@ -324,8 +320,6 @@ export function mountNavigation(route, store) {
   const dispose = () => {
     disposed = true;
     disposeAccountMenu();
-    collapse.removeEventListener('click', onCollapse);
-    expand.removeEventListener('click', onExpand);
     search.removeEventListener('input', filterHistory);
     archiveToggle.removeEventListener('click', onArchiveToggle);
     titleSave.removeEventListener('click', onTitleSave);

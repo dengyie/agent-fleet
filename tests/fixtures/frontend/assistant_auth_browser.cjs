@@ -107,7 +107,7 @@ const [origin] = process.argv.slice(2);
     assert.equal(await assistantInput.inputValue(), '页面切换后保留的草稿',
       'returning to the assistant preserves the draft');
     await page.setViewportSize({width: 390, height: 844});
-    await page.locator('#mobile-menu').click();
+    await page.locator('#navigation-toggle').click();
     await page.locator('[data-nav="monitoring"]').click();
     await page.getByRole('heading', {name: '服务监控', exact: true}).waitFor();
     assert.equal(sessionRequests, checksAtEntry, 'mobile navigation does not repeat session validation');

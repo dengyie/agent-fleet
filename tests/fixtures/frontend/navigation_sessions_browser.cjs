@@ -38,7 +38,114 @@ const [origin, scenario] = process.argv.slice(2);
       assert.equal(login.status(), 200);
       await page.goto(origin + '/assistant', {waitUntil: 'domcontentloaded'});
       await page.waitForFunction(() => document.querySelector('[aria-label="发送任务"]') && !document.querySelector('[aria-label="发送任务"]').disabled);
-      if (scenario === 'feature-401') {
+      if (scenario === 'sidebar-motion') {
+        const sidebar = page.locator('#sidebar');
+        const main = page.locator('.console-main');
+        const opened = await sidebar.boundingBox();
+        const close = page.getByRole('button', {name: '收起导航', exact: true});
+        const initialButton = await close.boundingBox();
+        await close.evaluate(node => { window.originalNavigationToggle = node; node.click(); });
+        const midpoint = await page.evaluate(() => {
+          const panel = document.querySelector('#sidebar');
+          const main = document.querySelector('.console-main');
+          panel.getBoundingClientRect();
+          const panelMotion = panel.getAnimations();
+          const mainMotion = main.getAnimations();
+          for (const animation of [...panelMotion, ...mainMotion]) {
+            animation.pause(); animation.currentTime = animation.effect.getTiming().duration / 2;
+          }
+          return {panelAnimations: panelMotion.length, mainAnimations: mainMotion.length,
+            panelX: panel.getBoundingClientRect().x, mainX: main.getBoundingClientRect().x};
+        });
+        assert.ok(midpoint.panelAnimations > 0, 'desktop sidebar must slide instead of jumping directly to hidden');
+        assert.ok(midpoint.mainAnimations > 0, 'main content must move with the sidebar');
+        assert.ok(midpoint.panelX < 0 && midpoint.panelX > -opened.width);
+        assert.ok(midpoint.mainX > 0 && midpoint.mainX < opened.width);
+        const settle = () => page.evaluate(async () => {
+          const nodes = ['#sidebar', '.console-main', '.console-topbar', '#navigation-toggle', '#navigation-toggle svg', '#sidebar-backdrop'];
+          const animations = nodes.flatMap(selector => document.querySelector(selector)?.getAnimations() || []);
+          for (const animation of animations) animation.finish();
+          await Promise.all(animations.map(animation => animation.finished));
+        });
+        await settle();
+        const toggle = page.locator('#navigation-toggle');
+        assert.equal(await toggle.evaluate(node => node === window.originalNavigationToggle), true,
+          'collapse and expand use the same persistent control');
+        const closedButton = await toggle.boundingBox();
+        assert.equal(initialButton.y, closedButton.y, 'toggle stays on the same vertical baseline');
+        assert.equal(initialButton.width, closedButton.width);
+        assert.equal(initialButton.height, closedButton.height);
+        assert.ok(Math.abs(initialButton.x - (opened.width - 48)) < 1);
+        assert.ok(Math.abs(closedButton.x - 14) < 1);
+        assert.equal(await toggle.evaluate(node => node === document.activeElement), true);
+        assert.equal(await sidebar.evaluate(node => node.inert), true);
+        assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
+        await toggle.click();
+        await settle();
+        assert.equal(await toggle.getAttribute('aria-expanded'), 'true');
+        assert.equal(await sidebar.evaluate(node => node.inert), false);
+        assert.ok(Math.abs((await main.boundingBox()).x - opened.width) < 1);
+        // Reversing during a transition must remain continuous and end expanded.
+        await toggle.evaluate(node => node.click());
+        await page.evaluate(() => {
+          for (const node of [document.querySelector('#sidebar'), document.querySelector('.console-main')]) {
+            for (const animation of node.getAnimations()) { animation.pause(); animation.currentTime = 80; }
+          }
+        });
+        const reversingX = (await sidebar.boundingBox()).x;
+        await toggle.evaluate(node => node.click());
+        assert.ok(Math.abs((await sidebar.boundingBox()).x - reversingX) < 30, 'rapid reversal must not jump to an endpoint');
+        await settle();
+        assert.equal(await toggle.getAttribute('aria-expanded'), 'true');
+        await page.screenshot({path: path.join(output, 'sidebar-expanded.png'), fullPage: true});
+        await toggle.click(); await settle();
+        await page.screenshot({path: path.join(output, 'sidebar-collapsed.png'), fullPage: true});
+        await page.reload({waitUntil: 'domcontentloaded'});
+        await page.getByLabel('给助手的任务').waitFor();
+        assert.equal(await toggle.getAttribute('aria-expanded'), 'false', 'desktop preference survives reload');
+        await page.setViewportSize({width: 390, height: 844}); await settle();
+        await toggle.click();
+        const mobileMotion = await page.evaluate(() => {
+          const backdrop = document.querySelector('#sidebar-backdrop');
+          backdrop.getBoundingClientRect();
+          const animations = backdrop.getAnimations();
+          for (const animation of animations) {
+            animation.pause(); animation.currentTime = animation.effect.getTiming().duration / 2;
+          }
+          return {count: animations.length, opacity: Number(getComputedStyle(backdrop).opacity)};
+        });
+        assert.ok(mobileMotion.count > 0 && mobileMotion.opacity > 0 && mobileMotion.opacity < 1,
+          'mobile backdrop fades with the drawer');
+        await settle(); await page.keyboard.press('Escape'); await settle();
+        await page.setViewportSize({width: 1440, height: 900}); await settle();
+        await page.emulateMedia({reducedMotion: 'reduce'});
+        await toggle.click(); await settle();
+        assert.ok(await sidebar.evaluate(node => getComputedStyle(node).transitionDuration.split(',')
+          .every(value => parseFloat(value) < .001)), 'reduced motion removes perceptible animation');
+        for (const width of [900, 768, 767, 390]) {
+          await page.setViewportSize({width, height: 844});
+          await settle();
+          assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+        }
+        const mobileClosed = await toggle.boundingBox();
+        await toggle.click(); await settle();
+        const mobileOpen = await toggle.boundingBox();
+        assert.equal(mobileClosed.y, mobileOpen.y);
+        assert.equal(await toggle.getAttribute('aria-expanded'), 'true');
+        await page.keyboard.press('Shift+Tab');
+        assert.equal(await toggle.evaluate(node => node === document.activeElement), true);
+        await page.keyboard.press('Shift+Tab');
+        assert.equal(await page.locator('#account-menu-trigger').evaluate(node => node === document.activeElement), true);
+        await page.keyboard.press('Tab');
+        assert.equal(await toggle.evaluate(node => node === document.activeElement), true);
+        await page.keyboard.press('Escape'); await settle();
+        assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
+        assert.equal(await sidebar.evaluate(node => node.inert), true);
+        await toggle.click(); await settle();
+        await page.screenshot({path: path.join(output, 'sidebar-mobile.png'), fullPage: true});
+        await page.locator('#sidebar-backdrop').click({position: {x: 380, y: 400}}); await settle();
+        assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
+      } else if (scenario === 'feature-401') {
         let checking;
         const checkStarted = new Promise(resolve => { checking = resolve; });
         const held = new Promise(resolve => { release = resolve; });
@@ -149,7 +256,7 @@ const [origin, scenario] = process.argv.slice(2);
         await page.screenshot({path: path.join(output, 'navigation-mobile.png'), fullPage: true});
         await page.keyboard.press('Escape');
         await page.keyboard.press('Escape');
-        assert.equal(await page.locator('#mobile-menu').getAttribute('aria-expanded'), 'false');
+        assert.equal(await page.locator('#navigation-toggle').getAttribute('aria-expanded'), 'false');
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
       }
     }
