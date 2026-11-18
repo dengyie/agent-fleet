@@ -128,7 +128,7 @@ const [origin] = process.argv.slice(2);
     await page.setViewportSize({width: 1280, height: 720});
     assert.equal(await page.locator('#sidebar-nodes').count(), 0, 'node inventory is owned by the assistant work panel');
     assert.equal(await page.locator('.workspace-identity').count(), 0, 'workspace identity copy is removed');
-    assert.equal(await page.locator('.sidebar-appearance [data-theme]').count(), 3, 'theme control stays at the sidebar top');
+    assert.equal(await page.locator('.console-topbar #theme-menu-trigger').count(), 1, 'theme menu lives at the top right');
     assert.equal(await page.locator('.sidebar-footer [data-nav="settings"]').count(), 1, 'settings is a footer icon');
     assert.equal(await page.locator('.sidebar-footer #operator-logout').getAttribute('aria-label'), '退出登录');
     if (process.env.FLEET_SCREENSHOTS) {
@@ -280,13 +280,14 @@ const [origin] = process.argv.slice(2);
     await page.waitForFunction(() => document.querySelector('[aria-label="工作区"]').value === 'saved');
     await page.waitForFunction(() => !document.querySelector('[aria-label="发送任务"]').disabled);
 
-    // A 401 after a successful entry check must also redirect, even non-JSON errors.
+    // Resource 401s trigger an identity check, not unconditional logout.
     await page.route(defaultsRoute, route => route.fulfill({status: 401, contentType: 'text/html', body: 'unauthorized'}));
     await page.goto(origin + '/assistant', {waitUntil: 'domcontentloaded'});
-    await expectLogin('/assistant');
-    assert.equal(await page.evaluate(() => sessionStorage.getItem('fleet_operator_token')), null);
+    await page.getByRole('button', {name: '重试加载', exact: true}).waitFor();
+    assert.equal(new URL(page.url()).pathname, '/assistant');
+    assert.equal(await page.evaluate(() => sessionStorage.getItem('fleet_operator_token')), 'browser-fixture-token');
     await page.unroute(defaultsRoute);
-    await login();
+    await page.getByRole('button', {name: '重试加载', exact: true}).click();
     await waitForAssistantReady();
     await page.route(defaultsRoute, route => route.fulfill({status: 403, contentType: 'application/json', body: JSON.stringify({error: 'forbidden', detail: 'denied'})}));
     await page.reload({waitUntil: 'domcontentloaded'});
@@ -297,15 +298,16 @@ const [origin] = process.argv.slice(2);
     const featureRequestCount = featureRequests.length;
     await page.goto(origin + '/monitoring', {waitUntil: 'domcontentloaded'});
     await page.getByText('工作空间暂时无法连接，稍后会自动重试。', {exact: true}).waitFor();
-    assert.equal(await page.locator('.console-layout').isVisible(), true);
-    assert.equal(await page.locator('#access-state').isVisible(), false);
+    assert.equal(await page.locator('.console-layout').isVisible(), false);
+    assert.equal(await page.locator('#access-state').isVisible(), true);
     assert.equal(featureRequests.length, featureRequestCount);
     assert.equal(await page.evaluate(() => sessionStorage.getItem('fleet_operator_token')), 'browser-fixture-token');
     await page.unroute(sessionRoute);
     await page.evaluate(() => { window.advanceFleetTime(60000); window.dispatchEvent(new Event('focus')); });
     await page.locator('.monitoring-view').waitFor();
     await page.getByRole('button', {name: '打开导航', exact: true}).click();
-    await page.getByRole('button', {name: '退出登录', exact: true}).click();
+    await page.locator('#account-menu-trigger').click();
+    await page.getByRole('menuitem', {name: '退出登录', exact: true}).click();
     await expectLogin('/monitoring');
     await page.goBack({waitUntil: 'domcontentloaded'});
     await page.waitForURL(url => url.pathname === '/login', {waitUntil: 'domcontentloaded'});
@@ -316,7 +318,8 @@ const [origin] = process.argv.slice(2);
       await waitForAssistantReady();
       assert.equal(new URL(page.url()).pathname, '/assistant');
       await page.getByRole('button', {name: '打开导航', exact: true}).click();
-      await page.getByRole('button', {name: '退出登录', exact: true}).click();
+      await page.locator('#account-menu-trigger').click();
+    await page.getByRole('menuitem', {name: '退出登录', exact: true}).click();
       await page.waitForURL(url => url.pathname === '/login', {waitUntil: 'domcontentloaded'});
     }
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);

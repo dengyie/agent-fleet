@@ -124,3 +124,20 @@ def test_password_reset_invalidates_http_session(account_app):
     assert post(other, 'reset', {'email': 'a@example.test', 'code': mail[-1][2], 'password': 'new-password-123!'}).status_code == 200
     assert client.get('/api/operator/session', base_url=ORIGIN).status_code == 401
     assert post(other, 'login', {'email': 'a@example.test', 'password': 'new-password-123!'}).status_code == 200
+
+
+def test_session_cookie_persists_and_renews_without_replacing_credentials(account_app):
+    app, mail = account_app
+    client = app.test_client()
+    login = signup(client, mail, 'persistent@example.test')
+    original = client.get_cookie('__Host-fleet_session', domain='fleet.example.test').value
+    assert 'Max-Age=34560000' in login.headers['Set-Cookie']
+    now = app.extensions['accounts'].clock()
+    app.extensions['accounts'].clock = lambda: now + 366 * 86400
+    check = client.get('/api/operator/session', base_url=ORIGIN)
+    assert check.status_code == 200
+    assert 'Max-Age=34560000' in check.headers['Set-Cookie']
+    assert client.get_cookie('__Host-fleet_session', domain='fleet.example.test').value == original
+    assert client.get('/api/accounts/me', base_url=ORIGIN).json['sessions'][0]['expires'] is None
+    assert post(client, 'logout', {}).status_code == 200
+    assert client.get('/api/operator/session', base_url=ORIGIN).status_code == 401

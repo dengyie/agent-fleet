@@ -62,7 +62,8 @@ const origin = process.argv[2];
       fs.mkdirSync(process.env.FLEET_SCREENSHOTS, {recursive: true});
       await page.screenshot({path: process.env.FLEET_SCREENSHOTS + '/full-flow-recovered.png', fullPage: true});
     }
-    await page.getByRole('button', {name: '退出登录', exact: true}).click();
+    await page.locator('#account-menu-trigger').click();
+    await page.getByRole('menuitem', {name: '退出登录', exact: true}).click();
     await page.waitForURL('**/login**', {waitUntil: 'domcontentloaded'});
     await page.goto(conversationUrl);
     await page.waitForURL('**/login?**', {waitUntil: 'domcontentloaded'});

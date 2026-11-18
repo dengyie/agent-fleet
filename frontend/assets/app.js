@@ -17,7 +17,7 @@ import { mountAssistant } from './views/assistant.js';
 import { mountMuse } from './views/muse.js';
 import { mountMonitoring } from './views/monitoring.js';
 import { mountPlugins } from './views/plugins.js';
-import { mountLogin, redirectToLogin } from './shell/operator.js';
+import { mountLogin, redirectToLogin, showAccessState } from './shell/operator.js';
 import './ui/ChatPromptInput.js';
 import './ui/StreamMarkdown.js';
 import './ui/ToolCallBadge.js';
@@ -38,6 +38,7 @@ function protectConsole() {
   let lastSessionCheckAt = 0;
   let sessionRecheckPending = false;
   let sessionResetPending = false;
+  let loggingOut = false;
   function routeKey(value) {
     return value.page + ':' + (value.id || '');
   }
@@ -82,6 +83,7 @@ function protectConsole() {
   }
   function requireLogin() {
     if (redirecting) return;
+    showAccessState('正在前往登录页…');
     redirecting = true; disposeView();
     redirectToLogin();
   }
@@ -243,7 +245,7 @@ function protectConsole() {
   }
   async function verifyAccess({force = false} = {}) {
     const now = Date.now();
-    if (redirecting) return;
+    if (redirecting || loggingOut) return;
     if (checking) {
       if (force || now - lastSessionCheckAt >= 60000) sessionRecheckPending = true;
       return;
@@ -253,26 +255,21 @@ function protectConsole() {
     lastSessionCheckAt = now;
     try {
       const session = await api.getOperatorSession({deferUnauthorized: true});
-      if (redirecting || sessionRecheckPending) return;
+      if (redirecting || loggingOut || sessionRecheckPending) return;
       const nextAccount = session.user || null;
-      if (sessionResetPending) {
-        // A feature's 401 may belong to a previous cookie session. Its view
-        // has been disposed; rebuild only after checking the current cookie.
-        if (account?.id !== nextAccount?.id || account?.role !== nextAccount?.role) {
-          redirecting = true;
-          window.location.reload();
-        } else requireLogin();
-        return;
-      }
       if (mounted && (account?.id !== nextAccount?.id || account?.role !== nextAccount?.role)) {
         // A session may have changed in another tab. The old view, async work,
         // navigation and store belong to that identity; recreate the document.
         redirecting = true;
+        showAccessState('账号已切换，正在更新工作空间…');
         disposeView();
         window.location.reload();
         return;
       }
       account = nextAccount;
+      sessionResetPending = false;
+      document.getElementById('account-menu-name').textContent = account?.name || account?.email || '操作员';
+      document.getElementById('account-menu-role').textContent = account ? (account.role === 'admin' ? '管理员' : '个人账号') : '令牌访问';
       document.querySelector('[data-nav="settings"]').hidden = false;
       if (account && account.role !== "admin") {
         document.querySelector('[data-nav="fleet"]').hidden = true;
@@ -287,15 +284,11 @@ function protectConsole() {
       else resumeRouteView(activeRouteView);
       gate.hidden = true; shell.hidden = false; if (!account || account.role === "admin") sse.start();
     } catch (error) {
-      if (sessionRecheckPending) return;
+      if (redirecting || loggingOut || sessionRecheckPending) return;
       if (error.status === 401) requireLogin();
-      else if (!mounted) {
+      else if (!mounted || sessionResetPending) {
         const message = '工作空间暂时无法连接，稍后会自动重试。';
-        if (sessionResetPending) {
-          gate.hidden = false;
-          gate.querySelector('p').textContent = message;
-          retry.hidden = false;
-        } else document.getElementById('route-view').textContent = message;
+        showAccessState(message, {retry: true});
       }
     } finally {
       checking = false;
@@ -306,14 +299,35 @@ function protectConsole() {
     }
   }
   window.addEventListener('fleet-auth-required', () => {
-    if (redirecting || sessionResetPending) return;
+    if (redirecting || loggingOut || sessionResetPending) return;
     sessionResetPending = true;
-    disposeView();
+    // Keep the view and unsent input until the authoritative identity check
+    // returns. A feature's 401 alone does not prove the browser was logged out.
+    showAccessState('正在重新验证登录状态…');
+    document.querySelectorAll('.shell-menu:popover-open').forEach(menu => menu.hidePopover());
+    shell.hidden = true;
+    sse.stop();
+    suspendRouteView(activeRouteView);
     verifyAccess({force: true});
   });
-  document.getElementById('operator-logout').addEventListener('click', async () => {
+  const logout = document.getElementById('operator-logout');
+  logout.addEventListener('click', async () => {
+    if (loggingOut) return;
+    loggingOut = true;
+    logout.disabled = true;
+    logout.querySelector('span:last-child').textContent = '正在退出…';
+    logout.setAttribute('aria-label', '正在退出…');
+    const status = document.getElementById('account-menu-status');
+    status.hidden = false; status.textContent = '正在安全退出登录…';
     try { if (account) await accountRequest('logout', {}); requireLogin(); }
-    catch (error) { gate.hidden = false; gate.querySelector('p').textContent = '退出登录失败，请重试'; }
+    catch (error) {
+      if (error.status === 401) requireLogin();
+      else status.textContent = '退出登录失败，请重试';
+    } finally {
+      loggingOut = false; logout.disabled = false;
+      logout.querySelector('span:last-child').textContent = '退出登录';
+      logout.setAttribute('aria-label', '退出登录');
+    }
   });
   document.getElementById('refresh-page').addEventListener('click', () => window.location.reload());
   retry.addEventListener('click', () => verifyAccess({force: true}));
@@ -329,13 +343,13 @@ function protectConsole() {
   });
   window.addEventListener('pageshow', event => {
     if (!event.persisted) return;
-    resumeRouteView(activeRouteView);
-    gate.hidden = true; shell.hidden = false;
-    if (!account || account.role === 'admin') sse.start();
-    verifyAccess();
+    // A restored document can belong to a logged-out or switched account.
+    // Revalidate before exposing cached content or restarting its streams.
+    sessionResetPending = true;
+    showAccessState('正在验证登录状态…'); shell.hidden = true;
+    verifyAccess({force: true});
   });
-  gate.hidden = true;
-  shell.hidden = false;
+  showAccessState('正在验证登录状态…');
   verifyAccess({force: true});
 }
 

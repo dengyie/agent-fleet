@@ -701,7 +701,8 @@ export function mountAssistant(target, options) {
       refreshMemoryItems('');
     } catch (error) {
       if (disposed) return;
-      if (error && error.status === 401) return; // The shared session guard redirects.
+      // The shell verifies identity after a 401. If that session is still
+      // valid, keep this failure visible and let the user retry the resource.
       setStatus(error && error.status === 403 ? '当前操作员无访问权限' : failureStatus);
       initializationHost.hidden = false;
       showError(initializationHost, error);

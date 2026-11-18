@@ -1,4 +1,5 @@
 import { uiIcon, pagePath, navigatePage } from '../routes.js';
+import {mountMenu} from './menus.js';
 import {
   getConversations, renameConversation, archiveConversation,
   restoreConversation, deleteConversation,
@@ -42,6 +43,7 @@ export function resolveRoute(location = window.location) {
 }
 export function mountNavigation(route, store) {
   document.querySelectorAll('[data-icon]').forEach(slot => slot.replaceChildren(uiIcon(slot.dataset.icon, {size: 18})));
+  const disposeAccountMenu = mountMenu(document.getElementById('account-menu-trigger'), document.getElementById('account-menu'));
   let currentRoute = route;
   function updateRouteMetadata() {
     const copy = labels[currentRoute.page] || ['页面不存在', '页面不存在', '请从左侧导航选择一个工作空间页面。', 'NOT FOUND'];
@@ -117,6 +119,7 @@ export function mountNavigation(route, store) {
   const onArchiveToggle = () => openHistoryMode(!historyArchived);
   archiveToggle.addEventListener('click', onArchiveToggle);
   function resetDrawer() {
+    document.getElementById('account-menu').hidePopover();
     sidebar.classList.remove('open');
     sidebar.inert = mobile.matches;
     backdrop.hidden = true;
@@ -139,6 +142,7 @@ export function mountNavigation(route, store) {
   button.addEventListener('click', onMenu);
   backdrop.addEventListener('click', onBackdrop);
   function onKeydown(event) {
+    if (document.querySelector('.shell-menu:popover-open')) return;
     if (document.querySelector('dialog:modal')) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') event.preventDefault();
       return;
@@ -219,7 +223,7 @@ export function mountNavigation(route, store) {
     const trigger = document.createElement('summary');
     trigger.setAttribute('aria-label', '对话操作');
     trigger.title = '对话操作';
-    trigger.textContent = '···';
+    trigger.append(uiIcon('sliders', {size: 16}));
     const actionList = document.createElement('div');
     actionList.className = 'conversation-action-menu';
     menu.append(trigger, actionList);
@@ -319,6 +323,7 @@ export function mountNavigation(route, store) {
   });
   const dispose = () => {
     disposed = true;
+    disposeAccountMenu();
     collapse.removeEventListener('click', onCollapse);
     expand.removeEventListener('click', onExpand);
     search.removeEventListener('input', filterHistory);

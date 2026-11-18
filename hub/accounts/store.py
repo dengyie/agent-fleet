@@ -16,6 +16,9 @@ from hub.diagnostics import log_failure
 from hub.http.errors import ApplicationError
 
 logger = logging.getLogger(__name__)
+# 9999-12-31T23:59:59Z. Keeping a valid future timestamp lets the previous
+# release continue to recognize these sessions if deployment is rolled back.
+REVOCABLE_SESSION_EXPIRY = 253402300799
 
 
 def fail(code, detail, status=400):
@@ -97,6 +100,9 @@ class AccountStore:
             if 'username' not in {row['name'] for row in db.execute('PRAGMA table_info(users)')}:
                 db.execute('ALTER TABLE users ADD COLUMN username TEXT')
             db.execute('CREATE UNIQUE INDEX IF NOT EXISTS users_username ON users(username)')
+            # Upgrade live sessions only; expired credentials must not revive.
+            db.execute('UPDATE sessions SET expires=? WHERE expires>? AND expires<?',
+                       (REVOCABLE_SESSION_EXPIRY, self.clock(), REVOCABLE_SESSION_EXPIRY))
             inv_cols = {row['name'] for row in db.execute('PRAGMA table_info(invitations)')}
             if 'code' not in inv_cols:
                 # Migrate legacy email-primary-key invitations table to code-primary-key
@@ -316,7 +322,8 @@ class AccountStore:
             if not current['active'] or current['password'] != user['password']:
                 fail('invalid_login', '账号或密码错误', 401)
             db.execute('DELETE FROM sessions WHERE expires<=?', (now,))
-            db.execute('INSERT INTO sessions VALUES (?,?,?,?)', (digest(token), user['id'], now, now + 604800))
+            db.execute('INSERT INTO sessions VALUES (?,?,?,?)',
+                       (digest(token), user['id'], now, REVOCABLE_SESSION_EXPIRY))
         return token, self.public(current)
 
     def identity(self, token):
@@ -335,7 +342,8 @@ class AccountStore:
         with self.connect(write=False) as db:
             rows = db.execute('SELECT token,created,expires FROM sessions WHERE user_id=? AND expires>? ORDER BY created DESC LIMIT 100',
                               (user_id, self.clock())).fetchall()
-            return [{'id': row['token'], 'created': row['created'], 'expires': row['expires'],
+            return [{'id': row['token'], 'created': row['created'],
+                     'expires': None if row['expires'] == REVOCABLE_SESSION_EXPIRY else row['expires'],
                      'current': row['token'] == digest(token)} for row in rows]
 
     def revoke(self, user_id, session_id=None):
