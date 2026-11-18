@@ -125,7 +125,9 @@ function renderMachineOverview(machine) {
   var row = h('div', 'fleet-machine-row');
   var main = h('div', 'fleet-machine-main');
   main.appendChild(h('span', 'dot' + (machine.online ? ' on' : ' off')));
-  main.appendChild(h('a', null, machine.machine || 'unknown'));
+  var machineLink = h('a', null, machine.machine || 'unknown');
+  machineLink.href = pagePath('machine', machine.machine);
+  main.appendChild(machineLink);
   main.appendChild(h('span', 'fleet-machine-description', machine.online ? (machine.desc || '在线') : (machine.error || '离线')));
   row.appendChild(main);
   var data = h('div', 'fleet-machine-meta');

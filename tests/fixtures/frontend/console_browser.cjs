@@ -28,10 +28,13 @@ const [origin, taskId] = process.argv.slice(2);
     })));
     assert.equal(await eventDisclosure.getAttribute('open'), '',
       'overview disclosure stays open while live store updates rerender node state');
+    const machineLink = page.getByRole('link', {name: 'studio-mac', exact: true});
+    assert.equal(new URL(await machineLink.getAttribute('href'), origin).pathname, '/machine/studio-mac');
     assert.equal(await page.locator('[data-icon] svg').first().evaluate(svg => svg.namespaceURI), 'http://www.w3.org/2000/svg');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await page.screenshot({path: path.join(output, 'fleet-desktop.png'), fullPage: true});
-    await page.goto(origin + '/machine/studio-mac', {waitUntil: 'domcontentloaded'});
+    await machineLink.click();
+    await page.waitForURL('**/machine/studio-mac');
     await page.locator('#task-create-form').waitFor();
     assert.ok((await page.locator('#nt-confirm').boundingBox()).width <= 24, 'checkbox must retain its control width');
     assert.equal(await page.locator('#nt-error').isVisible(), false, 'an empty error must not appear as an alert');
