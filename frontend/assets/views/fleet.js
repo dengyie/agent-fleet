@@ -1,11 +1,4 @@
-/* frontend/assets/views/fleet.js — Fleet 总览视图 (Awesome UI Kit 现代化重构)
- *
- * 核心特性：
- * - 纯矢量 Tabler-style 图标 (DOM-safe createElementNS)
- * - 响应式 KPI 状态仪表盘 + 优雅资源进度条 (Load/Memory/Disk)
- * - 紧凑 Agent 矩阵与实时事件审计流 (带有界保护)
- * - 维持原有契约与类名选择器，支持安全 DOM 渲染 (防 XSS)
- */
+/* Overview renders current reachability and keeps operational detail available on demand. */
 
 import { pagePath } from '../routes.js';
 import { uiIcon } from '../routes.js';
@@ -41,183 +34,6 @@ function removeAllChildren(el) {
   while (el.firstChild) {
     el.removeChild(el.firstChild);
   }
-}
-
-/* -- 机器卡片渲染 ------------------------------------------------------------ */
-
-// 节点客户端版本徽标：序号落后于 hub 当前发布时标黄
-function renderClientBadge(client, release) {
-  if (!client || typeof client.version !== 'string') {
-    return null;
-  }
-  var behind = !!release && typeof release.sequence === 'number'
-    && client.sequence < release.sequence;
-  var badge = h('span', 'badge-client' + (behind ? ' behind' : ''),
-    client.version + (client.sequence ? ' #' + client.sequence : ''));
-  badge.setAttribute('title', behind
-    ? '客户端落后：hub 当前 ' + release.version + ' #' + release.sequence
-    : '客户端版本');
-  return badge;
-}
-
-function renderMachineCard(grid, machine, release) {
-  var card = h('div', 'card');
-  var name = (typeof machine.machine === 'string' && machine.machine)
-    ? machine.machine : 'unknown';
-
-  var h2 = h('h2');
-  var dot = h('span', 'dot' + (machine.online ? ' on' : ' off'));
-  h2.appendChild(dot);
-
-  var nameLink = h('a', null, name);
-  nameLink.setAttribute('href', pagePath('machine', name));
-  h2.appendChild(nameLink);
-
-  if (machine.has_hermes) {
-    var hermesBadge = h('span', 'badge-hermes', 'Hermes ' + fmtValue(machine.hermes_state));
-    h2.appendChild(hermesBadge);
-  }
-  var clientBadge = renderClientBadge(machine.client, release);
-  if (clientBadge) {
-    h2.appendChild(clientBadge);
-  }
-  card.appendChild(h2);
-
-  var meta = h('div', 'meta', fmtValue(machine.desc));
-  card.appendChild(meta);
-
-  if (!machine.online) {
-    var errBox = h('div', 'err');
-    var alertIconSpan = h('span', null);
-    alertIconSpan.appendChild(uiIcon('alert-triangle', { size: 14, className: 'inline-icon' }));
-    errBox.appendChild(alertIconSpan);
-    errBox.appendChild(document.createTextNode(' ' + fmtValue(machine.error || '节点离线或通信超时')));
-    card.appendChild(errBox);
-  } else {
-    renderAgentSummaries(card, machine.agent_summaries);
-    renderSystemStat(card, machine);
-  }
-
-  var actions = h('div', 'card-actions');
-  var detailLink = h('a', 'dispatch-link');
-  detailLink.setAttribute('href', pagePath('machine', name));
-  var detailIcon = h('span', 'inline-icon-slot');
-  detailIcon.appendChild(uiIcon('arrow-right', { size: 12 }));
-  detailLink.appendChild(detailIcon);
-  detailLink.appendChild(document.createTextNode('节点详情'));
-  actions.appendChild(detailLink);
-  var dispatchLink = h('a', 'dispatch-link dispatch-primary');
-  dispatchLink.setAttribute('href', pagePath('machine', name) + '#task-create-form');
-  var dispatchIcon = h('span', 'inline-icon-slot');
-  dispatchIcon.appendChild(uiIcon('sparkles', { size: 12 }));
-  dispatchLink.appendChild(dispatchIcon);
-  dispatchLink.appendChild(document.createTextNode('下发任务'));
-  actions.appendChild(dispatchLink);
-  card.appendChild(actions);
-
-  grid.appendChild(card);
-}
-
-function renderAgentSummaries(card, summaries) {
-  var rows = Array.isArray(summaries) ? summaries : [];
-  if (rows.length === 0) {
-    return;
-  }
-  var title = h('div', 'meta', '已部署 Agent 连接器:');
-  card.appendChild(title);
-
-  rows.forEach(function (summary) {
-    var row = h('div', 'agent-row');
-    var kSpan = h('span', 'k', fmtValue(summary.type));
-    row.appendChild(kSpan);
-
-    var statusClass;
-    var statusText;
-    if (summary.status === 'ok') {
-      statusClass = 'st-ok';
-      statusText = 'ok';
-    } else if (summary.status === 'absent') {
-      statusClass = 'st-absent';
-      statusText = '未部署';
-    } else {
-      statusClass = 'st-err';
-      statusText = fmtValue(summary.detail);
-    }
-    var stSpan = h('span', statusClass, statusText);
-    row.appendChild(stSpan);
-    card.appendChild(row);
-  });
-}
-
-function renderSystemStat(card, machine) {
-  var sys = (machine.system && typeof machine.system === 'object')
-    ? machine.system : {};
-  var stat = h('div', 'stat');
-
-  function statItem(label, val) {
-    var sp = h('span', null, label + ': ');
-    var b = h('b', null, fmtValue(val));
-    sp.appendChild(b);
-    return sp;
-  }
-
-  stat.appendChild(statItem('Agents', machine.agent_count));
-  stat.appendChild(statItem('负载', sys.load));
-  stat.appendChild(statItem('内存', memLabel(sys)));
-  stat.appendChild(statItem('磁盘', sys.disk_used_pct));
-  stat.appendChild(statItem('运行时间', sys.uptime));
-
-  card.appendChild(stat);
-
-  appendMetricBar(card, '内存', memPct(sys), 70, 85);
-  appendMetricBar(card, '磁盘', parsePct(sys.disk_used_pct), 70, 85);
-}
-
-function parsePct(v) {
-  if (v === null || v === undefined || v === '') {
-    return null;
-  }
-  var n = parseFloat(String(v).replace('%', ''));
-  if (!isFinite(n) || n < 0) {
-    return null;
-  }
-  return Math.min(n, 100);
-}
-
-function memPct(sys) {
-  var used = Number(sys.mem_used_mb);
-  var total = Number(sys.mem_total_mb);
-  if (!isFinite(used) || !isFinite(total) || total <= 0) {
-    return null;
-  }
-  return Math.min((used / total) * 100, 100);
-}
-
-function memLabel(sys) {
-  if (sys.mem_used_mb === null || sys.mem_used_mb === undefined ||
-      sys.mem_total_mb === null || sys.mem_total_mb === undefined ||
-      sys.mem_used_mb === '' || sys.mem_total_mb === '') {
-    return '—';
-  }
-  return fmtValue(sys.mem_used_mb) + ' / ' + fmtValue(sys.mem_total_mb) + ' MB';
-}
-
-function appendMetricBar(host, label, pct, warnAt, dangerAt) {
-  if (pct === null || pct === undefined) {
-    return;
-  }
-  var wrap = h('div', 'metric-bar');
-  var caption = h('div', 'metric-bar-label');
-  caption.appendChild(h('span', null, label));
-  caption.appendChild(h('span', 'metric-bar-value', String(Math.round(pct)) + '%'));
-  wrap.appendChild(caption);
-  var barWrap = h('div', 'bar');
-  var tone = pct > dangerAt ? 'danger' : (pct > warnAt ? 'warn' : '');
-  var barInner = h('i', tone);
-  barInner.style.width = pct + '%';
-  barWrap.appendChild(barInner);
-  wrap.appendChild(barWrap);
-  host.appendChild(wrap);
 }
 
 /* -- 事件流列表（有界展示） -------------------------------------------------- */
@@ -269,7 +85,6 @@ function countByOnline(machines) {
   var total = 0;
   var online = 0;
   var totalAgents = 0;
-  var hermes = 0;
   if (Array.isArray(machines)) {
     total = machines.length;
     machines.forEach(function (m) {
@@ -277,41 +92,56 @@ function countByOnline(machines) {
         online += 1;
         totalAgents += (Number(m.agent_count) || 0);
       }
-      if (m && m.has_hermes) {
-        hermes += 1;
-      }
     });
   }
-  return { total: total, online: online, alerts: total - online, agents: totalAgents, hermes: hermes };
+  return { total: total, online: online, alerts: total - online, agents: totalAgents };
 }
 
 function renderHealthBar(rows) {
   var counts = countByOnline(rows);
-  var bar = h('div', 'healthbar');
-
-  function makeHealthCol(cls, label, value, iconName) {
-    var item = h('div', 'healthbar-stat-item ' + cls);
-    var lbl = h('span', 'hb-label');
-    var iconSlot = h('span', null);
-    iconSlot.appendChild(uiIcon(iconName, { size: 14, className: 'hb-icon' }));
-    lbl.appendChild(iconSlot);
-    lbl.appendChild(document.createTextNode(label));
-
-    var val = h('span', 'hb-value');
-    val.appendChild(h('b', null, String(value)));
-
-    item.appendChild(lbl);
-    item.appendChild(val);
-    return item;
+  var bar = h('div', 'healthbar fleet-summary');
+  var heading = h('div', 'fleet-summary-heading');
+  var state = counts.alerts ? '需要关注' : (counts.total ? '运行正常' : '等待节点连接');
+  var stateIcon = uiIcon(counts.alerts ? 'alert-triangle' : 'check-circle', {size: 18});
+  heading.appendChild(h('span', 'fleet-summary-state ' + (counts.alerts ? 'warning' : 'healthy'), state));
+  heading.querySelector('span').prepend(stateIcon);
+  heading.appendChild(h('span', 'fleet-summary-caption', counts.alerts ? counts.alerts + ' 台机器离线' : '节点与 Agent 状态持续同步'));
+  bar.appendChild(heading);
+  var stats = h('div', 'fleet-summary-stats');
+  for (var item of [
+    ['在线机器', counts.online, 'server'],
+    ['已登记机器', counts.total, 'monitor'],
+    ['活跃 Agent', counts.agents, 'cpu'],
+  ]) {
+    var stat = h('div', 'fleet-summary-stat');
+    stat.appendChild(uiIcon(item[2], {size: 16})); stat.appendChild(h('span', null, item[0]));
+    stat.appendChild(h('strong', null, String(item[1]))); stats.appendChild(stat);
   }
-
-  bar.appendChild(makeHealthCol('hb-ok', '在线节点', counts.online, 'server'));
-  bar.appendChild(makeHealthCol('hb-bad', '异常 / 离线', counts.alerts, 'alert-triangle'));
-  bar.appendChild(makeHealthCol('hb-total', '已注册集群', counts.total, 'globe'));
-  bar.appendChild(makeHealthCol('hb-warn', '活跃 Agents', counts.agents, 'cpu'));
-  bar.appendChild(makeHealthCol('hb-hermes', 'Hermes Gateway', counts.hermes, 'sparkles'));
-
+  bar.appendChild(stats);
   return bar;
+}
+
+function renderMachineOverview(machine) {
+  var row = h('div', 'fleet-machine-row');
+  var main = h('div', 'fleet-machine-main');
+  main.appendChild(h('span', 'dot' + (machine.online ? ' on' : ' off')));
+  var machineLink = h('a', null, machine.machine || 'unknown');
+  machineLink.href = pagePath('machine', machine.machine);
+  main.appendChild(machineLink);
+  main.appendChild(h('span', 'fleet-machine-description', machine.online ? (machine.desc || '在线') : (machine.error || '离线')));
+  row.appendChild(main);
+  var data = h('div', 'fleet-machine-meta');
+  if (machine.online) {
+    data.appendChild(h('span', null, 'Agent ' + fmtValue(machine.agent_count || 0)));
+    var load = machine.system && machine.system.load;
+    if (load !== null && load !== undefined && load !== '') data.appendChild(h('span', null, '负载 ' + fmtValue(load)));
+    if (machine.client && machine.client.version) data.appendChild(h('span', null, '版本 ' + machine.client.version));
+  }
+  row.appendChild(data);
+  var details = h('a', 'fleet-machine-link'); details.href = pagePath('machine', machine.machine);
+  details.setAttribute('aria-label', machine.machine + ' 节点详情'); details.title = '节点详情';
+  details.appendChild(uiIcon('arrow-right', {size: 17})); row.appendChild(details);
+  return row;
 }
 
 /* -- 活跃会话带 (Active Sessions) -------------------------------------------- */
@@ -402,6 +232,7 @@ export function mountFleet(root, store, client) {
     sessions: [],
     sessionError: null,
   };
+  var openDisclosures = new Set();
 
   function onStoreChange() { render(); }
   var unsubscribe = store.subscribe(onStoreChange);
@@ -410,6 +241,8 @@ export function mountFleet(root, store, client) {
     if (disposed) {
       return;
     }
+    openDisclosures = new Set(Array.from(root.querySelectorAll('.fleet-secondary-detail[open]'))
+      .map(function (details) { return details.getAttribute('data-disclosure'); }));
     removeAllChildren(root);
     if (viewState.error) {
       var errBox = h('div', 'err');
@@ -438,30 +271,33 @@ export function mountFleet(root, store, client) {
     var status = store.getState().status;
     var rows = listMachines(store.getState().machines, status);
     mainColumn.appendChild(renderHealthBar(rows));
-    mainColumn.appendChild(renderSessionStrip(viewState.sessions, viewState.sessionError));
-
+    var nodesHeading = h('div', 'fleet-section-heading');
+    nodesHeading.appendChild(h('h2', null, '计算节点'));
+    var allNodes = h('a', null, '查看全部'); allNodes.href = '/settings/nodes'; nodesHeading.appendChild(allNodes);
+    mainColumn.appendChild(nodesHeading);
     if (rows.length === 0) {
-      mainColumn.appendChild(h('div', 'meta', MSG_NO_DATA));
+      mainColumn.appendChild(h('div', 'fleet-empty-state', MSG_NO_DATA));
     } else {
-      var grid = h('div', 'grid');
-      rows.forEach(function (machine) {
-        renderMachineCard(grid, machine, status && status.client_release);
-      });
-      mainColumn.appendChild(grid);
+      var list = h('div', 'fleet-machine-list');
+      rows.forEach(function (machine) { list.appendChild(renderMachineOverview(machine)); });
+      mainColumn.appendChild(list);
     }
-
+    var sessionDetails = h('details', 'fleet-secondary-detail');
+    sessionDetails.setAttribute('data-disclosure', 'sessions');
+    sessionDetails.open = openDisclosures.has('sessions');
+    sessionDetails.appendChild(h('summary', null, '活跃会话 (' + viewState.sessions.length + ')'));
+    sessionDetails.appendChild(renderSessionStrip(viewState.sessions, viewState.sessionError));
+    mainColumn.appendChild(sessionDetails);
+    var eventDetails = h('details', 'fleet-secondary-detail');
+    eventDetails.setAttribute('data-disclosure', 'events');
+    eventDetails.open = openDisclosures.has('events');
+    eventDetails.appendChild(h('summary', null, '最近系统事件'));
+    var eventList = h('div', 'event-stream fleet-event-list');
+    renderEventList(eventList, eventSnapshot(store, viewState));
+    eventDetails.appendChild(eventList);
+    mainColumn.appendChild(eventDetails);
     layout.appendChild(mainColumn);
 
-    var aside = h('aside', 'event-stream');
-    var asideTitle = h('h3');
-    var actIcon = h('span', null);
-    actIcon.appendChild(uiIcon('activity', { size: 15 }));
-    asideTitle.appendChild(actIcon);
-    asideTitle.appendChild(document.createTextNode(' 实时事件流'));
-    aside.appendChild(asideTitle);
-
-    renderEventList(aside, eventSnapshot(store, viewState));
-    layout.appendChild(aside);
 
     root.appendChild(layout);
   }
@@ -521,7 +357,8 @@ export function mountFleet(root, store, client) {
     .catch(function (err) {
       if (disposed) return;
       viewState.loading = false;
-      viewState.error = (err && err.detail) ? err.detail : '网络错误';
+      viewState.error = err && (err.detail || err.code || err.message)
+        ? (err.detail || err.code || err.message) : '网络错误';
       render();
     });
 

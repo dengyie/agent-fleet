@@ -14,11 +14,27 @@ const [origin, taskId] = process.argv.slice(2);
     fs.mkdirSync(output, {recursive: true});
     await page.addInitScript(() => { const Native = window.EventSource; window.EventSource = class extends Native { constructor(...args) { super(...args); window.reviewSse = this; } }; });
     await page.goto(origin, {waitUntil: 'domcontentloaded'});
-    await page.getByText('下发任务', {exact: true}).first().waitFor();
+    await page.locator('.fleet-secondary-detail').first().waitFor({timeout: 5000}).catch(async error => {
+      throw new Error('Overview did not render: ' + await page.locator('#route-view').innerText() +
+        '; page errors: ' + errors.join(' | ') + '; ' + error.message);
+    });
+    await page.getByRole('heading', {name: '计算节点', exact: true}).waitFor();
+    const eventDisclosure = page.locator('.fleet-secondary-detail').last();
+    await eventDisclosure.locator('summary').click();
+    await page.evaluate(() => window.reviewSse.dispatchEvent(new MessageEvent('machine_update', {
+      data: JSON.stringify({machine:'studio-mac', online:true, ts:Date.now()/1000,
+        event_seq:100001, agents:{codex:{active_count:1}}, system:{load:'0.44'}, changes:[]}),
+      lastEventId:'100001',
+    })));
+    assert.equal(await eventDisclosure.getAttribute('open'), '',
+      'overview disclosure stays open while live store updates rerender node state');
+    const machineLink = page.getByRole('link', {name: 'studio-mac', exact: true});
+    assert.equal(new URL(await machineLink.getAttribute('href'), origin).pathname, '/machine/studio-mac');
     assert.equal(await page.locator('[data-icon] svg').first().evaluate(svg => svg.namespaceURI), 'http://www.w3.org/2000/svg');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await page.screenshot({path: path.join(output, 'fleet-desktop.png'), fullPage: true});
-    await page.goto(origin + '/machine/studio-mac', {waitUntil: 'domcontentloaded'});
+    await machineLink.click();
+    await page.waitForURL('**/machine/studio-mac');
     await page.locator('#task-create-form').waitFor();
     assert.ok((await page.locator('#nt-confirm').boundingBox()).width <= 24, 'checkbox must retain its control width');
     assert.equal(await page.locator('#nt-error').isVisible(), false, 'an empty error must not appear as an alert');
@@ -124,7 +140,11 @@ const [origin, taskId] = process.argv.slice(2);
     assert.equal(await page.getByRole('tab', {name:'运行', exact:true}).getAttribute('aria-selected'), 'true');
     await page.getByText('运行记录', {exact:true}).waitFor();
     await page.keyboard.press('End');
-    assert.equal(await page.getByRole('tab', {name:'上下文', exact:true}).getAttribute('aria-selected'), 'true');
+    assert.equal(await page.getByRole('tab', {name:'节点', exact:true}).getAttribute('aria-selected'), 'true');
+    await page.getByText('管理执行配置', {exact:true}).waitFor();
+    await page.getByText('管理执行配置', {exact:true}).click();
+    await page.getByRole('heading', {name:'VM 与执行节点', exact:true}).waitFor();
+    await page.getByRole('tab', {name:'节点', exact:true}).focus();
     await page.keyboard.press('Home');
     assert.equal(await page.getByRole('tab', {name:'产物', exact:true}).getAttribute('aria-selected'), 'true');
     await page.getByRole('button', {name:'收起工作面板', exact:true}).click();
@@ -175,11 +195,11 @@ const [origin, taskId] = process.argv.slice(2);
       const {mountNavigation} = await import('/assets/shell/navigation.js');
       const store = new FleetStore(); const stop = mountNavigation({page:'fleet'}, store);
       store.setStatus({machines:[{machine:'review-node', online:true}]});
-      const results = [document.querySelector('#sidebar-nodes .node-dot').classList.contains('online')];
+      const results = [document.querySelector('#sidebar-nodes') === null];
       store.applySseEvent({type:'machine_update',data:{machine:'review-node', online:false, ts:Date.now()/1000,event_seq:999}});
-      results.push(!document.querySelector('#sidebar-nodes .node-dot').classList.contains('online'));
+      results.push(document.querySelector('#sidebar-nodes') === null);
       store.applySseEvent({type:'machine_update',data:{machine:'new-node', online:true, ts:Date.now()/1000,event_seq:1000}});
-      results.push(document.querySelectorAll('#sidebar-nodes .node-dot').length === 2);
+      results.push(document.querySelectorAll('#sidebar-nodes').length === 0);
       stop(); return results;
     });
     assert.deepEqual(nodes, [true, true, true]);

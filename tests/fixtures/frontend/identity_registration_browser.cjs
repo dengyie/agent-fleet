@@ -65,7 +65,9 @@ const templateIds = mode === 'exact-ids' ? [' fixture ', '\ufeffnative'] : ['fix
       await Promise.all([page.waitForEvent('domcontentloaded'), page.evaluate(() => window.checkNewAccount())]);
       await page.getByText('ordinary@example.test · 普通用户', {exact: true}).waitFor();
       await held.abort('failed');
-      assert.equal(await page.getByRole('dialog').count(), 0); assert.equal(await panel.count(), 0);
+      assert.equal(await page.locator('.settings-dialog[open]').count(), 1);
+      assert.equal(await page.getByRole('dialog', {name: '登记 Fleet 集成身份', exact: true}).count(), 0);
+      assert.equal(await panel.count(), 0);
       assert.equal(posted.length, 1);
       assert.equal((await context.request.get(prefix)).status(), 403);
     } else {

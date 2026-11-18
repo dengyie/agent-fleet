@@ -2,7 +2,7 @@
 body[data-page=assistant] .console-content { max-width: none; padding: 0; }
 body[data-page=assistant] .console-main { height: 100dvh; display: flex; flex-direction: column; }
 body[data-page=assistant] .console-content, body[data-page=assistant] #route-view { flex: 1; width: 100%; min-height: 0; display: flex; }
-.assistant-view { --inspector-w: 330px; display: grid; grid-template-columns: minmax(0, 1fr) var(--inspector-w); grid-template-rows: 62px minmax(0, 1fr); width: 100%; min-width: 0; min-height: 0; }
+.assistant-view { --inspector-w: 370px; display: grid; grid-template-columns: minmax(0, 1fr) var(--inspector-w); grid-template-rows: 62px minmax(0, 1fr); width: 100%; min-width: 0; min-height: 0; }
 .assistant-view[data-inspector-open=false] { grid-template-columns: minmax(0, 1fr); }
 .assistant-heading { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; padding: 10px 28px; border-bottom: 1px solid var(--border-subtle); }
 .assistant-heading>div:first-child { min-width: 0; }
@@ -134,7 +134,7 @@ chat-prompt-input button[type=submit]:disabled { opacity: .45; }
 .assistant-artifact-digest { display: none; }
 .assistant-events { max-height: none; }
 @media (max-width: 1300px) {
-  .assistant-view { --inspector-w: 290px; }
+  .assistant-view { --inspector-w: 320px; }
   .assistant-thread { padding-left: 22px; padding-right: 22px; }
   .composer-dock { padding-left: 22px; padding-right: 22px; }
   .assistant-controls select { max-width: 135px; }
@@ -240,3 +240,22 @@ tool-call-badge #toggle-btn > div:first-child .tool-call-label { min-width: 0; m
 tool-call-badge #toggle-btn > div:first-child { min-width: 0; flex: 1; }
 tool-call-badge #toggle-btn > div:last-child { flex-shrink: 0; }
 tool-call-badge #drawer pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; }
+
+/* Task tools are grouped in a quiet, independently scrolling workspace. */
+.inspector-header { padding: 20px 18px 14px; }
+.inspector-label strong { color: var(--text); font-size: 13px; }
+.inspector-tabs { gap: 3px; padding: 0 12px 12px; border-bottom: 1px solid var(--border); }
+.inspector-tab { border: 0; border-radius: 7px; padding: 7px 5px; }
+.inspector-tab[aria-selected=true] { background: var(--panel-hover); }
+.workspace-node-list { margin: 16px 0; display: grid; gap: 4px; }
+.workspace-node-row { display: flex; align-items: center; gap: 9px; padding: 11px 10px; border: 1px solid var(--border); border-radius: 9px; color: var(--text); }
+.workspace-node-row span { min-width: 0; overflow-wrap: anywhere; }
+.workspace-node-row small { margin-left: auto; flex: none; color: var(--text-2); }
+.workspace-node-config { margin: 18px 0; border-top: 1px solid var(--border); padding-top: 14px; }
+.workspace-node-config > summary { cursor: pointer; color: var(--text); font-size: 13px; font-weight: 600; }
+.workspace-node-editor { padding-top: 14px; }
+.workspace-node-editor .settings-form, .workspace-node-editor .settings-advanced[open] { grid-template-columns: minmax(0, 1fr); }
+.workspace-node-editor .settings-panel { padding: 12px 0; }
+.workspace-node-editor .settings-panel h2 { font-size: 15px; }
+.workspace-node-editor .settings-owner-scope { margin-bottom: 12px; }
+.workspace-node-hosts { font-size: 12px; }

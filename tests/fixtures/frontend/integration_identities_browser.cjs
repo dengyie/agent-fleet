@@ -13,6 +13,11 @@ async function capture(page, name) {
   await page.screenshot({path: path.join(process.env.FLEET_SCREENSHOTS, name + '.png'), fullPage: true});
 }
 
+async function closeSettings(page) {
+  await page.getByRole('button', {name: '关闭设置', exact: true}).click();
+  await page.waitForURL('**/assistant', {waitUntil: 'domcontentloaded'});
+}
+
 (async () => {
   const browser = await chromium.launch({channel: process.env.FLEET_BROWSER_CHANNEL || 'chrome', headless: true});
   try {
@@ -45,7 +50,7 @@ async function capture(page, name) {
       if (mode === 'both') {
         const mcp = page.getByRole('region', {name: 'MCP 集成管理', exact: true});
         await mcp.getByText('尚无连接登记', {exact: true}).waitFor();
-        await page.getByRole('link', {name: '返回应用', exact: true}).click(); await page.waitForURL('**/assistant', {waitUntil: 'domcontentloaded'});
+        await closeSettings(page);
         await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate', {detail: {path: '/settings/integrations'}})));
         await panel.getByText('尚无身份登记', {exact: true}).waitFor();
         await mcp.getByText('尚无连接登记', {exact: true}).waitFor();
@@ -77,7 +82,7 @@ async function capture(page, name) {
       };
       if (mode === 'review') {
         await capture(page, 'fleet-identity-detail-' + viewport);
-        await revoke.click(); const dialog = page.getByRole('dialog');
+        await revoke.click(); const dialog = page.getByRole('dialog', {name: '撤销 Fleet 集成身份', exact: true});
         assert.equal(await dialog.getByRole('button', {name: '确认撤销身份', exact: true}).isDisabled(), true);
         await dialog.getByText('撤销不可恢复。', {exact: false}).waitFor();
         await capture(page, 'fleet-identity-confirm-' + viewport);
@@ -117,7 +122,7 @@ async function capture(page, name) {
         const readPattern = '**/integrations/fleet/record?**';
         await page.route(readPattern, route => { held = route; signalRead(); });
         await panel.getByRole('button', {name: '重新读取身份', exact: true}).click(); await arrived;
-        await page.getByRole('link', {name: '返回应用', exact: true}).click(); await page.waitForURL('**/assistant', {waitUntil: 'domcontentloaded'});
+        await closeSettings(page);
         await held.abort('failed'); await page.unroute(readPattern);
         await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate', {detail: {path: '/settings/integrations'}}))); await inspector.getByRole('heading', {name: '../记录?x#', exact: true}).waitFor();
         assert.equal(requests.filter(item => item.method === 'POST').length, 0);

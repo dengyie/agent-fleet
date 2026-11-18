@@ -25,7 +25,7 @@ export function mountInspector(root, heading, inspector, groups) {
   header.appendChild(label); header.appendChild(close); inspector.appendChild(header);
   const tabs = el('div', 'inspector-tabs'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', '工作面板');
   inspector.appendChild(tabs);
-  const entries = groups.map(({id, title, sections, hidden}) => {
+  const entries = groups.map(({id, title, sections, hidden, onSelect}) => {
     const button = el('button', 'inspector-tab', title); button.type = 'button'; button.id = 'inspector-tab-' + id;
     const panel = el('div', 'inspector-panel'); panel.id = 'inspector-panel-' + id;
     button.setAttribute('role', 'tab'); button.setAttribute('aria-controls', panel.id);
@@ -33,7 +33,7 @@ export function mountInspector(root, heading, inspector, groups) {
     panel.setAttribute('role', 'tabpanel'); panel.setAttribute('aria-labelledby', button.id); panel.tabIndex = 0;
     sections.forEach(section => panel.appendChild(section));
     tabs.appendChild(button); inspector.appendChild(panel);
-    return {id, button, panel};
+    return {id, button, panel, onSelect};
   });
   const narrow = window.matchMedia?.('(max-width: 1100px)');
   let open = !narrow?.matches;
@@ -63,6 +63,7 @@ export function mountInspector(root, heading, inspector, groups) {
       entry.button.tabIndex = active ? 0 : -1;
       entry.panel.hidden = !active;
     }
+    entries.find(entry => entry.id === id).onSelect?.();
     if (reveal) { setOpen(true); if (narrow?.matches) entries.find(entry => entry.id === id).button.focus(); }
   }
   entries.forEach(entry => {

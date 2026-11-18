@@ -31,12 +31,18 @@
 <div class="console-layout" hidden>
   <a class="skip-link" href="#main-content">跳到主内容</a>
   <aside class="console-sidebar" id="sidebar" aria-label="主导航">
+    <div class="sidebar-appearance">
+      <div class="theme-picker" role="group" aria-label="外观主题">
+        <button type="button" data-theme="light" aria-label="浅色主题" title="浅色"><span data-icon="sun"></span></button>
+        <button type="button" data-theme="dark" aria-label="深色主题" title="深色"><span data-icon="moon"></span></button>
+        <button type="button" data-theme="system" aria-label="跟随系统主题" title="跟随系统"><span data-icon="monitor"></span></button>
+      </div>
+    </div>
     <a class="console-brand" href="/"><img class="brand-logo" src="/assets/brand/mango-ddf462d0.png" alt=""><span>agent fleet<span class="brand-caption">个人智能工作空间</span></span></a>
     <button type="button" class="icon-button sidebar-collapse" id="sidebar-collapse" aria-label="收起导航" title="收起导航"><span data-icon="chevron-left"></span></button>
     <a class="new-conversation" href="/assistant"><span data-icon="sparkles"></span>开始新对话<span class="nav-shortcut">新建</span></a>
     <p class="nav-group-label">工作空间</p>
     <nav class="console-nav">
-      <a href="/settings" data-nav="settings"><span data-icon="tool"></span>设置</a>
       <a href="/" data-nav="fleet"><span data-icon="monitor"></span>总览</a>
       <a href="/assistant" data-nav="assistant"><span data-icon="sparkles"></span>主助手</a>
       <a href="/muse" data-nav="muse"><span data-icon="sparkles"></span>Muse</a>
@@ -50,17 +56,13 @@
       <label class="conversation-search"><span class="sr-only">搜索最近对话</span><input id="conversation-search" type="search" placeholder="搜索最近对话" aria-label="搜索最近对话" autocomplete="off"><kbd>⌘ K</kbd></label>
       <p id="conversation-search-status" class="sidebar-empty" role="status" hidden></p>
       <nav class="console-nodes console-conversations" id="sidebar-conversations" aria-label="最近对话"><p class="sidebar-empty">正在获取对话…</p></nav>
-      <div class="nav-group-heading"><p class="nav-group-label">计算节点</p><span id="node-count" class="subtle-count">—</span></div>
-      <div class="sidebar-resize-handle" id="sidebar-nodes-resize" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="调整最近对话和计算节点的高度"></div>
-      <nav class="console-nodes" id="sidebar-nodes" aria-label="计算节点"><p class="sidebar-empty">正在获取节点…</p></nav>
+
     </div>
     <div class="sidebar-footer">
-      <div class="workspace-identity"><span class="identity-icon" data-icon="lock"></span><div><strong>自托管工作空间</strong><span>你的数据，由你掌控</span></div></div>
-      <div class="theme-picker" role="group" aria-label="外观主题">
-        <button type="button" data-theme="light" aria-label="浅色主题" title="浅色"><span data-icon="sun"></span></button>
-        <button type="button" data-theme="dark" aria-label="深色主题" title="深色"><span data-icon="moon"></span></button>
-        <button type="button" data-theme="system" aria-label="跟随系统主题" title="跟随系统"><span data-icon="monitor"></span></button>
-      </div>
+      <a class="icon-button" href="/settings" data-nav="settings" aria-label="设置" title="设置"><span data-icon="tool"></span></a>
+      <a class="icon-button" href="/settings/account" aria-label="账号与访问" title="账号与访问"><span data-icon="lock"></span></a>
+      <a class="icon-button" href="/usage" aria-label="用量看板" title="用量看板"><span data-icon="activity"></span></a>
+      <button type="button" class="icon-button" id="operator-logout" aria-label="退出登录" title="退出登录"><span data-icon="external-link"></span></button>
     </div>
   </aside>
   <dialog class="conversation-dialog" id="conversation-title-dialog" aria-labelledby="conversation-title-heading">
@@ -82,8 +84,8 @@
   <button class="sidebar-backdrop" id="sidebar-backdrop" aria-label="关闭导航" hidden></button>
   <div class="console-main">
     <header class="console-topbar">
-      <div class="topbar-leading"><a class="settings-back" href="/assistant"><span data-icon="arrow-left"></span>返回应用</a><button type="button" class="icon-button desktop-menu" id="desktop-menu" aria-label="展开导航" title="展开导航" aria-controls="sidebar"><span data-icon="chevron-right"></span></button><button type="button" class="icon-button mobile-menu" id="mobile-menu" aria-label="打开导航" aria-controls="sidebar" aria-expanded="false"><span data-icon="layers"></span></button><span class="topbar-workspace">工作空间</span><span class="breadcrumb-separator">/</span><span id="route-label">总览</span></div>
-      <div class="topbar-trailing"><button type="button" id="operator-logout">退出登录</button><span class="connection-indicator" id="connection-status" role="status"><i></i><span>正在连接</span></span><button type="button" class="icon-button" id="refresh-page" aria-label="刷新当前页面" title="刷新当前页面"><span data-icon="refresh"></span></button></div>
+      <div class="topbar-leading"><button type="button" class="icon-button desktop-menu" id="desktop-menu" aria-label="展开导航" title="展开导航" aria-controls="sidebar"><span data-icon="chevron-right"></span></button><button type="button" class="icon-button mobile-menu" id="mobile-menu" aria-label="打开导航" aria-controls="sidebar" aria-expanded="false"><span data-icon="layers"></span></button><span class="topbar-workspace">工作空间</span><span class="breadcrumb-separator">/</span><span id="route-label">总览</span></div>
+      <div class="topbar-trailing"><span class="connection-indicator" id="connection-status" role="status"><i></i><span>正在连接</span></span><button type="button" class="icon-button" id="refresh-page" aria-label="刷新当前页面" title="刷新当前页面"><span data-icon="refresh"></span></button></div>
     </header>
     <main id="main-content" class="console-content" tabindex="-1">
       <div class="page-heading" id="page-heading"><div><p class="eyebrow" id="page-eyebrow">WORKSPACE OVERVIEW</p><h1 id="page-title">集群总览</h1><p id="page-description">节点、任务与服务状态，一处掌握。</p></div><a class="button-primary" href="/assistant"><span data-icon="sparkles"></span>打开主助手</a></div>

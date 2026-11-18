@@ -126,67 +126,15 @@ const [origin] = process.argv.slice(2);
     assert.equal(await send.isDisabled(), false);
     await page.locator('#sidebar-conversations a').filter({hasText: '登录恢复验收'}).waitFor();
     await page.setViewportSize({width: 1280, height: 720});
-    const compactSidebar = await page.evaluate(() => {
-      const bounds = selector => {
-        const {top, bottom} = document.querySelector(selector).getBoundingClientRect();
-        return {top, bottom};
-      };
-      const lists = document.querySelector('#sidebar-adjustable-lists');
-      return {lists: bounds('#sidebar-adjustable-lists'), footer: bounds('.sidebar-footer'),
-        sidebar: bounds('.console-sidebar'), listOverflow: lists.scrollHeight > lists.clientHeight,
-        listScrollMode: getComputedStyle(lists).overflowY};
-    });
-    assert.ok(compactSidebar.lists.bottom <= compactSidebar.footer.top &&
-      compactSidebar.footer.bottom <= compactSidebar.sidebar.bottom &&
-      compactSidebar.listOverflow && compactSidebar.listScrollMode === 'auto',
-    'compact desktop sidebar contains the adjustable lists above the footer: ' + JSON.stringify(compactSidebar));
+    assert.equal(await page.locator('#sidebar-nodes').count(), 0, 'node inventory is owned by the assistant work panel');
+    assert.equal(await page.locator('.workspace-identity').count(), 0, 'workspace identity copy is removed');
+    assert.equal(await page.locator('.sidebar-appearance [data-theme]').count(), 3, 'theme control stays at the sidebar top');
+    assert.equal(await page.locator('.sidebar-footer [data-nav="settings"]').count(), 1, 'settings is a footer icon');
+    assert.equal(await page.locator('.sidebar-footer #operator-logout').getAttribute('aria-label'), '退出登录');
     if (process.env.FLEET_SCREENSHOTS) {
       fs.mkdirSync(process.env.FLEET_SCREENSHOTS, {recursive: true});
       await page.screenshot({path: path.join(process.env.FLEET_SCREENSHOTS, 'sidebar-compact-desktop.png')});
     }
-    await page.setViewportSize({width: 1280, height: 900});
-    const divider = page.locator('#sidebar-nodes-resize');
-    const initialNodeHeight = Number(await divider.getAttribute('aria-valuenow'));
-    const sidebarGeometry = async () => page.evaluate(() => {
-      const bounds = selector => {
-        const {top, height, bottom} = document.querySelector(selector).getBoundingClientRect();
-        return {top, height, bottom};
-      };
-      return {
-        history: bounds('#sidebar-conversations'),
-        nodes: bounds('#sidebar-nodes'),
-        footer: bounds('.sidebar-footer'),
-      };
-    });
-    const beforeKeyboardResize = await sidebarGeometry();
-    await divider.focus();
-    await divider.press('ArrowUp');
-    const increasedNodeHeight = Number(await divider.getAttribute('aria-valuenow'));
-    assert.equal(increasedNodeHeight, Math.min(initialNodeHeight + 16, Number(await divider.getAttribute('aria-valuemax'))));
-    assert.equal((await sidebarGeometry()).footer.top, beforeKeyboardResize.footer.top,
-      'keyboard resizing keeps the self-hosted footer anchored');
-    assert.equal(await page.evaluate(() => localStorage.getItem('fleet-sidebar-nodes-height')),
-      String(increasedNodeHeight));
-    const afterKeyboardIncrease = await sidebarGeometry();
-    await divider.press('ArrowDown');
-    assert.equal((await sidebarGeometry()).footer.top, afterKeyboardIncrease.footer.top,
-      'keyboard resizing leaves the self-hosted footer anchored');
-    const beforeDrag = await sidebarGeometry();
-    const dividerBounds = await divider.boundingBox();
-    await page.mouse.move(dividerBounds.x + dividerBounds.width / 2, dividerBounds.y + dividerBounds.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(dividerBounds.x + dividerBounds.width / 2, dividerBounds.y - 48, {steps: 8});
-    await page.mouse.up();
-    const afterDrag = await sidebarGeometry();
-    assert.equal(afterDrag.footer.top, beforeDrag.footer.top, 'resizing the lists keeps the self-hosted footer anchored: ' +
-      JSON.stringify({beforeDrag, afterDrag}));
-    assert.equal(afterDrag.footer.height, beforeDrag.footer.height, 'resizing the lists leaves the self-hosted footer size unchanged');
-    assert.ok(afterDrag.nodes.height > beforeDrag.nodes.height, 'dragging upward expands the node list: ' +
-      JSON.stringify({initialNodeHeight, beforeDrag, afterDrag, max: await divider.getAttribute('aria-valuemax')}));
-    assert.ok(afterDrag.history.height < beforeDrag.history.height, 'the conversation list gives space to the node list');
-    assert.equal(await page.evaluate(() => localStorage.getItem('fleet-sidebar-nodes-height')),
-      await divider.getAttribute('aria-valuenow'), 'dragged height persists for the next visit');
-
     const historySearch = page.getByRole('searchbox', {name: '搜索最近对话'});
     await historySearch.fill('归档');
     const searchState = await page.locator('#sidebar-conversations .conversation-history-entry').evaluateAll(entries =>
@@ -260,6 +208,16 @@ const [origin] = process.argv.slice(2);
     await page.getByRole('dialog', {name: '永久删除对话？'}).waitFor();
     await page.getByRole('button', {name: '永久删除', exact: true}).click();
     await historyEntry.waitFor({state: 'detached'});
+    const settingsDraft = page.getByLabel('给助手的任务');
+    await settingsDraft.fill('设置关闭后仍应保留的草稿');
+    await page.locator('.sidebar-footer [data-nav="settings"]').click();
+    await page.locator('.settings-dialog[open]').waitFor();
+    assert.equal(await page.evaluate(() => document.querySelector('[aria-label="给助手的任务"]').value),
+      '设置关闭后仍应保留的草稿', 'the assistant remains mounted behind settings');
+    await page.keyboard.press('Escape');
+    await page.locator('.settings-dialog').waitFor({state: 'detached'});
+    assert.equal(await settingsDraft.inputValue(), '设置关闭后仍应保留的草稿',
+      'closing settings preserves the current draft at ' + page.url());
     await page.setViewportSize({width: 390, height: 844});
 
     await page.goto(origin + '/assistant', {waitUntil: 'domcontentloaded'});
@@ -346,6 +304,7 @@ const [origin] = process.argv.slice(2);
     await page.unroute(sessionRoute);
     await page.evaluate(() => { window.advanceFleetTime(60000); window.dispatchEvent(new Event('focus')); });
     await page.locator('.monitoring-view').waitFor();
+    await page.getByRole('button', {name: '打开导航', exact: true}).click();
     await page.getByRole('button', {name: '退出登录', exact: true}).click();
     await expectLogin('/monitoring');
     await page.goBack({waitUntil: 'domcontentloaded'});
@@ -356,6 +315,7 @@ const [origin] = process.argv.slice(2);
       await login();
       await waitForAssistantReady();
       assert.equal(new URL(page.url()).pathname, '/assistant');
+      await page.getByRole('button', {name: '打开导航', exact: true}).click();
       await page.getByRole('button', {name: '退出登录', exact: true}).click();
       await page.waitForURL(url => url.pathname === '/login', {waitUntil: 'domcontentloaded'});
     }

@@ -12,6 +12,11 @@ async function capture(page, name) {
   await page.screenshot({path: path.join(process.env.FLEET_SCREENSHOTS, name + '.png'), fullPage: true});
 }
 
+async function closeSettings(page) {
+  await page.getByRole('button', {name: '关闭设置', exact: true}).click();
+  await page.waitForURL('**/assistant');
+}
+
 (async () => {
   const browser = await chromium.launch({channel: process.env.FLEET_BROWSER_CHANNEL || 'chrome', headless: true});
   try {
@@ -78,7 +83,7 @@ async function capture(page, name) {
       } else if (mode === 'recovery') {
         const admitPattern = '**/integrations/mcp/admit?**';
         await page.route(admitPattern, async route => { assert.equal((await route.fetch()).status(), 200); await route.abort('failed'); });
-        await approve.click(); const dialog = page.getByRole('dialog');
+        await approve.click(); const dialog = page.getByRole('dialog', {name: '批准待审版本', exact: true});
         await dialog.getByLabel('已核对待审定义', {exact: true}).check();
         await dialog.getByRole('button', {name: '确认批准', exact: true}).click();
         await panel.getByText('操作结果待核对，请重新读取目录。请勿重复提交。', {exact: true}).waitFor();
@@ -112,7 +117,7 @@ async function capture(page, name) {
         const readPattern = '**/integrations/mcp/record?connector_id=weather';
         await page.route(readPattern, route => { held = route; signalRead(); });
         await panel.getByRole('button', {name: '重新读取目录', exact: true}).click(); await arrived;
-        await page.getByRole('link', {name: '返回应用', exact: true}).click(); await page.waitForURL('**/assistant');
+        await closeSettings(page);
         await held.abort('failed'); await page.unroute(readPattern);
         await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate', {detail: {path: '/settings/integrations'}})));
         await inspector.getByText('待审版本 3', {exact: true}).waitFor();

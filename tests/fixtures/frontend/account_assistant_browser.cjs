@@ -25,9 +25,14 @@ const [origin, role] = process.argv.slice(2);
     const restrictedPanels = '.assistant-memory-context, .assistant-execution-window, .assistant-legacy-section, .assistant-unknown-section';
     if (role === 'user') {
       assert.equal(await page.locator(restrictedPanels).count(), 0, 'ordinary users must not mount administrator controls');
+      assert.equal(await page.getByRole('tab', {name: '节点', exact: true}).count(), 0,
+        'ordinary users must not receive VM configuration controls');
       assert.deepEqual(requests, [], 'ordinary initialization must not call administrator APIs');
     } else {
       assert.equal(await page.locator(restrictedPanels).count(), 4);
+      await page.getByRole('tab', {name: '节点', exact: true}).click();
+      await page.getByText('管理执行配置', {exact: true}).click();
+      await page.getByRole('heading', {name: 'VM 与执行节点', exact: true}).waitFor();
       await page.getByRole('tab', {name: '上下文', exact: true}).click();
       const searched = page.waitForResponse(response => response.url().includes('/memory/search'));
       await page.getByRole('searchbox', {name: '搜索记忆'}).fill('fixture');
