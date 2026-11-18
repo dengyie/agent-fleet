@@ -69,7 +69,7 @@ _RECONCILE_AUDIT_ACTION = "revoke_probe_reject"
 #: ADOPTED session.  ``adopt``/``detach`` are the adoption-lifecycle commands
 #: owned by ``adopt``/``revoke`` — they are NOT operator source controls here.
 #: Phase 4/5 tokens (``append_user_turn`` / ``apply_local_profile``) are
-#: accepted by name but stay default-off at the supervisor issuance gate.
+#: accepted by name and respect the configured supervisor issuance gates.
 #: Any action outside this set (``exec_shell`` / ``inject_stdin`` etc.) is
 #: forever ``unsupported_action``: no raw pid/signal/shell/command text is
 #: ever accepted on this surface.

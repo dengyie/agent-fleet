@@ -22,7 +22,7 @@ def app(tmp_path):
         append_user_turn_enabled=True,
     ))
     services = app.extensions['fleet']['services']
-    services['observe'].ingest({'machine': 'm1', 'instances': [instance_row()],
+    services['observe'].ingest({'machine': 'm1', 'instances': [instance_row(native_file_path='/sessions/native.jsonl')],
                                 'agents': {}, 'reachable': True})
     services['sessions'].ingest_events([
         event(1, 'session_start', {'agent_family': 'claude', 'adapter': 'hooks'}),
@@ -306,8 +306,8 @@ def test_committed_control_is_reconciled_when_post_enqueue_audit_fails(app, monk
 
 
 @pytest.mark.parametrize('enabled,append,expected', [
-    (False, False, {'session.list', 'session.get', 'session.read_events', 'fleet.list_machines'}),
-    (True, False, {'session.list', 'session.get', 'session.read_events', 'fleet.list_machines', 'session.control', 'session.get_command'}),
+    (False, False, {'session.list', 'session.get', 'session.read_events', 'fleet.list_machines', 'session.list_profiles'}),
+    (True, False, {'session.list', 'session.get', 'session.read_events', 'fleet.list_machines', 'session.control', 'session.get_command', 'session.list_profiles', 'session.read_logs'}),
 ])
 def test_supervisor_and_follow_up_gates_control_actual_tool_visibility(tmp_path, enabled, append, expected):
     app = create_app(FleetConfig.from_root(tmp_path, dev_operator=OWNER,

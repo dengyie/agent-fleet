@@ -7,18 +7,93 @@ import argparse
 import hashlib
 import json
 import logging
+import copy
+import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 from tools.runner_config import load_config
 from tools.session.capture.native_jsonl import tailer
-from tools.session.runner_capture import RunnerCapture, replay_pending
+from tools.session.runner_capture import RunnerCapture, replay_pending, session_prefix
 from tools.transport import Transport
+from agent_profiles import PROFILES
 
 log = logging.getLogger(__name__)
 
 #: Native JSONL lines above this size are skipped (logged), never synced.
 MAX_LINE_BYTES = 16 << 20
+
+
+def native_identity(family, path):
+    return 'native_' + hashlib.sha256((family + '\0' + str(Path(path).resolve())).encode()).hexdigest()[:32]
+
+
+def default_sources():
+    """Existing native conversation stores on this node, including history."""
+    return [(family, Path(profile.native_session_root).expanduser())
+            for family, profile in PROFILES.items()
+            if profile.native_session_root and Path(profile.native_session_root).expanduser().is_dir()]
+
+
+class NativeArchiveSync:
+    """Independent incremental archive worker; slow uploads never block control polling."""
+
+    def __init__(self, cfg, *, interval=15, sources=default_sources, send=None):
+        self.cfg = copy.copy(cfg)
+        self.cfg.transport = copy.copy(cfg.transport) if cfg.transport is not None else None
+        self.interval = interval
+        self.sources = sources
+        self.send = send or post
+        self.stopping = threading.Event()
+        self.thread = None
+        self.completed = OrderedDict()
+
+    def start(self):
+        self.thread = threading.Thread(target=self._run, name='native-session-sync', daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.stopping.set()
+        if self.thread is not None:
+            # An in-flight upload has its own finite transport timeout. No new
+            # file is started after stop; the daemon cannot pin process exit.
+            self.thread.join(timeout=1)
+
+    def scan_once(self):
+        for family, root in self.sources():
+            # Iterate lazily: do not materialize a whole machine's history.
+            for path in root.rglob('*.jsonl'):
+                if self.stopping.is_set():
+                    return
+                try:
+                    if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
+                        continue
+                    stat = path.stat()
+                    fingerprint = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+                    if self.completed.get((family, path)) == fingerprint:
+                        continue
+                    sync_file(self.cfg, family, path, self.send)
+                    # Only skip future scans when the complete file was read
+                    # and acknowledged. Large files continue next pass; pending
+                    # uploads and partial lines are never marked complete.
+                    identity = native_identity(family, path)
+                    checkpoint = self.cfg.cache_dir / 'conversations' / (session_prefix(self.cfg.machine) + identity + '.cursor')
+                    if json.loads(checkpoint.read_text())['offset'] == stat.st_size:
+                        self.completed[(family, path)] = fingerprint
+                        self.completed.move_to_end((family, path))
+                        if len(self.completed) > 4096:
+                            self.completed.popitem(last=False)
+                except Exception:
+                    log.warning('Native session sync failed: family=%s code=sync_failed', family)
+
+    def _run(self):
+        while not self.stopping.is_set():
+            try:
+                self.scan_once()
+            except Exception:
+                log.warning('Native session discovery failed: code=source_unavailable')
+            self.stopping.wait(self.interval)
 
 
 def post(cfg, path, body):
@@ -31,7 +106,7 @@ def post(cfg, path, body):
 
 def sync_file(cfg, family, path, send=post):
     path = Path(path).resolve()
-    identity = 'native_' + hashlib.sha256((family + '\0' + str(path)).encode()).hexdigest()[:32]
+    identity = native_identity(family, path)
     capture = RunnerCapture(cfg, {'attempt_id': identity, 'agent_type': family, 'task_id': ''}, send)
     checkpoint = capture.root / (capture.session_id + '.cursor')
     reader = tailer(str(path), checkpoint_path=str(checkpoint), max_line_bytes=MAX_LINE_BYTES)
@@ -58,7 +133,9 @@ def sync_file(cfg, family, path, send=post):
         reader.offset = end
         reader.checkpoint_to(str(checkpoint))
         capture.flush()
-        if capture.bridge.uploader.last_error:
+        status = capture.bridge.spool.status()
+        if (capture.bridge.uploader.last_error
+                or status['ack_sequence'] < status['next_sequence'] - 1):
             raise RuntimeError("conversation_upload_pending")
         return len(entries)
     finally:

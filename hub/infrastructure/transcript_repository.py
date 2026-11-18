@@ -641,7 +641,8 @@ class TranscriptRepository:
             return int(conn.execute('SELECT COALESCE(MAX(cursor),0) FROM redacted_event_order WHERE session_id=?',
                                     (session_id,)).fetchone()[0])
 
-    def read_redacted(self, session_id: str, *, limit: int = 100, after_cursor: int = 0) -> list[dict]:
+    def read_redacted(self, session_id: str, *, limit: int = 100, after_cursor: int = 0,
+                      include_source: bool = True) -> list[dict]:
         self._validate_session_id(session_id)
         try:
             bounded = max(1, min(int(limit), 1001))  # Public 1000-row page plus one lookahead.
@@ -653,7 +654,9 @@ class TranscriptRepository:
                 "SELECT o.cursor,e.event_id, e.session_id, stream_id, machine_id, sequence,"
                 " kind, capture_quality, emitted_at, redacted_json"
                 " FROM redacted_event_order o JOIN redacted_events e USING(session_id,event_id)"
-                " WHERE o.session_id=? AND o.cursor>? ORDER BY o.cursor ASC LIMIT ?",
+                " WHERE o.session_id=? AND o.cursor>? "
+                + ("AND e.kind<>'source_record' " if not include_source else "")
+                + "ORDER BY o.cursor ASC LIMIT ?",
                 (session_id, max(0, int(after_cursor)), bounded)).fetchall()
         finally:
             conn.close()

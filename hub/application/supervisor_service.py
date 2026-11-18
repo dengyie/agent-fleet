@@ -457,12 +457,26 @@ class SupervisorService:
             raise SupervisorServiceError(exc.code, "", 503) from exc
         if row is None:
             raise SupervisorServiceError("command_not_found", "", 404)
+        return self._public_receipt(row)
+
+    @staticmethod
+    def _public_receipt(row):
         return {"command_id": row["command_id"], "action": row["action"],
                 "status": row["receipt_status"] or row["status"],
                 "reason": row["receipt_reason"] or "", "issued_at": _iso(row["issued_s"]),
                 "expires_at": _iso(row["expires_s"]), "attempt_id": row["attempt_id"],
                 "machine_id": row["machine"], "session_id": row["session_id"],
                 "reason_code": row["wire"].get("reason_code", "")}
+
+    def session_logs(self, session_id, *, limit=20, before=0):
+        self._expire_stale()
+        try:
+            page = self._command_repository.session_logs(session_id, limit=limit, before=before)
+        except SupervisorCommandRepositoryError as exc:
+            raise SupervisorServiceError(exc.code, "", 503) from exc
+        return {**page, 'commands': [self._public_receipt(row) for row in page['commands']],
+                'scope': 'hub_control', 'session_id': session_id,
+                'audit_retention': 'recent_5000_fleet_events'}
 
     # ------------------------------------------------------------------
     # audit helpers

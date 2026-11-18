@@ -135,6 +135,8 @@ def _shape_native_row(raw: Mapping) -> list[tuple[str, Mapping]]:
     is now captured rather than only the first tool block).
     """
     rtype = str(raw.get("type") or "")
+    if rtype == 'model_io':
+        return _shape_zcode_row(raw)
     if rtype in ("item.started", "item.updated", "item.completed"):
         item = raw.get("item")
         if not isinstance(item, Mapping):
@@ -213,6 +215,46 @@ def _shape_native_row(raw: Mapping) -> list[tuple[str, Mapping]]:
     if not text:
         return []
     return [(kind, {"text": text, "is_complete": True})]
+
+
+def _shape_zcode_row(raw: Mapping) -> list[tuple[str, Mapping]]:
+    """Project one native ZCode request/response without replaying old context.
+
+    The complete, redacted source remains available as source_record. Headers,
+    system prompts and provider metadata are not conversation preview events.
+    """
+    request = raw.get('request')
+    response = raw.get('response')
+    messages = request.get('messages', []) if isinstance(request, Mapping) else []
+    messages = messages if isinstance(messages, list) else []
+    # ZCode records full/tail/delta context. Only inputs after the last prior
+    # assistant message belong to this invocation; its response is below.
+    start = next((i + 1 for i in range(len(messages) - 1, -1, -1)
+                  if isinstance(messages[i], Mapping) and messages[i].get('role') == 'assistant'), 0)
+    shaped = []
+    for message in messages[start:]:
+        if not isinstance(message, Mapping):
+            continue
+        text = _native_message_text(message.get('content'))
+        if message.get('role') == 'user' and text:
+            shaped.append(('user_message', {'text': text, 'is_complete': True}))
+        elif message.get('role') == 'tool':
+            shaped.append(('tool_result', {
+                'call_id': str(message.get('toolCallId') or ''),
+                'tool_name': str(message.get('toolName') or ''),
+                'result': text, 'status': 'error' if message.get('isError') else 'ok',
+            }))
+    if isinstance(response, Mapping):
+        text = _native_message_text(response.get('text'))
+        if text:
+            shaped.append(('assistant_message', {'text': text, 'is_complete': True}))
+        calls = response.get('toolCalls')
+        for call in calls if isinstance(calls, list) else []:
+            if isinstance(call, Mapping):
+                shaped.append(('tool_call', {'call_id': str(call.get('id') or ''),
+                    'tool_name': str(call.get('name') or ''),
+                    'arguments': _bounded_json(call.get('input'))}))
+    return shaped
 
 
 def _shape_pi_row(raw: Mapping) -> list[tuple[str, Mapping]]:

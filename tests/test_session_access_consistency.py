@@ -26,7 +26,7 @@ def app(tmp_path):
 
 def adopted(app, *, family='codex', captured=True):
     services = app.extensions['fleet']['services']
-    services['observe'].ingest({'machine': 'm1', 'instances': [instance_row(agent_family=family)], 'agents': {}})
+    services['observe'].ingest({'machine': 'm1', 'instances': [instance_row(agent_family=family, native_file_path="/sessions/native.jsonl")], 'agents': {}})
     row = services['adoptions'].adopt('m1', DEFAULT_PID, DEFAULT_STARTED_AT, OWNER)
     services['adoptions'].adoption_repo.update_status(row.session_id, 'adopted')
     if captured:

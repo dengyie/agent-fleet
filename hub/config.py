@@ -54,11 +54,10 @@ class FleetConfig:
     # ``adoption_db`` None so no adoption store is ever created implicitly.
     adoption_repositories_enabled: bool = False
     adoption_db: Path | None = None
-    # ---- additive Phase 4/5 issuance gates (default off) ----
-    # append_user_turn / apply_local_profile stay unsigned until explicitly
-    # enabled.  Disabled keeps today's five-action operator surface.
-    append_user_turn_enabled: bool = False
-    apply_local_profile_enabled: bool = False
+    # Supported administrator session controls default on once Supervisor is configured.
+    # Explicit false remains an operator override; identity and node support are still required.
+    append_user_turn_enabled: bool = True
+    apply_local_profile_enabled: bool = True
     # Additive platform domain gate.  Disabled by default so no platform DB is
     # created and no new routes are exposed during the existing rollout.
     platform_enabled: bool = False
@@ -178,8 +177,8 @@ class FleetConfig:
         supervisor_command_db: Path | None = None,
         adoption_repositories_enabled: bool = False,
         adoption_db: Path | None = None,
-        append_user_turn_enabled: bool = False,
-        apply_local_profile_enabled: bool = False,
+        append_user_turn_enabled: bool | None = None,
+        apply_local_profile_enabled: bool | None = None,
         platform_enabled: bool = False,
         platform_db: Path | None = None,
         platform_artifact_root: Path | None = None,
@@ -383,8 +382,8 @@ class FleetConfig:
             if supervisor_enabled else None,
             adoption_repositories_enabled=bool(adoption_repositories_enabled),
             adoption_db=adoption_db_path,
-            append_user_turn_enabled=bool(append_user_turn_enabled),
-            apply_local_profile_enabled=bool(apply_local_profile_enabled),
+            append_user_turn_enabled=bool(supervisor_enabled if append_user_turn_enabled is None else append_user_turn_enabled),
+            apply_local_profile_enabled=bool(supervisor_enabled if apply_local_profile_enabled is None else apply_local_profile_enabled),
             platform_enabled=bool(platform_enabled),
             platform_db=platform_db_path,
             platform_artifact_root=platform_artifact_root_path,
