@@ -201,3 +201,34 @@ def test_desktop_scan_prioritizes_changes_and_continues_unvisited_sessions(tmp_p
     worker.close()
     worker.scan_once()
     assert len(visited) == 4
+
+
+def test_desktop_empty_assistant_placeholder_is_read_again_after_completion(tmp_path):
+    from tools.session.sync import sync_desktop, native_identity
+    from tools.session.runner_capture import session_prefix
+    from tools.supervisor.desktop_control import DesktopControl
+    cfg, client = _cfg(tmp_path), _client(tmp_path)
+    cfg.supervisor_enabled = True
+    cfg.supervisor_manifest_dir = tmp_path / 'manifests'
+    class Bridge:
+        text = ''
+        def request(self, path):
+            return {'messages': [{'id': 'u', 'role': 'user', 'text': 'question'},
+                                 {'id': 'a', 'role': 'assistant', 'text': self.text}],
+                    'nextCursor': None}
+    bridge = Bridge()
+    desktop = DesktopControl(cfg, client=bridge)
+    path = tmp_path / 'model-io-sess_placeholder.jsonl'
+    row = {'session': {'sessionId': 'sess_placeholder'}, 'status': 'idle'}
+    def send(cfg, path, events):
+        response = client.post(path, json=events, headers={'X-Runner-Credential': 'pxed:secret'})
+        return response.status_code, response.json
+    sync_desktop(cfg, desktop, row, path, send)
+    bridge.text = 'completed answer'
+    sync_desktop(cfg, desktop, row, path, send)
+    sync_desktop(cfg, desktop, row, path, send)
+    sid = session_prefix(cfg.machine) + native_identity('zcode', path)
+    events = client.get('/api/sessions/' + sid + '/events').json['events']
+    assert [(e['kind'], e['payload']['text']) for e in events
+            if e['kind'] in {'user_message', 'assistant_message'}] == [
+                ('user_message', 'question'), ('assistant_message', 'completed answer')]

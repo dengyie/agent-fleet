@@ -209,9 +209,13 @@ def sync_desktop(cfg, desktop, row, native_path, send=post, *, budget_s=1, shoul
                 if should_stop() or (progressed and time.monotonic() >= deadline):
                     yielded = True
                     break
-                if role in {'user','assistant'} and isinstance(text, str) and text:
-                    capture.bridge.ingest_one({'kind':role+'_message',
-                        'payload':{'text':text,'is_complete':True}})
+                # ZCode can expose an empty assistant placeholder while its
+                # session list still says idle. Only acknowledge actual text;
+                # the same message ID must remain readable once populated.
+                if role not in {'user', 'assistant'} or not isinstance(text, str) or not text:
+                    continue
+                capture.bridge.ingest_one({'kind':role+'_message',
+                    'payload':{'text':text,'is_complete':True}})
                 state['seen'].append(mid)
                 checkpoint.write_text(json.dumps(state), encoding='utf-8')
                 progressed = True
