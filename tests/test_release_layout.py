@@ -94,7 +94,7 @@ class ReleaseLayoutTests(unittest.TestCase):
         allowed.add('assets/views/account/mcp-registration.js')
         allowed.update({'assets/api/settings.js', 'assets/views/settings.js',
                         'assets/views/settings/catalogs.js', 'assets/views/settings/runtime.js',
-                        'assets/views/settings/forms.js'})
+                        'assets/views/settings/forms.js', 'assets/views/settings/appearance.js'})
         allowed.update({'assets/api/workflow-summaries.js',
                         'assets/views/account/workflow-summaries.js',
                         'assets/views/account/workflow-summary-generation.js'})
