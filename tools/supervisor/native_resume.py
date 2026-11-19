@@ -151,7 +151,7 @@ def continuation_options(family: str, command: list[str]) -> list[str]:
     }.get(family, set())
     switches = {
         'codex': {'--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check',
-                  '--strict-config', '--ignore-rules'},
+                  '--strict-config', '--ignore-rules', '--approve-for-me'},
         'claude_code': {'--dangerously-skip-permissions', '--bare', '--strict-mcp-config'},
     }.get(family, set())
     result = []
@@ -292,7 +292,7 @@ class NativeResumeMixin:
         cwd, env, token, exe = identity
         argv = _native_resume_argv(family, exe, token, text)
         if argv:
-            at = 3 if family == 'codex' else 1
+            at = 2 if family == 'codex' else 1
             argv[at:at] = entry.resume_options
         if not validate_command(argv) or not cwd:
             return "unsupported_action"

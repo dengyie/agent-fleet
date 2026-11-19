@@ -80,8 +80,9 @@ def test_followup_cross_instance_uses_original_stream_and_can_repeat(tmp_path, m
     sv = Supervisor(tmp_path/'manifests', 'mac')
     from tools.session.runner_capture import session_prefix
     sid = session_prefix('mac') + 'turn1'
-    m = sv.launch(agent='codex', command=[sys.executable, '-c',
-        'print(\'{"type":"thread.started","thread_id":"same-native-id"}\')'],
+    script = tmp_path / 'native_fixture.py'
+    script.write_text('print(\'{"type":"thread.started","thread_id":"same-native-id"}\')', encoding='utf-8')
+    m = sv.launch(agent='codex', command=[sys.executable, str(script)],
         cwd=str(tmp_path),env_allowlist={}, session_id=sid,attempt_id='turn1')
     cap = RunnerCapture(cfg, task, post, process_group_id=m.process_group_id)
     sv.wait_session(sid, timeout_s=5, on_line=cap.line)
@@ -261,3 +262,16 @@ def test_desktop_without_rollout_has_control_and_original_messages(tmp_path):
     assert info['managed'] and info['message_delivery']['mechanism']=='zcode_desktop_bridge'
     events = client.get('/api/sessions/'+sid+'/events').get_json()['events']
     assert [e['payload']['text'] for e in events if e['kind'] in {'user_message','assistant_message'}]==['hello','ACK']
+
+
+def test_codex_continuation_keeps_original_execution_policy(tmp_path):
+    import sys
+    from tools.supervisor.supervisor import Supervisor
+    sv = Supervisor(tmp_path/'m', 'mac')
+    m = sv.launch(agent='codex', command=[sys.executable, '-c',
+        'print(\'{"type":"thread.started","thread_id":"native-policy"}\')', '--approve-for-me'],
+        cwd=str(tmp_path), env_allowlist={})
+    sv.wait_session(m.session_id, timeout_s=5)
+    entry = sv._entries[m.session_id]
+    argv = sv._prepare_user_turn(m.session_id, 'followup', entry)[2]
+    assert argv.index('--approve-for-me') < argv.index('resume')
