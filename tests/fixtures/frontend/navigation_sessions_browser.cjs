@@ -86,15 +86,24 @@ const [origin, scenario] = process.argv.slice(2);
         assert.equal(await sidebar.evaluate(node => node.inert), false);
         assert.ok(Math.abs((await main.boundingBox()).x - opened.width) < 1);
         // Reversing during a transition must remain continuous and end expanded.
-        await toggle.evaluate(node => node.click());
-        await page.evaluate(() => {
-          for (const node of [document.querySelector('#sidebar'), document.querySelector('.console-main')]) {
+        const reversal = await page.evaluate(() => {
+          const panel = document.querySelector('#sidebar');
+          const toggle = document.querySelector('#navigation-toggle');
+          toggle.click();
+          panel.getBoundingClientRect();
+          for (const node of [panel, document.querySelector('.console-main')]) {
             for (const animation of node.getAnimations()) { animation.pause(); animation.currentTime = 80; }
           }
+          const before = panel.getBoundingClientRect().x;
+          toggle.click();
+          // Sample the reversal in the same browser task. A separate protocol
+          // round trip lets the new animation advance under CI scheduling load.
+          const after = panel.getBoundingClientRect().x;
+          return {before, after, animations: panel.getAnimations().length};
         });
-        const reversingX = (await sidebar.boundingBox()).x;
-        await toggle.evaluate(node => node.click());
-        assert.ok(Math.abs((await sidebar.boundingBox()).x - reversingX) < 30, 'rapid reversal must not jump to an endpoint');
+        assert.ok(reversal.before < 0 && reversal.before > -opened.width);
+        assert.ok(reversal.animations > 0, 'reversal must continue animating');
+        assert.ok(Math.abs(reversal.after - reversal.before) < 1, 'rapid reversal must not jump to an endpoint');
         await settle();
         assert.equal(await toggle.getAttribute('aria-expanded'), 'true');
         await page.screenshot({path: path.join(output, 'sidebar-expanded.png'), fullPage: true});
