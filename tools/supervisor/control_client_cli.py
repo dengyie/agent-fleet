@@ -204,7 +204,11 @@ def _build_client(cfg, *, ingest_token: str, spool_key: bytes,
     spool_root = Path(spool_root).expanduser()
     spool_root.mkdir(parents=True, exist_ok=True)
 
+    from tools.supervisor.continuation_capture import ContinuationCapture
+    from tools.supervisor.desktop_control import DesktopControl
     return ControlClient(
+        continuation=ContinuationCapture(cfg, supervisor),
+        desktop=DesktopControl(cfg),
         hub_url=cfg.hub,
         machine_id=cfg.machine,
         credential=cfg.supervisor_credential,
@@ -291,6 +295,11 @@ def _run(client, args, interval):
     def _tick():
         nonlocal announced
         result = client.poll_once()
+        desktop = getattr(client, 'desktop', None)
+        if desktop is not None:
+            for cid, status, reason in desktop.receipts():
+                if client._receipt(cid, status, reason):
+                    desktop.acknowledge(cid)
         _pump_bridges(client)
         if (not announced and result.get("ok")
                 and getattr(client, "adoption_recovery_complete", True)):
@@ -315,7 +324,7 @@ def _run(client, args, interval):
 
     def _on_term(signum, frame):
         state["stop"] = True
-        if not state["busy"]:
+        if not state["busy"] and not bool(getattr(getattr(client, 'continuation', None), 'active', False)):
             raise _Stop()
 
     try:
@@ -324,9 +333,13 @@ def _run(client, args, interval):
         pass
     backoff = MIN_BACKOFF_S
     while True:
-        if state["stop"] or client_runtime.drain_requested(ROLE):
+        continuing = bool(getattr(getattr(client, "continuation", None), "active", False))
+        if (state["stop"] or client_runtime.drain_requested(ROLE)) and not continuing:
             print("[control-client] 退出（SIGTERM 或客户端已切换新版本）", file=sys.stderr)
             return 0
+        if continuing and (state['stop'] or client_runtime.drain_requested(ROLE)):
+            time.sleep(1)
+            continue
         try:
             state["busy"] = True
             try:

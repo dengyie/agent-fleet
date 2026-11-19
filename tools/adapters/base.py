@@ -5,6 +5,7 @@
 子进程环境走 spawn_policy 白名单（与 managed 路径共用），runner 凭据不继承。
 """
 import subprocess
+import os
 from dataclasses import dataclass
 
 from fleet_core.process.bounded_process import ProcessAborted, run_streamed
@@ -34,9 +35,10 @@ class BaseAdapter:
     # 该 CLI 自身需要的额外环境键（API key / 配置目录），叠加在通用白名单上。
     env_keys = ()
 
-    def __init__(self, command=None, timeout_s=1800):
+    def __init__(self, command=None, timeout_s=1800, environment=None):
         self.command = command if command is not None else self.default_command
         self.timeout_s = int(timeout_s)
+        self.environment = environment or {}
 
     def build_argv(self, instruction):
         """instruction 以 '-' 开头：支持 '--' 的默认 CLI 插 '--'，否则抛 UnsafeInstruction。"""
@@ -45,7 +47,7 @@ class BaseAdapter:
         return place_instruction(self.command, instruction, end_of_options=supports_eoo)
 
     def child_env(self):
-        return build_child_env(self.env_keys)
+        return build_child_env(self.env_keys, source={**os.environ, **self.environment})
 
     def run(self, instruction, workdir, on_line=None, should_abort=None):
         if not self.command:

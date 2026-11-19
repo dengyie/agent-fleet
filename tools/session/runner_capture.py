@@ -136,16 +136,26 @@ class RunnerCapture:
         with self.flush_lock:
             return self.bridge.flush(guard=self.lock)
 
-    def finish(self, exit_code):
+    def begin_turn(self, text):
+        with self.lock:
+            data = json.loads(self.record.read_text())
+            data.update(closed=False, resumable=True)
+            self.record.write_text(json.dumps(data), encoding='utf-8')
+            self.bridge.ingest_one({'kind': 'session_metadata', 'payload': {
+                'native_resume': True, 'resumed': True}})
+            self.bridge.ingest_one({'kind': 'user_message', 'payload': {'text': text}})
+
+    def finish(self, exit_code, *, resumable=False):
         self.stop_upload()
         with self.lock:
             try:
+                self.bridge.ingest_one({'kind': 'session_metadata', 'payload': {'native_resume': resumable}})
                 self.bridge.ingest_one({'kind': 'process_exit', 'payload': {'exit_code': exit_code}})
-                self.bridge.ingest_one({'kind': 'session_close', 'payload': {'reason': 'completed' if exit_code == 0 else 'failed'}})
+                self.bridge.ingest_one({'kind': 'session_close', 'payload': {'reason': 'completed' if exit_code == 0 else 'failed', 'exit_code':exit_code}})
             except Exception:
                 log.warning('Conversation close events not captured: session=%s',
                             self.session_id, exc_info=True)
-            self._mark_closed()
+            self._mark_closed(resumable=resumable)
             try:
                 self.flush()
             except Exception:
@@ -154,11 +164,13 @@ class RunnerCapture:
             self.bridge.close()
             prune_if_done(self)
 
-    def _mark_closed(self):
+    def _mark_closed(self, *, resumable=False):
         try:
             data = json.loads(self.record.read_text())
             if isinstance(data, dict) and not data.get('closed'):
                 data['closed'] = True
+                if resumable:
+                    data['resumable'] = True
                 self.record.write_text(json.dumps(data))
         except (OSError, ValueError):
             pass
@@ -198,6 +210,10 @@ def prune_if_done(capture, *, now=None):
     except (OSError, ValueError):
         return False
     if not isinstance(data, dict) or data.get('pruned'):
+        return False
+    if data.get('resumable'):
+        # Retain the sequence checkpoint for subsequent turns. Acknowledged
+        # encrypted segments are already compacted by LocalSpool.ack().
         return False
     closed = bool(data.get('closed'))
     acked = capture.fully_acked()

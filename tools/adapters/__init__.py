@@ -23,8 +23,8 @@ register(PiAdapter)
 register(ZcodeAdapter)
 
 
-def create(agent_type, command=None, timeout_s=1800):
+def create(agent_type, command=None, timeout_s=1800, environment=None):
     cls = _REGISTRY.get(agent_type)
     if cls is None:
         raise ValueError(f"未知 adapter 类型: {agent_type}")
-    return cls(command=command, timeout_s=timeout_s)
+    return cls(command=command, timeout_s=timeout_s, environment=environment)

@@ -540,3 +540,7 @@ Node retirement is serialized with service registration and plugin target admiss
 Confirmed pre-effect management rejections (including the supported operation-specific revision conflicts) return a failed receipt to the model for a new decision. Checkpoint recovery follows the same policy. Storage failures, revoked authorization, cancellation and unknown effects never trigger automatic tool replay.
 
 Transcript schema 2 adds an ingestion-order index and insert trigger without rewriting event payloads. Existing rows are backfilled once in their original row order. Public event pages return decimal-string `cursor`, `after_cursor`, `next_cursor` and `has_more`; source `sequence` remains metadata. Sequence deep links resolve an initial `at_sequence` anchor and subsequently use ingestion cursors.
+
+### Persistent native session continuation
+
+Runner-managed Codex and Claude Code sessions now keep their native identity, working directory, explicit provider/model options and capture checkpoint for idle follow-up turns. ZCode desktop conversations bind by exact native session ID through the official extension bridge. See [ZCode bridge and continuation behavior](../../integrations/zcode/README.md) and the [continuation implementation plan](../superpowers/plans/2026-11-19-native-session-continuation.md). Node receipts and subsequent original-session events remain the delivery evidence; active CLI conversations cannot be concurrently resumed.

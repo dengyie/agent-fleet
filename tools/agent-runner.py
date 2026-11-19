@@ -345,11 +345,11 @@ def _start_capture(cfg, task, **kwargs):
         return None
 
 
-def _finish_capture(capture, exit_code):
+def _finish_capture(capture, exit_code, *, resumable=False):
     if capture is None:
         return
     try:
-        capture.finish(exit_code)
+        capture.finish(exit_code, resumable=resumable)
     except Exception as exc:
         log.warning("会话捕获收尾失败: %s: %s", type(exc).__name__, exc)
 
@@ -540,7 +540,8 @@ def run_task_managed(cfg, task, supervisor):
             _check_source_lifecycle(lease_lost, source_deadline)
             base_commit = worktree.head_commit(wt)
         agent_cfg = cfg.agents.get(task["agent_type"], {})
-        adapter = adapters.create(task["agent_type"], command=agent_cfg.get("command"))
+        adapter = adapters.create(task["agent_type"], command=agent_cfg.get("command"),
+                                  environment=agent_cfg.get('environment'))
         timeout_s = agent_cfg.get("timeout_s", 1800)
         if source_deadline is not None:
             timeout_s = min(timeout_s, max(0, source_deadline - time.monotonic()))
@@ -590,10 +591,11 @@ def run_task_managed(cfg, task, supervisor):
             timed_out=result.timed_out,
             aborted=result.aborted,
         )
+        resumable = supervisor.continuation_ready(session_id)
         if source_deadline is not None and adapter_result.exit_code == 0:
             if should_abort():
                 raise SourceUploadError("source_lease_lost")
-            _finish_capture(capture, adapter_result.exit_code)
+            _finish_capture(capture, adapter_result.exit_code, resumable=resumable)
             out = _collect_outputs(wt)
             body = _result_body(task["attempt_id"], task["nonce"], adapter_result, out["diff"],
                 time.monotonic() - started, out["files"], out["patch"] or None, out["summary"])
@@ -602,7 +604,7 @@ def run_task_managed(cfg, task, supervisor):
             return {"exit_code": adapter_result.exit_code, "source_pending": status != 200}
         hb_stop.set()
         hb.join(timeout=20)
-        _finish_capture(capture, adapter_result.exit_code)
+        _finish_capture(capture, adapter_result.exit_code, resumable=resumable)
         duration = time.monotonic() - started
         out = _collect_outputs(wt)
         _submit_result(cfg, task["attempt_id"], task["nonce"],
@@ -627,7 +629,7 @@ def run_task_managed(cfg, task, supervisor):
             capture.bridge.close()
         # 删除 worktree 前确保进程组已死：异常路径下组内进程可能仍在写 worktree
         _ensure_session_dead(supervisor, session_id)
-        if wt is not None:
+        if wt is not None and not (session_id and supervisor.continuation_ready(session_id)):
             worktree.cleanup_worktree(project, wt, task["task_id"])
 
 
@@ -730,6 +732,7 @@ def run_task(cfg, task):
             timeout_s = min(timeout_s, max(0, source_deadline - time.monotonic()))
         adapter = adapters.create(task["agent_type"],
                                   command=agent_cfg.get("command"),
+                                  environment=agent_cfg.get('environment'),
                                   timeout_s=timeout_s)
         hb = threading.Thread(target=heartbeat_loop, name="lease-heartbeat", daemon=True)
         hb.start()

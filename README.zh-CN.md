@@ -161,6 +161,8 @@ main 在测试、前后端打包通过后进入[自动部署](deploy/auto-deploy
 
 ## 进阶文档
 
+- [ZCode 桌面会话桥](integrations/zcode/README.md) — 向已有桌面会话发送消息并核对原命令回执。
+
 - [系统架构详解 (Architecture v3)](docs/architecture-v3.md)
 - [受控开发链路设计 (Control Plane v4)](docs/architecture-v4-control-plane.md)
 - [可视化架构与状态机 (Visual Architecture)](docs/visual-architecture.md)

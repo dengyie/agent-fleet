@@ -132,7 +132,7 @@ _FORBIDDEN_PAYLOAD_KEYS = frozenset({
 # ``process_group_id`` binding but never ``cmd``/``argv``/``env``/``cwd``/``pid``.
 _GENERIC_PAYLOAD_FIELDS: dict[str, tuple[str, ...]] = {
     'session_start': ('agent_family', 'adapter', 'cli_version', 'interactive_questions'),
-    'session_metadata': ('agent_family', 'adapter', 'task_id', 'agent_ref', 'interactive_questions'),
+    'session_metadata': ('agent_family', 'adapter', 'task_id', 'agent_ref', 'interactive_questions', 'native_resume', 'resumed', 'desktop_bridge'),
     'process_spawn': ('process_family', 'owner', 'group_binding',
                       'process_group_id'),
     'process_exit': ('exit_code', 'duration_s', 'reason'),
@@ -522,7 +522,7 @@ def _generic_payload(payload: Mapping[str, Any], kind: str) -> dict[str, Any]:
             continue
         if field in payload:
             value = payload[field]
-            if field == 'interactive_questions':
+            if field in {'interactive_questions', 'native_resume', 'resumed', 'desktop_bridge'}:
                 if not isinstance(value, bool):
                     raise SessionValidationError('invalid_payload_type', 'capability must be boolean')
                 clean[field] = value
