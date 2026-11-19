@@ -39,6 +39,7 @@ function protectConsole() {
   let sessionRecheckPending = false;
   let sessionResetPending = false;
   let loggingOut = false;
+  let identityLifetime = null;
   function routeKey(value) {
     return value.page + ':' + (value.id || '');
   }
@@ -66,6 +67,7 @@ function protectConsole() {
     if (activeRouteView === view) activeRouteView = null;
   }
   function disposeView() {
+    identityLifetime?.abort();
     shell.hidden = true; sse.stop();
     if (disposeNavigation) disposeNavigation();
     disposeNavigation = undefined;
@@ -113,13 +115,13 @@ function protectConsole() {
   function mountRoute(view, {animateEntrance = true} = {}) {
     const target = view.host;
     const mountEntity = {machine: mountMachine, task: mountTask, session: mountSession};
-    if (route.page === 'settings') view.teardown = mountSettings(target, {section: route.id, account, animateEntrance, onClose: () => {
+    if (route.page === 'settings') view.teardown = mountSettings(target, {section: route.id, account, identitySignal: identityLifetime.signal, animateEntrance, onClose: () => {
       navigateTo(settingsReturnUrl);
       document.querySelector('[data-nav="settings"]')?.focus();
     }});
     else if (route.page === 'fleet') view.teardown = mountFleet(target, store, client);
     else if (route.page === 'assistant') view.teardown = mountAssistant(target, {
-      conversationId: route.id, account, store,
+      conversationId: route.id, account, store, identitySignal: identityLifetime.signal,
       onConversationCreated: id => adoptConversation(view, id),
     });
     else if (route.page === 'muse') view.teardown = mountMuse(target);
@@ -232,6 +234,8 @@ function protectConsole() {
   window.addEventListener('fleet:navigate', onFleetNavigate);
   window.addEventListener('popstate', onPopState);
   function mount() {
+    // Sensitive results can outlive a cached route, but never its identity.
+    identityLifetime = new AbortController();
     disposeNavigation = mountNavigation(route, store);
     if (route.page === 'settings') {
       const settingsRoute = route;

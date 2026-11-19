@@ -8,7 +8,7 @@ import {mountWorkflowSummaries} from './account/workflow-summaries.js';
 import {mountPlugins} from './plugins.js';
 import {mountCatalog} from './settings/catalogs.js';
 import {mountRuntime} from './settings/runtime.js';
-import {el, field, panel} from './settings/forms.js';
+import {el, button, field, panel, errorText} from './settings/forms.js';
 import {uiIcon} from '../routes.js';
 
 const SECTIONS = [
@@ -29,8 +29,9 @@ const GROUPS = [
   ['系统', ['runtime']],
   ['个人设置', ['account', 'appearance']],
 ];
-export function mountSettings(root, {section = 'models', account = null, animateEntrance = true, onClose = () => navigatePage(pagePath('assistant'))} = {}) {
+export function mountSettings(root, {section = 'models', account = null, identitySignal, animateEntrance = true, onClose = () => navigatePage(pagePath('assistant'))} = {}) {
   let disposed = false, suspended = false, closing = false, closeTimer = null, views = [], epoch = 0;
+  let integrationState = 'idle', integrationStatus = null;
   const admin = !account || account.role === 'admin';
   const allowed = SECTIONS.filter(([id]) => admin || ['account', 'appearance'].includes(id));
   const selected = allowed.some(([id]) => id === section) ? section : allowed[0][0];
@@ -96,7 +97,7 @@ export function mountSettings(root, {section = 'models', account = null, animate
   const body = el('div', null, 'settings-content');
   layout.append(nav, body);
   dialog.showModal();
-  if (['models', 'nodes', 'workspaces', 'defaults'].includes(selected)) views.push(mountCatalog(body, selected));
+  if (['models', 'nodes', 'workspaces', 'defaults'].includes(selected)) views.push(mountCatalog(body, selected, {identitySignal}));
   else if (['runtime', 'hosts'].includes(selected)) views.push(mountRuntime(body, selected));
   else if (selected === 'account') {
     if (account) views.push(mountAccount(body));
@@ -112,8 +113,14 @@ export function mountSettings(root, {section = 'models', account = null, animate
     views.push(() => window.removeEventListener('fleet-theme-changed', syncTheme));
   }
   async function loadIntegrations() {
+    if (disposed || integrationState === 'loading' || integrationState === 'loaded') return;
+    integrationState = 'loading';
     const ticket = ++epoch;
-    const status = el('p', '正在读取可用集成…'); status.setAttribute('role', 'status'); body.append(status);
+    if (!integrationStatus) {
+      integrationStatus = el('p'); integrationStatus.setAttribute('role', 'status'); body.append(integrationStatus);
+    }
+    const status = integrationStatus;
+    status.textContent = '正在读取可用集成…';
     try {
       const data = await accountRequest('me');
       if (disposed || ticket !== epoch) return;
@@ -123,7 +130,12 @@ export function mountSettings(root, {section = 'models', account = null, animate
       if (features.workflow_summary_management) { views.push(mountWorkflowSummaries(body, {suspended, ownerId: data.user.id})); count++; }
       status.textContent = count ? '' : '尚未启用集成管理。可在系统与运行参数中配置相关功能开关，重启后生效。';
       const link = el('a', '配置集成运行开关', 'button-secondary'); link.href = pagePath('settings', 'runtime'); body.append(link);
-    } catch (error) { if (!disposed) status.textContent = error.detail || '集成配置加载失败，请重新进入此分类重试'; }
+      integrationState = 'loaded';
+    } catch (error) {
+      if (disposed || ticket !== epoch) return;
+      integrationState = 'failed';
+      status.replaceChildren(el('span', errorText(error)), button('重试加载集成', loadIntegrations));
+    }
   }
   const dispose = () => { disposed = true; window.clearTimeout(closeTimer); epoch++; views.forEach(view => view?.()); views = []; dialog.close(); dialog.remove(); root.classList.remove('settings-page'); };
   dispose.suspend = () => {
@@ -141,6 +153,7 @@ export function mountSettings(root, {section = 'models', account = null, animate
     dialog.classList.toggle('is-section-navigation', !animateEntrance);
     if (!dialog.open) dialog.showModal();
     views.forEach(view => view?.resume?.());
+    if (integrationState === 'failed') loadIntegrations();
   };
   return dispose;
 }

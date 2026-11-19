@@ -75,7 +75,7 @@ export function mountAssistant(target, options) {
   clear(root); root.appendChild(heading); root.appendChild(chat); root.appendChild(inspector); target.appendChild(root);
   var workflowTeardown = null;
   var nodeSection = el('section', 'workspace-nodes');
-  var nodePanel = canAdminister ? mountNodePanel(nodeSection, options.store) : null;
+  var nodePanel = canAdminister ? mountNodePanel(nodeSection, options.store, {identitySignal: options.identitySignal}) : null;
   var inspectorGroups = [
     {id: 'artifacts', title: '产物', sections: [artifactSection]},
     {id: 'activity', title: '运行', sections: executionSections},
