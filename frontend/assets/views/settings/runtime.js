@@ -64,9 +64,9 @@ export function mountRuntime(root, kind = 'runtime') {
             body = {digest: data.digest, values};
           }
           const result = await saveRuntimeSettings(kind, body);
-          if (disposed) return;
+          if (disposed || ticket !== generation || !form.isConnected) return;
           if (await load()) status.textContent = '已保存。需要重启 Hub 后生效。' + (result.backup_path ? ' 原配置备份：' + result.backup_path : '');
-        } catch (error) { if (!disposed) status.textContent = errorText(error) + '；请重新加载核对服务器状态。'; }
+        } catch (error) { if (!disposed && ticket === generation && form.isConnected) status.textContent = errorText(error) + '；请重新加载核对服务器状态。'; }
         finally { submit.disabled = false; }
       });
       if (data.paths) {

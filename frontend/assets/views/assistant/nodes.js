@@ -5,7 +5,7 @@ import {el} from './panels.js';
 
 // Presentation only. Node writes use the same settings catalog and permissions
 // as the settings dialog; observed machines and execution registrations differ.
-export function mountNodePanel(root, store) {
+export function mountNodePanel(root, store, {identitySignal} = {}) {
   let disposed = false, loading = false, activated = false, catalog, unsubscribe;
   const title = el('h2', 'assistant-section-title', '计算节点');
   const description = el('p', 'meta', '查看机器连接状态，管理已有 VM 的执行配置。');
@@ -16,7 +16,7 @@ export function mountNodePanel(root, store) {
   const config = el('details', 'workspace-node-config');
   config.appendChild(el('summary', null, '管理执行配置'));
   const editor = el('div', 'workspace-node-editor'); config.appendChild(editor);
-  config.addEventListener('toggle', () => { if (config.open && !catalog && !disposed) catalog = mountCatalog(editor, 'nodes'); });
+  config.addEventListener('toggle', () => { if (config.open && !catalog && !disposed) catalog = mountCatalog(editor, 'nodes', {identitySignal}); });
   const hosts = el('a', 'workspace-node-hosts', '节点展示与心跳设置'); hosts.href = pagePath('settings', 'hosts');
   [title, description, status, refresh, list, config, hosts].forEach(child => root.appendChild(child));
   function render() {

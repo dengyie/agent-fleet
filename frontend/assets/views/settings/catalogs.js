@@ -6,7 +6,7 @@ const info = {
   nodes: ['VM 与执行节点', '新增执行节点', 'node_id', '节点 ID'],
   workspaces: ['工作区与存储', '新增工作区', 'workspace_id', '工作区 ID'],
 };
-export function mountCatalog(root, kind) {
+export function mountCatalog(root, kind, {identitySignal} = {}) {
   let disposed = false, catalog, currentOwner = '', sequence = 0;
   const context = document.createElement('details'); context.className = 'settings-owner-scope';
   const summary = el('summary', '为其他账号配置');
@@ -121,12 +121,14 @@ export function mountCatalog(root, kind) {
           try {
             const issued = await enrollWorkspaceNode(row.node_id, {hub_url: window.location.origin,
               execution_mode: mode.value, sandbox_launcher: mode.value === 'sandbox' ? JSON.parse(launcher.value) : []}, formOwner);
-            if (disposed || ticket !== sequence || !form.isConnected) return;
+            // The server has already rotated the credential. Deliver this
+            // one-time result even if navigation replaced/disposed the editor.
+            if (identitySignal?.aborted) return;
             const url = URL.createObjectURL(new Blob([JSON.stringify(issued.enrollment, null, 2) + '\n'], {type: 'application/json'}));
             const link = el('a'); link.href = url; link.download = row.node_id + '-enrollment.json';
             document.body.append(link); link.click(); link.remove();
             setTimeout(() => URL.revokeObjectURL(url), 1000);
-            result.textContent = '接入配置已下载。请妥善保管凭据，在 VM 安装并重启 Node；出现心跳后再选择为默认执行节点。';
+            if (!disposed && ticket === sequence && form.isConnected) result.textContent = '接入配置已下载。请妥善保管凭据，在 VM 安装并重启 Node；出现心跳后再选择为默认执行节点。';
           } catch (error) { if (!disposed && ticket === sequence && form.isConnected) result.textContent = errorText(error); }
           finally { download.disabled = false; }
         });
