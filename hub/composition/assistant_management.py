@@ -14,11 +14,20 @@ def wire_assistant_management(app, config, platform, sessions, core, control):
     if sessions.session_service is None:
         return
     from hub.application.agent_session_service import AgentSessionService
+    from hub.application.session_model_service import SessionModelService
+
+    models = None
+    if config.supervisor_enabled and platform.platform_repository is not None:
+        models = SessionModelService(platform.platform_repository, platform.model_secrets,
+            sessions.session_service, control.supervisor_service,
+            authorize=accounts.is_active_admin if accounts is not None else None)
+        app.extensions['fleet']['services']['session_models'] = models
 
     service = AgentSessionService(
         sessions.session_service, observe=core.observe_service,
         supervisor=control.supervisor_service if config.supervisor_enabled else None,
         authorize=accounts.is_active_admin if accounts is not None else None,
+        models=models,
     )
     worker.agent_sessions = service
     app.extensions['fleet']['services']['agent_sessions'] = service

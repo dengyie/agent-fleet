@@ -76,6 +76,16 @@ class RunnerCapture:
             self.bridge.ingest_one({'kind': 'session_metadata', 'payload': {'task_id': task['task_id']}})
             if 'instruction' in task:
                 self.bridge.ingest_one({'kind': 'user_message', 'payload': {'text': task['instruction']}})
+        elif replay and process_group_id is None:
+            # Upgrade retained idle conversations without replaying a prompt.
+            # The spool writer lock above excludes running captures.
+            from fleet_core.session_models import AGENT_PROTOCOLS
+            data = json.loads(self.record.read_text(encoding='utf-8'))
+            if (data.get('closed') and data.get('resumable') and not data.get('model_takeover_version')
+                    and data.get('agent_type') in AGENT_PROTOCOLS):
+                self.bridge.ingest_one({'kind': 'session_metadata', 'payload': {'model_takeover': True}})
+                data['model_takeover_version'] = 1
+                self.record.write_text(json.dumps(data), encoding='utf-8')
 
     def _post(self, post, batch):
         status, body = post(self.cfg, '/api/runner-session-events', batch['events'])
@@ -149,7 +159,11 @@ class RunnerCapture:
         self.stop_upload()
         with self.lock:
             try:
-                self.bridge.ingest_one({'kind': 'session_metadata', 'payload': {'native_resume': resumable}})
+                from fleet_core.session_models import AGENT_PROTOCOLS
+                task = json.loads(self.record.read_text(encoding='utf-8'))
+                self.bridge.ingest_one({'kind': 'session_metadata', 'payload': {
+                    'native_resume': resumable,
+                    'model_takeover': bool(resumable and task.get('agent_type') in AGENT_PROTOCOLS)}})
                 self.bridge.ingest_one({'kind': 'process_exit', 'payload': {'exit_code': exit_code}})
                 self.bridge.ingest_one({'kind': 'session_close', 'payload': {'reason': 'completed' if exit_code == 0 else 'failed', 'exit_code':exit_code}})
             except Exception:

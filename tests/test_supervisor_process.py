@@ -348,7 +348,7 @@ class SupervisorTests(unittest.TestCase):
             set(sup_mod.CONTROL_ACTIONS),
             {"pause_session", "resume_session", "terminate_session",
              "quarantine_session", "cancel_attempt", "adopt", "detach",
-             "append_user_turn", "apply_local_profile"},
+             "append_user_turn", "apply_local_profile", "configure_model"},
         )
 
     def test_append_user_turn_never_spawns_sibling(self):

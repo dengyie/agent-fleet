@@ -14,6 +14,20 @@ def _definition(name, description, properties, required=(), *, write=False):
 
 _SESSION_ID = {'type': 'string', 'description': 'Agent session ID from session.list; not a conversation ID.'}
 SESSION_TOOL_DEFINITIONS = (
+    _definition('session.list_models',
+        'List the administrator online model profiles with an explicitly configured native protocol '
+        'endpoint for this Agent family. No API keys. available indicates whether the idle managed '
+        'session supports model takeover. Configure protocol endpoints in model settings first.',
+        {'session_id': _SESSION_ID}, ('session_id',)),
+    _definition('session.configure_model',
+        'Configure an idle managed Claude Code or Codex conversation to use an online model profile '
+        'for subsequent native resumes until restored. mode=catalog requires profile_id from session.list_models. '
+        'mode=original restores the saved original environment/options and omits profile_id. '
+        'Preserves the native conversation; never restarts a running desktop app. '
+        'Returns pending/command_id; wait for session.get_command before session.send_message. '
+        'A configuration receipt is not proof of a successful model response; verify new events.',
+        {'session_id': _SESSION_ID, 'mode': {'type': 'string', 'enum': ['catalog', 'original']},
+         'profile_id': {'type': 'string', 'maxLength': 128}}, ('session_id', 'mode'), write=True),
     _definition('fleet.list_machines',
         'List reporting fleet machines with machine_id, reachability and observation timestamp. '
         'machine_id is distinct from the selected workspace execution_node_id. Use offset for more machines.',

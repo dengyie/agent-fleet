@@ -49,7 +49,7 @@ from fleet_core.session.redact import Redactor
 DEFAULT_QUERY_LIMIT = 100
 _MAX_QUERY_LIMIT = 1000
 _MAX_SQLITE_SEQUENCE = (1 << 63) - 1
-_SESSION_ACTIONS = frozenset((*SESSION_CONTROL_ACTIONS, 'append_user_turn'))
+_SESSION_ACTIONS = frozenset((*SESSION_CONTROL_ACTIONS, 'append_user_turn', 'configure_model'))
 
 
 class SessionServiceError(RuntimeError):
@@ -356,9 +356,9 @@ class SessionService:
                 if kind == "agent_state_changed":
                     self._apply_agent_state(event)
                 elif kind in ("session_start", "session_metadata"):
-                    if any(key in payload for key in ('interactive_questions', 'native_resume', 'desktop_bridge')):
+                    if any(key in payload for key in ('interactive_questions', 'native_resume', 'desktop_bridge', 'model_takeover')):
                         caps = set(self.session_repo.get_capabilities(session_id))
-                        for key in ('interactive_questions', 'native_resume', 'desktop_bridge'):
+                        for key in ('interactive_questions', 'native_resume', 'desktop_bridge', 'model_takeover'):
                             if key in payload:
                                 caps.discard(key)
                                 if payload[key] is True:
@@ -538,6 +538,11 @@ class SessionService:
                 delivery_reason = 'session_busy'
         if delivery_reason:
             allowed.discard('append_user_turn')
+        if (family not in {'claude_code', 'codex'} or adoption is not None
+                or not str(row['session_id']).startswith('runner_')
+                or 'model_takeover' not in row.get('capabilities', [])
+                or row.get('status') not in {'closed', 'failed'}):
+            allowed.discard('configure_model')
         if family == 'zcode' and adoption is not None and not adoption.native_file_path:
             # Legacy discovery could adopt a whole desktop host, which owns
             # multiple conversations. Do not signal that shared process as if
@@ -630,6 +635,8 @@ class SessionService:
         """All session callers use the same admission path; reads confer no grant."""
         session = self.get_session(session_id)['session']
         self._check_action(session, action)
+        if action == 'configure_model' and (not isinstance(payload, dict) or payload.get('owner_id') != actor):
+            raise SessionServiceError('session_action_unavailable')
         if session.get('adoption_status'):
             try:
                 # Rechecks state under the same lock as revocation.

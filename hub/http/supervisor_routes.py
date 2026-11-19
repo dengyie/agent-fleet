@@ -23,6 +23,27 @@ from hub.http._common import json_object_or_error as _json_object
 bp = Blueprint("supervisor", __name__)
 
 
+@bp.post('/api/supervisor/model-configuration')
+@require_supervisor
+def model_configuration():
+    data, err = _json_object()
+    if err:
+        return err
+    try:
+        if (set(data) != {'command_id'} or not isinstance(data['command_id'], str)
+                or not 1 <= len(data['command_id']) <= 128):
+            raise ApplicationError('invalid_request', '', 400)
+        service = current_app.extensions['fleet']['services'].get('session_models')
+        if service is None:
+            raise ApplicationError('model_configuration_unavailable', '', 503)
+        result = service.resolve(g.supervisor_machine, data['command_id'])
+        response = jsonify({'configuration': result})
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except (ApplicationError, SupervisorServiceError) as exc:
+        return error_response(ApplicationError(exc.code, exc.code, exc.status))
+
+
 def _supervisor() -> SupervisorService:
     fleet = current_app.extensions.get("fleet", {})
     services = fleet.get("services", {})

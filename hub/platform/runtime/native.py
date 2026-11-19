@@ -46,8 +46,10 @@ def can_continue_after_tool_failure(tool: str, state: str, error_code: str | Non
             and error_code in {'invalid_arguments', 'operation_unavailable'})
         or (tool == 'platform.admin_mutate' and isinstance(arguments.get('operation'), str)
             and error_code in CORRECTABLE_MUTATION_ERRORS.get(arguments['operation'], ()))
-        or (tool in {'session.control', 'session.send_message'}
-            and error_code in {'session_not_managed', 'session_action_unavailable', 'invalid_arguments'}))
+        or (tool in {'session.control', 'session.send_message', 'session.configure_model'}
+            and error_code in {'session_not_managed', 'session_action_unavailable', 'invalid_arguments',
+                'model_unavailable', 'model_protocol_unavailable', 'model_credential_unavailable',
+                'model_configuration_changed'}))
 
 
 class NativeAssistantRuntime:

@@ -99,7 +99,7 @@ def validate_model_profile(data: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(provider_config, Mapping):
         raise PlatformValidationError("invalid_model", "provider 配置不合法")
     normalized_config: dict[str, Any] = {}
-    allowed_config = {"endpoint", "base_url", "timeout_s", "max_retries", "stream", "headers", "pricing"}
+    allowed_config = {"endpoint", "base_url", "timeout_s", "max_retries", "stream", "headers", "pricing", "agent_endpoints"}
     if any(not isinstance(key, str) or key not in allowed_config for key in provider_config):
         raise PlatformValidationError("invalid_model", "provider 配置不合法")
     for key in ("endpoint", "base_url"):
@@ -112,6 +112,14 @@ def validate_model_profile(data: Mapping[str, Any]) -> dict[str, Any]:
                     or parsed.username or parsed.password or parsed.query or parsed.fragment):
                 raise PlatformValidationError("invalid_model", "provider endpoint 不合法")
             normalized_config[key] = value
+    if "agent_endpoints" in provider_config:
+        endpoints = provider_config["agent_endpoints"]
+        if not isinstance(endpoints, Mapping) or set(endpoints) - {"anthropic", "responses"}:
+            raise PlatformValidationError("invalid_model", "Agent 协议地址不合法")
+        from fleet_core.session_models import valid_base_url
+        if any(not valid_base_url(value) for value in endpoints.values()):
+            raise PlatformValidationError("invalid_model", "Agent 协议 Base URL 不合法")
+        normalized_config["agent_endpoints"] = dict(endpoints)
     if "timeout_s" in provider_config:
         try:
             timeout_s = float(provider_config["timeout_s"])

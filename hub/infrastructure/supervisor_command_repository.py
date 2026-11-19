@@ -327,7 +327,7 @@ class SupervisorCommandRepository:
                 (session_id, attempt_id, attempt_id),
             ).fetchone()
             if (target and target["action"] in ("terminate_session", "quarantine_session")
-                    and action in ("resume_session", "append_user_turn")):
+                    and action in ("resume_session", "append_user_turn", "configure_model")):
                 conn.rollback()
                 raise SupervisorCommandRepositoryError("resume_superseded")
             superseded_audit_rows = []
@@ -336,7 +336,7 @@ class SupervisorCommandRepository:
                     superseded_audit_rows = conn.execute(
                         "SELECT command_id, action FROM supervisor_commands WHERE session_id=? AND "
                         "((attempt_id IS NULL AND ? IS NULL) OR attempt_id=?) AND "
-                        "action IN ('resume_session','append_user_turn') "
+                        "action IN ('resume_session','append_user_turn','configure_model') "
                         "AND status IN ('queued','delivered') "
                         "ORDER BY issued_s DESC, command_id DESC LIMIT ?",
                         (session_id, attempt_id, attempt_id, self._AUDIT_CAP),
@@ -347,7 +347,7 @@ class SupervisorCommandRepository:
                     "receipt_status='expired', receipt_reason='superseded', lease_until_s=0 "
                     "WHERE session_id=? AND "
                     "((attempt_id IS NULL AND ? IS NULL) OR attempt_id=?) AND "
-                    "action IN ('resume_session','append_user_turn') "
+                    "action IN ('resume_session','append_user_turn','configure_model') "
                     "AND status IN ('queued','delivered')",
                     (session_id, attempt_id, attempt_id),
                 )

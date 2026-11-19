@@ -60,7 +60,7 @@ _TERMINAL = frozenset({
 
 #: Actions that pre-empt a lower-precedence queued resume / follow-up.
 _HIGH_PRECEDENCE = frozenset({"terminate_session", "quarantine_session"})
-_LOW_PRECEDENCE = frozenset({"resume_session", "append_user_turn"})
+_LOW_PRECEDENCE = frozenset({"resume_session", "append_user_turn", "configure_model"})
 
 
 def _now_s() -> float:
@@ -205,9 +205,10 @@ class SupervisorService:
         """Public capability metadata; never expose keys to tool declarations."""
         if self.public_key() is None:
             return frozenset()
-        actions = set(CONTROL_ACTIONS) - {'append_user_turn', 'apply_local_profile'}
+        actions = set(CONTROL_ACTIONS) - {'append_user_turn', 'apply_local_profile', 'configure_model'}
         if self._append_user_turn_enabled:
             actions.add('append_user_turn')
+            actions.add('configure_model')
         if self._apply_local_profile_enabled:
             actions.add('apply_local_profile')
         return frozenset(actions)
@@ -226,6 +227,18 @@ class SupervisorService:
                 _ser.Encoding.Raw, _ser.PublicFormat.Raw)
         except (ValueError, TypeError):
             return None
+
+    def model_command(self, machine, command_id):
+        """Private resolver authorization, bound to a live delivered command."""
+        try:
+            row = self._command_repository.find_command(command_id)
+        except SupervisorCommandRepositoryError as exc:
+            raise SupervisorServiceError(exc.code, '', 503) from exc
+        if (not row or row['machine'] != machine or row['action'] != 'configure_model'
+                or row['status'] not in {'delivered', 'accepted', 'executing'}
+                or row['expires_s'] <= self._now_fn()):
+            raise SupervisorServiceError('model_command_unavailable', '', 409)
+        return row['wire']
 
     # ------------------------------------------------------------------
     # enqueue
@@ -261,7 +274,7 @@ class SupervisorService:
         if action not in CONTROL_ACTIONS:
             raise SupervisorServiceError("unsupported_action",
                                          "不支持的控制动作")
-        if action == "append_user_turn" and not self._append_user_turn_enabled:
+        if action in {"append_user_turn", "configure_model"} and not self._append_user_turn_enabled:
             raise SupervisorServiceError("feature_disabled",
                                          "append_user_turn 未启用", 403)
         if action == "apply_local_profile" and not self._apply_local_profile_enabled:

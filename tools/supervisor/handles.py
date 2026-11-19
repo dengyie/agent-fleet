@@ -109,6 +109,8 @@ class _ManagedEntry:
     exe_path: str | None = None
     persist_continuation: bool = False
     resume_options: list[str] = field(default_factory=list)
+    model_config: dict | None = field(default=None, repr=False)
+    restore_model: str | None = None
     control_lock: Any = field(default_factory=threading.RLock, repr=False,
                               compare=False)
     control_epoch: int = 0
