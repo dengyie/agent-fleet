@@ -108,6 +108,7 @@ class SessionRepository:
             "state_source": "TEXT NOT NULL DEFAULT 'unknown'",
             "state_confidence": "TEXT NOT NULL DEFAULT 'low'",
             "state_sequence": "INTEGER NOT NULL DEFAULT 0",
+            "lifecycle_sequence": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, declaration in additions.items():
             if name in cols:
@@ -461,8 +462,20 @@ class SessionRepository:
             conn.close()
         return self._clean_row(result) if result is not None else None
 
+    def reopen_session(self, session_id: str, sequence: int) -> None:
+        """Only a fresh, managed continuation event can reopen a closed turn."""
+        conn = self._connect()
+        try:
+            conn.execute("UPDATE sessions SET status='running', finished_at=NULL,"
+                         " current_state='running',state_source='structured_stream',"
+                         " state_confidence='medium',state_sequence=?,lifecycle_sequence=? WHERE session_id=?"
+                         " AND managed=1 AND lifecycle_sequence<? AND state_sequence<?",
+                         (sequence, sequence, session_id, sequence, sequence))
+        finally:
+            conn.close()
+
     def close_session(self, session_id: str, status: str,
-                      finished_at: str) -> dict[str, Any] | None:
+                      finished_at: str, *, sequence: int | None = None) -> dict[str, Any] | None:
         """Move a session to a terminal state exactly once.
 
         Terminal states are monotonic: late metadata cannot reopen them, and
@@ -481,8 +494,9 @@ class SessionRepository:
                 " WHEN status='closed' THEN 'closed'"
                 " ELSE ? END, finished_at = CASE"
                 " WHEN status IN ('closed','failed') THEN finished_at"
-                " ELSE ? END, updated_at=? WHERE session_id=?",
-                (status, finished_at, finished_at, session_id),
+                " ELSE ? END, updated_at=?, lifecycle_sequence=COALESCE(?,lifecycle_sequence)"
+                " WHERE session_id=? AND (? IS NULL OR lifecycle_sequence<?)",
+                (status, finished_at, finished_at, sequence, session_id, sequence, sequence),
             )
             row = conn.execute(
                 "SELECT * FROM sessions WHERE session_id=?",
@@ -821,6 +835,24 @@ class SessionRepository:
                 " ON CONFLICT(session_id) DO UPDATE SET"
                 " capabilities=excluded.capabilities",
                 (session_id, json.dumps(bounded, ensure_ascii=True)))
+        finally:
+            conn.close()
+
+    def get_capabilities_many(self, session_ids: list[str]) -> dict:
+        if not session_ids:
+            return {}
+        conn = self._connect()
+        try:
+            result = {}
+            for offset in range(0, len(session_ids), 500):
+                batch = session_ids[offset:offset + 500]
+                for row in conn.execute('SELECT session_id,capabilities FROM stream_state WHERE session_id IN ('
+                        + ','.join('?' for _ in batch) + ')', batch):
+                    try:
+                        result[row['session_id']] = json.loads(row['capabilities'] or '[]')
+                    except (ValueError, TypeError):
+                        result[row['session_id']] = []
+            return result
         finally:
             conn.close()
 

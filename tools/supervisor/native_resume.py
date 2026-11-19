@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 from pathlib import Path
 from typing import Mapping
@@ -68,11 +69,19 @@ def _live_process_cwd(pid: int) -> str | None:
 
 
 def _resume_token_from_native_path(path: str | None) -> str | None:
-    """Best-effort token from a native transcript filename; never opens it."""
+    """Read the exact transcript identity; verify rollout metadata against its filename."""
     if not isinstance(path, str) or not path:
         return None
     stem = Path(path).stem
-    if not stem or stem.startswith("rollout-"):
+    if stem.startswith("rollout-"):
+        try:
+            with open(path, encoding='utf-8') as stream:
+                first = json.loads(stream.readline(1 << 20))
+            token = first.get('payload', {}).get('id') if first.get('type') == 'session_meta' else None
+            return token if isinstance(token, str) and token and stem.endswith('-' + token) else None
+        except (OSError, ValueError, AttributeError):
+            return None
+    if not stem:
         return None
     if not all(ch.isalnum() or ch in "._-" for ch in stem):
         return None
@@ -125,9 +134,42 @@ def _native_resume_identity(entry):
     return (cwd, env, token, exe)
 
 
-_RESUME_FORBIDDEN_FLAGS = frozenset({
-    "--ephemeral", "--ignore-user-config", "-p", "--print",
-})
+_RESUME_FORBIDDEN_FLAGS = frozenset({"--ephemeral", "--ignore-user-config", "--no-session-persistence"})
+
+
+def continuation_options(family: str, command: list[str]) -> list[str]:
+    """Keep explicit provider/model/policy options, without replaying the prompt.
+
+    These are options supported by the family's resume command. Output paths,
+    session selectors and initial-turn attachments must not be replayed.
+    """
+    valued = {
+        'codex': {'-c', '--config', '-m', '--model', '--enable', '--disable'},
+        'claude_code': {'--model', '--fallback-model', '--settings', '--setting-sources',
+                        '--permission-mode', '--effort', '--agent', '--agents',
+                        '--system-prompt', '--append-system-prompt', '--mcp-config'},
+    }.get(family, set())
+    switches = {
+        'codex': {'--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check',
+                  '--strict-config', '--ignore-rules'},
+        'claude_code': {'--dangerously-skip-permissions', '--bare', '--strict-mcp-config'},
+    }.get(family, set())
+    result = []
+    args = iter(command[1:])
+    for arg in args:
+        if arg == '--':
+            break
+        flag = arg.split('=', 1)[0]
+        if flag in valued:
+            if '=' in arg:
+                result.append(arg)
+            else:
+                value = next(args, None)
+                if value is not None:
+                    result.extend((arg, value))
+        elif arg in switches:
+            result.append(arg)
+    return result
 
 
 def _native_resume_argv(family: str, exe: str, token: str, text: str) -> list[str]:
@@ -142,7 +184,7 @@ def _native_resume_argv(family: str, exe: str, token: str, text: str) -> list[st
     if family == "codex":
         argv = [exe, "exec", "resume", "--json", token] + (["--", text] if leading_dash else [text])
     elif family == "claude_code":
-        argv = [exe, "--resume", token] + (["--", text] if leading_dash else [text])
+        argv = [exe, "--print", "--verbose", "--output-format", "stream-json", "--resume", token] + (["--", text] if leading_dash else [text])
     elif family == "pi":
         if leading_dash:
             return []
@@ -219,6 +261,11 @@ class NativeResumeMixin:
         can still resume after ``_release_handle``.
         """
         m = entry.manifest
+        if entry.handle is None:
+            disk = self._read_disk_manifest(session_id)
+            if disk is not None:
+                m.state, m.reason = disk.state, disk.reason
+            self._continuations.restore(entry)
         if m.state in TERMINAL_STATES and m.reason != "completed":
             return m.state
         gate = self._guard_adopted(session_id)
@@ -244,6 +291,34 @@ class NativeResumeMixin:
             return "unsupported_action"
         cwd, env, token, exe = identity
         argv = _native_resume_argv(family, exe, token, text)
+        if argv:
+            at = 3 if family == 'codex' else 1
+            argv[at:at] = entry.resume_options
         if not validate_command(argv) or not cwd:
             return "unsupported_action"
         return m, entry.handle, argv, cwd, env
+
+    def continuation_ready(self, session_id: str) -> bool:
+        self.get(session_id)
+        entry = self._entries[session_id]
+        return bool(self._continuations.restore(entry)
+                    and entry.manifest.capability_manifest.get('resume'))
+
+    def _capture_native_identity(self, entry, line: str) -> None:
+        if not entry.persist_continuation:
+            return
+        try:
+            row = json.loads(line)
+            token = None
+            if entry.manifest.agent == 'codex' and row.get('type') == 'thread.started':
+                token = row.get('thread_id')
+            elif entry.manifest.agent == 'claude_code' and row.get('type') in {'system', 'result'}:
+                token = row.get('session_id')
+            if not isinstance(token, str) or not token or token.startswith('-'):
+                return
+            entry.resume_token = token
+            if self._continuations.save(entry):
+                entry.manifest.capability_manifest = {**entry.manifest.capability_manifest, 'resume': True}
+                self._persist(entry.manifest)
+        except (OSError, ValueError, TypeError, AttributeError):
+            return

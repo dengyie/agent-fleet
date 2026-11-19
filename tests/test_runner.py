@@ -77,7 +77,7 @@ class RunnerConfigTests(unittest.TestCase):
         # 默认值补齐；hermes 无 default_command 保持 None。
         cfg = runner_config.load_config(self._write())
         self.assertEqual(cfg.agents["claude_code"]["command"],
-                         ["claude", "-p", "{instruction}"])
+                         ["claude", "-p", "--verbose", "--output-format", "stream-json", "{instruction}"])
         self.assertEqual(cfg.agents["pi"]["command"], ["pi", "-p", "{instruction}"])
         self.assertIsNone(cfg.agents["hermes"]["command"])
         self.assertEqual(cfg.agents["pi"]["timeout_s"], 1800)
@@ -456,10 +456,9 @@ class AdapterTests(unittest.TestCase):
 class AdapterDefaultsTests(unittest.TestCase):
     def test_default_commands(self):
         self.assertEqual(adapters.create("codex").build_argv("修 bug"),
-                         ["codex", "exec", "--approve-for-me", "--ephemeral",
-                          "--ignore-user-config", "--json", "修 bug"])
+                         ["codex", "exec", "--approve-for-me", "--json", "修 bug"])
         self.assertEqual(adapters.create("claude_code").build_argv("修 bug"),
-                         ["claude", "-p", "修 bug"])
+                         ["claude", "-p", "--verbose", "--output-format", "stream-json", "修 bug"])
         self.assertEqual(adapters.create("pi").build_argv("修 bug"),
                          ["pi", "-p", "修 bug"])
         self.assertEqual(adapters.create("zcode").build_argv("修 bug"),

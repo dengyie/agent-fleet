@@ -1,0 +1,13 @@
+{
+  "name": "agent-fleet",
+  "description": "Agent Fleet desktop session connectors",
+  "plugins": [
+    {
+      "name": "agent-fleet-bridge",
+      "version": "0.1.2",
+      "description": "Deliver messages to existing ZCode desktop conversations through the official extension API.",
+      "category": "productivity",
+      "source": "./plugins/agent-fleet-bridge"
+    }
+  ]
+}

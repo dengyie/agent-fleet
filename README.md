@@ -158,6 +158,8 @@ The **Muse** workspace (`/muse`) connects native Muse sessions directly without 
 
 ## Advanced Documentation
 
+- [ZCode desktop conversation bridge](integrations/zcode/README.md) — send to an existing desktop session and observe its original command receipt.
+
 - [Architecture Specification v3](docs/architecture-v3.md)
 - [Control Plane Specification v4](docs/architecture-v4-control-plane.md)
 - [Visual Architecture & State Machine](docs/visual-architecture.md)

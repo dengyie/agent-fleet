@@ -28,7 +28,6 @@ import platform as _platform_mod
 # tests patch ``subprocess.Popen/run`` through this module's attribute.
 import subprocess  # noqa: F401
 import time
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -167,6 +166,8 @@ class Supervisor(HandlesMixin, NativeResumeMixin):
                 ops = MacGroupOps()
         self._ops = ops
         self._entries: dict[str, _ManagedEntry] = {}
+        from tools.supervisor.continuation import ContinuationStore
+        self._continuations = ContinuationStore(self._manifest_dir)
         #: Bounded in-memory mark of REVOKED adoptions (never persisted, never
         #: public; keeps ``detach`` / ``all_status`` / ``get`` semantics
         #: byte-identical).  Keyed by session id -> fixed code
@@ -221,12 +222,16 @@ class Supervisor(HandlesMixin, NativeResumeMixin):
             created_at=now,
             updated_at=now,
         )
+        from tools.supervisor.native_resume import continuation_options
         handle = self._ops.create(command, cwd, env_allowlist)
         entry = _ManagedEntry(
             manifest, handle,
             cwd=str(cwd) if cwd else None,
             env=dict(env_allowlist) if isinstance(env_allowlist, Mapping) else {},
             exe_path=str(command[0]) if command else None,
+            resume_options=continuation_options(agent, command),
+            persist_continuation=(agent in {'codex', 'claude_code'} and not
+                {'--ephemeral', '--no-session-persistence'} & set(command)),
         )
         _stamp_private_identity(handle, entry)
         self._entries[session_id] = entry
@@ -530,8 +535,8 @@ class Supervisor(HandlesMixin, NativeResumeMixin):
 
     def get(self, session_id: str) -> ManagedSessionManifest:
         entry = self._entries.get(session_id)
-        if entry is None:
-            entry = self._refresh_from_disk(session_id)
+        if entry is None or entry.handle is None:
+            entry = self._refresh_from_disk(session_id) or entry
         if entry is None:
             raise UnknownSessionError(session_id)
         return entry.manifest
@@ -682,6 +687,7 @@ class Supervisor(HandlesMixin, NativeResumeMixin):
         return self.terminate_session(session_id, grace_s=0.1)
 
     def append_user_turn(self, session_id: str, text: str) -> str:
+        self.get(session_id)
         entry = self._entries.get(session_id)
         if entry is None:
             raise UnknownSessionError(session_id)
@@ -891,18 +897,9 @@ class Supervisor(HandlesMixin, NativeResumeMixin):
             return ManagedRunResult(exit_code=125, outcome="no_live_process")
         consumer = on_line or (lambda _s: None)
         def on_line(line):
-            # Codex reports the native identity before any model output. Keep
-            # it with the private entry so a finished session can resume.
-            if m.agent == "codex":
-                try:
-                    record = json.loads(line)
-                    token = record.get("thread_id") if record.get("type") == "thread.started" else None
-                    if isinstance(token, str) and token:
-                        entry = self._entries.get(session_id)
-                        if entry is not None and entry.handle is handle:
-                            entry.resume_token = token
-                except (ValueError, TypeError, AttributeError):
-                    pass
+            entry = self._entries.get(session_id)
+            if entry is not None and entry.handle is handle:
+                self._capture_native_identity(entry, line)
             consumer(line)
         should_abort = should_abort or (lambda: False)
         deadline = time.monotonic() + max(0.0, float(timeout_s))
@@ -1084,6 +1081,7 @@ class Supervisor(HandlesMixin, NativeResumeMixin):
                 self._set_reason(m, "recovered")
                 self._entries[m.session_id] = _ManagedEntry(m, None)
             out[m.session_id] = m
+            self._continuations.restore(self._entries[m.session_id])
         return out
 
     #: 终态 manifest / owner 记录保留期与清理节流间隔。
@@ -1126,6 +1124,10 @@ class Supervisor(HandlesMixin, NativeResumeMixin):
             except Exception:
                 sid, terminal = None, True
             if not terminal:
+                continue
+            # Persisted continuations retain their working directory and stream
+            # checkpoint. Their manifest is part of that durable session.
+            if sid and self._continuations.path(sid).exists():
                 continue
             entry = self._entries.get(sid) if sid else None
             if entry is not None and entry.handle is not None:

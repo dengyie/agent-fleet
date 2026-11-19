@@ -324,6 +324,8 @@ class ControlClient:
         spool_key: bytes | None = None,
         uploader: Any | None = None,
         post_json: Callable[[dict], Any] | None = None,
+        continuation=None,
+        desktop=None,
     ):
         if not isinstance(machine_id, str) or not machine_id:
             raise ValueError("machine_id required")
@@ -351,6 +353,8 @@ class ControlClient:
         self._spool_key = spool_key
         self._uploader = uploader
         self._post_json = post_json
+        self.continuation = continuation
+        self.desktop = desktop
         self._adoption_recovery_after: str | None = "" if bridge_factory is not None else None
         # nonce/回执目录的周期清理（限频，首次 poll 即执行一次）
         self._last_prune = 0.0
@@ -519,6 +523,13 @@ class ControlClient:
 
         # 4. local conflict/state gate (a stale resume never resurrects a
         # quarantined/terminated session).
+        is_desktop = bool(getattr(manifest, 'capability_manifest', {}).get('desktop_bridge')) if action != 'adopt' else False
+        if is_desktop and action != 'append_user_turn':
+            self._receipt(cid, 'rejected', 'unsupported_action')
+            return
+        if action == 'append_user_turn' and state == 'running' and not is_desktop:
+            self._receipt(cid, 'rejected', 'session_busy')
+            return
         if (action in _SCOPE_BLOCKED and state in _SCOPE_BLOCKED[action]
                 and not (action == "append_user_turn" and state == "terminated"
                          and getattr(manifest, "reason", None) == "completed")):
@@ -718,8 +729,12 @@ class ControlClient:
             return "rejected", "invalid_payload"
         try:
             if action == "append_user_turn":
-                result = self._supervisor.append_user_turn(
-                    session_id, clean["text"])
+                if self.desktop is not None and self._supervisor.get(session_id).capability_manifest.get('desktop_bridge'):
+                    return self.desktop.send(session_id, cid, clean['text'])
+                if self.continuation is not None and session_id.startswith("runner_"):
+                    result = self.continuation.send(session_id, clean["text"])
+                else:
+                    result = self._supervisor.append_user_turn(session_id, clean["text"])
             else:
                 result = self._supervisor.apply_local_profile(
                     session_id, clean["profile_id"])
@@ -732,7 +747,7 @@ class ControlClient:
             return ("rejected", result)
         if result in ("unsupported_action", "resume_unverified",
                       "unknown_profile", "family_mismatch",
-                      "invalid_payload"):
+                      "invalid_payload", "session_busy", "native_session_unbound", "capture_unavailable"):
             return ("rejected", result)
         if result == {"append_user_turn": "appended", "apply_local_profile": "applied"}[action]:
             return ("succeeded", result)
@@ -789,7 +804,7 @@ class ControlClient:
             return ("succeeded", result)
         return ("failed", result or _UNEXPECTED)
 
-    def _receipt(self, cid: str, status: str, reason: str) -> None:
+    def _receipt(self, cid: str, status: str, reason: str) -> bool:
         # Bounded in every dimension: keys exactly, reason capped.
         body = {
             "command_id": str(cid)[:160],
@@ -800,9 +815,10 @@ class ControlClient:
         }
         self._nonces.save_receipt(cid, body)
         try:
-            self._transport("/api/supervisor/receipts", body, self._headers())
+            code, _ = self._transport("/api/supervisor/receipts", body, self._headers())
+            return code == 200
         except Exception:
-            pass  # best-effort; the receipt never contains anything sensitive.
+            return False
 
     def _headers(self) -> dict[str, str]:
         return {

@@ -99,7 +99,7 @@ class _ManagedEntry:
     manifest: ManagedSessionManifest
     handle: Any = None  # GroupOps handle (live only after launch/resume)
     probe: Any = None   # the LIVE-identity reader used at attach (Task 9)
-    # Private native-resume identity.  Never persisted, never public.
+    # Private native-resume identity; persisted separately, never public.
     # Survives ``_release_handle`` so a naturally finished session can still
     # be resumed into the same native transcript (not SIGCONT, not /tmp).
     cwd: str | None = None
@@ -107,6 +107,8 @@ class _ManagedEntry:
     native_file_path: str | None = None
     resume_token: str | None = None
     exe_path: str | None = None
+    persist_continuation: bool = False
+    resume_options: list[str] = field(default_factory=list)
     control_lock: Any = field(default_factory=threading.RLock, repr=False,
                               compare=False)
     control_epoch: int = 0
@@ -197,6 +199,9 @@ class HandlesMixin:
         if m is None:
             return None
         entry = self._entries.setdefault(session_id, _ManagedEntry(m, None))
+        if entry.handle is None:
+            entry.manifest = m
+        self._continuations.restore(entry)
         return entry
 
     def _rebind_owner(self, session_id: str, entry: _ManagedEntry):

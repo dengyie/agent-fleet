@@ -48,11 +48,12 @@ PROFILES: dict[str, Profile] = {
     # （codex-cli 0.147.0 起两者互斥）。
     "codex": Profile("codex", (
         "codex", "exec", "--approve-for-me",
-        "--ephemeral", "--ignore-user-config", "--json", "{instruction}"),
+        "--json", "{instruction}"),
         basenames=("codex", "codex-cli", "codex.js"),
         native_session_root="~/.codex/sessions", native_session_depth=3,
         native_resume=True, resume_verifiable=True),
-    "claude_code": Profile("claude_code", ("claude", "-p", "{instruction}"),
+    "claude_code": Profile("claude_code", ("claude", "-p", "--verbose",
+        "--output-format", "stream-json", "{instruction}"),
         basenames=("claude",),
         native_session_root="~/.claude/projects", native_session_depth=2,
         native_resume=True, resume_verifiable=True, probe_family="claude"),

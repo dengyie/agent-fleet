@@ -24,9 +24,8 @@ def _write(tmp: Path, agents_block: str = "") -> Path:
 def test_missing_agents_falls_back_to_registry(tmp_path):
     cfg = load_config(_write(tmp_path))
     assert cfg.agents["codex"]["command"] == [
-        "codex", "exec", "--approve-for-me", "--ephemeral",
-        "--ignore-user-config", "--json", "{instruction}"]
-    assert cfg.agents["claude_code"]["command"] == ["claude", "-p", "{instruction}"]
+        "codex", "exec", "--approve-for-me", "--json", "{instruction}"]
+    assert cfg.agents["claude_code"]["command"] == ["claude", "-p", "--verbose", "--output-format", "stream-json", "{instruction}"]
     assert cfg.agents["hermes"]["command"] is None
     assert cfg.agents["codex"]["timeout_s"] == 1800
 

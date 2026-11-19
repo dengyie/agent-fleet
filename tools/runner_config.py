@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -133,6 +134,15 @@ def load_config(path=DEFAULT_CONFIG_PATH):
             "command": command,
             "timeout_s": _to_int(entry.get("timeout_s"), 1800, f"agents.{agent_type}.timeout_s", allow_zero=False),
         }
+        if entry.get('env_file'):
+            try:
+                environment = json.loads(Path(entry['env_file']).expanduser().read_text(encoding='utf-8'))
+            except (OSError, ValueError, TypeError):
+                _err(f'agents.{agent_type}.env_file 无法读取')
+            if not isinstance(environment, dict) or not all(
+                    isinstance(k, str) and isinstance(v, str) for k, v in environment.items()):
+                _err(f'agents.{agent_type}.env_file 必须为字符串映射')
+            agents[str(agent_type)]['environment'] = environment
 
     # 注册表默认回退:runner.yaml 完全缺省的可执行家族用内置默认值补齐。
     # 部分指定(含显式 command: null)的家族保持原样,尊重操作者意图。

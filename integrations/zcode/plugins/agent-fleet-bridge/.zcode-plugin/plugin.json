@@ -1,0 +1,20 @@
+{
+  "name": "agent-fleet-bridge",
+  "version": "0.1.2",
+  "description": "Agent Fleet local bridge for existing desktop sessions",
+  "extension": {
+    "engines": {
+      "zcode": "^1.3.0"
+    },
+    "main": "./extension.mjs",
+    "activationEvents": [
+      "onAvailable"
+    ],
+    "grants": [
+      "sessions.write"
+    ],
+    "protocols": {
+      "sessions": 1
+    }
+  }
+}

@@ -231,8 +231,6 @@ class SessionService:
                     if clean.get("kind") in {"agent_state_changed", "interaction_request",
                             "interaction_response", "session_start", "session_metadata", "session_close"}:
                         projected_events.setdefault(session_id, []).append(clean["event_id"])
-                    if clean.get("kind") == "session_close":
-                        self._close_session_from_event(clean)
                     if result.status != "duplicate":
                         publish_event = clean
                 else:
@@ -255,12 +253,13 @@ class SessionService:
                     raise SessionServiceError(
                         "session_unavailable", "会话存储不可用，观测链路不受影响") from exc
 
+        for projected_session_id, ids in projected_events.items():
+            self._project_events(projected_session_id, ids)
+
         # 摘要推送按批合并：只推最后一条新存储事件（前端按最大游标取值）。
         if publish_event is not None:
             self._publish_session_summary(publish_event)
 
-        for projected_session_id, ids in projected_events.items():
-            self._project_events(projected_session_id, ids)
 
         if self.search_service is not None:
             for search_session_id, event_ids in search_events.items():
@@ -352,17 +351,26 @@ class SessionService:
             return
         try:
             rows = reader(session_id, event_ids)
-            for event in rows:
+            for event in sorted(rows, key=lambda row: row["sequence"]):
                 kind, payload = event["kind"], event.get("payload") or {}
                 if kind == "agent_state_changed":
                     self._apply_agent_state(event)
-                elif kind in ("session_start", "session_metadata") and "interactive_questions" in payload:
-                    self.session_repo.set_capabilities(session_id,
-                        ["interactive_questions"] if payload["interactive_questions"] is True else [],
-                        sequence=event["sequence"])
+                elif kind in ("session_start", "session_metadata"):
+                    if any(key in payload for key in ('interactive_questions', 'native_resume', 'desktop_bridge')):
+                        caps = set(self.session_repo.get_capabilities(session_id))
+                        for key in ('interactive_questions', 'native_resume', 'desktop_bridge'):
+                            if key in payload:
+                                caps.discard(key)
+                                if payload[key] is True:
+                                    caps.add(key)
+                        self.session_repo.set_capabilities(session_id, sorted(caps), sequence=event['sequence'])
+                    if payload.get('resumed') is True:
+                        self.session_repo.reopen_session(session_id, event['sequence'])
                 elif kind in ("interaction_request", "interaction_response", "session_close"):
                     clean = Redactor(passthrough=False).redact_event(event)[0]
                     self.session_repo.project_interaction(session_id, event["sequence"], kind, clean["payload"])
+                    if kind == "session_close":
+                        self._close_session_from_event(event)
         except (SessionError, TranscriptError, sqlite3.Error, OSError, ValueError) as exc:
             raise SessionServiceError("session_unavailable") from exc
 
@@ -415,7 +423,7 @@ class SessionService:
             return
         try:
             close(event["session_id"], self._close_status(event.get("payload")),
-                  event["emitted_at"])
+                  event["emitted_at"], sequence=event["sequence"])
         except (SessionError, sqlite3.Error, OSError) as exc:
             raise SessionServiceError(
                 "session_unavailable", "会话存储不可用，会话状态未更新") from exc
@@ -523,6 +531,11 @@ class SessionService:
             delivery_reason = 'native_resume_unsupported'
         elif adoption is not None and not adoption.native_file_path:
             delivery_reason = 'native_session_unbound'
+        elif str(row['session_id']).startswith('runner_') and dto.get('managed'):
+            if 'native_resume' not in row.get('capabilities', []):
+                delivery_reason = 'native_session_unbound'
+            elif row.get('current_state') in {'running', 'thinking', 'tool_running'}:
+                delivery_reason = 'session_busy'
         if delivery_reason:
             allowed.discard('append_user_turn')
         if family == 'zcode' and adoption is not None and not adoption.native_file_path:
@@ -531,10 +544,16 @@ class SessionService:
             # it were the selected conversation. Preserve its audit history.
             allowed.clear()
             dto['control_unavailable_reason'] = 'native_session_unbound'
+        desktop = (family == 'zcode' and adoption is None
+                   and str(row['session_id']).startswith('runner_')
+                   and 'desktop_bridge' in row.get('capabilities', []) and dto.get('managed'))
+        if desktop:
+            allowed = {'append_user_turn'} & set(actions)
+            delivery_reason = ''
         dto['message_delivery'] = {
             'available': 'append_user_turn' in allowed,
             'reason': delivery_reason or ('node_receipt_required' if 'append_user_turn' in allowed else 'control_unavailable'),
-            'mechanism': 'native_session_resume' if not delivery_reason else 'unavailable',
+            'mechanism': 'zcode_desktop_bridge' if desktop else ('native_session_resume' if not delivery_reason else 'unavailable'),
         }
         if adoption is not None:
             dto['capture'] = {'native_source_bound': bool(adoption.native_file_path),
@@ -564,6 +583,11 @@ class SessionService:
         except Exception:
             raise SessionServiceError("session_unavailable") from None
         rows = [r for r in rows if isinstance(r, Mapping)]
+        try:
+            capabilities = self.session_repo.get_capabilities_many([r['session_id'] for r in rows])
+        except Exception:
+            raise SessionServiceError('session_unavailable') from None
+        rows = [{**r, 'capabilities': capabilities.get(r['session_id'], [])} for r in rows]
         adoptions = self._adoption_rows([r['session_id'] for r in rows])
         actions = self._available_actions()
         return {"sessions": [self._live_session(r, adoptions.get(r['session_id']), actions) for r in rows]}

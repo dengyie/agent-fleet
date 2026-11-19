@@ -15,11 +15,14 @@ projects:                     # 项目白名单：页面只能创建这些项目
 agents:
   codex:
     # --approve-for-me 自带 workspace-write sandbox，与显式 --sandbox 互斥
-    command: ["codex", "exec", "--approve-for-me", "--ephemeral", "--ignore-user-config", "--json", "{instruction}"]
+    command: ["codex", "exec", "--approve-for-me", "--json", "{instruction}"]
     timeout_s: 1800
   claude_code:
-    command: ["claude", "-p", "{instruction}"]
+    command: ["claude", "-p", "--verbose", "--output-format", "stream-json", "{instruction}"]
     timeout_s: 1800
+    # 可选：节点私有 JSON 环境配置（0600），供 launchd/systemd 进程加载模型源。
+    # 如 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN；仅 CLI 的环境白名单生效。
+    # env_file: ~/.config/agent-fleet/claude-provider.json
   hermes:
     command: null             # hermes 无统一 CLI，必须按本机实际配置
     timeout_s: 1800

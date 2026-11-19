@@ -154,6 +154,7 @@ class ManagedSessionManifest:
             capability_manifest=dict(clean.get("capability_manifest") or {}),
             created_at=str(clean.get("created_at") or "")[:64],
             updated_at=str(clean.get("updated_at") or "")[:64],
+            reason=str(clean.get("reason") or "")[:64],
         )
 
 
