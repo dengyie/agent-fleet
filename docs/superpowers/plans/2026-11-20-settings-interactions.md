@@ -55,3 +55,9 @@ Final verification after separating the clear button from the input label: **235
 `git diff --check`, Node syntax checks for the three changed JavaScript modules and new browser fixture, and UTF-8/no-BOM checks passed. Screenshots are generated under `/Users/mango/.cache/agent-fleet/verification/settings-interactions-20261120/browser/`.
 
 Publication is authorized by the user's standing project instruction: after implementation and verification, submit to GitHub, merge into the latest main and deploy without waiting for another reminder. Preserve other worktrees, rebase before merging and use the existing CI deployment transaction. Publication and live acceptance evidence will be recorded in the canonical operations runbook after release.
+
+## Full-CI nested-dialog correction
+
+The first PR CI identified a missed parent/child modal boundary: on desktop, a nested registration dialog extends past the settings rectangle, and its bubbled pointer events were mistaken for settings-backdrop clicks. This interrupted MCP and identity registration; nested Escape also needs to stay scoped to its own dialog. Restrict backdrop gestures and cancellation to events targeted at the settings dialog itself, retaining the original geometry/drag checks. Existing MCP registration scenarios now explicitly assert that settings remains open after form interaction, Escape and child close.
+
+The four targeted failures were reproduced locally, then passed after the minimal fix (4 passed in 8.79s). The same run also found the existing view-source contract disallows template interpolation even for safe `textContent` assignments; the search count now uses ordinary string concatenation without changing that contract. Evidence is retained in `nested-before.log`, `nested-after.log` and the first PR CI logs under the private verification directory. The first PR CI result remains failed; a new complete CI run must validate the corrected code before merging.

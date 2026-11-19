@@ -55,10 +55,15 @@ export function mountSettings(root, {section = 'models', account = null, identit
     closeTimer = window.setTimeout(onClose, duration + 24);
   };
   close.addEventListener('click', requestClose);
-  dialog.addEventListener('cancel', event => { event.preventDefault(); requestClose(); });
+  dialog.addEventListener('cancel', event => {
+    if (event.target !== dialog) return;
+    event.preventDefault(); requestClose();
+  });
   const outsideDialog = event => {
     const bounds = dialog.getBoundingClientRect();
-    return event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom;
+    // A nested modal can extend beyond settings; its bubbled events are not
+    // backdrop gestures for this dialog.
+    return event.target === dialog && (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom);
   };
   dialog.addEventListener('pointerdown', event => {
     backdropPointer = event.isPrimary && event.button === 0 && outsideDialog(event)
@@ -118,7 +123,7 @@ export function mountSettings(root, {section = 'models', account = null, identit
     }
     const count = links.filter(({link}) => !link.hidden).length;
     noResults.hidden = !query;
-    noResults.textContent = count ? `找到 ${count} 个设置分类` : '没有匹配的设置';
+    noResults.textContent = count ? '找到 ' + count + ' 个设置分类' : '没有匹配的设置';
     clearSearch.hidden = !search.value;
   }
   search.addEventListener('input', filterSections);

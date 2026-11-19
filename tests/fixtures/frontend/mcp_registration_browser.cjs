@@ -34,9 +34,16 @@ async function capture(page, name) {
     const panel = page.getByRole('region', {name: 'MCP 集成管理', exact: true});
     await panel.getByRole('button', {name: '登记 MCP 连接', exact: true}).click();
     const dialog = page.getByRole('dialog', {name: '登记 MCP 连接', exact: true});
+    const settings = page.getByRole('dialog', {name: '设置', exact: true});
+    const assertSettingsOpen = async () => {
+      assert.equal(await settings.count(), 1);
+      assert.equal(await settings.evaluate(node => node.open && !node.classList.contains('is-closing')), true,
+        'nested modal interactions must not dismiss their settings parent');
+    };
     const fields = {'归属身份': owner, '工作区标识': 'workspace', '连接标识': 'browser-mcp',
       '服务地址': 'https://mcp.example.test/mcp', '凭据引用': 'env://MCP_TEST_TOKEN', '选定工具（每行一个）': 'weather'};
     for (const [name, value] of Object.entries(fields)) await dialog.getByLabel(name, {exact: true}).fill(value);
+    await assertSettingsOpen();
     assert.equal(await dialog.getByLabel('选定工具（每行一个）', {exact: true}).evaluate(element => {
       const rect = element.getBoundingClientRect();
       return rect.top >= 0 && rect.bottom <= innerHeight &&
@@ -49,6 +56,7 @@ async function capture(page, name) {
       await dialog.getByRole('button', {name: '登记连接', exact: true}).click(); await incoming;
       if (mode === 'cancel') {
         await page.keyboard.press('Escape'); await dialog.waitFor({state: 'detached'});
+        await assertSettingsOpen();
         await held.abort('failed'); await page.unroute(prefix + '/register');
         await panel.getByRole('button', {name: '重新读取目录', exact: true}).click();
         await panel.getByText('尚无连接登记', {exact: true}).waitFor();
@@ -82,6 +90,7 @@ async function capture(page, name) {
       if (mode === 'retry') assert.deepEqual(registrations[0].body, registrations[1].body);
       assert.equal(posts.filter(value => value.url.includes('/discover?')).length, 0, 'registration must not discover');
       await dialog.getByRole('button', {name: '关闭', exact: true}).click(); await dialog.waitFor({state: 'detached'});
+      await assertSettingsOpen();
       const inspector = panel.getByRole('region', {name: 'MCP 连接详情', exact: true});
       if (repeated) {
         await inspector.getByText(mode === 'disabled-repeat' ? '已撤销' : '已批准', {exact: true}).waitFor();
