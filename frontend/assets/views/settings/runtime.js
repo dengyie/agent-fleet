@@ -11,7 +11,8 @@ export function mountRuntime(root, kind = 'runtime') {
       const data = await getRuntimeSettings(kind);
       if (disposed || ticket !== generation) return;
       content.replaceChildren(); status.textContent = '';
-      const section = panel(content, kind === 'hosts' ? 'VM 展示与心跳配置' : '系统与运行参数', '保存写入服务器配置文件；当前进程继续使用已加载配置，需要按部署流程重启 Hub 后生效。页面不会自动重启服务。');
+      const section = panel(content, kind === 'hosts' ? 'VM 展示与心跳配置' : '系统与运行参数', '管理服务器配置、功能开关与运行方式。', kind === 'hosts' ? 'globe' : 'tool');
+      section.append(el('p', '保存后需重启 Hub 生效。当前服务会继续使用已加载的配置，页面不会自动重启。', 'settings-notice'));
       section.append(el('p', data.path, 'settings-path'));
       const form = el('form', null, 'settings-form'); section.append(form);
       const controls = new Map();
@@ -20,13 +21,13 @@ export function mountRuntime(root, kind = 'runtime') {
         controls.get('content').rows = 22;
       } else {
         const groups = [
-          ['平台功能', spec => spec.type === 'bool' && spec.key.startsWith('AGENT_FLEET_PLATFORM_')],
-          ['监控与会话', spec => spec.type === 'bool' && !spec.key.startsWith('AGENT_FLEET_PLATFORM_')],
-          ['运行间隔与容量', spec => ['number', 'integer'].includes(spec.type)],
-          ['外部连接与路径', spec => !['bool', 'number', 'integer'].includes(spec.type)],
-        ].map(([title, matches]) => {
+          ['平台功能', '配置助手、工作流与节点的可用能力', spec => spec.type === 'bool' && spec.key.startsWith('AGENT_FLEET_PLATFORM_')],
+          ['监控与会话', '管理状态采集、会话与监控功能', spec => spec.type === 'bool' && !spec.key.startsWith('AGENT_FLEET_PLATFORM_')],
+          ['运行间隔与容量', '调整轮询频率、并发与保留时间', spec => ['number', 'integer'].includes(spec.type)],
+          ['外部连接与路径', '管理网络地址、目录与外部服务连接', spec => !['bool', 'number', 'integer'].includes(spec.type)],
+        ].map(([title, description, matches]) => {
           const details = el('details', null, 'settings-runtime-group');
-          details.append(el('summary', title));
+          const summary = el('summary'); summary.append(el('span', title), el('small', description)); details.append(summary);
           const fields = el('div', null, 'settings-runtime-fields');
           details.append(fields);
           form.append(details);
@@ -42,12 +43,13 @@ export function mountRuntime(root, kind = 'runtime') {
           }
           const group = groups.find(({matches}) => matches(spec));
           const control = field(group?.fields || form, spec.key, spec.label, value ?? '', {type: spec.type === 'bool' ? 'checkbox' : ['number', 'integer'].includes(spec.type) ? 'number' : spec.type === 'array' ? 'textarea' : spec.type === 'url' ? 'url' : 'text',
-            help: '当前生效：' + (Array.isArray(spec.effective) ? JSON.stringify(spec.effective) : String(spec.effective ?? '未设置')) + (spec.environment_override ? ' · 环境变量覆盖，文件设置不会覆盖该环境变量。' : '')});
+            help: '当前生效：' + (spec.type === 'bool' ? spec.effective ? '已开启' : '已关闭' : Array.isArray(spec.effective) ? JSON.stringify(spec.effective) : String(spec.effective ?? '未设置')) + (spec.environment_override ? ' · 环境变量覆盖，文件设置不会覆盖该环境变量。' : '')});
           if (spec.min !== null) { control.min = spec.min; control.max = spec.max; control.step = spec.type === 'integer' ? '1' : 'any'; }
           controls.set(spec.key, {control, spec, original: spec.type === 'bool' ? control.checked : control.value});
         }
       }
-      const submit = el('button', '保存服务器配置', 'button-primary'); submit.type = 'submit'; form.append(submit, button('重新加载', load));
+      const submit = el('button', '保存服务器配置', 'button-primary'); submit.type = 'submit';
+      const actions = el('div', null, 'settings-form-actions'); actions.append(button('重新加载', load), submit); form.append(actions);
       form.addEventListener('submit', async event => {
         event.preventDefault(); submit.disabled = true; status.textContent = '正在保存…';
         try {
@@ -70,8 +72,10 @@ export function mountRuntime(root, kind = 'runtime') {
         finally { submit.disabled = false; }
       });
       if (data.paths) {
-        const paths = panel(content, '数据与部署位置', '路径变更需要迁移数据，请按部署流程处理。以下展示当前运行位置。');
-        for (const [key, value] of Object.entries(data.paths)) paths.append(el('p', key + '：' + value, 'settings-path'));
+        const paths = panel(content, '数据与部署位置', '以下是当前运行位置。路径变更涉及数据迁移，请按部署流程处理。');
+        const locations = el('dl', null, 'settings-locations');
+        for (const [key, value] of Object.entries(data.paths)) locations.append(el('dt', key), el('dd', value));
+        paths.append(locations);
       }
       return true;
     } catch (error) { if (!disposed && ticket === generation) { status.replaceChildren(el('span', errorText(error)), button('重试', load)); } }

@@ -26,6 +26,18 @@ def test_settings_save_reload_and_navigation(tmp_path, viewport):
 
 
 @pytest.mark.parametrize('viewport', ['desktop', 'mobile'])
+def test_settings_categories_layout_and_theme_controls(tmp_path, viewport):
+    if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
+        pytest.skip('Set FLEET_PLAYWRIGHT_MODULE to run Chromium acceptance')
+    app = create_app(FleetConfig.from_root(tmp_path, frontend_dir=Path(__file__).resolve().parents[1] / 'frontend',
+        platform_enabled=True, platform_workflows_enabled=True, platform_fleet_mcp_enabled=True,
+        platform_mcp_connectors_enabled=True, accounts={'enabled': True, 'origin': 'http://127.0.0.1'}))
+    app.config['ACCOUNT_COOKIE_SECURE'] = False
+    app.extensions['accounts'].bootstrap_admin('admin@example.test', PASSWORD)
+    _browser_acceptance(app, 'settings_layout_browser.cjs', viewport)
+
+
+@pytest.mark.parametrize('viewport', ['desktop', 'mobile'])
 @pytest.mark.parametrize('scenario', ['interrupted-opening', 'category-navigation'])
 def test_settings_overlay_motion(tmp_path, viewport, scenario):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
