@@ -46,7 +46,7 @@ def test_zcode_logs_normalize_current_turn_and_tool_results_without_replaying_co
 
 def test_default_archive_sync_reads_zcode_history_without_adoption(tmp_path, monkeypatch):
     from tools.session.sync import default_sources, sync_file
-    from tests.test_review_node_sync import _client, _cfg
+    from test_review_node_sync import _client, _cfg
     monkeypatch.setenv('HOME', str(tmp_path))
     monkeypatch.setenv('USERPROFILE', str(tmp_path))
     root = tmp_path / '.zcode' / 'cli' / 'rollout'
@@ -69,7 +69,7 @@ def test_default_archive_sync_reads_zcode_history_without_adoption(tmp_path, mon
 
 def test_archive_worker_only_skips_fully_uploaded_unchanged_files(tmp_path):
     from tools.session.sync import NativeArchiveSync
-    from tests.test_review_node_sync import _client, _cfg, _line
+    from test_review_node_sync import _client, _cfg, _line
     root = tmp_path / 'native'
     root.mkdir()
     native = root / 'one.jsonl'

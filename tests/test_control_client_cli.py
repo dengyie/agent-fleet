@@ -36,7 +36,8 @@ class SpoolKeyTests(unittest.TestCase):
         path = self.tmp / "session-spool.key"
         first = cli._load_or_create_spool_key(path)
         self.assertEqual(len(first), 32)
-        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        if os.name != 'nt':
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         second = cli._load_or_create_spool_key(path)
         self.assertEqual(first, second)
 

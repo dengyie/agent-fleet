@@ -239,7 +239,7 @@ def test_desktop_binding_pagination_and_unacknowledged_receipts_retry(tmp_path):
 def test_desktop_without_rollout_has_control_and_original_messages(tmp_path):
     from tools.session.sync import sync_desktop, native_identity
     from tools.supervisor.desktop_control import DesktopControl
-    from tests.test_review_node_sync import _cfg, _client
+    from test_review_node_sync import _cfg, _client
     cfg, client = _cfg(tmp_path), _client(tmp_path)
     cfg.supervisor_enabled = True
     cfg.supervisor_manifest_dir = tmp_path/'manifests'
