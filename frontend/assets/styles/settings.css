@@ -23,8 +23,8 @@ html[data-resolved-theme="dark"] .settings-dialog::backdrop { background: rgb(0 
 @keyframes settings-backdrop-out { from { opacity: var(--settings-backdrop-exit-opacity, 1); } to { opacity: 0; } }
 .settings-layout { display: grid; grid-template-columns: 230px minmax(0, 1fr); height: 100%; min-height: 0; }
 .settings-close { position: absolute; z-index: 5; top: 14px; right: 14px; border: 0; background: var(--panel); border-radius: 50%; }
-.settings-dialog .settings-navigation { position: static; overflow-y: auto; background: color-mix(in srgb, var(--sidebar-bg) 76%, transparent); padding: 22px 14px; border-right: 1px solid var(--border); }
-.settings-dialog .settings-content { overflow-y: auto; padding: 30px 36px 40px; scrollbar-gutter: stable; }
+.settings-dialog .settings-navigation { position: static; overflow-y: auto; overscroll-behavior-y: contain; background: color-mix(in srgb, var(--sidebar-bg) 76%, transparent); padding: 22px 14px; border-right: 1px solid var(--border); }
+.settings-dialog .settings-content { overflow-y: auto; overscroll-behavior-y: contain; padding: 30px 36px 40px; scrollbar-gutter: stable; }
 .settings-dialog .settings-panel:first-child { padding-top: 8px; }
 .settings-dialog .settings-panel h2 { padding-right: 20px; }
 body:has(.settings-dialog[open]) { overflow: hidden; }
@@ -35,8 +35,14 @@ body:has(.settings-dialog[open]) { overflow: hidden; }
 .settings-nav-header { display: flex; flex-direction: column; gap: 3px; padding: 8px 12px 18px; }
 .settings-nav-header strong { font-size: 17px; font-weight: 650; }
 .settings-nav-header span { color: var(--text-2); font-size: 12px; }
-.settings-navigation > .settings-field { margin: 0 0 14px; padding: 0 4px; }
-.settings-navigation > .settings-field input { min-height: 36px; padding: 8px 10px; font-size: 12px; }
+.settings-navigation > .settings-field, .settings-navigation > .settings-search-field { margin: 0 0 14px; padding: 0 4px; }
+.settings-navigation > .settings-search-field { position: relative; }
+.settings-search-field > .settings-field { margin: 0; }
+.settings-search-field input { min-height: 36px; padding: 8px 34px 8px 10px; font-size: 12px; }
+.settings-search-field input::-webkit-search-cancel-button { display: none; }
+.settings-search-clear { position: absolute; right: 7px; bottom: 4px; width: 28px; height: 28px; border: 0; }
+.settings-search-clear[hidden] { display: none; }
+.settings-search-status { margin: 0; padding: 0 8px; color: var(--text-2); font-size: 12px; }
 .settings-nav-group { margin: 0 0 16px; }
 .settings-nav-group[hidden] { display: none; }
 .settings-nav-group-title { margin: 0 0 5px; padding: 0 12px; color: var(--text-3); font-size: 11px; font-weight: 600; }
@@ -91,6 +97,7 @@ body:has(.settings-dialog[open]) { overflow: hidden; }
 }
 @media(max-width: 767px) {
   .settings-dialog { width: calc(100vw - 20px); height: calc(100dvh - 32px); border-radius: 20px; }
+  .settings-close { top: 8px; right: 8px; width: 44px; height: 44px; }
   @keyframes settings-dialog-in { from { opacity: 0; transform: translateY(28px) scale(.992); } to { opacity: 1; transform: translateY(0) scale(1); } }
   @keyframes settings-dialog-out { from { opacity: var(--settings-exit-opacity, 1); transform: var(--settings-exit-transform, none); } to { opacity: 0; transform: translateY(20px) scale(.994); } }
   .settings-layout { display: flex; flex-direction: column; }
@@ -101,8 +108,8 @@ body:has(.settings-dialog[open]) { overflow: hidden; }
   .settings-navigation > .settings-search-field { display: none; }
   .settings-nav-list { display: none; }
   .settings-navigation > .settings-field:has(.settings-mobile-section) { display: flex; margin: 0; padding: 0 0 8px; }
-  .settings-mobile-section { display: block; }
-  .settings-mobile-section select { min-height: 40px; }
+  .settings-mobile-section { display: block; min-height: 44px; }
+  .settings-search-status { display: none; }
   .settings-content { width: 100%; padding: 4px 0 32px; }
   .settings-form { grid-template-columns: minmax(0,1fr); gap: 10px; }
   .settings-advanced[open] { grid-template-columns: minmax(0,1fr); }

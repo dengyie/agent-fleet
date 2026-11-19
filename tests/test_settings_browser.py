@@ -98,3 +98,21 @@ def test_settings_runtime_late_receipt_preserves_new_draft(lifecycle_app, kind, 
 def test_settings_integrations_load_recovery(lifecycle_app, scenario):
     app, _repo, _owner, _old = lifecycle_app
     _browser_acceptance(app, 'settings_lifecycle_browser.cjs', 'integrations', scenario)
+
+
+@pytest.mark.parametrize('viewport,scenario', [
+    ('desktop', 'backdrop'), ('mobile', 'backdrop'),
+    ('desktop', 'pointer-safety'), ('mobile', 'pointer-safety'),
+    ('desktop', 'focus-return'), ('mobile', 'focus-return'),
+    ('desktop', 'category-focus'), ('mobile', 'category-focus'),
+    ('desktop', 'search'),
+    ('desktop', 'scroll'), ('mobile', 'scroll'),
+    ('desktop', 'keyboard-safety'), ('mobile', 'keyboard-safety'),
+    ('desktop', 'history-menus'), ('mobile', 'history-menus'),
+])
+def test_settings_overlay_interactions(lifecycle_app, viewport, scenario):
+    app, repo, owner, _old = lifecycle_app
+    if scenario == 'history-menus':
+        for index in range(2):
+            repo.create_conversation(owner, f'interaction-{index}', title=f'交互验收 {index}', workspace_id='review-work')
+    _browser_acceptance(app, 'settings_interactions_browser.cjs', viewport, scenario)
