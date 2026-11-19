@@ -1,11 +1,13 @@
 import {getSettings, saveSetting, saveDefaults, enrollWorkspaceNode} from '../../api/settings.js';
 import {el, button, field, panel, jsonValue, errorText} from './forms.js';
+import {uiIcon} from '../../routes.js';
 
 const info = {
   models: ['模型源与 API', '新增模型源', 'profile_id', '模型配置 ID'],
   nodes: ['VM 与执行节点', '新增执行节点', 'node_id', '节点 ID'],
   workspaces: ['工作区与存储', '新增工作区', 'workspace_id', '工作区 ID'],
 };
+const icons = {models: 'brain', nodes: 'cpu', workspaces: 'layers'};
 export function mountCatalog(root, kind, {identitySignal} = {}) {
   let disposed = false, catalog, currentOwner = '', sequence = 0;
   const context = document.createElement('details'); context.className = 'settings-owner-scope';
@@ -34,7 +36,7 @@ export function mountCatalog(root, kind, {identitySignal} = {}) {
   }
   function renderDefaults() {
     const ticket = sequence, formOwner = currentOwner;
-    const section = panel(content, '新对话默认配置', '只影响之后解析的运行配置。已有对话的覆盖配置和已提交任务保持原有绑定。');
+    const section = panel(content, '新对话默认配置', '为新对话选择常用模型、工作区和执行节点。已有对话和已提交任务保留原有配置。', 'check-circle');
     const form = el('form', null, 'settings-form'); section.append(form);
     const controls = {};
     for (const [name, title, rows, id, label] of [
@@ -42,7 +44,8 @@ export function mountCatalog(root, kind, {identitySignal} = {}) {
       ['workspace_id', '默认工作区', catalog.workspaces, 'workspace_id', 'name'],
       ['execution_node_id', '默认执行节点', catalog.nodes, 'node_id', 'label'],
     ]) controls[name] = field(form, name, title, catalog.defaults[name], {options: [['', '未指定'], ...rows.filter(row => row.enabled).map(row => [row[id], row[label] + ' · ' + row[id]])]});
-    const submit = el('button', '保存默认配置', 'button-primary'); submit.type = 'submit'; form.append(submit);
+    const submit = el('button', '保存默认配置', 'button-primary'); submit.type = 'submit';
+    const actions = el('div', null, 'settings-form-actions'); actions.append(submit); form.append(actions);
     form.addEventListener('submit', async event => {
       event.preventDefault(); submit.disabled = true;
       try {
@@ -56,24 +59,38 @@ export function mountCatalog(root, kind, {identitySignal} = {}) {
   function renderCatalog() {
     const ticket = sequence, formOwner = currentOwner;
     const [title, addLabel, idKey, idTitle] = info[kind];
-    const section = panel(content, title, kind === 'models' ? 'API URL、模型与凭据在此管理；保存影响未来任务。已排队任务及登记工作流使用已冻结的配置，登记模板需重新发布才会切换模型源。' : kind === 'nodes' ? '登记已有 VM 或物理机的执行节点及能力。节点进程连接 Hub 并上报心跳后才可执行；登记不会创建或启动云主机。' : '设置工作目录和默认执行节点；路径位于实际执行节点。保存不会创建、搬迁或删除目录。');
+    const section = panel(content, title, kind === 'models' ? '集中管理 API 地址、模型和凭据。保存后用于新任务；已排队任务保留原配置，工作流模板需重新发布。' : kind === 'nodes' ? '连接已有 VM 或物理机，配置执行能力。节点连接 Hub 并上报心跳后即可使用；登记不会创建或启动云主机。' : '管理工作目录和默认执行节点。目录位于实际执行节点；保存不会创建、搬迁或删除文件。', icons[kind]);
     const toolbar = el('div', null, 'settings-toolbar'); section.append(toolbar);
-    toolbar.append(button(addLabel, () => editor(null), 'button-primary'), button('重新加载', load));
+    const count = el('span', catalog[kind].length + ' 项配置', 'settings-count');
+    const add = button(addLabel, () => editor(null), 'button-primary'); add.append(uiIcon('arrow-right', {size: 16}));
+    const reload = button('重新加载', load); reload.prepend(uiIcon('refresh', {size: 15}));
+    toolbar.append(count, reload, add);
     const list = el('div', null, 'settings-records'); section.append(list);
     for (const row of catalog[kind]) {
       const label = kind === 'models' ? row.model : kind === 'nodes' ? row.label : row.name;
       const entry = button('', () => editor(row), 'settings-record');
-      entry.append(el('strong', label), el('span', row[idKey] + ' · ' + (row.enabled ? '已启用' : '已停用')));
-      if (kind === 'models') entry.append(el('small', row.provider_config.endpoint || row.provider_config.base_url || row.provider));
-      if (kind === 'nodes') entry.append(el('small', row.last_seen_at ? '最近心跳：' + new Date(row.last_seen_at * 1000).toLocaleString() : '尚无心跳'));
+      entry.dataset.recordId = row[idKey]; entry.setAttribute('aria-pressed', 'false');
+      const glyph = el('span', null, 'settings-record-icon'); glyph.append(uiIcon(icons[kind], {size: 18}));
+      const copy = el('span', null, 'settings-record-copy'); copy.append(el('strong', label), el('small', row[idKey]));
+      if (kind === 'models') copy.append(el('small', row.provider_config.endpoint || row.provider_config.base_url || row.provider));
+      if (kind === 'nodes') copy.append(el('small', row.last_seen_at ? '最近心跳：' + new Date(row.last_seen_at * 1000).toLocaleString() : '尚无心跳'));
+      if (kind === 'workspaces') copy.append(el('small', row.root_path));
+      const state = el('span', row.enabled ? '已启用' : '已停用', 'settings-record-state'); state.dataset.enabled = String(row.enabled);
+      entry.append(glyph, copy, state, uiIcon('chevron-right', {size: 16}));
       list.append(entry);
     }
-    if (!list.childElementCount) list.append(el('p', '暂无配置，点击上方按钮新增。', 'settings-description'));
+    if (!list.childElementCount) {
+      const empty = el('div', null, 'settings-empty'); empty.append(uiIcon(icons[kind], {size: 26}), el('strong', '尚未添加配置'), el('p', '点击「' + addLabel + '」，开始连接你的' + (kind === 'models' ? '模型服务。' : kind === 'nodes' ? '执行节点。' : '工作目录。'))); list.append(empty);
+    }
     const editorRoot = el('div'); section.append(editorRoot);
+    function clearEditor() { editorRoot.replaceChildren(); list.hidden = false; list.querySelectorAll('.settings-record').forEach(entry => entry.setAttribute('aria-pressed', 'false')); }
     function editor(row) {
-      editorRoot.replaceChildren();
-      const form = el('form', null, 'settings-form'); editorRoot.append(form);
-      form.append(el('h3', row ? '编辑 ' + row[idKey] : addLabel));
+      clearEditor();
+      list.hidden = !catalog[kind].length;
+      list.querySelectorAll('.settings-record').forEach(entry => entry.setAttribute('aria-pressed', String(entry.dataset.recordId === row?.[idKey])));
+      const form = el('form', null, 'settings-form settings-editor'); editorRoot.append(form);
+      const heading = el('div', null, 'settings-editor-heading');
+      heading.append(el('h3', row ? '编辑 ' + row[idKey] : addLabel), el('p', row ? '更新连接信息，保存后用于之后的新任务。' : '填写基本信息，高级选项可按需配置。', 'settings-description')); form.append(heading);
       const id = field(form, idKey, idTitle, row?.[idKey], {required: true, readOnly: !!row});
       id.pattern = '[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}';
       const controls = {};
@@ -81,9 +98,13 @@ export function mountCatalog(root, kind, {identitySignal} = {}) {
       if (kind === 'models') {
         controls.provider = field(form, 'provider', '模型协议', (row?.provider === 'openai-compatible' ? 'openai_compatible' : row?.provider) || 'openai_compatible', {options: [['openai_compatible', 'OpenAI 兼容 API'], ['deterministic', '本地确定性测试模型']]});
         controls.model = field(form, 'model', '模型名称', row?.model, {required: true});
+        controls.model.closest('label').classList.add('settings-field-wide');
         const config = row?.provider_config || {};
         controls.base_url = field(form, 'url', 'API URL', config.endpoint || config.base_url || '', {type: 'url', help: '填写 API Base URL（如 https://api.example.com/v1），或完整的 /chat/completions 地址。'});
         controls.api_key = field(form, 'api_key', 'API Key', '', {type: 'password', help: row?.secret_configured ? '已配置。留空保留原凭据；填写新值即轮换。' : '首次接入请填写；保存后不会回显。'});
+        controls.base_url.placeholder = 'https://api.example.com/v1';
+        controls.base_url.closest('label').classList.add('settings-field-wide');
+        controls.api_key.closest('label').classList.add('settings-field-wide');
         const advanced = el('details', null, 'settings-advanced');
         advanced.append(el('summary', '高级参数'));
         form.append(advanced);
@@ -104,7 +125,8 @@ export function mountCatalog(root, kind, {identitySignal} = {}) {
       const enabled = field(form, 'enabled', '启用此配置', row?.enabled ?? true, {type: 'checkbox'});
       const submit = el('button', '保存配置', 'button-primary'); submit.type = 'submit';
       const result = el('p'); result.setAttribute('role', 'status');
-      form.append(submit, button('取消编辑', () => editorRoot.replaceChildren()), result);
+      const actions = el('div', null, 'settings-form-actions');
+      actions.append(result, button('取消编辑', () => { clearEditor(); add.focus({preventScroll: true}); }), submit); form.append(actions);
       if (kind === 'nodes' && row?.enabled) {
         const setup = el('details', null, 'settings-advanced');
         setup.append(el('summary', '部署或更新 VM 执行配置'));
@@ -132,7 +154,7 @@ export function mountCatalog(root, kind, {identitySignal} = {}) {
           } catch (error) { if (!disposed && ticket === sequence && form.isConnected) result.textContent = errorText(error); }
           finally { download.disabled = false; }
         });
-        setup.append(download); form.append(setup);
+        setup.append(download); form.insertBefore(setup, actions);
       }
       form.addEventListener('submit', async event => {
         event.preventDefault(); submit.disabled = true; result.textContent = '正在保存…';
@@ -150,7 +172,8 @@ export function mountCatalog(root, kind, {identitySignal} = {}) {
         } catch (error) { if (!disposed && ticket === sequence && form.isConnected) result.textContent = errorText(error) + (error.status === 409 ? '；请点击重新加载，核对后再编辑。' : ''); }
         finally { submit.disabled = false; }
       });
-      form.scrollIntoView({block: 'nearest'});
+      heading.scrollIntoView({block: 'nearest'});
+      id.focus({preventScroll: true});
     }
   }
   load();

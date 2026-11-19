@@ -1,6 +1,5 @@
 import {navigatePage, pagePath} from '../routes.js';
 import {accountRequest} from '../api/accounts.js';
-import {getTheme, setTheme} from '../shell/theme.js';
 import {mountAccount} from './account.js';
 import {mountMCPIntegrations} from './account/integrations.js';
 import {mountIntegrationIdentities} from './account/identities.js';
@@ -8,6 +7,7 @@ import {mountWorkflowSummaries} from './account/workflow-summaries.js';
 import {mountPlugins} from './plugins.js';
 import {mountCatalog} from './settings/catalogs.js';
 import {mountRuntime} from './settings/runtime.js';
+import {mountAppearance} from './settings/appearance.js';
 import {el, button, field, panel, errorText} from './settings/forms.js';
 import {uiIcon} from '../routes.js';
 
@@ -156,27 +156,27 @@ export function mountSettings(root, {section = 'models', account = null, identit
   };
   dialog.showModal();
   if (!animateEntrance) focusCategory();
+  let extensionRoot = body;
+  if (['account', 'plugins', 'integrations'].includes(selected)) {
+    const [, title, , icon] = SECTIONS.find(([id]) => id === selected);
+    const descriptions = {account: '管理个人资料、登录设备和账号访问。', plugins: '连接常用工具，管理插件与节点接入。', integrations: '管理外部连接、集成身份和工作流摘要。'};
+    const section = panel(body, title, descriptions[selected], icon);
+    extensionRoot = el('div', null, 'settings-section-body'); section.append(extensionRoot);
+  }
   if (['models', 'nodes', 'workspaces', 'defaults'].includes(selected)) views.push(mountCatalog(body, selected, {identitySignal}));
   else if (['runtime', 'hosts'].includes(selected)) views.push(mountRuntime(body, selected));
   else if (selected === 'account') {
-    if (account) views.push(mountAccount(body));
-    else panel(body, '账号与访问', '当前使用操作员认证模式。账号资料与邀请管理需要启用账号登录。');
-  } else if (selected === 'plugins') views.push(mountPlugins(body));
+    if (account) views.push(mountAccount(extensionRoot));
+    else extensionRoot.append(el('p', '当前使用操作员认证模式。账号资料与邀请管理需要启用账号登录。', 'settings-notice'));
+  } else if (selected === 'plugins') views.push(mountPlugins(extensionRoot));
   else if (selected === 'integrations') loadIntegrations();
-  else if (selected === 'appearance') {
-    const section = panel(body, '外观主题', '外观保存在当前浏览器，与右上角主题菜单同步。');
-    const choice = field(section, 'theme', '配色方案', getTheme(), {options: [['system', '自动 · 跟随系统'], ['light', '浅色'], ['dark', '深色']]});
-    choice.addEventListener('change', () => setTheme(choice.value));
-    const syncTheme = () => { choice.value = getTheme(); };
-    window.addEventListener('fleet-theme-changed', syncTheme);
-    views.push(() => window.removeEventListener('fleet-theme-changed', syncTheme));
-  }
+  else if (selected === 'appearance') views.push(mountAppearance(body));
   async function loadIntegrations() {
     if (disposed || integrationState === 'loading' || integrationState === 'loaded') return;
     integrationState = 'loading';
     const ticket = ++epoch;
     if (!integrationStatus) {
-      integrationStatus = el('p'); integrationStatus.setAttribute('role', 'status'); body.append(integrationStatus);
+      integrationStatus = el('p'); integrationStatus.setAttribute('role', 'status'); extensionRoot.append(integrationStatus);
     }
     const status = integrationStatus;
     status.textContent = '正在读取可用集成…';
@@ -184,11 +184,11 @@ export function mountSettings(root, {section = 'models', account = null, identit
       const data = await accountRequest('me');
       if (disposed || ticket !== epoch) return;
       const features = data.features || {}; let count = 0;
-      if (features.mcp_catalog_management) { views.push(mountMCPIntegrations(body, {suspended, registrationEnabled: features.mcp_catalog_registration === true, ownerId: data.user.id})); count++; }
-      if (features.fleet_identity_management) { views.push(mountIntegrationIdentities(body, {suspended})); count++; }
-      if (features.workflow_summary_management) { views.push(mountWorkflowSummaries(body, {suspended, ownerId: data.user.id})); count++; }
+      if (features.mcp_catalog_management) { views.push(mountMCPIntegrations(extensionRoot, {suspended, registrationEnabled: features.mcp_catalog_registration === true, ownerId: data.user.id})); count++; }
+      if (features.fleet_identity_management) { views.push(mountIntegrationIdentities(extensionRoot, {suspended})); count++; }
+      if (features.workflow_summary_management) { views.push(mountWorkflowSummaries(extensionRoot, {suspended, ownerId: data.user.id})); count++; }
       status.textContent = count ? '' : '尚未启用集成管理。可在系统与运行参数中配置相关功能开关，重启后生效。';
-      const link = el('a', '配置集成运行开关', 'button-secondary'); link.href = pagePath('settings', 'runtime'); body.append(link);
+      const link = el('a', '配置集成运行开关', 'button-secondary'); link.href = pagePath('settings', 'runtime'); extensionRoot.append(link);
       integrationState = 'loaded';
     } catch (error) {
       if (disposed || ticket !== epoch) return;
