@@ -61,7 +61,9 @@ const sessionCheck = process.argv[3] || 'current';
       } else await page.evaluate(() => window.advanceSessionCheck());
       await staleReady;
     }
-    assert.equal((await context.request.post(origin + '/api/accounts/logout', {data: {}, headers: {Origin: origin}})).status(), 200);
+    // Replace the cookie while the original identity remains valid. Explicit
+    // logout creates a genuinely unauthenticated interval in which a polling
+    // view is correct to redirect; that is not a stale-response scenario.
     assert.equal((await context.request.post(origin + '/api/accounts/login', {data: {email: 'second@example.test', password: 'Workflow-password-123!'}, headers: {Origin: origin}})).status(), 200);
     await Promise.all([
       page.waitForEvent('domcontentloaded'),
@@ -80,7 +82,6 @@ const sessionCheck = process.argv[3] || 'current';
     await page.getByRole('tab', {name: '流程', exact: true}).click();
     await panel.locator('[data-workflow-id="workflow-user-b"][aria-pressed="true"]').waitFor();
     assert.equal(await panel.getByRole('button', {name: '重试上次操作', exact: true}).count(), 0);
-    assert.equal((await context.request.post(origin + '/api/accounts/logout', {data: {}, headers: {Origin: origin}})).status(), 200);
     assert.equal((await context.request.post(origin + '/api/accounts/login', {data: {email: 'basic@example.test', password: 'Workflow-password-123!'}, headers: {Origin: origin}})).status(), 200);
     await Promise.all([page.waitForEvent('domcontentloaded'), page.evaluate(() => window.advanceSessionCheck())]);
     await page.getByText('就绪', {exact: true}).waitFor();
