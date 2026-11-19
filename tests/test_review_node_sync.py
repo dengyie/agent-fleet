@@ -66,7 +66,7 @@ def test_quota_rejection_mid_batch_resumes_without_duplicates(tmp_path, monkeypa
 def test_read_entries_reports_per_row_end_offsets(tmp_path):
     path = tmp_path / 'x.jsonl'
     a, bad, b = _line('a'), 'not json\n', _line('b')
-    path.write_text(a + bad + b + '{"partial":')
+    path.write_bytes((a + bad + b + '{"partial":').encode('utf-8'))
     entries = tailer(str(path)).read_entries()
     assert [end for _obj, end in entries] == [len(a), len(a) + len(bad) + len(b)]
     reader = tailer(str(path))

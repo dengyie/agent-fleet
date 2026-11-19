@@ -127,6 +127,9 @@ jobs:
           tests/test_artifact_capacity.py::test_download_processes_compete_for_one_last_slot
           tests/test_artifact_capacity.py::test_download_process_death_releases_native_pool
           tests/fixtures/workflow/windows_artifact_probe.py
+          tests/test_review_node_sync.py tests/test_zcode_session_binding.py
+          tests/test_zcode_desktop_bridge.py tests/test_control_client_cli.py
+          --basetemp=C:/fleet-tests
           --junitxml=windows-results.xml
       - name: Preserve Windows test evidence
         if: always()
