@@ -34,6 +34,7 @@ function protectConsole() {
   const routeViews = new Map();
   const MAX_CACHED_ROUTES = 5;
   let settingsBackgroundView = null, settingsReturnUrl = '/assistant';
+  let settingsReturnFocus = null;
   let activeRouteView = null, disposeNavigation, mounted = false, checking = false, redirecting = false, account = null;
   let lastSessionCheckAt = 0;
   let sessionRecheckPending = false;
@@ -78,6 +79,7 @@ function protectConsole() {
     routeViews.clear();
     activeRouteView = null;
     settingsBackgroundView = null;
+    settingsReturnFocus = null;
     mounted = false;
     for (const id of ['route-view', 'sidebar-conversations']) {
       document.getElementById(id).replaceChildren();
@@ -116,8 +118,12 @@ function protectConsole() {
     const target = view.host;
     const mountEntity = {machine: mountMachine, task: mountTask, session: mountSession};
     if (route.page === 'settings') view.teardown = mountSettings(target, {section: route.id, account, identitySignal: identityLifetime.signal, animateEntrance, onClose: () => {
+      const opener = settingsReturnFocus;
       navigateTo(settingsReturnUrl);
-      document.querySelector('[data-nav="settings"]')?.focus();
+      settingsReturnFocus = null;
+      const available = node => node?.isConnected && node !== document.body && !node.matches(':disabled') && !node.closest('[inert], [hidden]') && node.getClientRects().length;
+      const fallback = document.querySelector('[data-nav="settings"]');
+      (available(opener) ? opener : available(fallback) ? fallback : document.getElementById('navigation-toggle'))?.focus({preventScroll: true});
     }});
     else if (route.page === 'fleet') view.teardown = mountFleet(target, store, client);
     else if (route.page === 'assistant') view.teardown = mountAssistant(target, {
@@ -147,6 +153,8 @@ function protectConsole() {
       return;
     }
     if (nextRoute.page === 'settings' && route.page !== 'settings') {
+      settingsReturnFocus = document.activeElement;
+      while (settingsReturnFocus?.shadowRoot?.activeElement) settingsReturnFocus = settingsReturnFocus.shadowRoot.activeElement;
       settingsBackgroundView = activeRouteView;
       settingsReturnUrl = route.page === 'assistant'
         ? (route.id ? pagePath('conversation', route.id) : pagePath('assistant'))

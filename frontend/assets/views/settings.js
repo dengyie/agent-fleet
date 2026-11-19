@@ -31,6 +31,7 @@ const GROUPS = [
 ];
 export function mountSettings(root, {section = 'models', account = null, identitySignal, animateEntrance = true, onClose = () => navigatePage(pagePath('assistant'))} = {}) {
   let disposed = false, suspended = false, closing = false, closeTimer = null, views = [], epoch = 0;
+  let backdropPointer = null;
   let integrationState = 'idle', integrationStatus = null;
   const admin = !account || account.role === 'admin';
   const allowed = SECTIONS.filter(([id]) => admin || ['account', 'appearance'].includes(id));
@@ -54,15 +55,43 @@ export function mountSettings(root, {section = 'models', account = null, identit
     closeTimer = window.setTimeout(onClose, duration + 24);
   };
   close.addEventListener('click', requestClose);
-  dialog.addEventListener('cancel', event => { event.preventDefault(); requestClose(); });
+  dialog.addEventListener('cancel', event => {
+    if (event.target !== dialog) return;
+    event.preventDefault(); requestClose();
+  });
+  const outsideDialog = event => {
+    const bounds = dialog.getBoundingClientRect();
+    // A nested modal can extend beyond settings; its bubbled events are not
+    // backdrop gestures for this dialog.
+    return event.target === dialog && (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom);
+  };
+  dialog.addEventListener('pointerdown', event => {
+    backdropPointer = event.isPrimary && event.button === 0 && outsideDialog(event)
+      ? {id: event.pointerId, x: event.clientX, y: event.clientY} : null;
+  });
+  dialog.addEventListener('pointermove', event => {
+    if (backdropPointer && (event.pointerId !== backdropPointer.id
+        || Math.hypot(event.clientX - backdropPointer.x, event.clientY - backdropPointer.y) > 8)) backdropPointer = null;
+  });
+  dialog.addEventListener('pointerup', event => {
+    const start = backdropPointer; backdropPointer = null;
+    // Both ends must be on the backdrop. Selecting text or scrolling across
+    // the edge must not discard the user's interaction with the dialog.
+    if (start && start.id === event.pointerId && event.button === 0 && outsideDialog(event)
+        && Math.hypot(event.clientX - start.x, event.clientY - start.y) <= 8) requestClose();
+  });
+  dialog.addEventListener('pointercancel', () => { backdropPointer = null; });
   const layout = document.createElement('div'); layout.className = 'settings-layout';
   dialog.append(close, layout); root.append(dialog);
   const nav = document.createElement('nav'); nav.className = 'settings-navigation'; nav.setAttribute('aria-label', '设置分类');
   const navHeader = el('div', null, 'settings-nav-header');
   navHeader.append(el('strong', '设置'), el('span', '配置与偏好'));
   nav.append(navHeader);
-  const search = field(nav, 'search', '搜索设置', '', {type: 'search'}); search.placeholder = '搜索设置';
-  search.closest('label').classList.add('settings-search-field');
+  const searchField = el('div', null, 'settings-search-field'); nav.append(searchField);
+  const search = field(searchField, 'search', '搜索设置', '', {type: 'search'}); search.placeholder = '搜索设置';
+  const clearSearch = button('', () => { search.value = ''; filterSections(); search.focus({preventScroll: true}); }, 'icon-button settings-search-clear');
+  clearSearch.setAttribute('aria-label', '清除设置搜索'); clearSearch.title = '清除搜索'; clearSearch.append(uiIcon('x', {size: 14})); clearSearch.hidden = true;
+  searchField.append(clearSearch);
   const navList = el('div', null, 'settings-nav-list');
   const links = [];
   for (const [groupTitle, ids] of GROUPS) {
@@ -85,18 +114,48 @@ export function mountSettings(root, {section = 'models', account = null, identit
   });
   mobileSection.classList.add('settings-mobile-section');
   mobileSection.addEventListener('change', () => navigatePage(pagePath('settings', mobileSection.value)));
-  const noResults = el('p', '没有匹配的设置', 'settings-description'); noResults.hidden = true; nav.append(noResults);
-  search.addEventListener('input', () => {
+  const noResults = el('p', '', 'settings-search-status'); noResults.setAttribute('role', 'status'); noResults.hidden = true; nav.append(noResults);
+  function filterSections() {
     const query = search.value.trim().toLocaleLowerCase();
     links.forEach(({link, text}) => { link.hidden = !text.toLocaleLowerCase().includes(query); });
     for (const group of nav.querySelectorAll('.settings-nav-group')) {
       group.hidden = !group.querySelector('a:not([hidden])');
     }
-    noResults.hidden = links.some(({link}) => !link.hidden);
+    const count = links.filter(({link}) => !link.hidden).length;
+    noResults.hidden = !query;
+    noResults.textContent = count ? '找到 ' + count + ' 个设置分类' : '没有匹配的设置';
+    clearSearch.hidden = !search.value;
+  }
+  search.addEventListener('input', filterSections);
+  search.addEventListener('keydown', event => {
+    if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.key === 'Escape' && search.value) {
+      event.preventDefault(); event.stopPropagation(); search.value = ''; filterSections();
+    } else if (event.key === 'Enter') {
+      event.preventDefault(); links.find(({link}) => !link.hidden)?.link.click();
+    } else if (event.key === 'ArrowDown') {
+      event.preventDefault(); links.find(({link}) => !link.hidden)?.link.focus();
+    }
+  });
+  navList.addEventListener('keydown', event => {
+    if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const visible = links.filter(({link}) => !link.hidden).map(({link}) => link);
+    const current = visible.indexOf(document.activeElement);
+    if (current < 0) return;
+    event.preventDefault();
+    const index = event.key === 'Home' ? 0 : event.key === 'End' ? visible.length - 1
+      : (current + (event.key === 'ArrowDown' ? 1 : -1) + visible.length) % visible.length;
+    visible[index].focus();
   });
   const body = el('div', null, 'settings-content');
   layout.append(nav, body);
+  const focusCategory = () => {
+    const selectedLink = links.find(({link}) => link.dataset.section === selected)?.link;
+    const control = mobileSection.getClientRects().length ? mobileSection : selectedLink?.hidden ? search : selectedLink;
+    control?.focus({preventScroll: true});
+  };
   dialog.showModal();
+  if (!animateEntrance) focusCategory();
   if (['models', 'nodes', 'workspaces', 'defaults'].includes(selected)) views.push(mountCatalog(body, selected, {identitySignal}));
   else if (['runtime', 'hosts'].includes(selected)) views.push(mountRuntime(body, selected));
   else if (selected === 'account') {
@@ -137,9 +196,10 @@ export function mountSettings(root, {section = 'models', account = null, identit
       status.replaceChildren(el('span', errorText(error)), button('重试加载集成', loadIntegrations));
     }
   }
-  const dispose = () => { disposed = true; window.clearTimeout(closeTimer); epoch++; views.forEach(view => view?.()); views = []; dialog.close(); dialog.remove(); root.classList.remove('settings-page'); };
+  const dispose = () => { disposed = true; backdropPointer = null; window.clearTimeout(closeTimer); epoch++; views.forEach(view => view?.()); views = []; dialog.close(); dialog.remove(); root.classList.remove('settings-page'); };
   dispose.suspend = () => {
     suspended = true;
+    backdropPointer = null;
     window.clearTimeout(closeTimer);
     closeTimer = null;
     closing = false;
@@ -152,6 +212,7 @@ export function mountSettings(root, {section = 'models', account = null, identit
     suspended = false;
     dialog.classList.toggle('is-section-navigation', !animateEntrance);
     if (!dialog.open) dialog.showModal();
+    if (!animateEntrance) focusCategory();
     views.forEach(view => view?.resume?.());
     if (integrationState === 'failed') loadIntegrations();
   };

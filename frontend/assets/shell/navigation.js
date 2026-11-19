@@ -68,6 +68,13 @@ export function mountNavigation(route, store) {
   const searchStatus = document.getElementById('conversation-search-status');
   const historyHeading = document.getElementById('conversation-heading');
   const archiveToggle = document.getElementById('archived-toggle');
+  const historyList = document.getElementById('sidebar-conversations');
+  function closeHistoryMenus(except = null) {
+    historyList.querySelectorAll('.conversation-actions[open]').forEach(menu => { if (menu !== except) menu.open = false; });
+  }
+  const onHistoryOutside = event => closeHistoryMenus(event.target.closest('.conversation-actions'));
+  document.addEventListener('pointerdown', onHistoryOutside);
+  document.addEventListener('focusin', onHistoryOutside);
   const titleDialog = document.getElementById('conversation-title-dialog');
   const titleInput = document.getElementById('conversation-title-input');
   const titleError = document.getElementById('conversation-title-error');
@@ -83,6 +90,7 @@ export function mountNavigation(route, store) {
     document.body.classList.toggle('sidebar-collapsed', collapsed && !mobile.matches);
     const open = mobile.matches ? sidebar.classList.contains('open') : !collapsed;
     sidebar.inert = !open;
+    if (!open) closeHistoryMenus();
     button.setAttribute('aria-expanded', String(open));
     const label = open ? '收起导航' : mobile.matches ? '打开导航' : '展开导航';
     button.setAttribute('aria-label', label);
@@ -120,6 +128,7 @@ export function mountNavigation(route, store) {
   function resetDrawer() {
     const restoreFocus = sidebar.contains(document.activeElement);
     document.getElementById('account-menu').hidePopover();
+    closeHistoryMenus();
     sidebar.classList.remove('open');
     document.body.classList.remove('navigation-open');
     applyCollapse();
@@ -142,6 +151,21 @@ export function mountNavigation(route, store) {
     if (document.querySelector('dialog:modal')) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') event.preventDefault();
       return;
+    }
+    const historyMenu = historyList.querySelector('.conversation-actions[open]');
+    if (historyMenu && event.key === 'Escape') {
+      event.preventDefault(); closeHistoryMenus(); historyMenu.querySelector('summary').focus(); return;
+    }
+    if (historyMenu && historyMenu.contains(event.target)) {
+      if (event.key === 'Tab') closeHistoryMenus();
+      else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) && !event.isComposing && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        event.preventDefault();
+        const items = [...historyMenu.querySelectorAll('button:not(:disabled)')];
+        const current = items.indexOf(document.activeElement);
+        const index = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+          : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+        items[index]?.focus(); return;
+      }
     }
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
       event.preventDefault();
@@ -220,6 +244,12 @@ export function mountNavigation(route, store) {
     trigger.setAttribute('aria-label', '对话操作');
     trigger.title = '对话操作';
     trigger.append(uiIcon('sliders', {size: 16}));
+    trigger.addEventListener('keydown', event => {
+      if (!['ArrowDown', 'ArrowUp'].includes(event.key) || event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return;
+      event.preventDefault(); event.stopPropagation(); closeHistoryMenus(menu); menu.open = true;
+      const items = [...menu.querySelectorAll('button:not(:disabled)')];
+      (event.key === 'ArrowUp' ? items.at(-1) : items[0])?.focus();
+    });
     const actionList = document.createElement('div');
     actionList.className = 'conversation-action-menu';
     menu.append(trigger, actionList);
@@ -332,6 +362,8 @@ export function mountNavigation(route, store) {
     button.removeEventListener('click', onMenu);
     backdrop.removeEventListener('click', onBackdrop);
     document.removeEventListener('keydown', onKeydown);
+    document.removeEventListener('pointerdown', onHistoryOutside);
+    document.removeEventListener('focusin', onHistoryOutside);
   };
   dispose.updateRoute = nextRoute => {
     currentRoute = nextRoute;
