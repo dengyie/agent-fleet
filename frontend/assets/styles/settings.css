@@ -1,9 +1,29 @@
-/* The native dialog owns focus isolation, Escape and the backdrop. */
-.settings-dialog { width: min(1080px, calc(100vw - 64px)); height: min(790px, calc(100dvh - 80px)); max-width: none; max-height: none; padding: 0; border: 1px solid var(--border); border-radius: 20px; background: var(--panel); color: var(--text); box-shadow: 0 28px 100px #0003; overflow: hidden; }
-.settings-dialog::backdrop { background: #11182065; backdrop-filter: blur(5px); }
+/* Native dialog keeps focus inside settings; the glass backdrop keeps the chat visible beneath it. */
+.settings-dialog {
+  --settings-close-duration: 180ms;
+  width: min(1080px, calc(100vw - 64px)); height: min(790px, calc(100dvh - 80px)); max-width: none; max-height: none;
+  padding: 0; border: 1px solid color-mix(in srgb, var(--border) 76%, transparent); border-radius: 22px;
+  background: color-mix(in srgb, var(--panel) 74%, transparent); color: var(--text);
+  box-shadow: 0 32px 100px #0003, 0 1px 0 #ffffff70 inset; overflow: hidden;
+  -webkit-backdrop-filter: blur(26px) saturate(142%); backdrop-filter: blur(26px) saturate(142%);
+}
+.settings-dialog[open]:not(.is-closing) { animation: settings-dialog-in 260ms cubic-bezier(.2,.8,.2,1) both; }
+.settings-dialog.is-closing { animation: settings-dialog-out var(--settings-close-duration) cubic-bezier(.4,0,1,1) both; }
+.settings-dialog::backdrop {
+  background: rgb(12 16 20 / 25%); -webkit-backdrop-filter: blur(11px) saturate(118%); backdrop-filter: blur(11px) saturate(118%);
+  animation: settings-backdrop-in 220ms ease-out both;
+}
+.settings-dialog.is-closing::backdrop { animation: settings-backdrop-out var(--settings-close-duration) ease-in both; }
+.settings-dialog[open].is-section-navigation:not(.is-closing), .settings-dialog.is-section-navigation:not(.is-closing)::backdrop { animation: none; }
+html[data-resolved-theme="dark"] .settings-dialog::backdrop { background: rgb(0 0 0 / 44%); }
+.settings-dialog.is-closing { pointer-events: none; }
+@keyframes settings-dialog-in { from { opacity: 0; transform: translateY(12px) scale(.982); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes settings-dialog-out { from { opacity: var(--settings-exit-opacity, 1); transform: var(--settings-exit-transform, none); } to { opacity: 0; transform: translateY(8px) scale(.986); } }
+@keyframes settings-backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes settings-backdrop-out { from { opacity: var(--settings-backdrop-exit-opacity, 1); } to { opacity: 0; } }
 .settings-layout { display: grid; grid-template-columns: 230px minmax(0, 1fr); height: 100%; min-height: 0; }
 .settings-close { position: absolute; z-index: 5; top: 14px; right: 14px; border: 0; background: var(--panel); border-radius: 50%; }
-.settings-dialog .settings-navigation { position: static; overflow-y: auto; background: var(--sidebar-bg); padding: 22px 14px; border-right: 1px solid var(--border); }
+.settings-dialog .settings-navigation { position: static; overflow-y: auto; background: color-mix(in srgb, var(--sidebar-bg) 76%, transparent); padding: 22px 14px; border-right: 1px solid var(--border); }
 .settings-dialog .settings-content { overflow-y: auto; padding: 30px 36px 40px; scrollbar-gutter: stable; }
 .settings-dialog .settings-panel:first-child { padding-top: 8px; }
 .settings-dialog .settings-panel h2 { padding-right: 20px; }
@@ -70,7 +90,9 @@ body:has(.settings-dialog[open]) { overflow: hidden; }
   .settings-dialog .settings-content { padding: 28px 24px; }
 }
 @media(max-width: 767px) {
-  .settings-dialog { width: calc(100vw - 20px); height: calc(100dvh - 32px); border-radius: 16px; }
+  .settings-dialog { width: calc(100vw - 20px); height: calc(100dvh - 32px); border-radius: 20px; }
+  @keyframes settings-dialog-in { from { opacity: 0; transform: translateY(28px) scale(.992); } to { opacity: 1; transform: translateY(0) scale(1); } }
+  @keyframes settings-dialog-out { from { opacity: var(--settings-exit-opacity, 1); transform: var(--settings-exit-transform, none); } to { opacity: 0; transform: translateY(20px) scale(.994); } }
   .settings-layout { display: flex; flex-direction: column; }
   .settings-dialog .settings-navigation { flex: none; overflow: visible; padding: 18px 52px 8px 18px; border-right: 0; }
   .settings-dialog .settings-content { flex: 1; min-height: 0; padding: 18px; }
@@ -86,4 +108,8 @@ body:has(.settings-dialog[open]) { overflow: hidden; }
   .settings-advanced[open] { grid-template-columns: minmax(0,1fr); }
   .settings-runtime-fields { grid-template-columns: minmax(0,1fr); gap: 6px; }
   .settings-panel { padding: 14px 0 18px; }
+}
+@media(prefers-reduced-motion: reduce) {
+  .settings-dialog { --settings-close-duration: 1ms; }
+  .settings-dialog[open]:not(.is-closing), .settings-dialog.is-closing, .settings-dialog::backdrop, .settings-dialog.is-closing::backdrop { animation-duration: .01ms; }
 }
