@@ -35,3 +35,20 @@
 `python3 -m ruff check --select E9,F63,F7,F82,F401 hub tools connectors fleet_core`
 
 Baseline: 94 passed, 2 skipped, 2 subtests passed for runner conversation, supervisor process, and control-client CLI tests.
+
+## Live acceptance follow-up
+
+The first production release passed its Linux/Windows gates. The managed Mac
+client then completed real Claude Code and Codex tasks plus two successive
+follow-ups each, with replies in the original Fleet sessions. ZCode's official
+desktop operation completed and its original conversation contained exactly one
+acceptance message and its reply.
+
+The ZCode reply exposed a separate capture delay: the desktop checkpoint stayed
+on the first history page while a whole-machine archive scan continued. Two
+regressions reproduced both causes: one slow file did not yield the scan, and
+one desktop refresh stopped before the latest message page. Archive scans now
+retain traversal position across time slices; each desktop refresh follows its
+pagination to the current page without duplicating previously captured messages.
+Recently updated desktop sessions are visited first. Publish and recheck the
+original production command's reply after this follow-up; do not resend it.
