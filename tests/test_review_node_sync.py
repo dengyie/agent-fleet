@@ -71,3 +71,57 @@ def test_read_entries_reports_per_row_end_offsets(tmp_path):
     assert [end for _obj, end in entries] == [len(a), len(a) + len(bad) + len(b)]
     reader = tailer(str(path))
     assert len(reader.read()) == 2 and reader.offset == len(a + bad + b)
+
+
+def test_archive_scan_yields_and_continues_after_slow_file(tmp_path, monkeypatch):
+    from tools.session import sync
+    root = tmp_path / 'native'
+    root.mkdir()
+    for name in ('a', 'b', 'c'):
+        (root / (name + '.jsonl')).write_text(_line(name))
+    now, visited = [0.0], []
+    monkeypatch.setattr(sync.time, 'monotonic', lambda: now[0])
+    def slow_file(cfg, family, path, send, **kwargs):
+        visited.append(path.name)
+        now[0] += 20
+        raise RuntimeError('upload_pending')
+    monkeypatch.setattr(sync, 'sync_file', slow_file)
+    worker = sync.NativeArchiveSync(_cfg(tmp_path), interval=15,
+                                   sources=lambda: [('codex', root)])
+    worker.scan_once()
+    assert len(visited) == 1
+    worker.scan_once()
+    assert len(visited) == 2 and len(set(visited)) == 2
+    worker.scan_once()
+    assert len(visited) == 3 and len(set(visited)) == 3
+
+
+def test_desktop_sync_reaches_latest_page_without_waiting_for_archive_scan(tmp_path):
+    from tools.session.sync import sync_desktop, native_identity
+    from tools.session.runner_capture import session_prefix
+    from tools.supervisor.desktop_control import DesktopControl
+    cfg, client = _cfg(tmp_path), _client(tmp_path)
+    cfg.supervisor_enabled = True
+    cfg.supervisor_manifest_dir = tmp_path / 'manifests'
+    class Bridge:
+        def request(self, path):
+            if 'cursor=next' in path:
+                return {'messages': [{'id': 'a1', 'role': 'assistant', 'text': 'latest reply'}],
+                        'nextCursor': None}
+            return {'messages': [{'id': 'u1', 'role': 'user', 'text': 'old message'}],
+                    'nextCursor': 'next'}
+    def send(cfg, path, events):
+        r = client.post(path, json=events, headers={'X-Runner-Credential': 'pxed:secret'})
+        return r.status_code, r.get_json()
+    desktop = DesktopControl(cfg, client=Bridge())
+    path = tmp_path / 'model-io-sess_desktop.jsonl'
+    row = {'session': {'sessionId': 'sess_desktop'}, 'status': 'idle'}
+    sync_desktop(cfg, desktop, row, path, send)
+    sid = session_prefix(cfg.machine) + native_identity('zcode', path)
+    def messages():
+        events = client.get('/api/sessions/' + sid + '/events').get_json()['events']
+        return [e['payload']['text'] for e in events
+                if e['kind'] in {'user_message', 'assistant_message'}]
+    assert messages() == ['old message', 'latest reply']
+    sync_desktop(cfg, desktop, row, path, send)
+    assert messages() == ['old message', 'latest reply']
