@@ -29,18 +29,31 @@ const GROUPS = [
   ['系统', ['runtime']],
   ['个人设置', ['account', 'appearance']],
 ];
-export function mountSettings(root, {section = 'models', account = null, onClose = () => navigatePage(pagePath('assistant'))} = {}) {
-  let disposed = false, suspended = false, views = [], epoch = 0;
+export function mountSettings(root, {section = 'models', account = null, animateEntrance = true, onClose = () => navigatePage(pagePath('assistant'))} = {}) {
+  let disposed = false, suspended = false, closing = false, closeTimer = null, views = [], epoch = 0;
   const admin = !account || account.role === 'admin';
   const allowed = SECTIONS.filter(([id]) => admin || ['account', 'appearance'].includes(id));
   const selected = allowed.some(([id]) => id === section) ? section : allowed[0][0];
   root.classList.add('settings-page');
   const dialog = document.createElement('dialog'); dialog.className = 'settings-dialog';
+  dialog.classList.toggle('is-section-navigation', !animateEntrance);
   dialog.setAttribute('aria-label', '设置');
   const close = document.createElement('button'); close.type = 'button'; close.className = 'icon-button settings-close';
   close.setAttribute('aria-label', '关闭设置'); close.title = '关闭设置 · Esc'; close.append(uiIcon('x', {size: 18}));
-  close.addEventListener('click', onClose);
-  dialog.addEventListener('cancel', event => { event.preventDefault(); onClose(); });
+  const requestClose = () => {
+    if (disposed || closing) return;
+    closing = true;
+    // Preserve an unfinished entrance so reversing the motion never snaps to its endpoint.
+    const current = getComputedStyle(dialog);
+    dialog.style.setProperty('--settings-exit-opacity', current.opacity);
+    dialog.style.setProperty('--settings-exit-transform', current.transform);
+    dialog.style.setProperty('--settings-backdrop-exit-opacity', getComputedStyle(dialog, '::backdrop').opacity);
+    dialog.classList.add('is-closing');
+    const duration = Number.parseFloat(getComputedStyle(dialog).getPropertyValue('--settings-close-duration')) || 180;
+    closeTimer = window.setTimeout(onClose, duration + 24);
+  };
+  close.addEventListener('click', requestClose);
+  dialog.addEventListener('cancel', event => { event.preventDefault(); requestClose(); });
   const layout = document.createElement('div'); layout.className = 'settings-layout';
   dialog.append(close, layout); root.append(dialog);
   const nav = document.createElement('nav'); nav.className = 'settings-navigation'; nav.setAttribute('aria-label', '设置分类');
@@ -112,8 +125,22 @@ export function mountSettings(root, {section = 'models', account = null, onClose
       const link = el('a', '配置集成运行开关', 'button-secondary'); link.href = pagePath('settings', 'runtime'); body.append(link);
     } catch (error) { if (!disposed) status.textContent = error.detail || '集成配置加载失败，请重新进入此分类重试'; }
   }
-  const dispose = () => { disposed = true; epoch++; views.forEach(view => view?.()); views = []; dialog.close(); dialog.remove(); root.classList.remove('settings-page'); };
-  dispose.suspend = () => { suspended = true; dialog.close(); views.forEach(view => view?.suspend?.()); };
-  dispose.resume = () => { suspended = false; if (!dialog.open) dialog.showModal(); views.forEach(view => view?.resume?.()); };
+  const dispose = () => { disposed = true; window.clearTimeout(closeTimer); epoch++; views.forEach(view => view?.()); views = []; dialog.close(); dialog.remove(); root.classList.remove('settings-page'); };
+  dispose.suspend = () => {
+    suspended = true;
+    window.clearTimeout(closeTimer);
+    closeTimer = null;
+    closing = false;
+    dialog.classList.remove('is-closing');
+    for (const property of ['--settings-exit-opacity', '--settings-exit-transform', '--settings-backdrop-exit-opacity']) dialog.style.removeProperty(property);
+    dialog.close();
+    views.forEach(view => view?.suspend?.());
+  };
+  dispose.resume = ({animateEntrance = true} = {}) => {
+    suspended = false;
+    dialog.classList.toggle('is-section-navigation', !animateEntrance);
+    if (!dialog.open) dialog.showModal();
+    views.forEach(view => view?.resume?.());
+  };
   return dispose;
 }

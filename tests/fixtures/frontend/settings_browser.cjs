@@ -16,6 +16,17 @@ const [origin, viewport] = process.argv.slice(2);
     if (viewport === 'mobile') await page.getByRole('button',{name:'打开导航',exact:true}).click();
     await page.locator('[data-nav="settings"]').click();
     assert.equal(await page.locator('.settings-dialog').evaluate(node => node.open), true);
+    const openingMotion = await page.locator('.settings-dialog').evaluate(node => ({
+      names: node.getAnimations().map(animation => animation.animationName),
+      backdrop: getComputedStyle(node, '::backdrop').animationName,
+      blur: getComputedStyle(node, '::backdrop').backdropFilter,
+    }));
+    assert.ok(openingMotion.names.includes('settings-dialog-in'), `settings should animate in: ${openingMotion.names}`);
+    assert.equal(openingMotion.backdrop, 'settings-backdrop-in');
+    assert.match(openingMotion.blur, /blur\(/);
+    await page.emulateMedia({reducedMotion:'reduce'});
+    assert.equal(await page.locator('.settings-dialog').evaluate(node => getComputedStyle(node).getPropertyValue('--settings-close-duration').trim()), '1ms');
+    await page.emulateMedia({reducedMotion:'no-preference'});
     assert.equal(await page.locator('.assistant-view').isVisible(), true, 'settings floats over the still-mounted page');
     assert.equal(await page.locator('.settings-layout').evaluate(node => getComputedStyle(node).display), viewport === 'mobile' ? 'flex' : 'grid');
     assert.equal(await page.locator('.console-sidebar').evaluate(node => getComputedStyle(node).display), 'flex');
@@ -100,12 +111,22 @@ const [origin, viewport] = process.argv.slice(2);
     await page.getByRole('button',{name:'保存默认配置',exact:true}).click();
     await page.getByText('默认配置已保存',{exact:true}).waitFor();
     await page.getByRole('button',{name:'关闭设置',exact:true}).click();
+    assert.equal(await page.locator('.settings-dialog').evaluate(node => node.classList.contains('is-closing')), true);
+    assert.ok(await page.locator('.settings-dialog').evaluate(node => node.getAnimations().some(animation => animation.animationName === 'settings-dialog-out')));
+    await page.locator('.settings-dialog').waitFor({state:'detached'});
     assert.equal(await page.locator('.settings-back').isVisible(),false);
     assert.equal(await page.locator('.settings-dialog').count(),0);
     assert.equal(await page.locator('.console-sidebar').evaluate(node => getComputedStyle(node).display),'flex');
     await page.getByLabel('模型', {exact:true}).locator('option[value="browser-model"]').waitFor({state:'attached'});
     assert.equal(await page.getByLabel('模型', {exact:true}).inputValue(),'browser-model');
     assert.equal(await page.getByLabel('工作区', {exact:true}).inputValue(),'browser-workspace');
+    if (viewport === 'mobile') await page.getByRole('button',{name:'打开导航',exact:true}).click();
+    await page.locator('[data-nav="settings"]').click();
+    await page.locator('.settings-dialog[open]').waitFor();
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('.settings-dialog').evaluate(node => node.classList.contains('is-closing')), true);
+    await page.locator('.settings-dialog').waitFor({state:'detached'});
+    assert.equal(await page.locator('.assistant-view').isVisible(), true, 'Escape close returns to the mounted assistant');
     await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate',{detail:{path:'/settings/runtime'}})));
     await page.locator('.settings-runtime-group summary').filter({hasText:'平台功能'}).click();
     await page.getByLabel('记忆管理',{exact:true}).check();

@@ -166,3 +166,5 @@ main 的 `deploy` 依赖 `test`、`launch-policy-windows` 与 `package`，通过
 ### 集中设置流程 SETTINGS-01
 
 `/settings` 的桌面／手机浏览器流程验证模型源URL与Key保存、刷新读回、旧版本冲突、VM节点与目录工作区登记、默认值选择、返回缓存助手后的目录刷新和需要重启的系统参数。后端补验实际Worker/readiness共用Key解析、Key轮换后旧快照恢复、owner隔离、并发写入和平台未启用时的配置入口。过程使用临时数据库、文件及浏览器，无外部模型调用、云VM生命周期操作或生产配置修改。具体selector见 [journeys.json](journeys.json) 的 SETTINGS-01。
+
+`test_settings_overlay_motion` 在真实 Chrome 中暂停入场动画，验证桌面／手机快速关闭时透明度与位置连续；新分类和缓存分类切换不重播浮层／遮罩入场。另验缓存浮层重新打开、深色遮罩、减少动态效果和退出途中导航不会被旧定时器带回助手页。原有保存流程验证关闭按钮和 Esc 退场后返回缓存助手。

@@ -50,13 +50,13 @@ function protectConsole() {
     if (view.teardown && typeof view.teardown.suspend === 'function') view.teardown.suspend();
     view.host.remove();
   }
-  function resumeRouteView(view) {
+  function resumeRouteView(view, {animateEntrance = true} = {}) {
     if (!view || !view.suspended) return;
     view.suspended = false;
     view.host.hidden = false;
     view.host.inert = false;
     document.getElementById('route-view').appendChild(view.host);
-    if (view.teardown && typeof view.teardown.resume === 'function') view.teardown.resume();
+    if (view.teardown && typeof view.teardown.resume === 'function') view.teardown.resume({animateEntrance});
   }
   function destroyRouteView(view) {
     if (!view) return;
@@ -110,10 +110,10 @@ function protectConsole() {
     window.history.replaceState(null, '', pagePath('conversation', conversationId));
     disposeNavigation?.updateRoute?.(route);
   }
-  function mountRoute(view) {
+  function mountRoute(view, {animateEntrance = true} = {}) {
     const target = view.host;
     const mountEntity = {machine: mountMachine, task: mountTask, session: mountSession};
-    if (route.page === 'settings') view.teardown = mountSettings(target, {section: route.id, account, onClose: () => {
+    if (route.page === 'settings') view.teardown = mountSettings(target, {section: route.id, account, animateEntrance, onClose: () => {
       navigateTo(settingsReturnUrl);
       document.querySelector('[data-nav="settings"]')?.focus();
     }});
@@ -135,6 +135,7 @@ function protectConsole() {
   }
   function renderRoute(nextRoute) {
     const key = routeKey(nextRoute);
+    const animateEntrance = nextRoute.page !== 'settings' || route.page !== 'settings';
     if (activeRouteView && activeRouteView.key === key) {
       route = nextRoute;
       if (typeof activeRouteView.teardown?.updateSequence === 'function') {
@@ -163,7 +164,7 @@ function protectConsole() {
     if (view) {
       routeViews.delete(key);
       routeViews.set(key, view);
-      resumeRouteView(view);
+      resumeRouteView(view, {animateEntrance});
       if (typeof view.teardown?.updateSequence === 'function') {
         view.teardown.updateSequence(nextRoute.sequence);
       }
@@ -176,7 +177,7 @@ function protectConsole() {
       if (!routeViews.size) routeHost.replaceChildren();
       routeHost.appendChild(host);
       routeViews.set(key, view);
-      mountRoute(view);
+      mountRoute(view, {animateEntrance});
     }
     activeRouteView = view;
     while (routeViews.size > MAX_CACHED_ROUTES) {
