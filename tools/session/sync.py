@@ -50,6 +50,8 @@ class NativeArchiveSync:
         self.thread = None
         self.completed = OrderedDict()
         self._archive_paths = None
+        self._desktop_visits = {}
+        self._desktop_visit = 0
 
     def start(self):
         self.thread = threading.Thread(target=self._run, name='native-session-sync', daemon=True)
@@ -75,16 +77,33 @@ class NativeArchiveSync:
         if desktop is not None:
             zroot = next((root for family, root in sources if family == 'zcode'),
                          Path(PROFILES['zcode'].native_session_root).expanduser())
-            for native_id, row in sorted(bindings.items(),
-                    key=lambda item: str(item[1].get('updatedAt') or ''), reverse=True):
+            self._desktop_visits = {key: value for key, value in self._desktop_visits.items()
+                                    if key in bindings}
+            def priority(item):
+                native_id, row = item
+                previous = self._desktop_visits.get(native_id)
+                fingerprint = (row.get('updatedAt'), row.get('status'))
+                changed = 2 if previous and previous[0] != fingerprint else int(previous is None)
+                return (changed, -previous[1] if previous else 0,
+                        str(row.get('updatedAt') or ''))
+            deadline = time.monotonic() + self.interval
+            visited = False
+            for native_id, row in sorted(bindings.items(), key=priority, reverse=True):
                 if self.stopping.is_set():
                     return
+                if visited and time.monotonic() >= deadline:
+                    break
                 path = zroot / ('model-io-' + native_id + '.jsonl')
                 sid = session_prefix(self.cfg.machine) + native_identity('zcode', path)
                 checkpoint = self.cfg.cache_dir / 'conversations' / (sid + '.desktop-cursor')
                 if not path.exists() or checkpoint.exists():
+                    visited = True
+                    self._desktop_visit += 1
+                    self._desktop_visits[native_id] = (
+                        (row.get('updatedAt'), row.get('status')), self._desktop_visit)
                     try:
-                        sync_desktop(self.cfg, desktop, row, path, self.send)
+                        sync_desktop(self.cfg, desktop, row, path, self.send,
+                                     budget_s=1, should_stop=self.stopping.is_set)
                     except Exception:
                         log.warning('Desktop session sync pending: session=%s', sid)
         # Keep traversal progress across bounded scan slices. A large or slow
@@ -152,7 +171,7 @@ def post(cfg, path, body):
         'X-Runner-Credential': cfg.machine + ':' + cfg.credential}, timeout=15)
 
 
-def sync_desktop(cfg, desktop, row, native_path, send=post):
+def sync_desktop(cfg, desktop, row, native_path, send=post, *, budget_s=1, should_stop=lambda: False):
     """Bounded official message pagination for sessions without a CLI rollout.
 
     Keep the last page cursor and its message IDs so new messages are picked up
@@ -166,6 +185,9 @@ def sync_desktop(cfg, desktop, row, native_path, send=post):
     capture = RunnerCapture(cfg, {'attempt_id':identity,'agent_type':'zcode','task_id':''},
                             send, process_group_id=group)
     checkpoint = capture.root / (sid + '.desktop-cursor')
+    deadline = time.monotonic() + budget_s
+    complete = False
+    progressed = False
     try:
         try:
             state = json.loads(checkpoint.read_text(encoding='utf-8'))
@@ -174,28 +196,39 @@ def sync_desktop(cfg, desktop, row, native_path, send=post):
             checkpoint.write_text(json.dumps(state), encoding='utf-8')
         capture.bridge.ingest_one({'kind':'session_metadata','payload':{'desktop_bridge':True}})
         cursors = {state['cursor']}
-        while row.get('status') == 'idle':
+        while row.get('status') == 'idle' and not should_stop():
             query = {'session_id':native_id}
             if state['cursor']:
                 query['cursor'] = state['cursor']
             page = desktop.client.request('/messages?' + urlencode(query))
+            yielded = False
             for message in page.get('messages', []):
                 mid, role, text = message.get('id'), message.get('role'), message.get('text')
                 if not mid or mid in state['seen']:
                     continue
+                if should_stop() or (progressed and time.monotonic() >= deadline):
+                    yielded = True
+                    break
                 if role in {'user','assistant'} and isinstance(text, str) and text:
                     capture.bridge.ingest_one({'kind':role+'_message',
                         'payload':{'text':text,'is_complete':True}})
                 state['seen'].append(mid)
                 checkpoint.write_text(json.dumps(state), encoding='utf-8')
+                progressed = True
+            if yielded:
+                break  # Keep this page and its accepted prefix across scan slices.
             cursor = page.get('nextCursor')
             if cursor and cursor not in cursors:
                 state = {'cursor':cursor, 'seen':[]}
                 checkpoint.write_text(json.dumps(state), encoding='utf-8')
                 cursors.add(cursor)
             else:
+                complete = True
+                break
+            if time.monotonic() >= deadline:
                 break
         capture.flush()
+        return complete
     finally:
         capture.bridge.close()
 

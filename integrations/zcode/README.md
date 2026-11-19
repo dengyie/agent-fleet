@@ -20,7 +20,10 @@ node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs plugins install ag
 In ZCode's command palette, run **Reload extensions / 重新加载扩展**. In the plugin's
 settings, grant **read/write sessions / 读写会话** once. Reloading extensions does
 not restart the desktop Host or its running conversations. Windows installation
-must use that installation's CLI path; it has not been validated on Windows.
+must use that installation's CLI path. Windows desktop installation and direct
+delivery were verified on 2026-11-20 using the existing user account. Run the
+control client with that user's HOME and shared runner configuration so it can
+read the desktop bridge descriptor and the same continuation manifests.
 
 The extension publishes a private, rotating loopback credential at:
 
@@ -91,6 +94,9 @@ Runner-launched Codex and Claude Code sessions use persisted native CLI resume
 when idle. Their original directory, explicit model/provider settings, native ID
 and event sequence survive a runner/control-client restart. Running CLI sessions
 are reported busy; no second CLI writer is spawned into an active conversation.
+Desktop history capture yields between bounded slices and retains its current
+page and accepted message IDs. Newly changed conversations take priority over
+unchanged history; slow initial imports do not monopolize the archive worker.
 Node-specific provider credentials can be supplied by `agents.<family>.env_file`
 in runner configuration (private JSON mapping, mode 0600). Resumable task
 worktrees and continuation checkpoints are retained with their sessions; normal
