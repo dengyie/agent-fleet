@@ -70,7 +70,7 @@ CI 的 `agent-fleet-release` artifact 只含后端归档；`agent-fleet-frontend
 
 前端打包保留目录结构并写入稳定排序的 `manifest.json`（版本、文件清单）。输出目录必须尚不存在；打包器以独占目录创建拒绝复用目标，避免将未列入 manifest 的旧文件或凭据带入 release。凭据、私钥、数据库/状态快照路径会使打包整体失败；`assets/state/store.js` 是允许的客户端模块。每次使用新的版本目录。
 
-当前 JS/CSS 文件名**不含内容哈希**，所有入口和 `/assets/*` 使用 `Cache-Control: no-cache`，允许 ETag/304 重新验证，不能使用 immutable 缓存。JSON API 使用 `no-store`；SSE 关闭代理缓冲和缓存，并设置足够长的读超时。
+当前 JS/CSS 文件名**不含内容哈希**。打包器会为 HTML 中的资源引用、JS 模块导入及 CSS 子资源追加本次 release SHA（`?v=<release>`），确保已缓存的旧 URL 不会遮蔽新 release；所有入口和 `/assets/*` 仍须使用 `Cache-Control: no-cache` 并允许 ETag/304 重新验证，不能使用 immutable 缓存。部署公网验收必须检查 `/` 与 `/manifest.json` 的版本；模块图通过 release SHA 查询参数隔离。JSON API 使用 `no-store`；SSE 关闭代理缓冲和缓存，并设置足够长的读超时。
 
 同源 Nginx 示例见 [nginx-frontend-backend.example.conf](nginx-frontend-backend.example.conf)。`/assets/` 与 `/config.js` 缺失返回 404，页面路径回退到原样 `index.html`，`/api/*` 不允许回退到 HTML。
 

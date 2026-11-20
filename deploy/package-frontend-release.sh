@@ -167,6 +167,8 @@ for rel in "${files[@]}"; do
   cp "$frontend_dir/$rel" "$output_dir/$rel"
 done
 
+python3 "$repo_root/deploy/version_frontend_release.py" "$output_dir" "$release_version"
+
 # JSON 字符串转义：路径已拒绝控制字符，此处只需转义反斜杠与双引号。
 json_string() {
   local value="$1"
