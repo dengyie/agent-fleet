@@ -8,10 +8,10 @@
 
 ## Constraints
 
-- Work inline on `codex/assistant-agent-tasks`, based on production main `0b63d28`; preserve other worktrees.
+- Original dispatch work used `codex/assistant-agent-tasks`, based on production main `0b63d28`; the PR98 capture follow-up used `codex/agent-dispatch-reliability`. Preserve other worktrees.
 - Task identities and idempotency tokens come from the authenticated Run. Never expose credentials or arbitrary command templates.
 - A queued task is not a completed task; its resulting session is the only target for follow-up. Never recreate uncertain work.
-- Use UTF-8 without BOM. Deploy the Hub through the existing GitHub CI; no node code changes are planned.
+- Use UTF-8 without BOM. Deploy the Hub through the existing GitHub CI. PR97 did not change node code; the PR98 follow-up below updates node capture and polling.
 
 ## Steps
 
@@ -20,7 +20,7 @@
 - [x] Extend `hub/domain/assistant_admin.py` and `hub/application/assistant_admin_service.py` with `tasks.targets/create/list/get/cancel`. Reuse `TaskService.create(..., actor=owner)` with the existing owner/command token. Respect `config.tasks_enabled`, and normalize existing task-domain failures.
 - [x] Update `hub/platform/admin_tools.py`, `hub/platform/runtime/assistant_prompt.py` and `hub/domain/tool_activity.py` so discovery, dispatch and progress are understandable and distinct from existing-session continuation. Link this plan from the platform document.
 - [x] Run `python3 -m pytest tests/test_assistant_agent_tasks.py tests/test_assistant_project_admin.py tests/test_assistant_vm_sessions.py tests/test_main_assistant_prompt.py tests/test_services.py -q`, relevant broker/activity/session-model tests and repository Ruff/diff checks.
-- [ ] Rebase the publication branch onto latest GitHub main, run PR CI, merge and follow the original deployment run. Verify the deployed version.
+- [x] Rebase the publication branch onto latest GitHub main, run PR CI, merge and follow the original deployment run. Verify the deployed version.
 - [ ] Through the online main assistant, create one dedicated Windows task for each core Agent, inspect its actual response, then send exactly one follow-up to its resulting original session. Preserve task/command IDs and live evidence. Do not touch user work sessions.
 - [ ] Record actual results and remaining limits in this plan and the existing canonical operations note on the vault's primary master branch.
 
@@ -42,3 +42,15 @@ Real tool-use acceptance exposed existing failures that prevent declaring the wo
 - Claude's original upstream still returned HTTP503. Once the exact session is readable, use the already implemented catalog takeover for that original session.
 
 Follow-up regression reproduced all three capture/poll failures and the 1000-session mapping failure before their fixes. After moving replay, reserving 64 MiB for live captures above the archive's 128 MiB cap, closing failed capture initialization and adding exact lookup/long polling, 432 tests and 3 subtests passed. No retained transcripts were deleted. The initial live attempts remain evidence and must not be reported as successful tool-use acceptance.
+
+## PR98 Publication and Resumed Acceptance
+
+PR98 merged as `0f403e8127f827564e7db82bfc02b34207007ac9`. PR CI44738024662 and main CI44742049928 both passed: Linux 8385 tests and 204 subtests; Windows 586 tests with 9 expected skips. The main package and automatic deployment succeeded. Fresh production verification matched the public manifest and ten relevant source/asset hashes, returned health200, and passed the platform/supervisor database checks. Physical Windows new-tool/capture tests passed all 23 cases.
+
+On 2026-11-21, both Mac and Windows were upgraded to signed client `0f403e8127f8-s22` with the previous releases and launch/task backups retained. The original Windows Codex and Claude Code captures were restored from their exact native transcript files under their original Fleet session IDs; Hub acknowledged 121 and 75 events respectively. These imports restore historical evidence and are distinct from automatic capture of a fresh task.
+
+The online main assistant resumed original Codex task `t-58c073e5e5a1`, actually read its worktree directory and `# Agent Fleet`, then received exactly one `_FOLLOW` reply in native session `01a1f8da-c4d4-7d12-a744-092261af176d`. Both signed message receipts succeeded. Independent Hub/native-log verification passed.
+
+A fresh online Codex task `t-a44e8107f8d6` also automatically acquired a session, executed the file-reading tool and completed one original-session follow-up. Independent verification confirmed task/session binding, successful receipts and native ID `01a1f9cd-0f92-7330-9987-722a43b16067`. The machine still retained 2173 capture records and 134720792 bytes during this acceptance; the old task's manual recovery was not used as proof of fresh capture. User defaults remained unchanged.
+
+For original Claude task `t-392976bd1570`, the main assistant successfully configured the existing session to `deepseek-v4-flash` and issued the first file-reading message. Native execution completed successfully in about 58 seconds and returned `# Agent Fleet`, but the main assistant ended its run before that output arrived and therefore did not send the requested `_FOLLOW`. The original task's historical state remains `failed`; recovery of the conversation does not rewrite that result. The remaining gap is addressed in [Native Session Event Waiting Implementation Plan](2026-11-21-native-session-wait.md). Its final follow-up and publication verification remain pending.
