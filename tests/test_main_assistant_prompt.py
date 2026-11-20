@@ -180,6 +180,9 @@ def test_prompt_treats_cross_vm_agent_management_as_a_real_scoped_capability():
     assert '不要仅因工具是写操作就再次索取许可' in prompt
     assert 'session.read_logs' in prompt
     assert '不能提升采集级别' in prompt
+    assert 'session_busy' in prompt
+    assert '日志证明没有原 command_id' in prompt
+    assert '先读取 session.get' in prompt
 
 
 def test_prompt_recovers_revoked_session_access_with_fresh_adoption():

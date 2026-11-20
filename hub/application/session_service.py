@@ -79,6 +79,7 @@ class SessionServiceError(RuntimeError):
         "adoption_revoked": 409,
         "invalid_status_transition": 409,
         "session_action_unavailable": 409,
+        "session_busy": 409,
         "unsupported_action": 409,
     }
 
@@ -627,6 +628,8 @@ class SessionService:
             raise SessionServiceError('control_unavailable')
         if action == 'append_user_turn' and session.get('message_delivery', {}).get('reason') == 'native_resume_unsupported':
             raise SessionServiceError('unsupported_action')
+        if action == 'append_user_turn' and session.get('message_delivery', {}).get('reason') == 'session_busy':
+            raise SessionServiceError('session_busy')
         if action not in session['allowed_actions']:
             raise SessionServiceError('session_action_unavailable')
 

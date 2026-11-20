@@ -76,6 +76,46 @@ def test_command_is_durable_idempotent_and_waits_for_original_receipt(app, tool,
     assert supervisor.poll('m1') == []
 
 
+def test_busy_native_followup_is_reported_without_enqueue_then_can_be_retried(app):
+    from hub.application.errors import ApplicationError
+
+    services = app.extensions['fleet']['services']
+    sid = 'runner_0123456789abcdef_busyacceptance'
+    start = event(1, 'session_start', {'agent_family': 'claude_code'})
+    start.update(event_id='busy_evt_1', session_id=sid, stream_id='busy_stream')
+    running = event(2, 'agent_state_changed', {
+        'state': 'running', 'source': 'structured_stream',
+        'confidence': 'high', 'reason': 'tool_started',
+    })
+    running.update(event_id='busy_evt_2', session_id=sid, stream_id='busy_stream')
+    services['sessions'].ingest_events([start, running])
+    services['sessions'].session_repo.set_capabilities(sid, ['native_resume'])
+    detail = execute(app, 'session.get', {'session_id': sid})['session']
+    assert detail['message_delivery']['reason'] == 'session_busy'
+    assert 'append_user_turn' not in detail['allowed_actions']
+
+    text = 'continue once after the native turn completes'
+    with pytest.raises(ApplicationError) as caught:
+        execute(app, 'session.send_message', {'session_id': sid, 'text': text})
+    assert caught.value.code == 'session_busy'
+    assert services['supervisor'].poll('m1') == []
+
+    completed = event(3, 'agent_state_changed', {
+        'state': 'completed', 'source': 'structured_stream',
+        'confidence': 'high', 'reason': 'process_exited',
+    })
+    completed.update(event_id='busy_evt_3', session_id=sid, stream_id='busy_stream')
+    services['sessions'].ingest_events([completed])
+    detail = execute(app, 'session.get', {'session_id': sid})['session']
+    assert detail['message_delivery']['available'] is True
+    accepted = execute(app, 'session.send_message', {'session_id': sid, 'text': text},
+                       command_id='run-after-idle:step:1')
+    assert accepted['status'] == 'pending'
+    commands = services['supervisor'].poll('m1')
+    assert len(commands) == 1
+    assert commands[0]['payload'] == {'text': text}
+
+
 @pytest.mark.parametrize('tool,args', [
     ('session.control', {'session_id': 's1', 'action': 'exec_shell'}),
     ('session.control', {'session_id': 's1', 'action': 'pause_session', 'machine_id': 'other'}),
