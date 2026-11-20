@@ -103,6 +103,7 @@ CONTROL_ACTIONS = frozenset({
     "detach",
     "append_user_turn",
     "apply_local_profile",
+    "configure_model",
 })
 
 # Bounded outcome codes for every control action.  Every persisted

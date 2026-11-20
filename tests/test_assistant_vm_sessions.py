@@ -307,7 +307,7 @@ def test_committed_control_is_reconciled_when_post_enqueue_audit_fails(app, monk
 
 @pytest.mark.parametrize('enabled,append,expected', [
     (False, False, {'session.list', 'session.get', 'session.read_events', 'fleet.list_machines', 'session.list_profiles'}),
-    (True, False, {'session.list', 'session.get', 'session.read_events', 'fleet.list_machines', 'session.control', 'session.get_command', 'session.list_profiles', 'session.read_logs'}),
+    (True, False, {'session.list', 'session.get', 'session.read_events', 'fleet.list_machines', 'session.control', 'session.get_command', 'session.list_profiles', 'session.read_logs', 'session.list_models'}),
 ])
 def test_supervisor_and_follow_up_gates_control_actual_tool_visibility(tmp_path, enabled, append, expected):
     app = create_app(FleetConfig.from_root(tmp_path, dev_operator=OWNER,

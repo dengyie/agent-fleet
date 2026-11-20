@@ -101,11 +101,11 @@ class ControlDomainTests(unittest.TestCase):
             set(ctrl.CONTROL_ACTIONS),
             {"pause_session", "resume_session", "terminate_session",
              "quarantine_session", "cancel_attempt", "adopt", "detach",
-             "append_user_turn", "apply_local_profile"},
+             "append_user_turn", "apply_local_profile", "configure_model"},
         )
         self.assertEqual(
             set(ctrl.PAYLOAD_ACTIONS),
-            {"append_user_turn", "apply_local_profile"},
+            {"append_user_turn", "apply_local_profile", "configure_model"},
         )
 
     def test_forbidden_actions_never_in_fixed_set(self):
@@ -113,7 +113,7 @@ class ControlDomainTests(unittest.TestCase):
                      "tmux_command", "arbitrary_signal", "change_credential",
                      "change_policy"}
         self.assertTrue(forbidden.isdisjoint(ctrl.CONTROL_ACTIONS))
-        self.assertEqual(len(ctrl.CONTROL_ACTIONS), 9)
+        self.assertEqual(len(ctrl.CONTROL_ACTIONS), 10)
 
     def test_control_states_cover_queue_machine(self):
         self.assertEqual(

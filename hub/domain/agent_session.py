@@ -8,4 +8,5 @@ SESSION_TOOLS = frozenset({
     'fleet.list_machines', 'session.list', 'session.get', 'session.read_events',
     'session.send_message', 'session.control', 'session.get_command',
     'session.read_logs', 'session.list_profiles',
+    'session.list_models', 'session.configure_model',
 })

@@ -78,6 +78,7 @@ _SCOPE_BLOCKED = {
     "pause_session": frozenset(),
     "append_user_turn": frozenset({"quarantined", "terminated"}),
     "apply_local_profile": frozenset({"terminated"}),
+    "configure_model": frozenset({"quarantined", "terminated"}),
 }
 
 #: Supervisor method callable keyed exactly by control action (fixed surface).
@@ -123,6 +124,10 @@ _TERMINAL_STATES = frozenset({"terminated"})
 #: No raw/except text ever reaches a receipt reason; map unexpected outcomes to
 #: this bounded code.
 _UNEXPECTED = "control_failed"
+_MODEL_FAILURES = frozenset({'model_configuration_changed', 'model_protocol_unavailable',
+    'model_credential_unavailable', 'model_unavailable', 'model_command_unavailable',
+    'model_configuration_invalid', 'model_config_unavailable', 'model_original_unavailable',
+    'native_provider_unbound', 'native_settings_unreadable', 'session_action_unavailable', 'forbidden'})
 
 
 def _rfc3339(ts: float | None = None) -> str:
@@ -527,11 +532,11 @@ class ControlClient:
         if is_desktop and action != 'append_user_turn':
             self._receipt(cid, 'rejected', 'unsupported_action')
             return
-        if action == 'append_user_turn' and state == 'running' and not is_desktop:
+        if action in {'append_user_turn', 'configure_model'} and state == 'running' and not is_desktop:
             self._receipt(cid, 'rejected', 'session_busy')
             return
         if (action in _SCOPE_BLOCKED and state in _SCOPE_BLOCKED[action]
-                and not (action == "append_user_turn" and state == "terminated"
+                and not (action in {"append_user_turn", "configure_model"} and state == "terminated"
                          and getattr(manifest, "reason", None) == "completed")):
             self._receipt(cid, "rejected", "scope_mismatch")
             return
@@ -735,6 +740,18 @@ class ControlClient:
                     result = self.continuation.send(session_id, clean["text"])
                 else:
                     result = self._supervisor.append_user_turn(session_id, clean["text"])
+            elif action == 'configure_model':
+                code, response = self._transport('/api/supervisor/model-configuration',
+                    {'command_id': cid}, self._headers())
+                if code != 200 or not isinstance(response, dict):
+                    reason = response.get('error') if isinstance(response, dict) else None
+                    return 'rejected', reason if isinstance(reason, str) and reason in _MODEL_FAILURES else 'model_configuration_unavailable'
+                config = response.get('configuration')
+                if (not isinstance(config, dict) or config.get('mode') != clean['mode']
+                        or (clean['mode'] == 'catalog' and any(config.get(k) != clean[k]
+                            for k in ('profile_id', 'digest')))):
+                    return 'rejected', 'model_configuration_mismatch'
+                result = self._supervisor.configure_model(session_id, config)
             else:
                 result = self._supervisor.apply_local_profile(
                     session_id, clean["profile_id"])
@@ -749,6 +766,10 @@ class ControlClient:
                       "unknown_profile", "family_mismatch",
                       "invalid_payload", "session_busy", "native_session_unbound", "capture_unavailable"):
             return ("rejected", result)
+        if action == 'configure_model':
+            if result in {'model_configured', 'model_restored'}:
+                return 'succeeded', result
+            return 'rejected', result if result in _MODEL_FAILURES else 'model_configuration_unavailable'
         if result == {"append_user_turn": "appended", "apply_local_profile": "applied"}[action]:
             return ("succeeded", result)
         if result in ("already_finished", "no_live_process"):

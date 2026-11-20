@@ -33,11 +33,12 @@ def _integer(value, minimum, maximum):
 
 class AgentSessionService:
     def __init__(self, sessions, *, observe=None, supervisor=None,
-                 authorize=None):
+                 authorize=None, models=None):
         self.sessions = sessions
         self.observe = observe
         self.supervisor = supervisor
         self.authorize = authorize
+        self.models = models
 
     def _authorized(self, owner_id):
         return bool(owner_id and (self.authorize is None or self.authorize(owner_id)))
@@ -57,6 +58,10 @@ class AgentSessionService:
                 tools.add('session.control')
             if 'append_user_turn' in actions:
                 tools.add('session.send_message')
+            if self.models is not None:
+                tools.add('session.list_models')
+                if 'configure_model' in actions:
+                    tools.add('session.configure_model')
         return frozenset(tools)
 
     def execute(self, *, tool, arguments, owner_id, command_id):
@@ -89,6 +94,8 @@ class AgentSessionService:
             'session.get_command': ({'session_id', 'command_id'}, {'session_id', 'command_id'}),
             'session.read_logs': ({'session_id', 'limit', 'before_cursor'}, {'session_id'}),
             'session.list_profiles': ({'session_id'}, {'session_id'}),
+            'session.list_models': ({'session_id'}, {'session_id'}),
+            'session.configure_model': ({'session_id', 'mode', 'profile_id'}, {'session_id', 'mode'}),
         }[tool]
         if not isinstance(args, dict) or set(args) - keys or not required <= args.keys():
             _invalid()
@@ -124,6 +131,8 @@ class AgentSessionService:
         session = self.sessions.get_session(session_id)['session']
         if tool == 'session.get':
             return {'session': session}
+        if tool == 'session.list_models':
+            return self.models.list_models(owner_id, session)
         if tool == 'session.list_profiles':
             machine = self.observe.machine_detail(session['machine_id'])
             family = session.get('agent_family')
@@ -159,7 +168,22 @@ class AgentSessionService:
                 size += event_size
             return {'events': events, 'next_cursor': events[-1]['cursor'] if events else after,
                     'has_more': len(events) < len(rows) or page['has_more']}
-        if tool == 'session.send_message':
+        if tool == 'session.configure_model':
+            # Reconcile the original issuance even if its catalog entry was
+            # subsequently changed or removed. Never issue a replacement.
+            if not isinstance(command_id, str) or not command_id:
+                _invalid()
+            key = 'assistant-session:' + hashlib.sha256(f'{owner_id}\0{command_id}'.encode()).hexdigest()
+            original = self.supervisor.find_idempotency(key)
+            if original:
+                old = original.get('payload', {})
+                if (original['target']['session_id'] != session_id or original['action'] != 'configure_model'
+                        or old.get('mode') != args.get('mode') or old.get('profile_id') != args.get('profile_id')
+                        or old.get('owner_id') != owner_id):
+                    raise ApplicationError('idempotency_conflict', 'idempotency_conflict', 409)
+                return {'session_id': session_id, 'command_id': original['command_id'], 'status': 'pending'}
+            action, payload = 'configure_model', self.models.payload(owner_id, session, args)
+        elif tool == 'session.send_message':
             text = args.get('text')
             if not isinstance(text, str) or not text.strip() or len(text) > 2000:
                 _invalid()

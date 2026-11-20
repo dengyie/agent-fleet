@@ -265,7 +265,8 @@ class NativeResumeMixin:
             disk = self._read_disk_manifest(session_id)
             if disk is not None:
                 m.state, m.reason = disk.state, disk.reason
-            self._continuations.restore(entry)
+            if self._continuations.path(session_id).exists() and not self._continuations.restore(entry):
+                return 'model_config_unavailable'
         if m.state in TERMINAL_STATES and m.reason != "completed":
             return m.state
         gate = self._guard_adopted(session_id)
@@ -290,13 +291,57 @@ class NativeResumeMixin:
             # sibling spawn, not resume.
             return "unsupported_action"
         cwd, env, token, exe = identity
+        from tools.supervisor.model_config import effective_model_config
+        try:
+            options, env = effective_model_config(entry, self._continuations.root)
+        except (ValueError, OSError, TypeError):
+            return 'model_config_unavailable'
         argv = _native_resume_argv(family, exe, token, text)
         if argv:
             at = 2 if family == 'codex' else 1
-            argv[at:at] = entry.resume_options
+            argv[at:at] = options
         if not validate_command(argv) or not cwd:
             return "unsupported_action"
         return m, entry.handle, argv, cwd, env
+
+    def configure_model(self, session_id, config):
+        """Atomically bind a model to a finished managed native conversation."""
+        from dataclasses import replace
+        from fleet_core.session_models import AGENT_PROTOCOLS, validate_model_delivery
+        from tools.supervisor.model_config import codex_provider, original_model, _claude_settings
+        self.get(session_id)
+        entry = self._entries[session_id]
+        with entry.control_lock:
+            if entry.resume_pending is not None:
+                return 'session_busy'
+            m = entry.manifest
+            if m.capability_manifest.get('desktop_bridge') or m.agent not in AGENT_PROTOCOLS:
+                return 'unsupported_action'
+            if m.state != 'terminated' or m.reason != 'completed':
+                return 'session_busy'
+            if not self.continuation_ready(session_id):
+                return 'native_session_unbound'
+            try:
+                value = validate_model_delivery(config, m.agent)
+                if value['mode'] == 'catalog':
+                    if m.agent == 'codex':
+                        codex_provider(entry)
+                    else:
+                        _claude_settings(entry.resume_options, entry.cwd)
+                baseline = entry.restore_model if entry.model_config is not None else original_model(entry)
+                if value['mode'] == 'original' and entry.model_config is not None and not baseline:
+                    return 'model_original_unavailable'
+                candidate = replace(entry, model_config=None if value['mode'] == 'original' else value,
+                                    restore_model=baseline)
+                if not self._continuations.save(candidate):
+                    return 'model_config_unavailable'
+            except ValueError as exc:
+                return str(exc) if str(exc) in {'native_provider_unbound', 'native_settings_unreadable'} else 'model_config_unavailable'
+            except (OSError, TypeError):
+                return 'model_config_unavailable'
+            entry.model_config = candidate.model_config
+            entry.restore_model = candidate.restore_model
+            return 'model_restored' if value['mode'] == 'original' else 'model_configured'
 
     def continuation_ready(self, session_id: str) -> bool:
         self.get(session_id)

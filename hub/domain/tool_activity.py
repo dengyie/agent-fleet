@@ -51,6 +51,7 @@ def tool_activity(tool, arguments, receipt=None):
               'session.get': '查看远端 Agent 会话', 'session.read_events': '读取远端会话记录',
               'session.send_message': '向远端 Agent 发送任务', 'session.get_command': '核对远端控制回执',
               'session.read_logs': '读取会话控制日志', 'session.list_profiles': '查看本地模型配置',
+              'session.list_models': '查看可接管会话的线上模型', 'session.configure_model': '切换远端会话模型',
               'conversation.list': '查找会话', 'conversation.rename': '重命名会话',
               'browser.open': '打开网页', 'browser.close': '关闭网页'}
     title = titles.get(tool, '调用工具 · ' + tool)
@@ -61,6 +62,8 @@ def tool_activity(tool, arguments, receipt=None):
                  'terminate_session': '终止远端 Agent', 'quarantine_session': '隔离远端 Agent',
                  'cancel_attempt': '取消远端 Agent 执行',
                  'apply_local_profile': '切换本地模型配置'}.get(arguments.get('action'), '控制远端 Agent')
+    if tool == 'session.configure_model' and arguments.get('mode') == 'original':
+        title = '恢复远端会话原模型配置'
     if tool == 'service.request_action':
         action = arguments.get('action')
         if action == 'inspect':
@@ -105,7 +108,7 @@ def tool_activity(tool, arguments, receipt=None):
         elif tool == 'service.read_logs':
             logs = result.get('logs', result)
             text = preview(logs.get('text')) if isinstance(logs, dict) else ''
-        elif tool in {'session.control', 'session.send_message', 'session.get_command'}:
+        elif tool in {'session.control', 'session.send_message', 'session.get_command', 'session.configure_model'}:
             command = result.get('receipt', result)
             status = command.get('status', '')
             labels = {'pending': '已入队，等待节点回执', 'queued': '等待节点领取',

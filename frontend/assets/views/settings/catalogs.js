@@ -108,6 +108,8 @@ export function mountCatalog(root, kind, {identitySignal} = {}) {
         const advanced = el('details', null, 'settings-advanced');
         advanced.append(el('summary', '高级参数'));
         form.append(advanced);
+        controls.anthropic = field(advanced, 'anthropic', 'Claude Code 接管 Base URL', config.agent_endpoints?.anthropic || '', {type: 'url', help: '可选。网关须支持 Anthropic Messages；通常填写站点根地址。复用此模型的 API Key，供主助手接管 VM 上已结束的原会话。'});
+        controls.responses = field(advanced, 'responses', 'Codex 接管 Base URL', config.agent_endpoints?.responses || '', {type: 'url', help: '可选。网关须支持 Responses；通常以 /v1 结尾。复用此模型的 API Key。仅支持 Chat Completions 的地址不能用于 Codex。'});
         controls.timeout = field(advanced, 'timeout', '请求超时（秒）', config.timeout_s ?? 60, {type: 'number'}); controls.timeout.min = 1; controls.timeout.max = 600;
         controls.retries = field(advanced, 'retries', '最大重试次数', config.max_retries ?? 3, {type: 'number', help: '建议 3 次；503、限流等临时错误会自动重试，并实时显示进度。已执行的工具不会重放。'}); controls.retries.min = 0; controls.retries.max = 5;
         controls.stream = field(advanced, 'stream', '启用流式响应', row ? config.stream === true : true, {type: 'checkbox'});
@@ -163,6 +165,8 @@ export function mountCatalog(root, kind, {identitySignal} = {}) {
             const provider_config = {timeout_s: Number(controls.timeout.value), max_retries: Number(controls.retries.value), stream: controls.stream.checked, headers: jsonValue(controls.headers)};
             if (controls.base_url.value.trim()) provider_config[/\/chat\/completions\/?$/.test(controls.base_url.value.trim()) ? 'endpoint' : 'base_url'] = controls.base_url.value.trim();
             if (controls.pricing.value.trim()) provider_config.pricing = jsonValue(controls.pricing);
+            const agent_endpoints = Object.fromEntries(['anthropic', 'responses'].filter(key => controls[key].value.trim()).map(key => [key, controls[key].value.trim()]));
+            if (Object.keys(agent_endpoints).length) provider_config.agent_endpoints = agent_endpoints;
             value = {provider: controls.provider.value, model: controls.model.value.trim(), provider_config, capabilities: jsonValue(controls.capabilities)};
           } else if (kind === 'nodes') value = {label: controls.label.value.trim(), capabilities: jsonValue(controls.capabilities)};
           else value = {name: controls.name.value.trim(), root_path: controls.root_path.value.trim(), backend: row?.backend || 'directory', default_node_id: controls.node.value || null};

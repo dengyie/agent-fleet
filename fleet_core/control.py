@@ -35,7 +35,8 @@ from typing import Any, Callable, Mapping
 #: adoption (纳管) commands.  ``append_user_turn`` / ``apply_local_profile``
 #: are Phase 4/5 seams: they may be signed only when their issuance gates are
 #: on, carry a bounded ``payload`` (text / local profile_id), and are NEVER
-#: ``inject_stdin`` / credential push.
+#: ``inject_stdin``. ``configure_model`` carries only a catalog binding;
+#: credentials use a separate authenticated, machine-bound resolver.
 CONTROL_ACTIONS = frozenset({
     "pause_session",
     "resume_session",
@@ -46,12 +47,14 @@ CONTROL_ACTIONS = frozenset({
     "detach",
     "append_user_turn",
     "apply_local_profile",
+    "configure_model",
 })
 
 #: Operator source-control tokens that require a bounded signed payload.
 PAYLOAD_ACTIONS = frozenset({
     "append_user_turn",
     "apply_local_profile",
+    "configure_model",
 })
 
 _MAX_TURN_TEXT = 2000
@@ -294,10 +297,11 @@ def new_nonce() -> str:
 
 
 def validated_control_payload(action: str, payload: Any) -> dict:
-    """Return the bounded signed payload for a Phase 4/5 action.
+    """Return the bounded signed payload for a typed control action.
 
     Exact allowlist: ``append_user_turn`` may carry only ``text``;
-    ``apply_local_profile`` may carry only ``profile_id``.  Extra keys
+    ``apply_local_profile`` may carry only ``profile_id``; ``configure_model``
+    carries mode, authenticated owner and catalog profile/digest. Extra keys
     (cwd / family / api_key / argv / pid) are refused, never copied or
     stripped.  Raises ``ValueError`` with a bounded code.
     """
@@ -306,6 +310,18 @@ def validated_control_payload(action: str, payload: Any) -> dict:
     if not isinstance(payload, Mapping):
         raise ValueError("invalid_payload")
     keys = set(payload)
+    if action == 'configure_model':
+        mode = payload.get('mode')
+        required = {'mode', 'owner_id'} | ({'profile_id', 'digest'} if mode == 'catalog' else set())
+        if not isinstance(mode, str) or mode not in {'catalog', 'original'} or keys != required:
+            raise ValueError('invalid_payload')
+        if any(not isinstance(payload[k], str) or not 1 <= len(payload[k]) <= 128
+               or any(ord(c) < 32 for c in payload[k]) for k in required):
+            raise ValueError('invalid_payload')
+        if mode == 'catalog' and (not _PROFILE_ID_RE.fullmatch(payload['profile_id'])
+                or not re.fullmatch('[0-9a-f]{64}', payload['digest'])):
+            raise ValueError('invalid_payload')
+        return dict(payload)
     if action == "append_user_turn":
         if keys != {"text"}:
             raise ValueError("invalid_payload")

@@ -29,6 +29,8 @@ class ContinuationStore:
                  'agent': m.agent, 'cwd': entry.cwd, 'exe_path': entry.exe_path,
                  'resume_token': entry.resume_token, 'env': entry.env or {},
                  'resume_options': entry.resume_options,
+                 'model_config': entry.model_config,
+                 'restore_model': entry.restore_model,
                  'native_file_path': entry.native_file_path}
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd, name = tempfile.mkstemp(prefix='.continuation-', dir=self.root)
@@ -55,9 +57,19 @@ class ContinuationStore:
                     or not all(isinstance(v, str) for v in data.get('resume_options', []))
                     or not Path(data['cwd']).is_dir()):
                 return False
+            model_config = data.get('model_config')
+            restore_model = data.get('restore_model')
+            if restore_model is not None and (not isinstance(restore_model, str) or not restore_model
+                    or len(restore_model) > 256 or any(ord(c) < 32 for c in restore_model)):
+                return False
+            if model_config is not None:
+                from fleet_core.session_models import validate_model_delivery
+                model_config = validate_model_delivery(model_config, m.agent)
             for key in ('cwd', 'exe_path', 'resume_token', 'env', 'native_file_path'):
                 setattr(entry, key, data.get(key))
             entry.resume_options = data.get('resume_options', [])
+            entry.model_config = model_config
+            entry.restore_model = restore_model
             return True
         except (OSError, ValueError, TypeError, KeyError):
             return False
