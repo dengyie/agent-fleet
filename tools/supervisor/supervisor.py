@@ -123,9 +123,10 @@ _CONTROL_OUTCOMES = frozenset({
     "liveness_unknown",
 })
 
-# Post-exit tail-flush bounds: per-pump step and the whole-flush wall budget.
+# Post-exit tail-flush bounds: per-pump step, inactivity and total budgets.
 _FLUSH_STEP = 0.2
 _FLUSH_BUDGET = 2.0
+_FLUSH_TOTAL_BUDGET = 30.0
 
 
 # --------------------------------------------------------------------------- #
@@ -974,22 +975,31 @@ class Supervisor(HandlesMixin, NativeResumeMixin):
 
         The leader (``m.state`` the supervisor knows) has exited, but members of
         the same group may still run (e.g. a leader that forked a child and
-        returned).  We keep pumping until EOF or ``_FLUSH_BUDGET`` total seconds
-        of wall time, then guarantee the whole group is gone: a SIGKILL for any
+        returned).  Keep pumping while output progresses, allowing capture
+        callbacks to persist the tail. Stop after ``_FLUSH_BUDGET`` seconds
+        without progress or ``_FLUSH_TOTAL_BUDGET`` total seconds, then send
+        SIGKILL for any
         member that keeps the stdout pipe open past the budget, reaped by a
         second bounded wait.  A degraded completion is reported honestly
         (``group_remaining``, exit 124) instead of a plain success.
         """
         flush_start = time.monotonic()
+        idle_deadline = flush_start + _FLUSH_BUDGET
+        total_deadline = flush_start + _FLUSH_TOTAL_BUDGET
         eof = False
         try:
-            while time.monotonic() - flush_start < _FLUSH_BUDGET:
-                pr = self._ops.pump(handle, _FLUSH_STEP, on_line)
+            while True:
+                remaining = min(idle_deadline, total_deadline) - time.monotonic()
+                if remaining <= 0:
+                    break
+                pr = self._ops.pump(handle, min(_FLUSH_STEP, remaining), on_line)
                 if pr == "eof":
                     eof = True
                     break
                 if pr == "abort":
                     break
+                if pr == "line":
+                    idle_deadline = time.monotonic() + _FLUSH_BUDGET
         except Exception:
             pass
 
