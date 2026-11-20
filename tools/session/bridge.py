@@ -681,6 +681,7 @@ class SessionBridge:
                 Path(spool_root), self._machine_id, self._session_id,
                 key=bytes(spool_key),
                 quota_root=Path(quota_root) if quota_root is not None else None,
+                max_machine_bytes=int(config.get('spool_machine_bytes', 134217728)),
                 owner_lock=bool(config.get("spool_owner_lock", False)),
                 owner_timeout=float(config.get("spool_owner_timeout",
                                                OWNER_WAIT_S)))

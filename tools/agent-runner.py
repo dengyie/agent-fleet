@@ -777,13 +777,11 @@ def run_task(cfg, task):
 
 
 def poll_once(cfg):
-    """单轮：先重传缓存结果，再 poll；有任务则执行。返回是否有任务。
+    """单轮：重传任务结果，再 poll；会话历史由独立线程恢复。
 
     轮询请求网络失败（post_json 返回 status 0）抛 RunnerPollError，
     由 main() 转为指数退避——这是全局 5s→60s 退避约束的实现点。
     """
-    from tools.session.runner_capture import replay_pending
-    replay_pending(cfg, post_json)
     flush_pending(cfg)
     status, data = post_json(cfg, "/api/commands/poll", {"runner_id": cfg.runner_id})
     if status == 0:
@@ -867,10 +865,15 @@ def main(argv=None):
         return EXIT_ALREADY_RUNNING
     try:
         if args.once:
+            from tools.session.runner_capture import ConversationReplay
+            replay = ConversationReplay(cfg, post_json)
+            replay.start()
             try:
                 poll_once(cfg)
             except RunnerPollError as exc:
                 log.error("hub 不可达: %s", exc)
+            finally:
+                replay.close()
             return 0
         return _resident_loop(cfg, interval)
     finally:
@@ -878,9 +881,12 @@ def main(argv=None):
 
 
 def _resident_loop(cfg, interval):
+    from tools.session.runner_capture import ConversationReplay
+    replay = ConversationReplay(cfg, post_json)
     stop = _GracefulStop()
     stop.install()
     client_runtime.announce(ROLE)
+    replay.start()
     backoff = MIN_BACKOFF_S
     try:
         while True:
@@ -912,6 +918,8 @@ def _resident_loop(cfg, interval):
                 backoff = min(backoff * 2, MAX_BACKOFF_S)
     except _StopRequested:
         return 0
+    finally:
+        replay.close()
 
 if __name__ == "__main__":
     raise SystemExit(main())

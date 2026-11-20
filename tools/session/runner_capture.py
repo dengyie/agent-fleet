@@ -8,6 +8,7 @@ normalized conversation events, and replays unacknowledged data on later polls.
 被清理；长期无法上送的已结束会话按保留期清理，防止缓存无限增长。
 """
 import hashlib
+import copy
 import json
 import logging
 import shutil
@@ -28,6 +29,10 @@ CLOSED_RETENTION_S = 7 * 86400
 ORPHAN_RETENTION_S = 2 * 86400
 #: sync.py 的原生会话身份前缀：其 spool 序号与 Hub 去重绑定，永不清理。
 NATIVE_PREFIX = 'native_'
+# Historical imports may fill their shared 128 MiB allocation. Keep a further
+# 64 MiB available to live managed task/continuation events on the same disk.
+ARCHIVE_MACHINE_BYTES = 128 * 1024 * 1024
+LIVE_RESERVE_BYTES = 64 * 1024 * 1024
 
 
 def session_prefix(machine):
@@ -65,27 +70,33 @@ class RunnerCapture:
             'process_group_id': process_group_id, 'managed': bool(process_group_id),
             'spool_root': self.root / self.session_id, 'spool_key': key,
             'spool_quota_root': self.root,
+            'spool_machine_bytes': ARCHIVE_MACHINE_BYTES + (
+                0 if task['attempt_id'].startswith(NATIVE_PREFIX) else LIVE_RESERVE_BYTES),
             'spool_owner_lock': True, 'spool_owner_timeout': 0 if replay else OWNER_WAIT_S,
             'preserve_source': True,
             'post_json': lambda batch: self._post(post, batch),
         })
-        if not self.record.exists():
-            # No credential or prompt in this recovery index.
-            self.record.write_text(json.dumps({k: task[k] for k in ('attempt_id', 'agent_type', 'task_id')}))
-            self.bridge.start()
-            self.bridge.ingest_one({'kind': 'session_metadata', 'payload': {'task_id': task['task_id']}})
-            if 'instruction' in task:
-                self.bridge.ingest_one({'kind': 'user_message', 'payload': {'text': task['instruction']}})
-        elif replay and process_group_id is None:
-            # Upgrade retained idle conversations without replaying a prompt.
-            # The spool writer lock above excludes running captures.
-            from fleet_core.session_models import AGENT_PROTOCOLS
-            data = json.loads(self.record.read_text(encoding='utf-8'))
-            if (data.get('closed') and data.get('resumable') and not data.get('model_takeover_version')
-                    and data.get('agent_type') in AGENT_PROTOCOLS):
-                self.bridge.ingest_one({'kind': 'session_metadata', 'payload': {'model_takeover': True}})
-                data['model_takeover_version'] = 1
-                self.record.write_text(json.dumps(data), encoding='utf-8')
+        try:
+            if not self.record.exists():
+                # No credential or prompt in this recovery index.
+                self.record.write_text(json.dumps({k: task[k] for k in ('attempt_id', 'agent_type', 'task_id')}))
+                self.bridge.start()
+                self.bridge.ingest_one({'kind': 'session_metadata', 'payload': {'task_id': task['task_id']}})
+                if 'instruction' in task:
+                    self.bridge.ingest_one({'kind': 'user_message', 'payload': {'text': task['instruction']}})
+            elif replay and process_group_id is None:
+                # Upgrade retained idle conversations without replaying a prompt.
+                # The spool writer lock above excludes running captures.
+                from fleet_core.session_models import AGENT_PROTOCOLS
+                data = json.loads(self.record.read_text(encoding='utf-8'))
+                if (data.get('closed') and data.get('resumable') and not data.get('model_takeover_version')
+                        and data.get('agent_type') in AGENT_PROTOCOLS):
+                    self.bridge.ingest_one({'kind': 'session_metadata', 'payload': {'model_takeover': True}})
+                    data['model_takeover_version'] = 1
+                    self.record.write_text(json.dumps(data), encoding='utf-8')
+        except Exception:
+            self.bridge.close()
+            raise
 
     def _post(self, post, batch):
         status, body = post(self.cfg, '/api/runner-session-events', batch['events'])
@@ -260,11 +271,13 @@ def _expire_tombstone(record, data, now=None):
     return True
 
 
-def replay_pending(cfg, post):
+def replay_pending(cfg, post, *, should_stop=lambda: False):
     root = Path(cfg.cache_dir) / 'conversations'
     if not root.exists():
         return
     for record in root.glob(session_prefix(cfg.machine) + '*.json'):
+        if should_stop():
+            return
         capture = None
         try:
             data = json.loads(record.read_text())
@@ -285,3 +298,31 @@ def replay_pending(cfg, post):
                     prune_if_done(capture)
                 except Exception:
                     log.exception('Conversation prune failed: %s', record.name)
+
+
+class ConversationReplay:
+    """Recover retained uploads without delaying the runner's task polling."""
+
+    def __init__(self, cfg, post, *, interval=15):
+        self.cfg = copy.copy(cfg)
+        self.cfg.transport = copy.copy(cfg.transport) if cfg.transport is not None else None
+        self.post = post
+        self.interval = interval
+        self.stopping = threading.Event()
+        self.thread = None
+
+    def start(self):
+        def replay():
+            while not self.stopping.is_set():
+                try:
+                    replay_pending(self.cfg, self.post, should_stop=self.stopping.is_set)
+                except Exception:
+                    log.exception('Conversation replay scan failed')
+                self.stopping.wait(self.interval)
+        self.thread = threading.Thread(target=replay, name='conversation-replay', daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.stopping.set()
+        if self.thread is not None:
+            self.thread.join(timeout=1)
