@@ -38,6 +38,8 @@ def _service_action_result(result):
 
 def tool_activity(tool, arguments, receipt=None):
     arguments = arguments if isinstance(arguments, dict) else {}
+    operation = arguments.get('operation')
+    operation = operation if isinstance(operation, str) else ''
     titles = {'workspace.exec': '执行命令', 'workspace.read': '读取文件',
               'workspace.list': '列出目录', 'workspace.write': '写入文件',
               'workspace.digest': '计算文件摘要', 'workspace.artifact': '保存产物',
@@ -56,7 +58,10 @@ def tool_activity(tool, arguments, receipt=None):
               'browser.open': '打开网页', 'browser.close': '关闭网页'}
     title = titles.get(tool, '调用工具 · ' + tool)
     if tool in {'platform.admin_inspect', 'platform.admin_mutate'}:
-        title += ' · ' + preview(arguments.get('operation'), 96)
+        task_titles = {'tasks.targets': '查看机器可用 Agent 与项目', 'tasks.create': '启动远端 Agent 任务',
+                       'tasks.list': '查看远端 Agent 任务', 'tasks.get': '跟进远端 Agent 任务',
+                       'tasks.cancel': '取消远端 Agent 任务'}
+        title = task_titles.get(operation, title + ' · ' + preview(operation, 96))
     if tool == 'session.control':
         title = {'pause_session': '暂停远端 Agent', 'resume_session': '恢复远端 Agent 进程',
                  'terminate_session': '终止远端 Agent', 'quarantine_session': '隔离远端 Agent',
@@ -83,6 +88,11 @@ def tool_activity(tool, arguments, receipt=None):
         source = preview(arguments.get('grant_id'), 512)
     elif tool.startswith('session.'):
         source = preview(arguments.get('session_id') or arguments.get('machine_id'), 512)
+    elif tool in {'platform.admin_inspect', 'platform.admin_mutate'} and operation.startswith('tasks.'):
+        payload = arguments.get('payload')
+        if isinstance(payload, dict):
+            source = preview(' · '.join(payload[key] for key in ('machine', 'project', 'agent_type', 'task_id')
+                                        if isinstance(payload.get(key), str)), 512)
     activity = {'title': preview(title + (' · ' + source.replace('\n', ' ') if source else ''), 384)}
     if source:
         activity['input'] = source
@@ -135,6 +145,15 @@ def tool_activity(tool, arguments, receipt=None):
                     text += '，需要重启后生效'
             if receipt.state == 'succeeded' and result.get('removed'):
                 text = '节点登记已移除（云 VM 未销毁）'
+            task = result.get('task')
+            if receipt.state == 'succeeded' and isinstance(task, dict):
+                labels = {'queued': '等待节点领取', 'leased': '节点已领取', 'running': '执行中',
+                          'paused': '已暂停', 'succeeded': '任务已完成', 'failed': '任务失败',
+                          'cancelled': '任务已取消', 'expired': '任务已过期'}
+                text = labels.get(task.get('state'), '任务状态待确认')
+                text += '\n任务：' + preview(task.get('task_id'), 128)
+                if task.get('session_id'):
+                    text += '\n会话：' + preview(task['session_id'], 128)
         elif tool == 'fleet.list_machines':
             text = '已读取 ' + str(len(result.get('machines', []))) + ' 台机器的状态'
         else:

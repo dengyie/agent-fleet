@@ -16,7 +16,8 @@ ADMIN_TOOL_DEFINITIONS = (
       for name, write, description in (
           ('platform.admin_inspect', False,
            'Inspect project management resources. First call operation=capabilities (payload={}) for available operation schemas. '
-           'Then use settings catalog/runtime/hosts, plugins, usage, commands, adoption, memory, schedules, workflows or MCP reads. '
+           'Then use settings catalog/runtime/hosts, plugins, usage, commands, adoption, tasks, memory, schedules, workflows or MCP reads. '
+           'tasks.targets discovers registered projects/Agent types on a machine; tasks.get follows the original task and its session_id. '
            'Only enabled services are callable; settings.catalog is paginated with next_offset.'),
           ('platform.admin_mutate', True,
            'Administer the project using an enabled operation from platform.admin_inspect capabilities. '
@@ -24,5 +25,7 @@ ADMIN_TOOL_DEFINITIONS = (
            'runtime/hosts changes require Hub restart and retain backups. nodes.enroll creates a NEW Node with one-time credentials; '
            'duplicate IDs fail without rotation. nodes.remove requires a disabled unreferenced Node; never destroys a cloud VM. '
            'Plugin operations and workflows return their own receipts, not completed remote work. Never repeat uncertain writes. '
+           'tasks.create starts a new managed native Agent task on a registered machine/project, independent of the current workspace; '
+           'tasks.cancel cancels the original task. For existing conversations use session.send_message instead of creating another task. '
            'Do not echo credentials or enrollment secrets in chat.'))),
 )
