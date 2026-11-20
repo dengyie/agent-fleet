@@ -165,3 +165,10 @@ def test_activity_distinguishes_admission_from_real_task_completion():
     receipt.result['task'].update(state='succeeded', session_id='native-one')
     activity = tool_activity('platform.admin_inspect', {'operation': 'tasks.get'}, receipt)
     assert '任务已完成' in activity['output'] and 'native-one' in activity['output']
+
+
+@pytest.mark.parametrize('operation', [None, [], {}])
+def test_malformed_operation_can_be_rendered_before_tool_validation(operation):
+    from hub.domain.tool_activity import tool_activity
+    result = tool_activity('platform.admin_mutate', {'operation': operation})
+    assert 'title' in result

@@ -38,6 +38,8 @@ def _service_action_result(result):
 
 def tool_activity(tool, arguments, receipt=None):
     arguments = arguments if isinstance(arguments, dict) else {}
+    operation = arguments.get('operation')
+    operation = operation if isinstance(operation, str) else ''
     titles = {'workspace.exec': '执行命令', 'workspace.read': '读取文件',
               'workspace.list': '列出目录', 'workspace.write': '写入文件',
               'workspace.digest': '计算文件摘要', 'workspace.artifact': '保存产物',
@@ -59,7 +61,7 @@ def tool_activity(tool, arguments, receipt=None):
         task_titles = {'tasks.targets': '查看机器可用 Agent 与项目', 'tasks.create': '启动远端 Agent 任务',
                        'tasks.list': '查看远端 Agent 任务', 'tasks.get': '跟进远端 Agent 任务',
                        'tasks.cancel': '取消远端 Agent 任务'}
-        title = task_titles.get(arguments.get('operation'), title + ' · ' + preview(arguments.get('operation'), 96))
+        title = task_titles.get(operation, title + ' · ' + preview(operation, 96))
     if tool == 'session.control':
         title = {'pause_session': '暂停远端 Agent', 'resume_session': '恢复远端 Agent 进程',
                  'terminate_session': '终止远端 Agent', 'quarantine_session': '隔离远端 Agent',
@@ -86,7 +88,7 @@ def tool_activity(tool, arguments, receipt=None):
         source = preview(arguments.get('grant_id'), 512)
     elif tool.startswith('session.'):
         source = preview(arguments.get('session_id') or arguments.get('machine_id'), 512)
-    elif tool in {'platform.admin_inspect', 'platform.admin_mutate'} and arguments.get('operation', '').startswith('tasks.'):
+    elif tool in {'platform.admin_inspect', 'platform.admin_mutate'} and operation.startswith('tasks.'):
         payload = arguments.get('payload')
         if isinstance(payload, dict):
             source = preview(' · '.join(payload[key] for key in ('machine', 'project', 'agent_type', 'task_id')
