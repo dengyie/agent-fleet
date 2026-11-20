@@ -79,7 +79,9 @@ def test_packaged_static_references_are_versioned_without_changing_sources(tmp_p
         '<script type="module" src="./assets/app.js"></script>\n'
         '<img src="/assets/brand/logo.svg">\n', encoding='utf-8')
     (src / 'assets/app.js').write_text(
-        "import { mount } from './views/settings.js';\n", encoding='utf-8')
+        "import { mount } from './views/settings.js';\n"
+        "import './views/settings.js';\n"
+        "import('./views/settings.js');\n", encoding='utf-8')
     (src / 'assets/styles/app.css').write_text(
         "@import url('./settings.css');\n", encoding='utf-8')
 
@@ -90,6 +92,8 @@ def test_packaged_static_references_are_versioned_without_changing_sources(tmp_p
     assert 'src="./assets/app.js?v=a1b2c3"' in (tmp_path / 'out/index.html').read_text()
     assert 'src="/assets/brand/logo.svg?v=a1b2c3"' in (tmp_path / 'out/index.html').read_text()
     assert "'./views/settings.js?v=a1b2c3'" in (tmp_path / 'out/assets/app.js').read_text()
+    assert "import './views/settings.js?v=a1b2c3'" in (tmp_path / 'out/assets/app.js').read_text()
+    assert "import('./views/settings.js?v=a1b2c3')" in (tmp_path / 'out/assets/app.js').read_text()
     assert "url('./settings.css?v=a1b2c3')" in (tmp_path / 'out/assets/styles/app.css').read_text()
     assert (src / 'index.html').read_text().find('?v=') == -1
 

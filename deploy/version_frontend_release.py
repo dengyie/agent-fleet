@@ -12,7 +12,7 @@ LOCAL_ASSET = re.compile(
     re.IGNORECASE,
 )
 JS_REFERENCE = re.compile(
-    r"(?P<prefix>\bfrom\s*[\"']|\bimport\s*\(\s*[\"'])"
+    r"(?P<prefix>\bfrom\s*[\"']|\bimport\s*\(\s*[\"']|\bimport\s*[\"'])"
     r"(?P<url>(?:\.{1,2}/|/)[^\"']+)"
     r"(?P<quote>[\"'])"
 )
