@@ -70,6 +70,50 @@ def test_manifest_escapes_quotes_and_backslashes(tmp_path):
         assert (tmp_path / 'out' / name).is_file()
 
 
+def test_packaged_static_references_are_versioned_without_changing_sources(tmp_path):
+    src = _frontend(tmp_path, ['assets/app.js', 'assets/views/settings.js',
+                               'assets/styles/app.css', 'assets/styles/settings.css',
+                               'assets/brand/logo.svg'])
+    (src / 'index.html').write_text(
+        '<link rel="stylesheet" href="./assets/styles/app.css">\n'
+        '<script type="module" src="./assets/app.js"></script>\n'
+        '<img src="/assets/brand/logo.svg">\n', encoding='utf-8')
+    (src / 'assets/app.js').write_text(
+        "import { mount } from './views/settings.js';\n"
+        "import './views/settings.js';\n"
+        "import('./views/settings.js');\n", encoding='utf-8')
+    (src / 'assets/styles/app.css').write_text(
+        "@import url('./settings.css');\n", encoding='utf-8')
+
+    result = _package(src, tmp_path / 'out', {}, version='a1b2c3')
+
+    assert result.returncode == 0, result.stderr
+    assert 'href="./assets/styles/app.css?v=a1b2c3"' in (tmp_path / 'out/index.html').read_text()
+    assert 'src="./assets/app.js?v=a1b2c3"' in (tmp_path / 'out/index.html').read_text()
+    assert 'src="/assets/brand/logo.svg?v=a1b2c3"' in (tmp_path / 'out/index.html').read_text()
+    assert "'./views/settings.js?v=a1b2c3'" in (tmp_path / 'out/assets/app.js').read_text()
+    assert "import './views/settings.js?v=a1b2c3'" in (tmp_path / 'out/assets/app.js').read_text()
+    assert "import('./views/settings.js?v=a1b2c3')" in (tmp_path / 'out/assets/app.js').read_text()
+    assert "url('./settings.css?v=a1b2c3')" in (tmp_path / 'out/assets/styles/app.css').read_text()
+    assert (src / 'index.html').read_text().find('?v=') == -1
+
+
+def test_packaged_static_references_preserve_existing_query_and_external_urls(tmp_path):
+    src = _frontend(tmp_path, ['assets/app.js'])
+    (src / 'index.html').write_text(
+        '<script src="/assets/app.js?mode=module"></script>\n'
+        '<link href="./assets/app.js#entry">\n'
+        '<script src="https://cdn.example/app.js"></script>\n', encoding='utf-8')
+
+    result = _package(src, tmp_path / 'out', {}, version='release-2')
+
+    assert result.returncode == 0, result.stderr
+    html = (tmp_path / 'out/index.html').read_text()
+    assert '/assets/app.js?mode=module&v=release-2' in html
+    assert './assets/app.js?v=release-2#entry' in html
+    assert 'https://cdn.example/app.js' in html
+
+
 def test_forbidden_component_is_detected_without_glob_expansion(tmp_path):
     # A literal '*' component must not be glob-expanded into sibling names,
     # and nested credential components are still rejected.
