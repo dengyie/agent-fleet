@@ -273,6 +273,7 @@ def test_repeated_missing_reads_stop_at_frozen_step_budget(tmp_path):
     ('platform.admin_mutate', 'nodes.remove', 'failed', 'node_in_use', 'succeeded'),
     ('platform.admin_mutate', 'settings.save_runtime', 'failed', 'revision_conflict', 'succeeded'),
     ('session.send_message', None, 'failed', 'session_not_managed', 'succeeded'),
+    ('session.send_message', None, 'failed', 'session_busy', 'succeeded'),
     ('platform.admin_mutate', 'settings.save', 'failed', 'forbidden', 'failed'),
     ('platform.admin_mutate', 'settings.save', 'unknown', 'revision_conflict', 'unknown'),
     ('platform.admin_mutate', 'plugins.submit', 'failed', 'revision_conflict', 'failed'),
