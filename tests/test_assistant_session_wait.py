@@ -1,5 +1,6 @@
 """Bounded waits for real output from the original remote Agent session."""
 
+import os
 import threading
 from types import SimpleNamespace
 
@@ -7,10 +8,30 @@ import pytest
 
 from hub.application import agent_session_service as adapter
 from hub.application.errors import ApplicationError
+from hub.application.session_service import SessionService
+from hub.infrastructure.session_repository import SessionRepository
+from hub.infrastructure.transcript_repository import TranscriptRepository
 from hub.platform.session_tools import SESSION_TOOL_DEFINITIONS
 from hub.platform.providers.base import ModelResponse
-from tests.test_assistant_vm_sessions import app as app, event, execute
+from tests.test_assistant_vm_sessions import app as vm_app, execute
 from tests.test_platform_run_worker import OWNER, _catalog, _queued
+from tests.test_session_interactions import event
+
+
+@pytest.fixture
+def app(tmp_path):
+    repository = SessionRepository(tmp_path / 'sessions.db')
+    repository.init()
+    transcripts = TranscriptRepository(tmp_path / 'transcripts', key=bytes(range(32)))
+    transcripts.init()
+    sessions = SessionService(repository, transcripts)
+    sessions.ingest_events([
+        event(1, 'session_start', {'agent_family': 'claude', 'adapter': 'hooks'}),
+        event(2, 'assistant_message', {'text': 'remote output', 'is_complete': True}),
+    ])
+    return SimpleNamespace(extensions={'fleet': {'services': {
+        'sessions': sessions, 'agent_sessions': adapter.AgentSessionService(sessions),
+    }}})
 
 
 @pytest.fixture
@@ -134,7 +155,9 @@ def test_tool_contract_exposes_bounded_wait_and_keeps_it_optional():
     assert 'wait_seconds=30' in definition['description']
 
 
-def test_vm_main_assistant_waits_at_hub_and_receives_the_original_agent_result(app, tmp_path, clock, monkeypatch):
+@pytest.mark.skipif(os.name != 'posix', reason='Hub Worker integration requires POSIX private storage')
+def test_vm_main_assistant_waits_at_hub_and_receives_the_original_agent_result(vm_app, tmp_path, clock, monkeypatch):
+    app = vm_app
     repo = _catalog(app, tmp_path)
     repo.upsert_node(OWNER, {'node_id': 'other-workspace-node', 'capabilities': {'workspace.list': True}})
     repo.update_defaults(OWNER, {'model_profile_id': 'local', 'workspace_id': 'home',

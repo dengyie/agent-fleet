@@ -83,6 +83,7 @@ if not self._authorized(owner_id):
 - [x] Explain that `session.read_events(wait_seconds=30)` waits for new events after `next_cursor`, and that an empty bounded wait leaves the remote work pending. Explain that `session.get_command` success proves application of the control, and actual completion must be verified from the session's later tool results and response.
 - [x] Update the fixed prompt to continue waiting on the same native session while it is busy; stop only when the requested output/follow-up is complete, the user cancels, or actual error evidence identifies a blocker.
 - [x] Assert the schema limits and immediate default, and exercise waiting through the VM main-assistant worker. Add the applicable new suite to Windows CI so the shared assistant contract remains portable.
+- [x] Keep the portable waiting tests on real session/transcript repositories. Run the VM Hub Worker integration on POSIX, where its existing private-storage permissions are supported.
 - [x] Run `python3 -m pytest tests/test_assistant_session_wait.py tests/test_assistant_vm_sessions.py tests/test_main_assistant_prompt.py tests/test_assistant_agent_tasks.py tests/test_session_model_takeover.py -q` plus repository Ruff and `git diff --check`.
 
 ## Task 3: Publish and Verify the Original Workflow
@@ -102,3 +103,7 @@ if not self._authorized(owner_id):
 ## Verification Checkpoints
 
 Baseline main-assistant/session tests passed: `42 passed in 2.60s` before implementation. The new suite first reported `6 failed, 7 passed`, covering the absent wait contract and authorization checks. After implementation and an additional VM-worker integration case, the relevant regression command passed all 91 tests in 9.36 seconds; repository Ruff and diff checks passed. Only fresh publication results and real online native output can complete the final checkpoint.
+
+The first PR CI (`44781253256`, head `0c34934`) passed Linux but reported `587 passed, 9 skipped, 13 errors` on Windows. All errors occurred in the imported full-Hub fixture before waiting ran: the existing Supervisor private store requires POSIX `os.getuid`. The read tests now construct real session/transcript repositories without starting that unrelated private store; only the full VM Hub Worker integration is POSIX-scoped. The affected local suite was rerun with `91 passed in 9.13s`, and Ruff/diff checks passed. The complete initial failure log remains in the verification evidence directory.
+
+The physical Windows host reran the new suite on an isolated verification source copy with the host's unrelated `automation-kit.tests` package excluded: `13 passed, 1 skipped in 3.04s`. The sole skip is the full POSIX Hub Worker integration, which remains active in Linux CI. The verification-copy preparation errors and successful output are all retained in separate evidence files.
