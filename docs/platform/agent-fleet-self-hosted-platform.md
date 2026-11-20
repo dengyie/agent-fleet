@@ -543,4 +543,6 @@ Transcript schema 2 adds an ingestion-order index and insert trigger without rew
 
 ### Persistent native session continuation
 
+The administrator main assistant can discover registered machine projects and observed Agent installations with `platform.admin_inspect` / `tasks.targets`, then start a native runner task with `platform.admin_mutate` / `tasks.create`. `tasks.get` returns its original result and bound `session_id` for subsequent `session.send_message` turns. This works across registered machines, including Windows, independently of the assistant's selected workspace. Queued admission is not execution evidence. See the [assistant Agent task plan](../superpowers/plans/2026-11-20-assistant-agent-tasks.md).
+
 Runner-managed Codex and Claude Code sessions now keep their native identity, working directory, explicit provider/model options and capture checkpoint for idle follow-up turns. ZCode desktop conversations bind by exact native session ID through the official extension bridge. See [ZCode bridge and continuation behavior](../../integrations/zcode/README.md) and the [continuation implementation plan](../superpowers/plans/2026-11-19-native-session-continuation.md). Node receipts and subsequent original-session events remain the delivery evidence; active CLI conversations cannot be concurrently resumed.

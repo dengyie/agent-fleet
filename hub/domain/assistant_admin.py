@@ -1,4 +1,6 @@
 """Fixed administration contracts; no user-selected methods or HTTP routes."""
+from hub.domain.task import DEFAULT_AGENT_TYPES, MAX_INSTRUCTION, TASK_STATES
+
 ADMIN_TOOLS = frozenset({'platform.get_system_info', 'platform.admin_inspect', 'platform.admin_mutate'})
 # Only errors proven to reject before a business mutation commits. Storage,
 # authorization and uncertain remote outcomes deliberately have no entry.
@@ -14,6 +16,8 @@ CORRECTABLE_MUTATION_ERRORS = {
     'memory.delete': frozenset({'revision_conflict'}),
     'schedules.update': frozenset({'revision_conflict'}),
     'workflows.control': frozenset({'revision_conflict'}),
+    'tasks.create': frozenset({'machine_offline', 'project_not_allowed', 'agent_unavailable',
+                              'invalid_machine', 'invalid_project', 'invalid_instruction'}),
 }
 TEXT = {'type': 'string', 'minLength': 1, 'maxLength': 2048}
 IDENTIFIER = {'type': 'string', 'minLength': 1, 'maxLength': 128}
@@ -82,6 +86,13 @@ OPERATIONS = {
     'adoption.adopt': operation('adoptions', True, required=('machine_id', 'pid', 'started_at'),
         machine_id=IDENTIFIER, pid={'type': 'integer', 'minimum': 1}, started_at=TEXT),
     'adoption.revoke': operation('adoptions', True, required=('session_id',), session_id=IDENTIFIER),
+    'tasks.targets': operation('tasks', required=('machine',), machine=IDENTIFIER),
+    'tasks.create': operation('tasks', True, required=('machine', 'project', 'agent_type', 'instruction'),
+        machine=IDENTIFIER, project=IDENTIFIER, agent_type={'enum': list(DEFAULT_AGENT_TYPES)},
+        instruction={'type': 'string', 'minLength': 1, 'maxLength': MAX_INSTRUCTION}),
+    'tasks.list': operation('tasks', machine=IDENTIFIER, state={'enum': list(TASK_STATES)}, limit=LIMIT),
+    'tasks.get': operation('tasks', required=('task_id',), task_id=IDENTIFIER),
+    'tasks.cancel': operation('tasks', True, required=('task_id',), task_id=IDENTIFIER),
     'workflows.templates': operation('workflows'),
     'workflows.list': operation('workflows', limit=LIMIT, cursor=TEXT),
     'workflows.detail': operation('workflows', required=('workflow_id',), workflow_id=IDENTIFIER),

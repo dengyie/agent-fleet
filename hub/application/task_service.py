@@ -32,6 +32,7 @@ from hub.domain.handoff import HandoffConflict
 from hub.domain.task import (
     DEFAULT_AGENT_TYPES,
     DomainError,
+    MACHINE_RE,
     TaskStopObservation,
     public_task,
     validate_task_input,
@@ -73,12 +74,16 @@ class TaskHostPolicy:
         self._hosts = list(hosts or ())
 
     def project_allowed(self, machine: str, project: str) -> bool:
+        return project in self.projects_for(machine)
+
+    def projects_for(self, machine: str) -> list[str]:
+        """Project identifiers only; runner paths stay on the target machine."""
         if self._whitelist is not None:
-            return project in (self._whitelist.get(machine) or [])
+            return list(self._whitelist.get(machine) or [])
         for host in self._hosts:
             if host.get("name") == machine:
-                return project in (host.get("projects") or [])
-        return False
+                return list(host.get("projects") or [])
+        return []
 
     def handoff_targets(self, project: str) -> list[dict[str, Any]]:
         """Registered same-project targets, bounded for the operator picker."""
@@ -117,22 +122,23 @@ class TaskService:
         return current if current and current.get("reachable", True) else None
 
     @staticmethod
-    def _agent_reported_unavailable(snapshot, agent_type: str) -> bool:
-        """最近一次上报明确表明该机没有 ``agent_type`` 时返回 True。
-
-        未知一律放行：快照没有 agents 字段/为空（旧探针或未采集），或该 agent
-        采集出错（``error``）。只有上报了 agents 但其中缺少该类型、或明确
-        ``installed: false`` 时才拒绝。
-        """
+    def _agent_installation(snapshot, agent_type: str) -> bool | None:
+        """Share installation evidence between discovery and task admission."""
         agents = snapshot.get("agents") if isinstance(snapshot, dict) else None
         if not isinstance(agents, dict) or not agents:
-            return False
+            return None
         state = agents.get(agent_type)
         if state is None:
-            return True
-        if not isinstance(state, dict) or state.get("error"):
             return False
-        return state.get("installed") is False
+        if not isinstance(state, dict) or state.get("error"):
+            return None
+        installed = state.get("installed")
+        return installed if type(installed) is bool else None
+
+    @classmethod
+    def _agent_reported_unavailable(cls, snapshot, agent_type: str) -> bool:
+        """Only explicit absence rejects dispatch; missing/error reports are unknown."""
+        return cls._agent_installation(snapshot, agent_type) is False
 
     def _emit(self, event: str, machine=None, task_id=None, state=None) -> None:
         # 提交后副作用：统一走 safe_emit（记日志、绝不抛出）。
@@ -202,6 +208,16 @@ class TaskService:
         return {"ok": True, "created": created, "task": self._public_task(task)}
 
     # -- read use cases ------------------------------------------------------
+
+    def targets(self, machine: str) -> dict:
+        """Discover dispatch policy and observed installation, not CLI health."""
+        if not isinstance(machine, str) or not MACHINE_RE.fullmatch(machine):
+            raise ApplicationError('invalid_machine', 'machine 名不合法', 400)
+        snapshot = self.observation_repo.read_current(machine)
+        return {'machine': machine, 'projects': self.hosts.projects_for(machine),
+                'observed_at': snapshot.get('timestamp') if snapshot else None,
+                'agents': {family: {'installed': self._agent_installation(snapshot, family)}
+                           for family in DEFAULT_AGENT_TYPES}}
 
     def get(self, task_id: str) -> dict:
         """Public detail of one task, with its result when available."""

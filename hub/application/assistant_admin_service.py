@@ -41,6 +41,7 @@ class AssistantAdminService:
     def _operations(self):
         return {key: spec for key, spec in OPERATIONS.items()
                 if (spec['service'] is None or self.services.get(spec['service']) is not None)
+                and (spec['service'] != 'tasks' or self.fleet['config'].tasks_enabled)
                 and (key not in {'mcp.register', 'mcp.discover'}
                      or self.services['mcp_catalog_admin'].registration_enabled)}
 
@@ -86,6 +87,11 @@ class AssistantAdminService:
                     'Plugin action names/parameters come from plugins.catalog and targets, not guessed shell commands.',
                     'Workflow input schemas and revisions come from workflows.templates; value excludes owner_id/client_token.',
                     'Memory/schedule creation gets a stable generated ID when omitted; retain it for subsequent reads.',
+                    'tasks.targets(machine) lists registered projects and observed Agent installations; '
+                    'fleet.list_machines reports reachability. tasks.create starts a NEW managed native Agent task; '
+                    'query tasks.get(task_id) until a real session_id and result exist. '
+                    'Use session.send_message for existing-session follow-ups, never recreate an uncertain task. '
+                    'Task identity and idempotency come from the Run. Cancellation does not undo completed effects.',
                 ]}
         # Stable per-Run-step tokens for existing durable admission APIs.
         key = 'assistant_' + hashlib.sha256((owner_id + '\0' + command_id).encode()).hexdigest()[:40]
@@ -103,12 +109,13 @@ class AssistantAdminService:
             from hub.application.workflow_operator import WorkflowOperatorError
             from hub.domain.workflow_errors import WorkflowValidationError
             from hub.domain.mcp_catalog import MCPCatalogError
+            from hub.domain.task import DomainError
             from hub.infrastructure.platform_db_base import PlatformRepositoryError
             from platform_schema import PlatformValidationError
             from fleet_core.plugins import PluginError
             if isinstance(exc, (AdoptionServiceError, PlatformScheduleError, WorkflowOperatorError,
                                 WorkflowValidationError, MCPCatalogError, PlatformRepositoryError,
-                                PlatformValidationError, PluginError)):
+                                PlatformValidationError, PluginError, DomainError)):
                 raise ApplicationError(exc.code, exc.code, 400) from exc
             raise
 
@@ -229,6 +236,16 @@ class AssistantAdminService:
         if name == 'adoption.revoke':
             s['adoptions'].revoke(p['session_id'], owner)
             return {'revoked': True, 'session_id': p['session_id']}
+        if name == 'tasks.targets':
+            return s['tasks'].targets(p['machine'])
+        if name == 'tasks.create':
+            return s['tasks'].create({**p, 'client_token': key}, owner)
+        if name == 'tasks.list':
+            return s['tasks'].list(**p)
+        if name == 'tasks.get':
+            return s['tasks'].get(p['task_id'])
+        if name == 'tasks.cancel':
+            return s['tasks'].cancel(p['task_id'], owner)
         if name.startswith('workflows.'):
             return self._workflow(name, p, owner, key)
         if name.startswith('mcp.'):
