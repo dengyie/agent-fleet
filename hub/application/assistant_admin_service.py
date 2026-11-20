@@ -89,7 +89,9 @@ class AssistantAdminService:
                     'Memory/schedule creation gets a stable generated ID when omitted; retain it for subsequent reads.',
                     'tasks.targets(machine) lists registered projects and observed Agent installations; '
                     'fleet.list_machines reports reachability. tasks.create starts a NEW managed native Agent task; '
-                    'query tasks.get(task_id) until a real session_id and result exist. '
+                    'query tasks.get(task_id, wait_seconds=30) until a real session_id and result exist. '
+                    'Each read can wait for a state change; unchanged pending state is not a task deadline or blocker. '
+                    'Continue querying the original task; do not execute sleep in a workspace or finish solely because it is queued. '
                     'Use session.send_message for existing-session follow-ups, never recreate an uncertain task. '
                     'Task identity and idempotency come from the Run. Cancellation does not undo completed effects.',
                 ]}
@@ -243,7 +245,7 @@ class AssistantAdminService:
         if name == 'tasks.list':
             return s['tasks'].list(**p)
         if name == 'tasks.get':
-            return s['tasks'].get(p['task_id'])
+            return s['tasks'].get(**p)
         if name == 'tasks.cancel':
             return s['tasks'].cancel(p['task_id'], owner)
         if name.startswith('workflows.'):

@@ -563,7 +563,7 @@ class TaskServiceTests(unittest.TestCase):
                      "attempt_id": "att-bound"}
 
         class FakeSessionRepo:
-            def list_sessions(self, machine_id=None, limit=1000):
+            def sessions_for_attempts(self, machine_id, attempt_ids):
                 return [{
                     "session_id": "sess_bound_1",
                     "machine_id": machine_id,
@@ -585,7 +585,7 @@ class TaskServiceTests(unittest.TestCase):
                      "attempt_id": "att-other"}
 
         class FakeSessionRepo:
-            def list_sessions(self, machine_id=None, limit=1000):
+            def sessions_for_attempts(self, machine_id, attempt_ids):
                 return [{
                     "session_id": "sess_bound_1",
                     "machine_id": machine_id,

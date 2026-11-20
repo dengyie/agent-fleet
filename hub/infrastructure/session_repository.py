@@ -170,6 +170,8 @@ class SessionRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_sessions_machine
                     ON sessions(machine_id);
+                CREATE INDEX IF NOT EXISTS idx_sessions_machine_attempt
+                    ON sessions(machine_id, attempt_id);
                 """
             )
             # v2 remains required by legacy ingestion; v3 is an optional read model.
@@ -572,6 +574,20 @@ class SessionRepository:
             conn.close()
         cleaned = self._clean_row(row)
         return cleaned if cleaned else None
+
+    def sessions_for_attempts(self, machine_id: str, attempt_ids: list[str]) -> list[dict[str, Any]]:
+        """Resolve actual task bindings independently of a bounded archive list."""
+        if not attempt_ids:
+            return []
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                'SELECT * FROM sessions WHERE machine_id=? AND attempt_id IN (' +
+                ','.join('?' for _ in attempt_ids) + ') ORDER BY started_at DESC',
+                [machine_id, *attempt_ids]).fetchall()
+            return [self._clean_row(row) for row in rows]
+        finally:
+            conn.close()
 
     def list_sessions(
         self, machine_id: str | None = None, limit: int = 100,

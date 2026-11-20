@@ -105,6 +105,34 @@ def test_cancel_queued_task_prevents_runner_execution(app):
     assert app.extensions['fleet']['services']['runner'].poll('win-local', 'runner')['task'] is None
 
 
+def test_wait_observes_original_task_progress_without_another_dispatch(app, monkeypatch):
+    from hub.application import task_service
+    task = create(app)['task']
+    def progress(_):
+        app.extensions['fleet']['services']['runner'].poll('win-local', 'runner')
+    monkeypatch.setattr(task_service.time, 'sleep', progress)
+    observed = call(app, 'tasks.get', {'task_id': task['task_id'], 'wait_seconds': 30})['task']
+    assert observed['state'] == 'leased' and observed['task_id'] == task['task_id']
+    assert len(call(app, 'tasks.list')['tasks']) == 1
+
+
+def test_task_binding_is_not_lost_behind_a_large_native_archive(app):
+    services = app.extensions['fleet']['services']
+    task = create(app)['task']
+    leased = services['runner'].poll('win-local', 'runner')['task']
+    from tests.test_session_interactions import event
+    events = []
+    for i in range(1002):
+        row = event(1, 'session_start', {'agent_family': 'codex', 'adapter': 'hooks'})
+        row.update(session_id=f'archive_{i}', stream_id=f'stream_{i}', event_id=f'event_{i}',
+                   machine_id='win-local', attempt_id=leased['attempt_id'] if i == 0 else f'archive_{i}',
+                   emitted_at='2020-01-01T00:00:00Z' if i == 0 else '2026-01-01T00:00:00Z')
+        events.append(row)
+    for row in events:
+        services['sessions'].ingest_events([row])
+    assert call(app, 'tasks.get', {'task_id': task['task_id']})['task']['session_id'] == 'archive_0'
+
+
 def test_disabled_task_feature_hides_operations_and_rejects_execution(tmp_path):
     app = create_app(FleetConfig.from_root(tmp_path, dev_operator=OWNER,
         platform_enabled=True, platform_worker_enabled=True, tasks_enabled=False))

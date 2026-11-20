@@ -17,7 +17,8 @@ ADMIN_TOOL_DEFINITIONS = (
           ('platform.admin_inspect', False,
            'Inspect project management resources. First call operation=capabilities (payload={}) for available operation schemas. '
            'Then use settings catalog/runtime/hosts, plugins, usage, commands, adoption, tasks, memory, schedules, workflows or MCP reads. '
-           'tasks.targets discovers registered projects/Agent types on a machine; tasks.get follows the original task and its session_id. '
+           'tasks.targets discovers registered projects/Agent types on a machine; tasks.get with wait_seconds=30 '
+           'waits for original task progress without workspace sleep commands. Keep following pending tasks until completion or a real blocker. '
            'Only enabled services are callable; settings.catalog is paginated with next_offset.'),
           ('platform.admin_mutate', True,
            'Administer the project using an enabled operation from platform.admin_inspect capabilities. '

@@ -57,10 +57,6 @@ TASK_STATES = (
     "succeeded", "failed", "cancelled", "expired",
 )
 
-#: Bounded scan when projecting attempt_id → session_id (same cap as ControlRouter).
-_SESSION_SCAN = 1000
-
-
 class TaskHostPolicy:
     """Deployment policy for the task project whitelist.
 
@@ -219,11 +215,23 @@ class TaskService:
                 'agents': {family: {'installed': self._agent_installation(snapshot, family)}
                            for family in DEFAULT_AGENT_TYPES}}
 
-    def get(self, task_id: str) -> dict:
+    def get(self, task_id: str, *, wait_seconds: int = 0) -> dict:
         """Public detail of one task, with its result when available."""
+        if type(wait_seconds) is not int or not 0 <= wait_seconds <= 30:
+            raise ApplicationError('invalid_arguments', 'wait_seconds 必须在 0 到 30 秒之间', 400)
         task = self._task_op(self.task_repo.get_task, task_id)
         if not task:
             raise ApplicationError("not_found", "任务不存在", 404)
+        state = task['state']
+        deadline = time.monotonic() + wait_seconds
+        while state in {'queued', 'leased', 'running'} and task['state'] == state:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.5, remaining))
+            task = self._task_op(self.task_repo.get_task, task_id)
+            if not task:
+                raise ApplicationError('not_found', '任务不存在', 404)
         return {"ok": True, "task": self._public_task(task, with_result=True)}
 
     def list(self, machine=None, state=None, limit=50) -> dict:
@@ -443,24 +451,22 @@ class TaskService:
         """Map (machine, attempt_id) → session_id from existing session rows.
 
         Fail-closed: missing repo, scan errors, or invalid ids omit the field.
-        Does not create, write, or invent bindings. One bounded list per machine.
+        Does not create, write, or invent bindings. One exact lookup per machine.
         """
         index: dict[tuple, str] = {}
         if self.session_repo is None:
             return index
-        machines: list[str] = []
-        seen: set[str] = set()
+        machines: dict[str, set[str]] = {}
         for task in tasks:
             if not isinstance(task, Mapping):
                 continue
             machine = task.get("machine")
-            if isinstance(machine, str) and machine and machine not in seen:
-                seen.add(machine)
-                machines.append(machine)
-        for machine in machines:
+            attempt = task.get('attempt_id')
+            if isinstance(machine, str) and machine and isinstance(attempt, str) and attempt:
+                machines.setdefault(machine, set()).add(attempt)
+        for machine, attempts in machines.items():
             try:
-                rows = self.session_repo.list_sessions(
-                    machine_id=machine, limit=_SESSION_SCAN)
+                rows = self.session_repo.sessions_for_attempts(machine, sorted(attempts))
             except (TypeError, ValueError, RuntimeError):
                 continue
             if not isinstance(rows, list):

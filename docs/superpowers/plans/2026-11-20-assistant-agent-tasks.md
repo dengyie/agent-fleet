@@ -27,3 +27,18 @@
 ## Local verification
 
 The new behavioral suite first reported 11 failures and 2 passes against the absent operations. After implementation and boundary checks, 332 affected tests passed, including both native Agent task lifecycles, idempotent dispatch, installed/unknown evidence, task feature gates, project policy, cancellation, cross-workspace routing and existing session/model behavior. Repository Ruff and diff checks passed. Production acceptance will be recorded in the release PR and canonical operations note after deployment.
+
+## Production acceptance findings and follow-up
+
+PR97 deployed as `f67f94f`. Full PR and main both passed 8380 tests, 204 subtests, 47 journeys and 2830 selectors; Windows 563 passed with 9 expected skips. Physical Windows new-tool tests: 18 passed. The main assistant created exactly one Codex task and one Claude Code task from its original VM workspace.
+
+Real tool-use acceptance exposed existing failures that prevent declaring the workflow complete:
+
+- Windows retained 2170 capture records; historical pending uploads filled 134217325 of the shared 134217728 bytes. New task capture failed with `source_record_not_persisted`, so the native session was absent from Hub despite actual task execution.
+- The runner replayed all historical captures synchronously before each task poll. Network failures multiplied the delay. Move replay to its own transport/thread and keep task polling independent; retain the existing spool writer locks.
+- Task-to-session projection scanned only the newest 1000 sessions. An exact machine/attempt lookup and index resolve existing task bindings regardless of archive size.
+- The main assistant attempted workspace `sleep` while waiting or ended at queued. Add bounded long polling to `tasks.get(wait_seconds=30)` and explicitly continue the original task; this bounds one read, not task execution time.
+- Codex's Windows elevated sandbox returned `timed out ... runner pipe-in` when used by the S4U service. Verify task-scoped direct execution settings on the existing dedicated test conversation before updating the runner-only configuration; do not change user-wide Codex settings.
+- Claude's original upstream still returned HTTP503. Once the exact session is readable, use the already implemented catalog takeover for that original session.
+
+Follow-up regression reproduced all three capture/poll failures and the 1000-session mapping failure before their fixes. After moving replay, reserving 64 MiB for live captures above the archive's 128 MiB cap, closing failed capture initialization and adding exact lookup/long polling, 432 tests and 3 subtests passed. No retained transcripts were deleted. The initial live attempts remain evidence and must not be reported as successful tool-use acceptance.
