@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 
 from session_schema import is_valid_session_id
 from hub.repositories import MACHINE_NAME_RE
@@ -88,7 +89,7 @@ class AgentSessionService:
             'fleet.list_machines': ({'offset', 'limit'}, set()),
             'session.list': ({'machine_id', 'active', 'limit'}, set()),
             'session.get': ({'session_id'}, {'session_id'}),
-            'session.read_events': ({'session_id', 'limit', 'after_cursor', 'include_source'}, {'session_id'}),
+            'session.read_events': ({'session_id', 'limit', 'after_cursor', 'include_source', 'wait_seconds'}, {'session_id'}),
             'session.send_message': ({'session_id', 'text'}, {'session_id', 'text'}),
             'session.control': ({'session_id', 'action', 'profile_id'}, {'session_id', 'action'}),
             'session.get_command': ({'session_id', 'command_id'}, {'session_id', 'command_id'}),
@@ -156,8 +157,19 @@ class AgentSessionService:
             include_source = args.get('include_source', False)
             if type(include_source) is not bool:
                 _invalid()
-            page = self.sessions.session_events(session_id, limit=limit, after_cursor=int(after),
-                                                include_source=include_source)
+            wait_seconds = _integer(args.get('wait_seconds', 0), 0, 30)
+            deadline = time.monotonic() + wait_seconds
+            while True:
+                if not self._authorized(owner_id):
+                    raise ApplicationError('forbidden', 'forbidden', 403)
+                page = self.sessions.session_events(session_id, limit=limit, after_cursor=int(after),
+                                                    include_source=include_source)
+                remaining = deadline - time.monotonic()
+                if page['events'] or remaining <= 0:
+                    break
+                time.sleep(min(0.1, remaining))
+            if not self._authorized(owner_id):
+                raise ApplicationError('forbidden', 'forbidden', 403)
             rows = page['events']
             events, size = [], 0
             for row in rows:
