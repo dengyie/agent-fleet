@@ -1,6 +1,7 @@
 """Native launch directory and accepted task replay through real Hub/SQLite."""
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from pathlib import Path
 import sqlite3
 from threading import Barrier
 
@@ -17,6 +18,26 @@ SUBMISSION = {
     "machine": "mac-local", "agent_type": "codex", "project": "agent-fleet",
     "instruction": "保留原生身份，检查测试。", "client_token": "native-web-acceptance",
 }
+
+
+def test_runtime_gate_file_uses_utf8_on_windows_code_pages(tmp_path, monkeypatch):
+    from hub import web
+
+    gate = tmp_path / web._FEATURE_GATE_FILE
+    key = "AGENT_FLEET_SESSION_REPOSITORIES_ENABLED"
+    gate.write_text(f"# 原生会话开关\n{key}=1\n", encoding="utf-8")
+    monkeypatch.setattr(web, "FLEET_HOME", tmp_path)
+    monkeypatch.delenv(key, raising=False)
+    read_text = Path.read_text
+
+    def windows_read_text(path, encoding=None, errors=None, **kwargs):
+        if path == gate and encoding is None:
+            encoding = "cp1252"
+        return read_text(path, encoding=encoding, errors=errors, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", windows_read_text)
+    assert web._gate_conf_text(key) == "1"
+    assert web._feature_on(None, env=key) is True
 
 
 @pytest.fixture

@@ -124,7 +124,7 @@ def _gate_conf_text(env: str) -> str:
     ``#``/``;``-commentable and ``KEY=VALUE``-split on the first ``=``.
     """
     try:
-        raw = (FLEET_HOME / _FEATURE_GATE_FILE).read_text()
+        raw = (FLEET_HOME / _FEATURE_GATE_FILE).read_text(encoding="utf-8")
     except OSError:
         return ""
     for line in raw.splitlines():

@@ -74,3 +74,4 @@ Before implementation: `tests/test_task_api.py tests/test_task_store.py tests/te
 - Extended task/database/Workflow coordinator/capability batch, including original bound-session recovery: **155 passed**. Batches overlap and are not added into a total.
 - Python lint, changed-module compilation, UTF-8/no-BOM and diff checks passed.
 - Review preserved specialized handoff conflicts, original gate decisions, internal origin ownership and cancellation fences. No schema migration, new dependencies, frontend changes or node client changes.
+- Initial PR Windows CI exposed a pre-existing startup defect: `fleet-gates.conf` was decoded with the Windows locale rather than UTF-8, so Chinese comments prevented Hub initialization (48 setup errors). A deterministic cp1252 regression reproduced the same failure locally before the one-line UTF-8 read-boundary fix. The regression runs in all three OS jobs; the failed CI and red-test logs remain retained.
