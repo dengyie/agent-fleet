@@ -16,6 +16,10 @@
 
 ---
 
+## 最新更新
+
+2026-11-21：Agent 会话准入、原生续聊、采集与前端控制各自分层；已验证的 Hermes Runner 会话可以从会话页续聊。查看 [Agent 分层架构](docs/agent-capability-architecture.md) 与 [发布说明](docs/releases/release-notes.md)。
+
 ## 为什么选择 Agent Fleet？
 
 当你在多台开发机、VPS、云服务器上跑各类 AI Coding Agent（如 Claude Code、Codex CLI、Hermes、ZCode 等）时，通常面临三大痛点：
@@ -163,6 +167,7 @@ main 在测试、前后端打包通过后进入[自动部署](deploy/auto-deploy
 
 - [ZCode 桌面会话桥](integrations/zcode/README.md) — 向已有桌面会话发送消息并核对原命令回执。
 
+- [Agent 能力分层与扩展指南](docs/agent-capability-architecture.md)
 - [系统架构详解 (Architecture v3)](docs/architecture-v3.md)
 - [受控开发链路设计 (Control Plane v4)](docs/architecture-v4-control-plane.md)
 - [可视化架构与状态机 (Visual Architecture)](docs/visual-architecture.md)

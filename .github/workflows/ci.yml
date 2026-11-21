@@ -136,6 +136,7 @@ jobs:
           tests/test_agent_command.py tests/test_cross_platform_agents.py
           tests/test_native_agent_storage.py tests/test_hermes_workspace.py
           tests/test_hermes_installation.py tests/test_agent_profiles.py
+          tests/test_agent_capability_layers.py
           tests/test_native_continuation.py tests/test_runner_config.py
           tests/test_session_bridge.py
           --basetemp=C:/fleet-tests
@@ -167,6 +168,7 @@ jobs:
           python -m pytest tests/test_agent_command.py tests/test_cross_platform_agents.py
           tests/test_native_agent_storage.py tests/test_hermes_workspace.py
           tests/test_hermes_installation.py tests/test_agent_profiles.py
+          tests/test_agent_capability_layers.py
           tests/test_native_continuation.py tests/test_runner_conversation.py
           tests/test_runner_config.py tests/test_review_runner_spawn.py
           tests/test_session_bridge.py tests/test_session_probe.py

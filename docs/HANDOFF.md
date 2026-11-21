@@ -1,5 +1,7 @@
 # agent-fleet — 项目交接与权威现状（2026-08-17）
 
+> Agent 执行、续聊、存储接口与前端能力契约的代码分工见 [Agent 分层架构](agent-capability-architecture.md)。
+
 > 本文档是 push-only 架构的唯一交接入口。HK hub 只接收上报，不反向连接任何机器。
 
 ## 一、项目一句话

@@ -1,7 +1,10 @@
 """Explicit native Agent model protocols and bounded private delivery contract."""
 from urllib.parse import urlsplit
 
-AGENT_PROTOCOLS = {'claude_code': 'anthropic', 'codex': 'responses'}
+from agent_profiles import PROFILES
+
+AGENT_PROTOCOLS = {family: profile.model_protocol for family, profile in PROFILES.items()
+                   if profile.model_protocol is not None}
 
 
 def valid_base_url(value):

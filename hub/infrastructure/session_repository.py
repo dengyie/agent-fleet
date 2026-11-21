@@ -22,6 +22,8 @@ Design rules enforced here:
 
 from __future__ import annotations
 
+from hub.domain.session_ports import SessionError  # compatibility exports
+
 import json
 import sqlite3
 from collections.abc import Mapping
@@ -53,21 +55,6 @@ _QUALITY_RANK = {
     "structured": 1,
     "best_effort": 2,
 }
-
-
-class SessionError(RuntimeError):
-    """Bounded session repository error: only a stable short code is exposed.
-
-    ``str(err)`` and ``code`` carry the bounded code only - never paths,
-    exception text, raw input, or key material.
-    """
-
-    def __init__(self, code: str):
-        self.code = code
-        super().__init__(code)
-
-    def __str__(self) -> str:
-        return self.code
 
 
 def _now_iso() -> str:

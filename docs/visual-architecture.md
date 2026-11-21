@@ -1,5 +1,7 @@
 # Agent Fleet visual architecture
 
+See [Agent capability layers](agent-capability-architecture.md) for native Agent execution, access policy, storage ports and browser contracts.
+
 This document is the visual companion to
 [Architecture v3](architecture-v3.md),
 [Control Plane v4](architecture-v4-control-plane.md), and the

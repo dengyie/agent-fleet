@@ -1,5 +1,7 @@
 # macOS / Windows Agent 适配验收
 
+开发边界与扩展入口见 [Agent 分层架构](../agent-capability-architecture.md)。
+
 本矩阵将本地执行、原生会话续聊、桌面桥和模型接管分别验证。`generic` 仅观察，不提供通用执行或桌面点击能力。
 
 ## 能力与安装边界

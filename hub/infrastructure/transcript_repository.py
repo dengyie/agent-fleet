@@ -44,10 +44,11 @@ Design rules enforced here (from the Task 5 brief and tests):
 
 from __future__ import annotations
 
+from hub.domain.session_ports import TranscriptError, IngestResult  # compatibility exports
+
 import json
 import sqlite3
 from collections.abc import Mapping
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -76,43 +77,6 @@ _AUDIT_RAW_READ = "raw_read"
 _AUDIT_RAW_PURGE = "raw_purge"
 
 _RAW_AD_PREFIX = b"fleet-transcript-raw-v1"
-
-
-class TranscriptError(RuntimeError):
-    """Bounded transcript repository error: only a stable short code.
-
-    ``str(err)`` and ``code`` carry the bounded code only - never paths,
-    exception text, raw input, or key material.
-    """
-
-    def __init__(self, code: str):
-        self.code = code
-        super().__init__(code)
-
-    def __str__(self) -> str:
-        return self.code
-
-
-@dataclass(frozen=True)
-class IngestResult:
-    """Result of a single :meth:`TranscriptRepository.ingest` call.
-
-    Fields are JSON-safe and carry no paths, exception text, or raw payloads:
-
-    - ``status`` - ``accepted`` | ``duplicate`` | ``rejected`` | ``gap``
-    - ``event_id`` - the event identifier (or ``None``)
-    - ``reason``  - a stable bounded code, or ``None`` on a clean accept
-    - ``raw_written`` - whether the raw encrypted row was written
-    """
-
-    status: str
-    event_id: str | None = None
-    reason: str | None = None
-    raw_written: bool = False
-
-    @property
-    def accepted(self) -> bool:
-        return self.status == "accepted"
 
 
 def _now_iso() -> str:

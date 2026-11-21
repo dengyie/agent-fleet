@@ -101,19 +101,15 @@ class AdoptionPhase2ViewTests(unittest.TestCase):
         self.assertIn('started_at', adopt)
 
 
-_CONTROL_START = '/* --- 源控制'
-_CONTROL_END = '/* --- 源控制区结束'
+SOURCE_CONTROL_JS = MACHINE_JS.parent.parent / 'ui/source-control.js'
 
 
 def _source_control_block():
-    source = MACHINE_JS.read_text()
-    begin = source.index(_CONTROL_START)
-    end = source.index(_CONTROL_END, begin)
-    return source[begin:end] + '\n'
+    return SOURCE_CONTROL_JS.read_text()
 
 
 class SourceControlViewTests(unittest.TestCase):
-    """machine.js 的受控源控制区（Task 10）：固定令牌 / DOM-safe / 无文本接口。
+    """共享 UI 的受控源控制区（Task 10）：固定令牌 / DOM-safe / 无文本接口。
 
     The source-control section renders from a fixed five-token allowlist only,
     communicates status through a bounded whitelist map, and wires every click
@@ -122,7 +118,7 @@ class SourceControlViewTests(unittest.TestCase):
     """
 
     def test_source_control_has_fixed_five_action_tokens(self):
-        source = MACHINE_JS.read_text()
+        source = SOURCE_CONTROL_JS.read_text()
         self.assertIn('SOURCE_ACTIONS_LABELS', source)
         begin = source.index('var SOURCE_ACTIONS_LABELS = {')
         end = source.index('};', begin)
@@ -132,11 +128,13 @@ class SourceControlViewTests(unittest.TestCase):
             self.assertIn(token, labels, f'action token {token} 缺失')
 
     def test_source_control_renderer_exported_and_wired(self):
-        source = MACHINE_JS.read_text()
+        source = SOURCE_CONTROL_JS.read_text()
         self.assertIn(
             'export function renderSourceControl(source, actions, onAction)',
             source, 'renderSourceControl 未导出')
-        self.assertIn('renderSourceControl(', source, '未挂载 renderSourceControl')
+        machine = MACHINE_JS.read_text()
+        self.assertIn("export { renderSourceControl } from '../ui/source-control.js'", machine)
+        self.assertIn('renderSourceControl(', machine, '未挂载 renderSourceControl')
 
     def test_source_control_empty_state_composes_without_adoption(self):
         source = MACHINE_JS.read_text()
@@ -162,7 +160,7 @@ class SourceControlViewTests(unittest.TestCase):
             self.assertNotIn(leaked, block, f'源控制区引入了 {leaked}')
 
     def test_source_control_status_whitelist_map(self):
-        source = MACHINE_JS.read_text()
+        source = SOURCE_CONTROL_JS.read_text()
         self.assertIn('SOURCE_STATUS_CLASSES', source)
         begin = source.index('var SOURCE_STATUS_CLASSES = {')
         end = source.index('};', begin)

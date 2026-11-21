@@ -18,6 +18,8 @@
 
 ## 最新更新
 
+2026-11-21：Agent 能力、会话准入、CLI 续接及采集已拆分为独立层，前端统一依据公开能力契约展示续聊。开发扩展见 [Agent 分层架构](docs/agent-capability-architecture.md)。
+
 2026-11-21：补齐 Windows / macOS 的 Agent 原生命令、结构化采集和同会话续聊适配，新增 macOS CI 与双端工具证据测试。能力边界及安装状态见 [Agent 验收矩阵](docs/testing/agent-platform-acceptance.md)，完整历史见 [Release Notes](docs/releases/release-notes.md)。
 
 ## Why Agent Fleet?
@@ -160,6 +162,7 @@ The **Muse** workspace (`/muse`) connects native Muse sessions directly without 
 
 - [ZCode desktop conversation bridge](integrations/zcode/README.md) — send to an existing desktop session and observe its original command receipt.
 
+- [Agent Capability Layers & Extension Guide](docs/agent-capability-architecture.md)
 - [Architecture Specification v3](docs/architecture-v3.md)
 - [Control Plane Specification v4](docs/architecture-v4-control-plane.md)
 - [Visual Architecture & State Machine](docs/visual-architecture.md)

@@ -11,6 +11,7 @@ import json
 import logging
 import time
 
+from agent_profiles import canonical_family
 from session_schema import is_valid_session_id
 from hub.repositories import MACHINE_NAME_RE
 from hub.application.errors import ApplicationError
@@ -136,8 +137,7 @@ class AgentSessionService:
             return self.models.list_models(owner_id, session)
         if tool == 'session.list_profiles':
             machine = self.observe.machine_detail(session['machine_id'])
-            family = session.get('agent_family')
-            family = 'claude_code' if family == 'claude' else family
+            family = canonical_family(session.get('agent_family'))
             return {'machine_id': session['machine_id'],
                     'profiles': [p for p in machine.get('current', {}).get('local_profiles', []) if p['family'] == family],
                     'purpose': 'local_provider_selection_not_capture'}
