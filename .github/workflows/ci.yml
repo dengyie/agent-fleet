@@ -186,6 +186,8 @@ jobs:
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      FRONTEND_ORIGIN: ${{ vars.FRONTEND_ORIGIN }}
     environment: production
     concurrency:
       group: agent-fleet-production
@@ -221,6 +223,7 @@ jobs:
       - name: Validate and bundle this run's artifacts
         if: steps.current.outputs.deploy == 'true'
         run: |
+          : "${FRONTEND_ORIGIN:?Configure repository variable FRONTEND_ORIGIN}"
           python3 deploy/auto_deploy_ssh.py bundle \
             --backend "release/backend/agent-fleet-release-$GITHUB_SHA.tgz" \
             --frontend release/frontend --output "$RUNNER_TEMP/fleet-deploy.tgz" \
@@ -249,11 +252,20 @@ jobs:
             -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=40 \
             "$DEPLOY_USER@$DEPLOY_HOST" "deploy $GITHUB_SHA $GITHUB_RUN_ID $digest $size" \
             < "$RUNNER_TEMP/fleet-deploy.tgz" | tee "$RUNNER_TEMP/deployment.json"
+      - name: Verify public frontend resources
+        if: steps.current.outputs.deploy == 'true'
+        run: |
+          set -euo pipefail
+          python3 deploy/verify_frontend_release.py \
+            --release release/frontend --version "$GITHUB_SHA" \
+            --origin "$FRONTEND_ORIGIN" | tee "$RUNNER_TEMP/frontend-verification.json"
       - name: Preserve deployment result
         if: always() && steps.current.outputs.deploy == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: agent-fleet-deployment
-          path: ${{ runner.temp }}/deployment.json
+          path: |
+            ${{ runner.temp }}/deployment.json
+            ${{ runner.temp }}/frontend-verification.json
           retention-days: 14
           if-no-files-found: warn

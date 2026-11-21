@@ -7,7 +7,10 @@ import json
 import os
 import shutil
 import subprocess
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -139,3 +142,82 @@ def test_script_does_not_leak_ifs_or_repeat_set_flags():
     assert source.count('set -euo pipefail') == 1
     assert '\nset -eu\n' not in source
     assert 'LC_ALL=C sort' in source
+
+
+@pytest.mark.parametrize('versioned', [False, True])
+def test_browser_upgrade_with_fresh_old_asset_cache(tmp_path, versioned):
+    if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
+        pytest.skip('Set FLEET_PLAYWRIGHT_MODULE to run Chromium acceptance')
+    releases = []
+    for version, width in [('old', 101), ('new', 202)]:
+        src = tmp_path / version / 'src'
+        assets = src / 'assets'
+        assets.mkdir(parents=True)
+        (src / 'index.html').write_text(
+            '<link rel="stylesheet" href="/assets/app.css">'
+            '<div id="probe"></div><script type="module" src="/assets/app.js"></script>',
+            encoding='utf-8')
+        (assets / 'app.js').write_text(
+            "import {value} from './named.js'; import './side-effect.js';"
+            "const dynamic = await import('./dynamic.js');"
+            f"window.cacheProbe = {{entry:'{version}',named:value,side:window.side,dynamic:dynamic.value}};",
+            encoding='utf-8')
+        (assets / 'named.js').write_text(f"export const value = '{version}';", encoding='utf-8')
+        (assets / 'side-effect.js').write_text(f"window.side = '{version}';", encoding='utf-8')
+        (assets / 'dynamic.js').write_text(f"export const value = '{version}';", encoding='utf-8')
+        (assets / 'app.css').write_text("@import url('./nested.css');", encoding='utf-8')
+        (assets / 'nested.css').write_text(f'#probe {{width:{width}px}}', encoding='utf-8')
+        if versioned:
+            out = tmp_path / version / 'release'
+            result = _package(src, out, {}, version=version)
+            assert result.returncode == 0, result.stderr
+            releases.append(out)
+        else:
+            releases.append(src)
+        # http.server's validator is second-granularity mtime (no ETag).
+        # Distinguish same-sized documents built within one test second so its
+        # HTML revalidation does not incorrectly return 304 for the new release.
+        os.utime(releases[-1] / 'index.html', (1_700_000_000 + width, 1_700_000_000 + width))
+
+    current = [0]
+    hits = []
+
+    class Handler(SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(releases[current[0]]), **kwargs)
+
+        def do_GET(self):
+            hits.append(self.path)
+            super().do_GET()
+
+        def do_POST(self):
+            assert self.path == '/_fixture/deploy'
+            current[0] = 1
+            self.send_response(204)
+            self.end_headers()
+
+        def end_headers(self):
+            self.send_header('Cache-Control', 'max-age=14400' if '/assets/' in self.path else 'no-cache')
+            super().end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = subprocess.run([
+            'node', str(REPO_ROOT / 'tests/fixtures/frontend/cache_upgrade_browser.cjs'),
+            f'http://127.0.0.1:{server.server_port}', 'new' if versioned else 'old',
+        ], capture_output=True, text=True, timeout=45)
+        assert result.returncode == 0, result.stdout + result.stderr
+        # Prove the unversioned control really reused its 4-hour cache and the
+        # fix fetched every dependency, rather than accidentally disabling cache.
+        for name in ('app.js', 'named.js', 'side-effect.js', 'dynamic.js', 'app.css', 'nested.css'):
+            matches = [hit for hit in hits if urlsplit(hit).path == '/assets/' + name]
+            assert len(matches) == (2 if versioned else 1), (name, matches)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
