@@ -2,6 +2,9 @@
 
 ### 2026-11-21
 
+- 将 Agent 能力定义、Hub 会话准入策略、存储接口、节点续接语法及原生事件规范化拆成独立层；保留原有导入入口、会话身份与签名命令协议，便于新增 Agent 和替换实现。
+- 前端完整解析公开的消息投递和采集来源契约，共享源控制组件；修复已验证 Hermes Runner 会话被页面隐藏续聊输入的问题，补充双端架构门禁与手机/桌面浏览器回归。
+
 - 补齐 macOS / Windows Agent 原生命令解析：Windows 已知 npm 安装优先使用原生 exe / Node 脚本，保留 Unicode 与带引号指令，避免批处理转义。
 - Pi 使用非交互 JSON 采集与精确会话续聊；ZCode、Hermes 从验证过 ID 和 cwd 的原生 SQLite 读取真实消息及工具，续聊保留脚本和本机 provider 参数。Hermes 工具工作目录隔离到任务配置；技能缓存目录不再误报为安装。
 - 增加 macOS Agent CI、扩展 Windows 回归与真实子进程到 Hub 的工具证据测试；模型目录接管仍限定 Codex / Claude Code，未安装的 Windows Hermes 明确不可用。

@@ -41,6 +41,9 @@ class Profile:
     # tools.session.probe keys families by CLI name; set only where that key
     # differs from ``family`` (claude_code is probed as ``claude``).
     probe_family: str | None = None
+    # Declarative support only: runtime identity and admission still prove use.
+    runner_resume_only: bool = False
+    model_protocol: str | None = None
 
 
 PROFILES: dict[str, Profile] = {
@@ -51,13 +54,13 @@ PROFILES: dict[str, Profile] = {
         "--json", "{instruction}"),
         basenames=("codex", "codex-cli", "codex.js"),
         native_session_root="~/.codex/sessions", native_session_depth=3,
-        native_resume=True, resume_verifiable=True),
+        native_resume=True, resume_verifiable=True, model_protocol="responses"),
     "claude_code": Profile("claude_code", ("claude", "-p", "--verbose",
         "--output-format", "stream-json", "{instruction}"),
         basenames=("claude",),
         native_session_root="~/.claude/projects", native_session_depth=2,
-        native_resume=True, resume_verifiable=True, probe_family="claude"),
-    "hermes": Profile("hermes", None, basenames=("hermes",), native_resume=True),
+        native_resume=True, resume_verifiable=True, probe_family="claude", model_protocol="anthropic"),
+    "hermes": Profile("hermes", None, basenames=("hermes",), native_resume=True, runner_resume_only=True),
     "pi": Profile("pi", ("pi", "--print", "--mode", "json", "{instruction}"),
         basenames=("pi",),
         native_session_root="~/.pi/agent/sessions",
@@ -71,7 +74,7 @@ PROFILES: dict[str, Profile] = {
     "zcode": Profile("zcode", ("zcode", "--json", "-p", "{instruction}"),
         basenames=("zcode", "zcode.cjs"),
         native_session_root="~/.zcode/cli/rollout",
-        native_session_depth=1, native_resume=True),
+        native_session_depth=1, native_resume=True, runner_resume_only=True),
     "generic": Profile(
         "generic", None, executable=False,
         pattern="claude|codex|astrbot|openclaw|opencode|aider",
@@ -89,6 +92,11 @@ SESSION_PATH_RESUME_AGENT_TYPES = tuple(
 # RESUME_VERIFIABLE_AGENT_TYPES under tools.session.probe family keys.
 RESUME_VERIFIABLE_PROBE_FAMILIES = tuple(
     p.probe_family or k for k, p in PROFILES.items() if p.resume_verifiable)
+
+
+def canonical_family(value: str | None) -> str | None:
+    """Normalize the historical probe/capture alias; unknown families stay unknown."""
+    return "claude_code" if value == "claude" else value
 
 
 def is_executable(agent_type: str) -> bool:
@@ -117,6 +125,7 @@ __all__ = [
     "RESUME_VERIFIABLE_AGENT_TYPES",
     "RESUME_VERIFIABLE_PROBE_FAMILIES",
     "SESSION_PATH_RESUME_AGENT_TYPES",
+    "canonical_family",
     "default_command",
     "is_executable",
     "profile_basenames",

@@ -3,6 +3,7 @@
 Keys are resolved only for an authenticated machine's live signed command.
 Assistant results, command envelopes and audits never contain credentials.
 """
+from agent_profiles import canonical_family
 from fleet_core.session_models import AGENT_PROTOCOLS, validate_model_delivery
 from hub.application.errors import ApplicationError
 from hub.infrastructure.platform_db_catalog import catalog_digest
@@ -19,8 +20,7 @@ class SessionModelService:
 
     @staticmethod
     def _family(session):
-        family = session.get('agent_family')
-        return 'claude_code' if family == 'claude' else family
+        return canonical_family(session.get('agent_family'))
 
     @staticmethod
     def _endpoint(model, family):

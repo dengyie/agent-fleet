@@ -29,6 +29,8 @@ Design rules enforced here:
 
 from __future__ import annotations
 
+from hub.domain.session_ports import AdoptionRepositoryError  # compatibility exports
+
 import sqlite3
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -47,21 +49,6 @@ from hub.infrastructure.sqlite import connect as sqlite_connect
 SCHEMA_VERSION = 1
 
 _NOW_FMT = "%Y-%m-%dT%H:%M:%S.%fZ"
-
-
-class AdoptionRepositoryError(RuntimeError):
-    """Bounded adoption repository error: a stable short code only.
-
-    ``str(err)`` and ``code`` carry the bounded code only  - never paths,
-    exception text, raw input, or key material.
-    """
-
-    def __init__(self, code: str):
-        self.code = code
-        super().__init__(code)
-
-    def __str__(self) -> str:
-        return self.code
 
 
 def _now_iso() -> str:

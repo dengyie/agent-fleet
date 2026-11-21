@@ -33,23 +33,20 @@ from collections.abc import Mapping, Sequence
 from session_schema import (
     MAX_BATCH_BYTES,
     MAX_BATCH_EVENTS,
-    public_session_dto,
     try_validate_event,
 )
 
-from hub.infrastructure.session_repository import SessionError
-from hub.infrastructure.transcript_repository import TranscriptError
+from hub.domain.session_ports import (
+    SessionError, TranscriptError, AdoptionRepositoryError, SessionStore, TranscriptStore,
+)
 from hub.domain.interaction import normalize_answer, validate_answer_ids
-from hub.domain.agent_session import SESSION_CONTROL_ACTIONS
-from agent_profiles import NATIVE_RESUME_AGENT_TYPES
+from hub.domain.session_access import AdoptionAccess, project_session_access
 from hub.application.adoption_service import AdoptionServiceError
-from hub.infrastructure.adoption_repository import AdoptionRepositoryError
 from fleet_core.session.redact import Redactor
 
 DEFAULT_QUERY_LIMIT = 100
 _MAX_QUERY_LIMIT = 1000
 _MAX_SQLITE_SEQUENCE = (1 << 63) - 1
-_SESSION_ACTIONS = frozenset((*SESSION_CONTROL_ACTIONS, 'append_user_turn', 'configure_model'))
 
 
 class SessionServiceError(RuntimeError):
@@ -111,7 +108,7 @@ def _bounded_limit(value, default: int = DEFAULT_QUERY_LIMIT) -> int:
 class SessionService:
     """Application service owning the session ingest + operator query use cases."""
 
-    def __init__(self, session_repo, transcript_repo, event_publisher=None,
+    def __init__(self, session_repo: SessionStore, transcript_repo: TranscriptStore, event_publisher=None,
                  search_service=None) -> None:
         self.session_repo = session_repo
         self.transcript_repo = transcript_repo
@@ -512,67 +509,11 @@ class SessionService:
             raise SessionServiceError(exc.code) from exc
 
     def _live_session(self, row, adoption, actions):
-        """Capture provenance and current control authority are separate facts."""
-        if adoption is not None:
-            # Control identity/family belongs to the adoption, not the capture.
-            row = {**row, 'machine_id': adoption.machine_id, 'agent_family': adoption.agent_family}
-        dto = public_session_dto(row)
-        allowed = set(actions) & _SESSION_ACTIONS
-        if str(row['session_id']).startswith('adopt_'):
-            dto['adoption_status'] = (adoption.status if adoption is not None else
-                                      'missing' if self.adoptions is not None else 'unavailable')
-            if dto['adoption_status'] != 'adopted':
-                allowed.clear()
-        elif not dto['managed']:
-            allowed.clear()
-        family = dto.get('agent_family')
-        family = 'claude_code' if family == 'claude' else family
-        owned_runner = (adoption is None and str(row['session_id']).startswith('runner_')
-                        and dto.get('managed'))
-        delivery_reason = ''
-        # ZCode/Hermes continuation is proven only for Runner-owned CLI
-        # identities. Captured metadata and adoptions do not establish one.
-        if (family not in NATIVE_RESUME_AGENT_TYPES
-                or (family in {'zcode', 'hermes'} and not owned_runner)):
-            delivery_reason = 'native_resume_unsupported'
-        elif adoption is not None and not adoption.native_file_path:
-            delivery_reason = 'native_session_unbound'
-        elif owned_runner:
-            if 'native_resume' not in row.get('capabilities', []):
-                delivery_reason = 'native_session_unbound'
-            elif row.get('current_state') in {'running', 'thinking', 'tool_running'}:
-                delivery_reason = 'session_busy'
-        if delivery_reason:
-            allowed.discard('append_user_turn')
-        if (family not in {'claude_code', 'codex'} or adoption is not None
-                or not str(row['session_id']).startswith('runner_')
-                or 'model_takeover' not in row.get('capabilities', [])
-                or row.get('status') not in {'closed', 'failed'}):
-            allowed.discard('configure_model')
-        if family == 'zcode' and adoption is not None and not adoption.native_file_path:
-            # Legacy discovery could adopt a whole desktop host, which owns
-            # multiple conversations. Do not signal that shared process as if
-            # it were the selected conversation. Preserve its audit history.
-            allowed.clear()
-            dto['control_unavailable_reason'] = 'native_session_unbound'
-        desktop = (family == 'zcode' and adoption is None
-                   and str(row['session_id']).startswith('runner_')
-                   and 'desktop_bridge' in row.get('capabilities', []) and dto.get('managed'))
-        if desktop:
-            allowed = {'append_user_turn'} & set(actions)
-            delivery_reason = ''
-        dto['message_delivery'] = {
-            'available': 'append_user_turn' in allowed,
-            'reason': delivery_reason or ('node_receipt_required' if 'append_user_turn' in allowed else 'control_unavailable'),
-            'mechanism': 'zcode_desktop_bridge' if desktop else ('native_session_resume' if not delivery_reason else 'unavailable'),
-        }
-        if adoption is not None:
-            dto['capture'] = {'native_source_bound': bool(adoption.native_file_path),
-                              'history': 'retained_source_from_checkpoint' if adoption.native_file_path else 'unavailable',
-                              'provider_profile_changes_capture': False}
-        dto['allowed_actions'] = sorted(allowed)
-        dto['control_capability'] = 'available' if allowed else 'unavailable'
-        return dto
+        snapshot = None if adoption is None else AdoptionAccess(
+            machine_id=adoption.machine_id, agent_family=adoption.agent_family,
+            status=adoption.status, native_file_path=adoption.native_file_path)
+        return project_session_access(row, snapshot, actions,
+                                      adoption_available=self.adoptions is not None)
 
     def _available_actions(self):
         return self.supervisor.available_actions() if self.supervisor is not None else frozenset()
