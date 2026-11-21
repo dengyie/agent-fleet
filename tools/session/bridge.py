@@ -722,6 +722,7 @@ class SessionBridge:
         self._tailer = None
         self._last_error: str | None = None
         self._last_reject: str | None = None
+        self._expected_user_echo: str | None = None
         self._started = False
         self._reported_quality: str | None = None
         self.sources = select_sources(self._manifest)
@@ -832,6 +833,16 @@ class SessionBridge:
 
     def ingest_one(self, raw, *, source: str | None = None) -> bool:
         return self._handle_raw(source or self.source, raw)
+
+    def record_user_turn(self, text: str) -> None:
+        """Record a Runner-delivered turn and expect at most one native echo.
+
+        Raw echo records remain archived. Each explicit delivery resets the
+        match, so legitimate identical instructions in later turns survive.
+        """
+        self._expected_user_echo = None
+        if self.ingest_one({'kind': 'user_message', 'payload': {'text': text}}):
+            self._expected_user_echo = text[:_MAX_TEXT]
 
     def flush(self, guard=None) -> int:
         """Upload all pending unacked events (Task 6 ack/replay).
@@ -983,6 +994,15 @@ class SessionBridge:
             events = [events]
         accepted = False
         for event in (events or []):
+            kind = event.get('kind') if event else None
+            if kind in {'user_message', 'assistant_message', 'tool_call', 'tool_result'}:
+                expected = self._expected_user_echo
+                self._expected_user_echo = None
+                if kind == 'user_message' and expected is not None and event['payload'].get('text') == expected:
+                    # record_source() ran before shaping, preserving the exact
+                    # observable native echo without a duplicate chat bubble.
+                    accepted = True
+                    continue
             if source and event:
                 event = dict(event, source=source)
             if self._emit_event(event):

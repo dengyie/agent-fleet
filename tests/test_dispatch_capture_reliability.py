@@ -142,3 +142,64 @@ def test_replay_revokes_older_clients_failed_continuation_claim(tmp_path):
         assert path.read_bytes() == original
     finally:
         replay.bridge.close()
+
+
+def test_runner_pi_user_echo_is_archived_without_duplicate_message(tmp_path):
+    from tools.session.runner_capture import RunnerCapture
+    capture = RunnerCapture(_cfg(tmp_path), {**_task(), 'agent_type': 'pi', 'instruction': 'first 🌲'}, _Hub())
+    def echo(text):
+        row = {'type': 'message_end', 'message': {'role': 'user',
+            'content': [{'type': 'text', 'text': text}]}}
+        assert capture.line(json.dumps(row))
+        return json.dumps(row, ensure_ascii=False)
+    try:
+        first = echo('first 🌲')
+        capture.line(json.dumps({'type': 'message_end', 'message': {'role': 'assistant', 'content': 'reply'}}))
+        capture.begin_turn('same follow')
+        follow = echo('same follow')
+        # A legitimate subsequent identical instruction is a new turn.
+        capture.begin_turn('same follow')
+        echo('same follow')
+        rows = capture.bridge.spool.read_after(0, 100, 262144)
+        assert [r['payload']['text'] for r in rows if r['kind'] == 'user_message'] == ['first 🌲', 'same follow', 'same follow']
+        archived = ''.join(r['payload']['text'] for r in rows if r['kind'] == 'source_record')
+        assert first in archived and archived.count(follow) == 2
+    finally:
+        capture.bridge.close()
+
+
+def test_runner_preserves_distinct_native_users_and_post_response_repetition(tmp_path):
+    from tools.session.runner_capture import RunnerCapture
+    capture = RunnerCapture(_cfg(tmp_path), {**_task(), 'agent_type': 'pi', 'instruction': 'first'}, _Hub())
+    try:
+        for role, text in [('user', 'a different user'), ('assistant', 'reply'), ('user', 'first')]:
+            capture.line(json.dumps({'type': 'message_end', 'message': {'role': role, 'content': text}}))
+        rows = capture.bridge.spool.read_after(0, 100, 262144)
+        assert [r['payload']['text'] for r in rows if r['kind'] == 'user_message'] == ['first', 'a different user', 'first']
+    finally:
+        capture.bridge.close()
+
+
+def test_repeated_runner_turn_without_any_native_echo_is_not_dropped(tmp_path):
+    from tools.session.runner_capture import RunnerCapture
+    capture = RunnerCapture(_cfg(tmp_path), {**_task(), 'instruction': 'repeat'}, _Hub())
+    try:
+        capture.begin_turn('repeat')
+        rows = capture.bridge.spool.read_after(0, 100, 262144)
+        assert [r['payload']['text'] for r in rows if r['kind'] == 'user_message'] == ['repeat', 'repeat']
+    finally:
+        capture.bridge.close()
+
+
+def test_standalone_native_capture_keeps_identical_user_messages(tmp_path):
+    from tools.session.bridge import SessionBridge
+    bridge = SessionBridge({'agent': 'pi', 'structured_stream': True}, {
+        'session_id': 'native_pi', 'machine_id': 'mac', 'spool_root': tmp_path,
+        'spool_key': b'x' * 32})
+    try:
+        for _ in range(2):
+            bridge.ingest_one({'type': 'message_end', 'message': {'role': 'user', 'content': 'repeat'}})
+        rows = bridge.spool.read_after(0, 100, 262144)
+        assert [r['payload']['text'] for r in rows if r['kind'] == 'user_message'] == ['repeat', 'repeat']
+    finally:
+        bridge.close()
