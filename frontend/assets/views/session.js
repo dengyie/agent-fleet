@@ -24,10 +24,11 @@
 
 import { pagePath } from '../routes.js';
 import { uiIcon } from '../routes.js';
-import { renderSourceControl } from './machine.js';
+import { renderSourceControl } from '../ui/source-control.js';
 import { mountHandoffPanel } from './session-handoff.js';
 import { renderQuestions, disposeQuestions, suspendQuestions } from './session-questions.js';
 import { sessionAccessLabel } from '../ui/session-labels.js';
+import { sessionControls } from '../ui/session-capabilities.js';
 
 var MSG_LOADING = '加载中…';
 var MSG_ERROR = '加载失败：';
@@ -616,7 +617,7 @@ function pollControlReceipt(clientMethods, viewState, paint, commandId, attempt)
 }
 
 function renderFollowUpTurn(host, session, viewState, clientMethods, paint) {
-  if (!session || session.agent_family === 'hermes') {
+  if (!session) {
     return;
   }
   var wrap = h('div', 'follow-up');
@@ -704,11 +705,10 @@ function renderLocalProfilePicker(host, session, profiles, viewState,
 function renderControlPanel(host, events, session, viewState, clientMethods, redraw, store) {
   host.appendChild(h('h3', 'control-heading', '控制状态'));
   var paint = (typeof redraw === 'function') ? redraw : function () {};
-  var actions = session && Array.isArray(session.allowed_actions) ? session.allowed_actions : [];
-  var canControl = session &&
-    session.control_capability === 'available' &&
-    typeof clientMethods.controlSession === 'function' &&
-    typeof session.session_id === 'string' && session.session_id;
+  var controls = sessionControls(session, controlFeatures(store));
+  var actions = controls.actions;
+  var canControl = controls.canControl && typeof clientMethods.controlSession === 'function';
+  if (controls.deliveryLabel) host.appendChild(h('p', 'meta', controls.deliveryLabel));
   if (canControl) {
     var source = {
       session_id: session.session_id,
@@ -719,11 +719,10 @@ function renderControlPanel(host, events, session, viewState, clientMethods, red
       function (action, sid) {
         enqueueControl(clientMethods, viewState, paint, sid, action);
       }));
-    var flags = controlFeatures(store);
-    if (flags.append_user_turn && actions.includes('append_user_turn')) {
+    if (controls.appendUserTurn) {
       renderFollowUpTurn(host, session, viewState, clientMethods, paint);
     }
-    if (flags.apply_local_profile && actions.includes('apply_local_profile')) {
+    if (controls.applyLocalProfile) {
       renderLocalProfilePicker(host, session, viewState.localProfiles || [],
         viewState, clientMethods, paint);
     }

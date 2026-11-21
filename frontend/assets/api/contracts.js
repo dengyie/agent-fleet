@@ -138,7 +138,7 @@ var CONTROL_ENQUEUE_FIELDS = ['ok', 'command_id', 'session_id', 'action',
 var SOURCE_CONTROL_ACTIONS = ['pause_session', 'resume_session',
                               'terminate_session', 'quarantine_session',
                               'cancel_attempt', 'append_user_turn',
-                              'apply_local_profile'];
+                              'apply_local_profile', 'configure_model'];
 var REJECTED_CONTROL_KEYS = ['pid', 'signal', 'shell', 'command'];
 
 // SSE summary 事件只携带这些公开字段（绝不透传 payload/transcript）。
@@ -1163,6 +1163,42 @@ function parseSessionRow(row) {
   out.control_capability = out.control_capability === 'available' && out.allowed_actions.length
     ? 'available' : 'unavailable';
   if (out.control_capability === 'unavailable') out.allowed_actions = [];
+  // Additive public facts; missing fields remain compatible with older Hubs.
+  // A delivery claim can narrow an action, never grant control authority.
+  if (row.message_delivery !== undefined) {
+    requireObject(row.message_delivery, 'message_delivery');
+    rejectInternalKey(row.message_delivery, 'message_delivery');
+    if (typeof row.message_delivery.available !== 'boolean') {
+      throw new ContractError('invalid_message_delivery', '投递状态无效');
+    }
+    out.message_delivery = {
+      available: row.message_delivery.available && out.allowed_actions.includes('append_user_turn'),
+      reason: strictEnum(row.message_delivery.reason,
+        ['native_resume_unsupported', 'native_session_unbound', 'session_busy',
+         'node_receipt_required', 'control_unavailable'], 'invalid_message_delivery', 'reason'),
+      mechanism: strictEnum(row.message_delivery.mechanism,
+        ['native_session_resume', 'zcode_desktop_bridge', 'unavailable'],
+        'invalid_message_delivery', 'mechanism'),
+    };
+  }
+  if (row.capture !== undefined) {
+    requireObject(row.capture, 'capture');
+    rejectInternalKey(row.capture, 'capture');
+    if (typeof row.capture.native_source_bound !== 'boolean' ||
+        typeof row.capture.provider_profile_changes_capture !== 'boolean') {
+      throw new ContractError('invalid_capture', '采集来源无效');
+    }
+    out.capture = {
+      native_source_bound: row.capture.native_source_bound,
+      history: strictEnum(row.capture.history, ['retained_source_from_checkpoint', 'unavailable'],
+        'invalid_capture', 'history'),
+      provider_profile_changes_capture: row.capture.provider_profile_changes_capture,
+    };
+  }
+  if (row.control_unavailable_reason !== undefined) {
+    out.control_unavailable_reason = strictEnum(row.control_unavailable_reason,
+      ['native_session_unbound'], 'invalid_control_reason', 'control_unavailable_reason');
+  }
   // Capture provenance does not decide current adoption authority.
   if (!managed) {
     out.capture_quality = 'best_effort';

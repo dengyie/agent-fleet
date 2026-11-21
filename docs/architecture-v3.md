@@ -1,5 +1,7 @@
 # agent-fleet 架构 v3 — push-only agent fleet（2026-08-17）
 
+原生 Agent、Hub 准入与前端契约的当前代码边界见 [Agent 分层架构](agent-capability-architecture.md)。
+
 ## 目标
 
 让中央 hub 只承担接收、存储、告警和展示；所有 agent 状态由机器本地 probe 主动上报。这样 Mac、VPS、容器都只需要出站 HTTPS，不需要中央持有机器级凭据。

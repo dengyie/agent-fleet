@@ -1,5 +1,7 @@
 # agent-fleet 架构 v4：观测链路 + 受控开发链路
 
+See [Agent capability layers](agent-capability-architecture.md) for native Agent execution, access policy, storage ports and browser contracts.
+
 > 系统拓扑、三个数据/控制平面、任务状态机、transcript 身份解析、
 > scheduler 生命周期和发布链路见 [可视化架构](visual-architecture.md)。
 
