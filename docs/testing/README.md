@@ -2,6 +2,17 @@
 
 电脑 Agent 的节点启动目录、原启动请求找回、请求字段绑定与并发/取消回归见[原生任务 HTTP 契约](../native-task-api.md)。目录、启动和主助手共用应用服务；新回归 `tests/test_native_task_api.py` 在 Linux、Windows、macOS CI 执行。
 
+原生会话的消息响应丢失恢复、事件 tail/before/after 游标和会话目录快照分页见[原生会话 HTTP 契约](../native-session-api.md)。专项及相关现有 HTTP、SQLite、交互回答和 Supervisor 回归：
+
+```sh
+PYTHONPATH=. python3 -m pytest tests/test_native_session_api.py \
+  tests/test_agent_lifecycle.py \
+  tests/test_session_repository.py tests/test_transcript_repository.py \
+  tests/test_transcript_cursors.py tests/test_session_query_api.py \
+  tests/test_session_interactions.py tests/test_adoption_control_http.py \
+  tests/test_adoption_control_guard.py tests/test_supervisor_control.py -q
+```
+
 官方插件及 GitHub CLI 的节点接入、设备码任务与验收边界见[官方插件文档](../platform/official-plugins.md)。
 
 请求级模型、五项 Token、耗时、费用来源、重试与交互验收详见[请求元数据测试矩阵](request-metadata.md)。

@@ -32,7 +32,9 @@ python -m tools.session.sync --config /path/to/runner.yaml \
 
 ## Hub 查询与页面
 
-`GET /api/sessions/<id>/events?limit=100&after_sequence=<n>` 获取 n 之后的事件。一直读取至空页即可取回全部已保存历史。
+会话列表、消息投递和事件 cursor 的权威 HTTP 契约见[原生会话 API](native-session-api.md)。
+事件增量读取使用 Hub 入库 cursor 的 `after_cursor`；新会话首次读取可用 `tail=1`，
+再以 `before_cursor` 连续向前翻页。cursor 分页有界，已裁剪记录不能从 Hub 恢复。
 
 会话页提供前后翻页、长消息全文展开、工具完整参数/结果和源记录展开。API 客户端不再截断消息正文。任务页可跳转关联会话。
 
@@ -40,7 +42,10 @@ python -m tools.session.sync --config /path/to/runner.yaml \
 
 ## 追加消息
 
-`POST /api/sessions/<id>/messages`，JSON `{ "text": "继续检查测试失败" }`，复用既有签名 supervisor 通道。需要会话已受管、节点 ControlClient 可达，并启用 supervisor 和 append-user-turn。返回 202 仅代表入队，通过 control receipt 和随后对话事件确认执行及回复。
+`POST /api/sessions/<id>/messages` 接受 `{ "text": "继续检查测试失败" }`，
+并可选使用 `client_token` 在响应丢失后恢复同一 command receipt。它复用既有签名
+Supervisor 通道。需要会话已受管、节点 ControlClient 可达，并启用 supervisor 和
+append-user-turn。返回 202 仅代表入队，通过 control receipt 和随后对话事件确认执行及回复。
 
 - Codex 续聊使用 `codex exec resume --json <native-id> <text>`。
 - Supervisor 保存 thread.started 返回的原生 ID；正常完成标为 completed，与主动终止区分，正常完成后允许下一轮。

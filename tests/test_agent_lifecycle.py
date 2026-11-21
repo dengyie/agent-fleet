@@ -112,3 +112,21 @@ def test_new_migration_failure_keeps_legacy_session_store(tmp_path, monkeypatch)
     assert row["current_state"] == "unknown"
     with pytest.raises(SessionError, match="feature_unavailable"):
         repo.update_agent_state("s1", "running", "hook", "high", 1)
+
+    conn = repo._connect()
+    try:
+        tables = {row["name"] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "session_directory" not in tables
+    finally:
+        conn.close()
+
+    monkeypatch.undo()
+    repo.init()
+    assert repo.management_available
+    conn = repo._connect()
+    try:
+        assert [row["session_id"] for row in conn.execute(
+            "SELECT session_id FROM session_directory")] == ["s1"]
+    finally:
+        conn.close()

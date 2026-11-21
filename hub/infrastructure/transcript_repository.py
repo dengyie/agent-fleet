@@ -606,26 +606,62 @@ class TranscriptRepository:
                                     (session_id,)).fetchone()[0])
 
     def read_redacted(self, session_id: str, *, limit: int = 100, after_cursor: int = 0,
+                      before_cursor: int | None = None, tail: bool = False,
                       include_source: bool = True) -> list[dict]:
         self._validate_session_id(session_id)
         try:
             bounded = max(1, min(int(limit), 1001))  # Public 1000-row page plus one lookahead.
         except (TypeError, ValueError):
             bounded = 100
+        if (type(after_cursor) is not int or after_cursor < 0
+                or after_cursor > (1 << 63) - 1
+                or (before_cursor is not None and
+                    (type(before_cursor) is not int or before_cursor < 0
+                     or before_cursor > (1 << 63) - 1))
+                or (before_cursor is not None and tail)
+                or (tail and after_cursor != 0)):
+            raise TranscriptError("invalid_cursor")
         conn = self._connect()
         try:
+            conn.execute("BEGIN")
+            high_water_row = conn.execute(
+                "SELECT COALESCE((SELECT seq FROM sqlite_sequence "
+                "WHERE name='redacted_event_order'),0)").fetchone()
+            high_water = int(high_water_row[0] or 0)
+            if after_cursor > high_water or (before_cursor is not None and before_cursor > high_water):
+                raise TranscriptError("invalid_cursor")
+            if tail:
+                position_sql = ""
+                position = None
+                order = "DESC"
+            elif before_cursor is not None:
+                position_sql = "AND o.cursor<? "
+                position = before_cursor
+                order = "DESC"
+            else:
+                position_sql = "AND o.cursor>? "
+                position = after_cursor
+                order = "ASC"
+            params = [session_id]
+            if position is not None:
+                params.append(position)
+            params.append(bounded)
             rows = conn.execute(
                 "SELECT o.cursor,e.event_id, e.session_id, stream_id, machine_id, sequence,"
                 " kind, capture_quality, emitted_at, redacted_json"
                 " FROM redacted_event_order o JOIN redacted_events e USING(session_id,event_id)"
-                " WHERE o.session_id=? AND o.cursor>? "
+                " WHERE o.session_id=? " + position_sql
                 + ("AND e.kind<>'source_record' " if not include_source else "")
-                + "ORDER BY o.cursor ASC LIMIT ?",
-                (session_id, max(0, int(after_cursor)), bounded)).fetchall()
+                + "ORDER BY o.cursor " + order + " LIMIT ?",
+                params).fetchall()
+            conn.commit()
         finally:
+            if conn.in_transaction:
+                conn.rollback()
             conn.close()
         out: list[dict[str, Any]] = []
-        for row in rows:
+        ordered_rows = reversed(rows) if tail or before_cursor is not None else rows
+        for row in ordered_rows:
             try:
                 parsed = json.loads(row["redacted_json"])
                 payload = parsed.get("payload")

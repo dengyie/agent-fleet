@@ -248,7 +248,8 @@ class SupervisorService:
                 action: str, reason_code: str, *, nonce: str | None = None,
                 candidate: Mapping | None = None,
                 payload: Mapping | None = None,
-                idempotency_key: str | None = None) -> dict:
+                idempotency_key: str | None = None,
+                message_binding: Mapping[str, str] | None = None) -> dict:
         """Create a signed control command for one machine/session/attempt.
 
         Returns the full signed envelope (with ``signature``).  Raises
@@ -343,13 +344,15 @@ class SupervisorService:
                 attempt_id=attempt_id, action=action, nonce=action_nonce,
                 idempotency_key=idempotency_key, wire=body,
                 issued_s=now, expires_s=expires_at_s,
+                message_binding=message_binding,
                 audit_row=_bound_row({
                     "event": "enqueue", "ts": _iso(now),
                     "command_id": command_id, "machine": machine,
                     "session_id": session_id, "action": action,
                 }))
         except SupervisorCommandRepositoryError as exc:
-            status = 409 if exc.code in {"resume_superseded", "command_conflict"} else 503
+            status = 409 if exc.code in {
+                "resume_superseded", "command_conflict", "idempotency_conflict"} else 503
             raise SupervisorServiceError(exc.code, "", status) from exc
         if stored["command_id"] != command_id:
             return dict(stored["wire"])
@@ -460,6 +463,25 @@ class SupervisorService:
         except SupervisorCommandRepositoryError as exc:
             raise SupervisorServiceError(exc.code, "", 503) from exc
         return dict(row["wire"]) if row else None
+
+    def find_session_message(self, token_digest: str) -> dict | None:
+        """Return only the stored binding and bounded current operation status."""
+        self._expire_stale()
+        try:
+            row = self._command_repository.find_session_message(token_digest)
+        except SupervisorCommandRepositoryError as exc:
+            raise SupervisorServiceError(exc.code, "", 503) from exc
+        if row is None:
+            return None
+        return {
+            "token_digest": row["token_digest"],
+            "operator_id": row["operator_id"],
+            "session_id": row["session_id"],
+            "operation": row["operation"],
+            "content_digest": row["content_digest"],
+            "command_id": row["command_id"],
+            "status": row["receipt_status"] or row["status"],
+        }
 
     def receipt_status(self, command_id: str) -> dict:
         """Return a bounded operator view of one command's current receipt."""
