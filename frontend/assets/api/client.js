@@ -35,6 +35,7 @@ import {
   parseTaskFile,
   parseTaskFileList,
   parseTaskDiff,
+  parseTaskTargets,
 } from './contracts.js';
 
 /* 公开 API 路径的唯一来源；动态段由 encodeURIComponent 编码。
@@ -312,8 +313,8 @@ export async function getUsageSummary(filters) {
   return parseUsageSummary(await request('/platform/v1/usage' + queryString(filters || {})));
 }
 
-export async function getStatus() {
-  return parseStatus(await request(API.status));
+export async function getStatus(options) {
+  return parseStatus(await request(API.status, {signal: options?.signal}));
 }
 
 export async function getMachine(name) {
@@ -330,8 +331,8 @@ export async function listTasks(filters) {
   return parseTaskList(await request(API.tasks + queryString(filters || {})));
 }
 
-export async function getTask(taskId) {
-  return parseTask(await request(API.tasks + '/' + encodeURIComponent(taskId)));
+export async function getTask(taskId, options) {
+  return parseTask(await request(API.tasks + '/' + encodeURIComponent(taskId), options));
 }
 
 export async function createTask(input) {
@@ -420,30 +421,38 @@ export async function listAgentTypes() {
   return parseAgentTypes(await request(API.agentTypes));
 }
 
+// TaskService.targets is the authority for registered projects and installation.
+// An absent endpoint is surfaced by the picker; no handwritten project fallback.
+export async function getTaskTargets(machine, options) {
+  return parseTaskTargets(await request(API.machines + encodeURIComponent(machine) + '/task-targets', options));
+}
+
 /* -- session query surface（Task 11：有界会话数据面，纯 operator 只读）------ */
 
-export async function listSessions(filters) {
-  return parseSessionList(await request(API.sessions + queryString(filters || {})));
+export async function listSessions(filters, options) {
+  filters = filters || {};
+  return parseSessionList(await request(API.sessions + queryString(filters), options), {liveSlice: filters.active === true});
 }
 
 export async function searchSessions(filters) {
   return parseSessionSearch(await request('/session-search' + queryString(filters || {})));
 }
 
-export async function getSession(sessionId) {
+export async function getSession(sessionId, options) {
   return parseSession(await request(
-    API.sessions + '/' + encodeURIComponent(sessionId)));
+    API.sessions + '/' + encodeURIComponent(sessionId), options));
 }
 
-export async function getSessionEvents(sessionId, limit, afterCursor, atSequence) {
+export async function getSessionEvents(sessionId, {limit = 100, afterCursor, beforeCursor, tail, atSequence, signal} = {}) {
   return parseSessionEvents(await request(
     API.sessions + '/' + encodeURIComponent(sessionId) + '/events' +
-    queryString({ limit: limit || 100, after_cursor: afterCursor || '0', at_sequence: atSequence })));
+    queryString({limit, after_cursor: atSequence == null && beforeCursor == null && !tail ? afterCursor || '0' : undefined,
+      before_cursor: beforeCursor, tail: tail ? 1 : undefined, at_sequence: atSequence}), {signal}));
 }
 
-export async function sendSessionMessage(sessionId, text) {
+export async function sendSessionMessage(sessionId, text, clientToken) {
   return parseControlEnqueue(await request(API.sessions + '/' + encodeURIComponent(sessionId) + '/messages', {
-    method: 'POST', headers: JSON_HEADERS, body: { text: text }
+    method: 'POST', headers: JSON_HEADERS, body: {text, ...(clientToken ? {client_token: clientToken} : {})}
   }));
 }
 
@@ -528,7 +537,7 @@ export async function controlSession(sessionId, action, reasonCode, payload) {
     }));
 }
 
-export async function getControlReceipt(commandId) {
+export async function getControlReceipt(commandId, options) {
   return parseControlReceipt(await request(
-    API.supervisorReceipts + '/' + encodeURIComponent(commandId)));
+    API.supervisorReceipts + '/' + encodeURIComponent(commandId), options));
 }

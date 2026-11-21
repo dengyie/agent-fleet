@@ -123,10 +123,15 @@ if (fixture === 'session_parsers') {
   // 4) list surface allow-lists to the same row shape
   assertModel(() => contracts.parseSessionList({ sessions: [
     { machine_id: 'm', session_id: 's-4', managed: false,
-      capture_quality: 'best_effort', control_capability: 'unavailable' } ] }),
+      capture_quality: 'best_effort', control_capability: 'unavailable' } ],
+      has_more: true, next_cursor: 'directory-next' }),
     (m) => Array.isArray(m.sessions) && m.sessions.length === 1 &&
-      m.sessions[0].session_id === 's-4' && m.sessions[0].managed === false,
+      m.sessions[0].session_id === 's-4' && m.sessions[0].managed === false &&
+      m.has_more && m.next_cursor === 'directory-next',
     'session_parsers.list');
+  assertModel(() => contracts.parseSessionList({sessions:[{machine_id:'m',session_id:'live',managed:false}]},
+    {liveSlice:true}), m => m.sessions.length === 1 && !m.has_more && m.next_cursor === null,
+    'session_parsers.live_slice');
   // 5) events surface keeps payload text but drops unknown and secret keys
   assertModel(() => contracts.parseSessionEvents({ events: [
     { schema_version: 1, event_id: 'e1', stream_id: 'st', machine_id: 'm',
@@ -137,7 +142,7 @@ if (fixture === 'session_parsers') {
       session_id: 's', sequence: 2, cursor: '11', kind: 'capture_gap',
       capture_quality: 'structured', emitted_at: '2026-08-26T00:00:01Z',
       payload: { start_sequence: 2, end_sequence: 4, reason: 'degraded',
-                 quality: 'best_effort' } } ], after_cursor: '0', next_cursor: '11', has_more: false }),
+                 quality: 'best_effort' } } ], after_cursor: '0', before_cursor: '10', next_cursor: '11', has_more: false }),
     (m) => m.events.length === 2 && m.events[0].kind === 'user_message' &&
       m.events[0].payload.text === 'hello' &&
       !Object.prototype.hasOwnProperty.call(m.events[0].payload, 'raw_log') &&

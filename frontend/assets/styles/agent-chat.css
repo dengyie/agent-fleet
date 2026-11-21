@@ -1,0 +1,79 @@
+/* Native conversations share the assistant canvas, without sharing its state. */
+body[data-page=agent-chat] .console-content { max-width: none; padding: 0; }
+body[data-page=agent-chat] .console-main { height: 100dvh; display: flex; flex-direction: column; }
+body[data-page=agent-chat] .console-content, body[data-page=agent-chat] #route-view { flex: 1; width: 100%; min-height: 0; display: flex; }
+body[data-page=agent-chat] .page-heading, body[data-page=sessions] .page-heading { display: none; }
+.conversation-targets { display: flex; flex-wrap: wrap; justify-content: center; gap: 5px; margin: 0 auto 24px; width: fit-content; max-width: 100%; padding: 4px; border: 1px solid var(--border-subtle); border-radius: 12px; background: var(--panel); }
+.conversation-target { display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 7px 11px; color: var(--text-2); font-size: 12px; border-radius: 8px; min-height: 36px; white-space: nowrap; }
+.conversation-target:hover { text-decoration: none; background: var(--panel-hover); }
+.conversation-target[aria-current=page] { color: var(--text); background: var(--panel-hover); font-weight: 600; }
+.native-thread { gap: 16px; }
+.native-target-picker { flex: none; margin: 0 auto 16px; width: 100%; max-width: 720px; padding: 20px; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; }
+.native-target-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.native-target-field { min-width: 0; display: grid; gap: 7px; font-size: 11px; color: var(--text-2); }
+.native-target-field select { width: 100%; min-width: 0; font-size: 12px; }
+.native-target-notice { margin-top: 14px; font-size: 11px; }
+.native-directory-link { display: inline-flex; margin-top: 20px; font-size: 12px; }
+.native-composer-target { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 11px; }
+.native-chat-view .composer-tools { align-items: center; justify-content: space-between; }
+.native-chat-view .composer-tools>button { min-height: 36px; padding: 7px 11px; border-radius: 10px; }
+.native-chat-notice:empty, .native-history-notice:empty { display: none; }
+.native-chat-notice { margin-bottom: 12px; max-height: 140px; overflow-y: auto; }
+.native-chat-notice p { margin: 5px 0; font-size: 12px; }
+.native-pending { display: grid; gap: 10px; flex: none; }
+.native-delivery-card { padding: 12px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); overflow-wrap: anywhere; }
+.native-delivery-card>strong, .native-delivery-card>summary { font-size: 11px; color: var(--text-2); cursor: pointer; }
+.native-delivery-text { white-space: pre-wrap; font-size: 13px; margin: 8px 0; }
+.native-delivery-card .button-secondary { margin: 8px 8px 0 0; font-size: 11px; }
+.native-context-row { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 10px; margin-bottom: 14px; font-size: 12px; overflow-wrap: anywhere; }
+.native-context-row>span { color: var(--text-3); }
+.native-context-row>strong { font-weight: 500; }
+.native-context>.meta { margin: 18px 0; font-size: 11px; line-height: 1.9; }
+.native-context>.button-secondary { font-size: 11px; margin: 5px 6px 5px 0; }
+.native-operation-detail { border-bottom: 1px solid var(--border-subtle); padding: 12px 0; font-size: 12px; overflow-wrap: anywhere; }
+.native-operation-detail summary { cursor: pointer; }
+.native-operation-detail p { margin-top: 8px; font-size: 11px; }
+.native-notice { padding: 10px 14px; border-left: 2px solid var(--warn); background: var(--warn-bg); font-size: 12px; overflow-wrap: anywhere; }
+.native-full-text { font-size: 12px; overflow-wrap: anywhere; margin: 10px 0; }
+.native-full-text pre { white-space: pre-wrap; }
+.native-directory { max-width: 1120px; margin: 0 auto; }
+.native-directory>.conversation-targets { margin: 0 0 24px; }
+.native-directory-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 28px; }
+.native-directory-heading h1 { font-size: 24px; font-weight: 600; letter-spacing: -.5px; margin-bottom: 6px; }
+.native-directory-filters { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; align-items: center; }
+.native-directory-filters input { flex: 1; min-width: 180px; font-size: 12px; }
+.native-directory-filters select { min-width: 135px; font-size: 12px; }
+.native-directory-filters .button-secondary { font-size: 12px; }
+.native-directory-status { margin-bottom: 14px; font-size: 11px; }
+.native-session-list { display: grid; gap: 10px; }
+.native-session-card { display: flex; align-items: center; gap: 16px; padding: 20px; border: 1px solid var(--border); background: var(--panel); border-radius: 14px; color: var(--text); transition: border-color .15s, background .15s; }
+.native-session-card:hover { text-decoration: none; background: color-mix(in srgb, var(--panel-hover) 40%, var(--panel)); border-color: var(--text-3); }
+.native-session-glyph { display: grid; place-items: center; width: 36px; height: 36px; flex: none; border-radius: 10px; background: var(--panel-hover); color: var(--text-2); }
+.native-session-copy { flex: 1; min-width: 0; display: grid; gap: 4px; overflow-wrap: anywhere; }
+.native-session-copy>strong { font-size: 13px; font-weight: 550; }
+.native-session-copy>.meta { font-size: 10px; }
+.native-session-state { display: grid; justify-items: end; gap: 5px; font-size: 11px; flex: none; }
+.native-session-state>.meta { font-size: 10px; }
+.native-session-state>svg { display: none; }
+.native-session-state-label { color: var(--text-2); }
+.native-directory-empty { display: flex; align-items: center; flex-direction: column; gap: 14px; padding: 80px 20px; text-align: center; }
+.native-directory-empty>svg { color: var(--text-3); }
+.native-directory-empty>h2 { font-size: 18px; font-weight: 550; }
+.native-session-skeleton { height: 112px; border-radius: 14px; background: linear-gradient(100deg, var(--panel-hover), var(--panel), var(--panel-hover)); background-size: 200% 100%; animation: native-skeleton 1.5s ease-in-out infinite; }
+.native-history-entry>a { display: flex; align-items: center; gap: 7px; }
+.native-history-entry>a>span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@keyframes native-skeleton { to { background-position: -200% 0; } }
+@media (max-width: 767px) {
+  .conversation-targets { gap: 0; }
+  .conversation-target { padding: 7px 9px; font-size: 11px; gap: 5px; }
+  .native-target-fields { grid-template-columns: 1fr; gap: 10px; }
+  .native-target-field { grid-template-columns: 60px minmax(0, 1fr); align-items: center; }
+  .native-target-picker { padding: 16px; }
+  .native-directory-heading { align-items: flex-start; flex-direction: column; margin-bottom: 20px; }
+  .native-directory-heading h1 { font-size: 21px; }
+  .native-directory-filters select { flex: 1; min-width: 120px; }
+  .native-directory-filters input { flex-basis: 100%; }
+  .native-session-card { padding: 14px 12px; gap: 10px; }
+  .native-session-state { max-width: 90px; }
+  .native-session-copy>.meta { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}

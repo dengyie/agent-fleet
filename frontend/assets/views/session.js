@@ -538,7 +538,7 @@ function enqueueControl(clientMethods, viewState, paint, sid, action, payload) {
     }
     var afterCursor = viewState.pageStarts[viewState.pageStarts.length - 1];
     var pageDepth = viewState.pageStarts.length;
-    return clientMethods.getSessionEvents(sid, 100, afterCursor)
+    return clientMethods.getSessionEvents(sid, {limit: 100, afterCursor})
       .then(function (events) {
         if (viewState.disposed || viewState.pageStarts.length !== pageDepth ||
             viewState.pageStarts[pageDepth - 1] !== afterCursor) {
@@ -922,7 +922,7 @@ export function mountSession(root, sessionId, store, client, routeSequence) {
     var afterCursor = viewState.pageStarts[viewState.pageStarts.length - 1];
     var jobs = [];
     if (typeof clientMethods.getSessionEvents === 'function') {
-      jobs.push(clientMethods.getSessionEvents(sessionId, 100, afterCursor, viewState.eventAnchor).then(function (events) {
+      jobs.push(clientMethods.getSessionEvents(sessionId, {limit: 100, afterCursor, atSequence: afterCursor === '0' ? viewState.eventAnchor : undefined}).then(function (events) {
         if (!viewState.disposed && generation === pageGeneration && events && Array.isArray(events.events)) {
           applyEventPage(events);
         }
@@ -1092,7 +1092,7 @@ export function mountSession(root, sessionId, store, client, routeSequence) {
     var generation = pageGeneration;
     var jobs = [
       clientMethods.getSession(sessionId),
-      clientMethods.getSessionEvents(sessionId, 100, viewState.pageStarts[viewState.pageStarts.length - 1], viewState.eventAnchor),
+      clientMethods.getSessionEvents(sessionId, {limit: 100, afterCursor: viewState.pageStarts[viewState.pageStarts.length - 1], atSequence: viewState.pageStarts.length === 1 ? viewState.eventAnchor : undefined}),
       clientMethods.getSessionSignals(sessionId),
     ];
     if (typeof clientMethods.getStatus === 'function' &&
