@@ -16,9 +16,10 @@ class HermesConnector(BaseConnector):
     def collect(self, ctx):
         # 远端执行：一次性读取 Hermes 状态 + 会话
         remote_script = r"""
-import json, os, sys
+import json, os, sys, shutil
 base = os.path.expanduser('~/.hermes')
-out = {'installed': os.path.isdir(base)}
+out = {'installed': bool(shutil.which('hermes')) or any(os.path.isfile(os.path.join(base, name))
+       for name in ('state.db', 'gateway_state.json', 'sessions/sessions.json'))}
 if not out['installed']:
     print(json.dumps(out)); sys.exit(0)
 gw = {}
@@ -59,5 +60,15 @@ print(json.dumps(out))
 
     # ------------------------------------------------------------------
     def detect(self, ctx):
-        # 是否存在 ~/.hermes
-        return ctx.run("test -d ~/.hermes && echo yes || echo no").strip() == "yes"
+        # A synced skills directory alone is not an installed Hermes runtime.
+        raw = ctx.run_python("""
+import json, os, shutil
+base = os.path.expanduser('~/.hermes')
+print(json.dumps({'installed': bool(shutil.which('hermes')) or any(
+    os.path.isfile(os.path.join(base, name)) for name in
+    ('state.db', 'gateway_state.json', 'sessions/sessions.json'))}))
+""")
+        try:
+            return json.loads(raw).get('installed') is True
+        except (ValueError, AttributeError, TypeError):
+            return False

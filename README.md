@@ -18,7 +18,7 @@
 
 ## 最新更新
 
-2026-11-20：优化设置浮层与常用操作：点击遮罩关闭并保留聊天草稿，关闭后焦点返回原入口；设置搜索支持清空、结果提示和键盘导航，手机点击目标与滚动体验同步改善。最近会话菜单同时只展开一个，支持外点收起和键盘操作。完整历史见 [Release Notes](docs/releases/release-notes.md)。
+2026-11-21：补齐 Windows / macOS 的 Agent 原生命令、结构化采集和同会话续聊适配，新增 macOS CI 与双端工具证据测试。能力边界及安装状态见 [Agent 验收矩阵](docs/testing/agent-platform-acceptance.md)，完整历史见 [Release Notes](docs/releases/release-notes.md)。
 
 ## Why Agent Fleet?
 

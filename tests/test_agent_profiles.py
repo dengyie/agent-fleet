@@ -27,7 +27,7 @@ def test_hermes_has_no_default_command():
 
 def test_pi_profile_default_command_and_session_layout():
     cmd = default_command("pi")
-    assert cmd is not None and cmd == ("pi", "-p", "{instruction}")
+    assert cmd is not None and cmd == ("pi", "--print", "--mode", "json", "{instruction}")
     profile = PROFILES["pi"]
     assert profile.basenames == ("pi",)
     assert profile.native_session_root == "~/.pi/agent/sessions"
@@ -36,7 +36,7 @@ def test_pi_profile_default_command_and_session_layout():
 
 def test_zcode_profile_default_command_and_session_layout():
     cmd = default_command("zcode")
-    assert cmd is not None and cmd == ("zcode", "-p", "{instruction}")
+    assert cmd is not None and cmd == ("zcode", "--json", "-p", "{instruction}")
     profile = PROFILES["zcode"]
     # shim 与桌面版脚本直跑两种进程形态都要能精确分类
     assert profile.basenames == ("zcode", "zcode.cjs")
@@ -96,7 +96,7 @@ def test_connector_registry_subset_of_observable_types():
 
 
 def test_resume_capability_types_derived_from_profiles():
-    assert NATIVE_RESUME_AGENT_TYPES == ("codex", "claude_code", "pi")
+    assert NATIVE_RESUME_AGENT_TYPES == ("codex", "claude_code", "hermes", "pi", "zcode")
     assert RESUME_VERIFIABLE_AGENT_TYPES == ("codex", "claude_code")
     assert SESSION_PATH_RESUME_AGENT_TYPES == ("pi",)
     # 可探针验证 / 按路径续接 都必须先是原生可续接 family

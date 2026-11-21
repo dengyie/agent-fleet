@@ -232,8 +232,8 @@ class Supervisor(HandlesMixin, NativeResumeMixin):
             env=dict(env_allowlist) if isinstance(env_allowlist, Mapping) else {},
             exe_path=str(command[0]) if command else None,
             resume_options=continuation_options(agent, command),
-            persist_continuation=(agent in {'codex', 'claude_code'} and not
-                {'--ephemeral', '--no-session-persistence'} & set(command)),
+            persist_continuation=(agent in _NATIVE_RESUME_FAMILIES and not
+                {'--ephemeral', '--no-session-persistence', '--no-session'} & set(command)),
         )
         _stamp_private_identity(handle, entry)
         self._entries[session_id] = entry
@@ -377,8 +377,8 @@ class Supervisor(HandlesMixin, NativeResumeMixin):
             exe_path=str(exe_path) if exe_path else None,
         )
         _stamp_private_identity(handle, entry)
-        if (isinstance(native_file_path, str) and native_file_path
-                and family in _NATIVE_RESUME_FAMILIES):
+        if (isinstance(native_file_path, str) and native_file_path and token
+                and family in _NATIVE_RESUME_FAMILIES and family != 'hermes'):
             manifest.capability_manifest = {"resume": True}
         self._entries[sid] = entry
         self._persist(manifest)
@@ -922,8 +922,11 @@ class Supervisor(HandlesMixin, NativeResumeMixin):
             except Exception:
                 rc = None
             if rc is not None:
-                return self._finish_completed(
+                result = self._finish_completed(
                     m, handle, session_id, rc, on_line)
+                if result.exit_code == 0 and result.outcome == 'finished':
+                    self._capture_native_storage(entry, consumer)
+                return result
 
             # 2. abort / deadline checks, then one progress pump.
             if should_abort():

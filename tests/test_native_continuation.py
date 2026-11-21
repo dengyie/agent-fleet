@@ -33,7 +33,8 @@ def test_completed_session_identity_survives_a_new_supervisor(tmp_path):
     assert entry.cwd == str(tmp_path)
     assert entry.manifest.capability_manifest['resume'] is True
     private = root / 'continuations' / (m.session_id + '.json')
-    assert private.stat().st_mode & 0o077 == 0
+    if __import__('os').name != 'nt':
+        assert private.stat().st_mode & 0o077 == 0
     assert 'native-test-thread' not in (root / (m.session_id + '.json')).read_text()
 
 

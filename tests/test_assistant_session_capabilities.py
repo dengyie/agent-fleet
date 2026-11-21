@@ -57,6 +57,33 @@ def test_zcode_metadata_does_not_advertise_native_delivery(app):
     assert result['message_delivery']['reason'] == 'native_resume_unsupported'
 
 
+@pytest.mark.parametrize('family', ['zcode', 'hermes'])
+@pytest.mark.parametrize('owned,capabilities,expected', [
+    (False, ['native_resume'], 'native_resume_unsupported'),
+    (True, [], 'native_session_unbound'),
+    (True, ['native_resume'], 'node_receipt_required'),
+])
+def test_new_native_families_require_owned_runner_identity(app, family, owned, capabilities, expected):
+    from tests.test_session_interactions import event
+    sessions = app.extensions['fleet']['services']['sessions']
+    sid = ('runner_' if owned else 'metadata_') + family
+    start = event(1, 'session_start', {'agent_family': family, 'adapter': 'structured_stream'})
+    start.update(session_id=sid, stream_id=sid + '_stream')
+    assert not sessions.ingest_events([start])['rejected']
+    sessions.session_repo.set_capabilities(sid, capabilities)
+    detail = execute(app, 'session.get', {'session_id': sid})['session']
+    assert detail['message_delivery']['reason'] == expected
+    assert ('append_user_turn' in detail['allowed_actions']) == (expected == 'node_receipt_required')
+    if expected == 'node_receipt_required':
+        command = execute(app, 'session.send_message', {'session_id': sid, 'text': 'follow'})
+        assert command['status'] == 'pending'
+    else:
+        with pytest.raises(ApplicationError, match=(
+                'unsupported_action' if not owned else 'session_action_unavailable')):
+            execute(app, 'session.send_message', {'session_id': sid, 'text': 'follow'})
+        assert app.extensions['fleet']['services']['supervisor'].poll('m1') == []
+
+
 def test_unknown_agent_family_cannot_advertise_followup_support(app):
     sessions = app.extensions['fleet']['services']['sessions']
     sessions.session_repo.upsert_session({'session_id': 'unknown_agent', 'machine_id': 'm1',

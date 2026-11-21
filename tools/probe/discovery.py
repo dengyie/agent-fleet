@@ -221,6 +221,7 @@ $rows = @(
       $direct = $name -match '(?i)^(codex|codex-cli|claude|hermes|pi|zcode|opencode|aider|astrabot|openclaw)(\.exe)?$'
       $interpreter = $name -match '(?i)^(node|python|python3|bun|deno|npm|npx)(\.exe)?$'
       $script_cli = $cmd -match '(?i)(^|[\\/ "])(codex|claude|zcode|hermes|opencode|aider|astrabot|openclaw)(\.c?js|\.py)?([ "]|$)'
+      $script_cli = $script_cli -or ($cmd -match '(?i)[\\/]node_modules[\\/]@(earendil-works|mariozechner)[\\/]pi-coding-agent[\\/]dist[\\/](bundle[\\/])?cli\.js([ "]|$)')
       # ZCode's desktop launcher and Electron children share ZCode.exe.  Only
       # keep its CLI forms, whose command line names the bundled zcode.cjs.
       ($direct -and (($name -notmatch '(?i)^zcode(\.exe)?$') -or
@@ -550,6 +551,9 @@ def classify_family(exe_path: str, cmdline: str) -> str | None:
                        _INTERPRETER_RE.match(argv0_base))
     script_base = (_token_basename(_argv1(cmdline or "")).lower()
                    if interpreted else "")
+    script = _argv1(cmdline or '').replace('\\', '/') if interpreted else ''
+    if re.search(r'/node_modules/@(?:earendil-works|mariozechner)/pi-coding-agent/dist/(?:bundle/)?cli\.js$', script, re.IGNORECASE):
+        return 'pi'
     if script_base.endswith(".exe"):
         script_base = script_base[:-4]
     if script_base:

@@ -527,12 +527,17 @@ class SessionService:
             allowed.clear()
         family = dto.get('agent_family')
         family = 'claude_code' if family == 'claude' else family
+        owned_runner = (adoption is None and str(row['session_id']).startswith('runner_')
+                        and dto.get('managed'))
         delivery_reason = ''
-        if family not in NATIVE_RESUME_AGENT_TYPES:
+        # ZCode/Hermes continuation is proven only for Runner-owned CLI
+        # identities. Captured metadata and adoptions do not establish one.
+        if (family not in NATIVE_RESUME_AGENT_TYPES
+                or (family in {'zcode', 'hermes'} and not owned_runner)):
             delivery_reason = 'native_resume_unsupported'
         elif adoption is not None and not adoption.native_file_path:
             delivery_reason = 'native_session_unbound'
-        elif str(row['session_id']).startswith('runner_') and dto.get('managed'):
+        elif owned_runner:
             if 'native_resume' not in row.get('capabilities', []):
                 delivery_reason = 'native_session_unbound'
             elif row.get('current_state') in {'running', 'thinking', 'tool_running'}:

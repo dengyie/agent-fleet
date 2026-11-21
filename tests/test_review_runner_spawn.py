@@ -63,7 +63,8 @@ class LeadingDashTests(unittest.TestCase):
                          ["--", "--help"])
         self.assertEqual(sup_mod._native_resume_argv("claude_code", "claude", "tok", "-x")[-2:],
                          ["--", "-x"])
-        self.assertEqual(sup_mod._native_resume_argv("pi", "pi", "tok", "--help"), [])
+        self.assertEqual(sup_mod._native_resume_argv("pi", "pi", "tok", "--help")[-2:],
+                         ["--", "--help"])
         self.assertEqual(sup_mod._native_resume_argv("codex", "codex", "--evil", "hi"), [])
 
     def test_windows_batch_refuses_untrusted_args(self):

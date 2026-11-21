@@ -65,7 +65,9 @@ MAX_PROBE_READ = 65536
 
 # Minimal neutral PATH used when the *probed CLI itself* spawns a helper.  The
 # probe never resolves the probed executable through PATH.
-_PROBE_SYSTEM_PATH = ":".join(("/usr/local/bin", "/usr/bin", "/bin"))
+_PROBE_SYSTEM_PATH = (os.pathsep.join(("/usr/local/bin", "/usr/bin", "/bin"))
+                      if os.name != 'nt' else
+                      os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32'))
 
 # Bounds for the optional local PATH-additions config.
 MAX_PATH_ADDITIONS = 4
@@ -267,7 +269,7 @@ def _env_for(exe_path: str, path_adds: Sequence[str] = ()) -> dict[str, str]:
         parts.append(exe_dir)
     parts.extend(path_adds)
     parts.append(_PROBE_SYSTEM_PATH)
-    env["PATH"] = ":".join(parts)
+    env["PATH"] = os.pathsep.join(parts)
     return env
 
 
@@ -370,7 +372,10 @@ def _validate_command(
         canonical = os.path.realpath(exe)
     except (OSError, ValueError):
         canonical = exe
-    if os.path.basename(canonical) not in family["aliases"]:
+    basename = os.path.basename(canonical)
+    if basename.lower().endswith('.exe'):
+        basename = basename[:-4].lower()
+    if basename not in family["aliases"]:
         return None, DIAG_EXECUTABLE_INVALID
     return canonical, None
 
@@ -404,7 +409,7 @@ def _validate_path_adds(raw: Any) -> list[str]:
         canonical = os.path.realpath(item)
         if canonical in out:
             continue
-        if canonical in _PROBE_SYSTEM_PATH.split(":"):
+        if canonical in _PROBE_SYSTEM_PATH.split(os.pathsep):
             continue
         out.append(canonical)
         if len(out) >= MAX_PATH_ADDITIONS:

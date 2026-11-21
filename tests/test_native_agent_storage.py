@@ -1,0 +1,60 @@
+"""Read exact native identities and real tool evidence from local SQLite stores."""
+import json
+import sqlite3
+
+import pytest
+
+from tools.session.native_storage import read_events, verify_identity
+
+
+def test_zcode_filters_synthetic_and_thinking_and_reads_actual_tool_parts(tmp_path):
+    path = tmp_path / 'db.sqlite'
+    with sqlite3.connect(path) as db:
+        db.execute('create table session(id text, directory text)')
+        db.execute('insert into session values (?,?)', ('sess_test', str(tmp_path)))
+        db.execute('create table message(id text,session_id text,data text)')
+        db.execute('create table part(message_id text,session_id text,data text)')
+        for mid, message, part in [
+            ('hidden', {'role':'user','synthetic':True}, {'type':'text','text':'private system'}),
+            ('think', {'role':'assistant'}, {'type':'reasoning','text':'private reasoning'}),
+            ('reply', {'role':'assistant'}, {'type':'text','text':'已读取 🌲'}),
+            ('tool', {'role':'assistant'}, {'type':'tool','callID':'c1','tool':'Read',
+                'state':{'status':'completed','input':{'file_path':'probe.txt'},'output':'real file contents'}}),
+        ]:
+            db.execute('insert into message values (?,?,?)',(mid,'sess_test',json.dumps(message)))
+            db.execute('insert into part values (?,?,?)',(mid,'sess_test',json.dumps(part)))
+    assert verify_identity('zcode', path, 'sess_test', str(tmp_path))
+    events, cursor = read_events('zcode', path, 'sess_test', 0)
+    assert [x['kind'] for x in events] == ['assistant_message','tool_call','tool_result']
+    assert events[-1]['payload']['result'] == 'real file contents'
+    assert 'private' not in json.dumps(events)
+    assert read_events('zcode', path, 'sess_test', cursor) == ([],cursor)
+    assert not verify_identity('zcode',path,'sess_test',str(tmp_path/'wrong'))
+    assert not verify_identity('zcode',path,'another',str(tmp_path))
+
+
+def test_hermes_tools_are_native_messages_not_answer_claims(tmp_path):
+    path = tmp_path/'state.db'
+    with sqlite3.connect(path) as db:
+        db.execute('create table sessions(id text,cwd text)')
+        db.execute('insert into sessions values (?,?)',('native',str(tmp_path)))
+        db.execute('create table messages(id integer primary key,session_id text,role text,content text,tool_calls text,tool_call_id text,tool_name text)')
+        db.execute('insert into messages values (1,?,?,?,?,?,?)',('native','assistant','',json.dumps([
+            {'id':'c1','function':{'name':'terminal','arguments':'{"command":"cat probe.txt"}'}}]),None,None))
+        db.execute('insert into messages values (2,?,?,?,?,?,?)',('native','tool','{"output":"actual bytes","exit_code":0}',None,'c1','terminal'))
+        db.execute('insert into messages values (3,?,?,?,?,?,?)',('native','assistant','verified reply',None,None,None))
+    events,cursor=read_events('hermes',path,'native',0)
+    assert [x['kind'] for x in events]==['tool_call','tool_result','assistant_message']
+    assert events[1]['payload']['call_id']=='c1'
+    assert 'actual bytes' in events[1]['payload']['result']
+    assert read_events('hermes',path,'native',cursor)==([],cursor)
+
+
+def test_missing_malformed_or_excessive_database_fails_closed(tmp_path):
+    path=tmp_path/'missing.db'
+    assert not verify_identity('hermes',path,'native',str(tmp_path))
+    assert not path.exists()
+    path.write_bytes(b'not sqlite')
+    assert not verify_identity('hermes',path,'native',str(tmp_path))
+    with pytest.raises((sqlite3.Error, ValueError)):
+        read_events('hermes',path,'native',0)

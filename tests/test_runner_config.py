@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,7 @@ def _write(tmp: Path, agents_block: str = "") -> Path:
         "machine: m1\n"
         f"credential_file: {cred}\n"
         "projects:\n"
-        f'  p1:\n    path: "{tmp}"\n'
+        f'  p1:\n    path: {json.dumps(str(tmp))}\n'
         + agents_block
     )
     p = tmp / "runner.yaml"
