@@ -9,6 +9,7 @@ import pytest
 
 from agent_profiles import EXECUTABLE_AGENT_TYPES
 from hub.application.errors import ApplicationError
+from hub.bootstrap import create_app
 from hub.domain.task import DomainError
 from support.hub_env import HubStores
 
@@ -50,8 +51,8 @@ def hub(tmp_path):
                    "pi": {"installed": False}, "hermes": {}},
         "credential": "private-marker",
     })
-    app = stores.make_app(dev_operator=ACTOR, ingest_token="fixture-ingest",
-        project_whitelist={"mac-local": ["agent-fleet"], "win-local": ["windows-project"]})
+    app = create_app(stores.config(dev_operator=ACTOR, ingest_token="fixture-ingest",
+        project_whitelist={"mac-local": ["agent-fleet"], "win-local": ["windows-project"]}))
     return stores, app, app.test_client()
 
 
@@ -68,6 +69,12 @@ def _counts(stores):
     with closing(sqlite3.connect(stores.task_db)) as conn:
         return tuple(conn.execute(sql).fetchone()[0] for sql in (
             "SELECT count(*) FROM tasks", "SELECT count(*) FROM audit WHERE action='create_task'"))
+
+
+def test_native_task_fixture_does_not_inherit_runtime_control_gates(hub):
+    _, app, _ = hub
+    for key in ("SUPERVISOR_ENABLED", "SESSION_REPOSITORIES_ENABLED", "ADOPTION_REPOSITORIES_ENABLED"):
+        assert app.config[key] is False
 
 
 def test_target_directory_projects_registry_and_installation_tristate(hub):
