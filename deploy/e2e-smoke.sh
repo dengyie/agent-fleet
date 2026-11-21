@@ -124,7 +124,7 @@ info "2. 任务已建: $TASK_ID ✓"
 
 # 幂等：同 client_token 再建
 CREATED=$(curl -s -X POST "$ENDPOINT/api/tasks" -H 'Content-Type: application/json' \
-  -d "{\"machine\":\"$MACHINE\",\"agent_type\":\"codex\",\"project\":\"demo\",\"instruction\":\"重复\",\"client_token\":\"smoke-$$\"}" \
+  -d "{\"machine\":\"$MACHINE\",\"agent_type\":\"codex\",\"project\":\"demo\",\"instruction\":\"写 hello.txt 并打印 done\",\"client_token\":\"smoke-$$\"}" \
   | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["created"])')
 [ "$CREATED" = "False" ] || fail "client_token 幂等失效"
 info "3. client_token 幂等 ✓"
