@@ -66,11 +66,20 @@ def _query_limit(default: int = 100) -> int:
     return max(1, min(limit, _MAX_QUERY_LIMIT))
 
 
-def _query_position(name: str) -> int:
-    try:
-        return max(0, min(int(request.args.get(name, 0)), 2**63 - 1))
-    except (TypeError, ValueError):
-        return 0
+def _strict_cursor(name: str) -> int | None:
+    values = request.args.getlist(name)
+    if not values:
+        return None
+    value = values[0]
+    if (len(values) != 1 or not isinstance(value, str)
+            or not value.isascii() or not value.isdecimal()
+            or (len(value) > 1 and value.startswith("0"))
+            or len(value) > 19):
+        raise SessionServiceError("invalid_cursor")
+    parsed = int(value)
+    if parsed > (1 << 63) - 1:
+        raise SessionServiceError("invalid_cursor")
+    return parsed
 
 
 def _query_bool(name: str) -> bool:
@@ -157,9 +166,13 @@ def api_runner_session_events():
 @require_operator
 def api_sessions():
     try:
-        result = _sessions().list_sessions(
+        cursor_values = request.args.getlist("cursor")
+        if len(cursor_values) > 1:
+            raise SessionServiceError("invalid_cursor")
+        result = _sessions().list_session_page(
             machine=request.args.get("machine") or None,
-            limit=_query_limit(), active=_query_bool("active"))
+            limit=_query_limit(), active=_query_bool("active"),
+            cursor=cursor_values[0] if cursor_values else None)
     except SessionServiceError as exc:
         return _session_error(exc)
     return jsonify(result)
@@ -185,12 +198,23 @@ def api_session_message(session_id):
         return error_response(exc)
     if not isinstance(data, dict):
         return error_response(ApplicationError("invalid_message", "请求必须为对象", 400))
-    if "request_id" not in data and (set(data) != {"text"} or not isinstance(data.get("text"), str)):
+    if "request_id" not in data and (
+            set(data) - {"text", "client_token"}
+            or not isinstance(data.get("text"), str)):
         return error_response(ApplicationError("invalid_message", "text 必须是字符串", 400))
+    if "request_id" not in data and "client_token" in data and (
+            type(data.get("client_token")) is not str
+            or not 1 <= len(data["client_token"]) <= 128
+            or data["client_token"].strip() != data["client_token"]
+            or any(ord(char) < 0x20 or ord(char) == 0x7f
+                   for char in data["client_token"])):
+        return _session_error(SessionServiceError("invalid_client_token"))
     try:
         if "request_id" in data:
             return jsonify(_sessions().answer_interaction(session_id, data, actor=g.operator)), 202
-        return jsonify(_sessions().send_message(session_id, data["text"], actor=g.operator)), 202
+        return jsonify(_sessions().send_message(
+            session_id, data["text"], actor=g.operator,
+            client_token=data.get("client_token"))), 202
     except SessionServiceError as exc:
         return _session_error(exc)
     except SupervisorServiceError as exc:
@@ -201,10 +225,27 @@ def api_session_message(session_id):
 @require_operator
 def api_session_events_query(session_id):
     try:
+        after_cursor = _strict_cursor("after_cursor")
+        before_cursor = _strict_cursor("before_cursor")
+        at_sequence = _strict_cursor("at_sequence")
+        tail_values = request.args.getlist("tail")
+        if len(tail_values) > 1:
+            raise SessionServiceError("invalid_cursor")
+        tail = False
+        if tail_values:
+            if tail_values[0] in {"1", "true", "yes"}:
+                tail = True
+            elif tail_values[0] not in {"0", "false", "no"}:
+                raise SessionServiceError("invalid_cursor")
+        selected_modes = int(after_cursor is not None) + int(before_cursor is not None) + int(tail)
+        if selected_modes > 1 or (tail and at_sequence is not None) or (
+                before_cursor is not None and at_sequence is not None):
+            raise SessionServiceError("invalid_cursor")
+        if at_sequence is not None and after_cursor not in (None, 0):
+            raise SessionServiceError("invalid_cursor")
         result = _sessions().session_events(
-            session_id, limit=_query_limit(),
-            after_cursor=_query_position('after_cursor'),
-            at_sequence=_query_position('at_sequence') if 'at_sequence' in request.args else None)
+            session_id, limit=_query_limit(), after_cursor=after_cursor or 0,
+            before_cursor=before_cursor, tail=tail, at_sequence=at_sequence)
     except SessionServiceError as exc:
         return _session_error(exc)
     return jsonify(result)

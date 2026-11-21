@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Mapping
 from hub.infrastructure.sqlite import connect as sqlite_connect
 
+_SESSION_MESSAGE_SCHEMA_VERSION = 1
+
 
 class SupervisorCommandRepositoryError(RuntimeError):
     def __init__(self, code: str):
@@ -156,11 +158,74 @@ class SupervisorCommandRepository:
                          " ON supervisor_commands(machine_id,session_projection_retry_s,"
                          "issued_s,command_id)"
                          " WHERE session_projection_pending=1")
+            self._migrate_session_message_operations(conn)
             conn.commit()
         except (sqlite3.Error, OSError) as exc:
+            if conn.in_transaction:
+                conn.rollback()
             raise SupervisorCommandRepositoryError("command_unavailable") from exc
         finally:
             conn.close()
+
+    @staticmethod
+    def _migrate_session_message_operations(conn: sqlite3.Connection) -> None:
+        """Atomically add the ordinary-message operation binding table."""
+        tables = {row["name"] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        version = 0
+        if "supervisor_meta" in tables:
+            meta_columns = {row["name"] for row in conn.execute(
+                "PRAGMA table_info(supervisor_meta)")}
+            if meta_columns != {"key", "value"}:
+                raise sqlite3.DatabaseError("invalid supervisor metadata schema")
+            row = conn.execute(
+                "SELECT value FROM supervisor_meta WHERE key='schema_version'").fetchone()
+            if row is not None:
+                raw_version = row["value"]
+                if (not isinstance(raw_version, str) or len(raw_version) > 10
+                        or not raw_version.isascii()
+                        or not raw_version.isdecimal()):
+                    raise sqlite3.DatabaseError("invalid supervisor schema version")
+                version = int(raw_version)
+                if version > _SESSION_MESSAGE_SCHEMA_VERSION:
+                    raise sqlite3.DatabaseError("unsupported supervisor schema version")
+
+        operation_table_exists = "session_message_operations" in tables
+        if version == _SESSION_MESSAGE_SCHEMA_VERSION and not operation_table_exists:
+            raise sqlite3.DatabaseError("missing session message operation table")
+
+        conn.execute("CREATE TABLE IF NOT EXISTS supervisor_meta ("
+                     "key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+        conn.execute("CREATE TABLE IF NOT EXISTS session_message_operations ("
+                     "token_digest TEXT PRIMARY KEY CHECK(length(token_digest)=64),"
+                     "operator_id TEXT NOT NULL,session_id TEXT NOT NULL,"
+                     "operation TEXT NOT NULL CHECK(operation='append_user_turn'),"
+                     "content_digest TEXT NOT NULL CHECK(length(content_digest)=64),"
+                     "command_id TEXT NOT NULL UNIQUE REFERENCES supervisor_commands(command_id))")
+
+        columns = {row["name"]: row for row in conn.execute(
+            "PRAGMA table_info(session_message_operations)")}
+        expected = {"token_digest", "operator_id", "session_id", "operation",
+                    "content_digest", "command_id"}
+        if set(columns) != expected or columns["token_digest"]["pk"] != 1:
+            raise sqlite3.DatabaseError("invalid session message operation schema")
+        unique_command_id = False
+        for index in conn.execute("PRAGMA index_list(session_message_operations)"):
+            if not index["unique"]:
+                continue
+            indexed_columns = [row["name"] for row in conn.execute(
+                f"PRAGMA index_info('{index['name']}')")]
+            if indexed_columns == ["command_id"]:
+                unique_command_id = True
+                break
+        if not unique_command_id:
+            raise sqlite3.DatabaseError("invalid session message operation indexes")
+
+        if version == 0:
+            conn.execute(
+                "INSERT INTO supervisor_meta(key,value) VALUES('schema_version',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(_SESSION_MESSAGE_SCHEMA_VERSION),))
 
     @classmethod
     def _append_audit_rows(cls, conn: sqlite3.Connection,
@@ -277,6 +342,33 @@ class SupervisorCommandRepository:
         finally:
             conn.close()
 
+    def find_session_message(self, token_digest: str) -> dict[str, Any] | None:
+        """Read a message binding and its current command state, never its body."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT o.token_digest,o.operator_id,o.session_id,o.operation,"
+                "o.content_digest,o.command_id,c.action AS command_action,"
+                "c.session_id AS command_session_id,c.status,c.receipt_status "
+                "FROM session_message_operations o LEFT JOIN supervisor_commands c "
+                "ON c.command_id=o.command_id WHERE o.token_digest=?",
+                (token_digest,),
+            ).fetchone()
+            if row is None:
+                return None
+            if row["status"] is None:
+                raise SupervisorCommandRepositoryError("command_corrupt")
+            if (row["command_action"] != row["operation"]
+                    or row["command_session_id"] != row["session_id"]):
+                raise SupervisorCommandRepositoryError("command_corrupt")
+            return {key: row[key] for key in row.keys()}
+        except SupervisorCommandRepositoryError:
+            raise
+        except (sqlite3.Error, OSError) as exc:
+            raise SupervisorCommandRepositoryError("command_unavailable") from exc
+        finally:
+            conn.close()
+
     def nonce_exists(self, nonce: str) -> bool:
         conn = self._connect()
         try:
@@ -309,15 +401,33 @@ class SupervisorCommandRepository:
                attempt_id: str | None, action: str, nonce: str,
                idempotency_key: str | None, wire: Mapping[str, Any],
                issued_s: float, expires_s: float,
-               audit_row: Mapping[str, Any] | None = None) -> dict[str, Any]:
+               audit_row: Mapping[str, Any] | None = None,
+               message_binding: Mapping[str, str] | None = None) -> dict[str, Any]:
         conn = self._connect()
+        binding = None
         try:
             conn.execute("BEGIN IMMEDIATE")
+            if message_binding is not None:
+                binding = self._validate_message_binding(message_binding, action, idempotency_key)
+                existing_operation = conn.execute(
+                    "SELECT o.operator_id,o.session_id,o.operation,o.content_digest,c.* "
+                    "FROM session_message_operations o JOIN supervisor_commands c "
+                    "ON c.command_id=o.command_id WHERE o.token_digest=?",
+                    (binding["token_digest"],)).fetchone()
+                if existing_operation is not None:
+                    if self._same_message_binding(existing_operation, binding):
+                        conn.commit()
+                        return self._decode(existing_operation)  # type: ignore[return-value]
+                    conn.rollback()
+                    raise SupervisorCommandRepositoryError("idempotency_conflict")
             if idempotency_key:
                 existing = conn.execute(
                     "SELECT * FROM supervisor_commands WHERE idempotency_key=?",
                     (idempotency_key,)).fetchone()
                 if existing is not None:
+                    if message_binding is not None:
+                        conn.rollback()
+                        raise SupervisorCommandRepositoryError("idempotency_conflict")
                     conn.commit()
                     return self._decode(existing)  # type: ignore[return-value]
             target = conn.execute(
@@ -361,6 +471,12 @@ class SupervisorCommandRepository:
             )
             row = conn.execute("SELECT * FROM supervisor_commands WHERE command_id=?",
                                (command_id,)).fetchone()
+            if message_binding is not None:
+                conn.execute(
+                    "INSERT INTO session_message_operations(token_digest,operator_id,session_id,"
+                    "operation,content_digest,command_id) VALUES(?,?,?,?,?,?)",
+                    (binding["token_digest"], binding["operator_id"], binding["session_id"],
+                     binding["operation"], binding["content_digest"], command_id))
             if audit_row is not None:
                 audit_rows = [
                     {**dict(audit_row), "event": "supersede",
@@ -374,6 +490,22 @@ class SupervisorCommandRepository:
             return self._decode(row)  # type: ignore[return-value]
         except sqlite3.IntegrityError as exc:
             conn.rollback()
+            if message_binding is not None:
+                existing_operation = conn.execute(
+                    "SELECT o.operator_id,o.session_id,o.operation,o.content_digest,c.* "
+                    "FROM session_message_operations o JOIN supervisor_commands c "
+                    "ON c.command_id=o.command_id WHERE o.token_digest=?",
+                    (binding["token_digest"],)).fetchone()
+                if existing_operation is not None:
+                    if self._same_message_binding(existing_operation, binding):
+                        return self._decode(existing_operation)  # type: ignore[return-value]
+                    raise SupervisorCommandRepositoryError("idempotency_conflict") from exc
+                existing_command = conn.execute(
+                    "SELECT 1 FROM supervisor_commands WHERE idempotency_key=?",
+                    (idempotency_key,)).fetchone()
+                if existing_command is not None:
+                    raise SupervisorCommandRepositoryError("idempotency_conflict") from exc
+                raise SupervisorCommandRepositoryError("command_unavailable") from exc
             if idempotency_key:
                 existing = conn.execute(
                     "SELECT * FROM supervisor_commands WHERE idempotency_key=?",
@@ -386,6 +518,32 @@ class SupervisorCommandRepository:
             raise SupervisorCommandRepositoryError("command_unavailable") from exc
         finally:
             conn.close()
+
+    @staticmethod
+    def _validate_message_binding(binding, action, idempotency_key):
+        required = {"token_digest", "operator_id", "session_id", "operation", "content_digest"}
+        if (not isinstance(binding, Mapping) or set(binding) != required
+                or action != "append_user_turn" or not idempotency_key):
+            raise SupervisorCommandRepositoryError("command_invalid")
+        token_digest = binding.get("token_digest")
+        content_digest = binding.get("content_digest")
+        if (not isinstance(token_digest, str) or len(token_digest) != 64
+                or any(char not in "0123456789abcdef" for char in token_digest)
+                or not isinstance(content_digest, str) or len(content_digest) != 64
+                or any(char not in "0123456789abcdef" for char in content_digest)):
+            raise SupervisorCommandRepositoryError("command_invalid")
+        for key, cap in (("operator_id", 128), ("session_id", 256)):
+            value = binding.get(key)
+            if not isinstance(value, str) or not value or len(value) > cap:
+                raise SupervisorCommandRepositoryError("command_invalid")
+        if binding.get("operation") != "append_user_turn":
+            raise SupervisorCommandRepositoryError("command_invalid")
+        return {key: str(binding[key]) for key in required}
+
+    @staticmethod
+    def _same_message_binding(row, binding):
+        return (row["operator_id"], row["session_id"], row["operation"], row["content_digest"]) == (
+            binding["operator_id"], binding["session_id"], binding["operation"], binding["content_digest"])
 
     def claim_available(self, machine: str, now_s: float, limit: int,
                         lease_until_s: float,

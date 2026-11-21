@@ -42,7 +42,7 @@ from session_schema import (
 )
 from hub.infrastructure.sqlite import connect as sqlite_connect
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _FAMILY_REJECT_MARKERS = ("/", "\\", "token", "key", "secret", "private", "password")
 
@@ -117,10 +117,45 @@ class SessionRepository:
         if "capability_sequence" not in stream_columns:
             conn.execute("ALTER TABLE stream_state ADD COLUMN capability_sequence INTEGER NOT NULL DEFAULT 0")
 
+    @staticmethod
+    def _migrate_v4(conn) -> None:
+        """Add immutable session-directory order and backfill old sessions."""
+        conn.execute("CREATE TABLE IF NOT EXISTS session_directory ("
+                     "directory_cursor INTEGER PRIMARY KEY AUTOINCREMENT,"
+                     "session_id TEXT NOT NULL UNIQUE REFERENCES sessions(session_id) ON DELETE CASCADE)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_session_directory_id "
+                     "ON session_directory(session_id,directory_cursor)")
+        conn.execute("INSERT OR IGNORE INTO session_directory(session_id) "
+                     "SELECT session_id FROM sessions "
+                     "ORDER BY COALESCE(updated_at,started_at,''),session_id")
+
+    @staticmethod
+    def _stored_schema_version(conn) -> int:
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
+        if table is None:
+            return 0
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(meta)")}
+        if not {"key", "value"}.issubset(columns):
+            raise sqlite3.DatabaseError("invalid session metadata schema")
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        if row is None:
+            return 0
+        value = row["value"]
+        if (not isinstance(value, str) or len(value) > 10
+                or not value.isascii() or not value.isdecimal()):
+            raise sqlite3.DatabaseError("invalid session schema version")
+        version = int(value)
+        if version > SCHEMA_VERSION:
+            raise sqlite3.DatabaseError("unsupported session schema version")
+        return version
+
     def init(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = self._connect()
         try:
+            self._stored_schema_version(conn)
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS meta (
@@ -161,20 +196,25 @@ class SessionRepository:
                     ON sessions(machine_id, attempt_id);
                 """
             )
-            # v2 remains required by legacy ingestion; v3 is an optional read model.
-            columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
-            if "agent_family" not in columns:
-                conn.execute("ALTER TABLE sessions ADD COLUMN agent_family TEXT")
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                # Recheck after acquiring the writer lock so an older process
+                # cannot downgrade a schema upgraded by a concurrent process.
+                self._stored_schema_version(conn)
                 self._migrate_v3(conn)
-                conn.execute("INSERT OR REPLACE INTO meta (key,value) VALUES ('schema_version',?)",
+                self._migrate_v4(conn)
+                conn.execute("INSERT INTO meta (key,value) VALUES ('schema_version',?) "
+                             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                              (str(SCHEMA_VERSION),))
                 conn.commit()
                 self.management_available = True
             except sqlite3.Error:
                 conn.rollback()
                 self.management_available = False
+        except sqlite3.Error:
+            if conn.in_transaction:
+                conn.rollback()
+            self.management_available = False
         finally:
             conn.close()
 
@@ -390,6 +430,10 @@ class SessionRepository:
                  clean.get("process_group_id"), clean.get("attempt_id"),
                  clean.get("agent_family"), None),
             )
+            if self.management_available:
+                conn.execute(
+                    "INSERT OR IGNORE INTO session_directory(session_id) VALUES (?)",
+                    (session_id,))
             row = conn.execute(
                 "SELECT * FROM sessions WHERE session_id=?", (session_id,)
             ).fetchone()
@@ -615,6 +659,56 @@ class SessionRepository:
             except Exception:
                 continue
         return out
+
+    def list_sessions_page(self, machine_id: str | None = None, *,
+                           limit: int = 100, snapshot_cursor: int | None = None,
+                           before_cursor: int | None = None) -> dict[str, Any]:
+        """Read a newest-first keyset page from an immutable directory snapshot."""
+        try:
+            bounded = max(1, min(int(limit), 1000))
+        except (TypeError, ValueError):
+            bounded = 100
+        if (snapshot_cursor is not None and
+                (type(snapshot_cursor) is not int or snapshot_cursor < 0
+                 or snapshot_cursor > (1 << 63) - 1)):
+            raise SessionError("invalid_cursor")
+        if (before_cursor is not None and
+                (type(before_cursor) is not int or before_cursor < 1
+                 or before_cursor > (1 << 63) - 1)):
+            raise SessionError("invalid_cursor")
+        conn = self._connect()
+        try:
+            high_water = int(conn.execute(
+                "SELECT COALESCE(MAX(directory_cursor),0) FROM session_directory").fetchone()[0])
+            snapshot = high_water if snapshot_cursor is None else snapshot_cursor
+            if snapshot > high_water or (before_cursor is not None and before_cursor > snapshot):
+                raise SessionError("invalid_cursor")
+            predicates = ["d.directory_cursor<=?"]
+            params: list[Any] = [snapshot]
+            if before_cursor is not None:
+                predicates.append("d.directory_cursor<?")
+                params.append(before_cursor)
+            if machine_id:
+                predicates.append("s.machine_id=?")
+                params.append(machine_id)
+            rows = conn.execute(
+                "SELECT s.*,d.directory_cursor FROM sessions s "
+                "JOIN session_directory d USING(session_id) WHERE "
+                + " AND ".join(predicates)
+                + " ORDER BY d.directory_cursor DESC LIMIT ?",
+                (*params, bounded + 1)).fetchall()
+        except SessionError:
+            raise
+        except (sqlite3.Error, OSError) as exc:
+            raise SessionError("session_store") from exc
+        finally:
+            conn.close()
+        has_more = len(rows) > bounded
+        page_rows = rows[:bounded]
+        items = [self._clean_row(row) for row in page_rows]
+        next_before = int(page_rows[-1]["directory_cursor"]) if has_more and page_rows else None
+        return {"sessions": items, "snapshot_cursor": snapshot,
+                "next_before_cursor": next_before, "has_more": has_more}
 
     # -- stream cursor --------------------------------------------------------------
 

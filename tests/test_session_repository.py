@@ -89,8 +89,8 @@ class SessionRepositoryTests(unittest.TestCase):
         self.repo.init()
 
     def test_init_records_schema_version(self):
-        self.assertEqual(SCHEMA_VERSION, 3)
-        self.assertEqual(self.repo.schema_version(), 3)
+        self.assertEqual(SCHEMA_VERSION, 4)
+        self.assertEqual(self.repo.schema_version(), 4)
 
     def test_upsert_and_get_session(self):
         spec = _spec()
@@ -380,6 +380,109 @@ def test_legacy_db_migrates_without_losing_rows(tmp_path):
     repo2.init()  # 幂等,不抛
     assert repo2.get_session("old")["session_id"] == "old"
     assert repo2.get_session("old")["agent_family"] == ""
+
+
+def test_v3_database_migrates_stable_directory_order_without_losing_sessions(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "directory-v3.db"
+    repo = SessionRepository(db)
+    repo.init()
+    for session_id in ("same-time-a", "same-time-b", "older"):
+        repo.upsert_session({"session_id": session_id, "machine_id": "m1"})
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE sessions SET started_at='2026-01-01T00:00:00Z',"
+                           "updated_at='2026-01-01T00:00:00Z' "
+                           "WHERE session_id IN ('same-time-a','same-time-b')")
+        connection.execute("UPDATE sessions SET started_at='2025-01-01T00:00:00Z',"
+                           "updated_at='2025-01-01T00:00:00Z' WHERE session_id='older'")
+        connection.execute("DROP TABLE session_directory")
+        connection.execute("UPDATE meta SET value='3' WHERE key='schema_version'")
+
+    migrated = SessionRepository(db)
+    migrated.init()
+    assert migrated.management_available is True
+    assert migrated.schema_version() == 4
+    page = migrated.list_sessions_page(limit=10)
+    assert [row["session_id"] for row in page["sessions"]] == [
+        "same-time-b", "same-time-a", "older"]
+    assert page["has_more"] is False
+
+
+def test_directory_migration_rolls_back_table_backfill_and_version_atomically(
+        tmp_path, monkeypatch):
+    import sqlite3
+
+    db = tmp_path / "directory-v3-failure.db"
+    original_repo = SessionRepository(db)
+    original_repo.init()
+    original_repo.upsert_session({"session_id": "old", "machine_id": "m1"})
+    with sqlite3.connect(db) as connection:
+        connection.execute("DROP TABLE session_directory")
+        connection.execute("UPDATE meta SET value='3' WHERE key='schema_version'")
+
+    repo = SessionRepository(db)
+    migrate = repo._migrate_v4
+
+    def fail_after_backfill(connection):
+        migrate(connection)
+        raise sqlite3.OperationalError("private migration marker")
+
+    monkeypatch.setattr(repo, "_migrate_v4", fail_after_backfill)
+    repo.init()
+    assert repo.management_available is False
+    with sqlite3.connect(db) as connection:
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        version = connection.execute(
+            "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
+    assert "session_directory" not in tables
+    assert version == "3"
+
+
+@pytest.mark.parametrize("version", ["5", "-1", "broken", "9" * 5000])
+def test_unsupported_or_damaged_schema_version_is_preserved_and_disables_management(
+        tmp_path, version):
+    import sqlite3
+
+    db = tmp_path / "session-version.db"
+    repo = SessionRepository(db)
+    repo.init()
+    repo.upsert_session({"session_id": "kept", "machine_id": "m1"})
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "UPDATE meta SET value=? WHERE key='schema_version'", (version,))
+
+    reopened = SessionRepository(db)
+    reopened.init()
+
+    assert reopened.management_available is False
+    with sqlite3.connect(db) as connection:
+        stored_version = connection.execute(
+            "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
+        sessions = connection.execute(
+            "SELECT session_id FROM sessions").fetchall()
+    assert stored_version == version
+    assert sessions == [("kept",)]
+
+
+def test_corrupt_session_meta_schema_fails_closed_without_rebuilding_it(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "corrupt-meta.db"
+    repo = SessionRepository(db)
+    repo.init()
+    with sqlite3.connect(db) as connection:
+        connection.execute("DROP TABLE meta")
+        connection.execute("CREATE TABLE meta(key TEXT PRIMARY KEY)")
+
+    reopened = SessionRepository(db)
+    reopened.init()
+
+    assert reopened.management_available is False
+    with sqlite3.connect(db) as connection:
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(meta)")]
+    assert columns == ["key"]
 
 
 def test_session_id_boundary_matches_transcript_repository(tmp_path):

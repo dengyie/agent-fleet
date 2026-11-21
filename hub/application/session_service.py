@@ -23,6 +23,7 @@ the service.
 
 from __future__ import annotations
 
+import base64
 import json
 import secrets
 import sqlite3
@@ -43,6 +44,7 @@ from hub.domain.interaction import normalize_answer, validate_answer_ids
 from hub.domain.session_access import AdoptionAccess, project_session_access
 from hub.application.adoption_service import AdoptionServiceError
 from fleet_core.session.redact import Redactor
+from fleet_core.control import canonical_json_bytes, validated_control_payload
 
 DEFAULT_QUERY_LIMIT = 100
 _MAX_QUERY_LIMIT = 1000
@@ -78,6 +80,11 @@ class SessionServiceError(RuntimeError):
         "session_action_unavailable": 409,
         "session_busy": 409,
         "unsupported_action": 409,
+        "invalid_client_token": 400,
+        "invalid_message": 400,
+        "idempotency_conflict": 409,
+        "session_message_unavailable": 503,
+        "invalid_cursor": 400,
     }
 
     def __init__(self, code: str, detail: str = "") -> None:
@@ -103,6 +110,39 @@ def _bounded_limit(value, default: int = DEFAULT_QUERY_LIMIT) -> int:
     except (TypeError, ValueError):
         return default
     return max(1, min(n, _MAX_QUERY_LIMIT))
+
+
+def _directory_filter_digest(machine: str | None) -> str:
+    return hashlib.sha256((machine or "").encode("utf-8")).hexdigest()
+
+
+def _encode_directory_cursor(snapshot: int, before: int, machine: str | None) -> str:
+    value = {"before": before, "filter": _directory_filter_digest(machine),
+             "snapshot": snapshot, "version": 1}
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+    return base64.urlsafe_b64encode(encoded).rstrip(b"=").decode("ascii")
+
+
+def _decode_directory_cursor(value: str, machine: str | None) -> tuple[int, int]:
+    if not isinstance(value, str) or not 1 <= len(value) <= 256:
+        raise SessionServiceError("invalid_cursor")
+    try:
+        raw = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
+        decoded = json.loads(raw)
+    except (ValueError, TypeError, UnicodeError, json.JSONDecodeError):
+        raise SessionServiceError("invalid_cursor") from None
+    if (not isinstance(decoded, dict)
+            or set(decoded) != {"before", "filter", "snapshot", "version"}
+            or type(decoded.get("version")) is not int or decoded["version"] != 1
+            or type(decoded.get("snapshot")) is not int
+            or type(decoded.get("before")) is not int
+            or decoded.get("filter") != _directory_filter_digest(machine)
+            or decoded["snapshot"] < 0 or decoded["before"] < 1
+            or decoded["snapshot"] > _MAX_SQLITE_SEQUENCE
+            or decoded["before"] > _MAX_SQLITE_SEQUENCE
+            or _encode_directory_cursor(decoded["snapshot"], decoded["before"], machine) != value):
+        raise SessionServiceError("invalid_cursor")
+    return decoded["snapshot"], decoded["before"]
 
 
 class SessionService:
@@ -544,6 +584,45 @@ class SessionService:
         actions = self._available_actions()
         return {"sessions": [self._live_session(r, adoptions.get(r['session_id']), actions) for r in rows]}
 
+    def list_session_page(self, machine=None, limit: int = DEFAULT_QUERY_LIMIT,
+                          active: bool = False, cursor: str | None = None) -> dict:
+        """Read a stable snapshot page; active-only remains a live legacy slice."""
+        if active:
+            if cursor is not None:
+                raise SessionServiceError("invalid_cursor")
+            return self.list_sessions(machine=machine, limit=limit, active=True)
+        if getattr(self.session_repo, "management_available", True) is False:
+            raise SessionServiceError("feature_unavailable")
+        snapshot = before = None
+        if cursor is not None:
+            snapshot, before = _decode_directory_cursor(cursor, machine)
+        try:
+            page = self.session_repo.list_sessions_page(
+                machine_id=machine or None, limit=_bounded_limit(limit),
+                snapshot_cursor=snapshot, before_cursor=before)
+            rows = [row for row in page["sessions"] if isinstance(row, Mapping)]
+            capabilities = self.session_repo.get_capabilities_many(
+                [row["session_id"] for row in rows])
+        except SessionError as exc:
+            raise SessionServiceError("invalid_cursor" if exc.code == "invalid_cursor"
+                                      else "session_unavailable") from None
+        except Exception:
+            raise SessionServiceError("session_unavailable") from None
+        rows = [{**row, "capabilities": capabilities.get(row["session_id"], [])}
+                for row in rows]
+        adoptions = self._adoption_rows([row["session_id"] for row in rows])
+        actions = self._available_actions()
+        result = {
+            "sessions": [self._live_session(row, adoptions.get(row["session_id"]), actions)
+                         for row in rows],
+            "has_more": bool(page["has_more"]),
+            "next_cursor": None,
+        }
+        if page["has_more"] and page["next_before_cursor"] is not None:
+            result["next_cursor"] = _encode_directory_cursor(
+                page["snapshot_cursor"], page["next_before_cursor"], machine)
+        return result
+
     def get_session(self, session_id: str) -> dict:
         """Return a single bounded session DTO or ``session_not_found``."""
         try:
@@ -580,8 +659,11 @@ class SessionService:
             raise SessionServiceError('session_action_unavailable')
 
     def control(self, session_id, *, action, actor, payload=None,
-                reason_code='operator_requested', idempotency_key=None):
+                reason_code='operator_requested', idempotency_key=None,
+                message_binding=None):
         """All session callers use the same admission path; reads confer no grant."""
+        if getattr(self.session_repo, "management_available", True) is False:
+            raise SessionServiceError("feature_unavailable")
         session = self.get_session(session_id)['session']
         self._check_action(session, action)
         if action == 'configure_model' and (not isinstance(payload, dict) or payload.get('owner_id') != actor):
@@ -590,12 +672,15 @@ class SessionService:
             try:
                 # Rechecks state under the same lock as revocation.
                 return self.adoptions.control(session_id, action=action, actor=actor,
-                    reason_code=reason_code, payload=payload, idempotency_key=idempotency_key)
+                    reason_code=reason_code, payload=payload, idempotency_key=idempotency_key,
+                    message_binding=message_binding)
             except AdoptionServiceError as exc:
                 raise SessionServiceError(exc.code) from exc
         kwargs = {'payload': payload}
         if idempotency_key is not None:
             kwargs['idempotency_key'] = idempotency_key
+        if message_binding is not None:
+            kwargs['message_binding'] = message_binding
         command = self.supervisor.enqueue(session['machine_id'], session_id,
             session.get('attempt_id'), action, reason_code, **kwargs)
         return {'session_id': session_id, 'command_id': command['command_id'], 'status': 'pending'}
@@ -681,29 +766,107 @@ class SessionService:
             raise SessionServiceError("interaction_pending") from exc
         return {"session_id": session_id, "command_id": command["command_id"], "status": "queued"}
 
-    def send_message(self, session_id: str, text: str, *, actor: str = '') -> dict:
-        """Queue a follow-up for a managed session through the existing channel."""
-        return self.control(session_id, action='append_user_turn', actor=actor, payload={'text': text})
+    def send_message(self, session_id: str, text: str, *, actor: str = '',
+                     client_token: str | None = None) -> dict:
+        """Queue or recover a follow-up through the signed control outbox."""
+        try:
+            payload = validated_control_payload('append_user_turn', {'text': text})
+        except (TypeError, ValueError):
+            raise SessionServiceError('invalid_message') from None
+        if client_token is None:
+            return self.control(session_id, action='append_user_turn', actor=actor,
+                                payload=payload)
+        if (type(client_token) is not str or not 1 <= len(client_token) <= 128
+                or client_token.strip() != client_token
+                or any(ord(char) < 0x20 or ord(char) == 0x7f for char in client_token)):
+            raise SessionServiceError('invalid_client_token')
+        if not isinstance(actor, str) or not actor or len(actor) > 128:
+            raise SessionServiceError('session_action_unavailable')
+
+        token_digest = hashlib.sha256(client_token.encode('utf-8')).hexdigest()
+        content_digest = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+        binding = {
+            'token_digest': token_digest,
+            'operator_id': actor,
+            'session_id': session_id,
+            'operation': 'append_user_turn',
+            'content_digest': content_digest,
+        }
+        try:
+            prior = self.supervisor.find_session_message(token_digest)
+        except Exception as exc:
+            from hub.application.supervisor_service import SupervisorServiceError
+            if isinstance(exc, SupervisorServiceError):
+                raise SessionServiceError('session_message_unavailable') from exc
+            raise SessionServiceError('session_message_unavailable') from exc
+        if prior is not None:
+            if any(prior.get(key) != value for key, value in binding.items()):
+                raise SessionServiceError('idempotency_conflict')
+            return {'session_id': session_id, 'command_id': prior['command_id'],
+                    'status': prior['status']}
+
+        try:
+            self.control(session_id, action='append_user_turn', actor=actor,
+                payload=payload, idempotency_key='session-message:' + token_digest,
+                message_binding=binding)
+            stored = self.supervisor.find_session_message(token_digest)
+        except Exception as exc:
+            from hub.application.supervisor_service import SupervisorServiceError
+            if isinstance(exc, SupervisorServiceError) and exc.code == 'idempotency_conflict':
+                raise SessionServiceError('idempotency_conflict') from exc
+            if isinstance(exc, SessionServiceError):
+                raise
+            if isinstance(exc, SupervisorServiceError):
+                raise
+            raise SessionServiceError('session_message_unavailable') from exc
+        if stored is None or any(stored.get(key) != value for key, value in binding.items()):
+            raise SessionServiceError('session_message_unavailable')
+        return {'session_id': session_id, 'command_id': stored['command_id'],
+                'status': stored['status']}
 
     def session_events(self, session_id: str,
                        limit: int = DEFAULT_QUERY_LIMIT, after_cursor: int = 0,
-                       at_sequence: int | None = None, include_source: bool = True) -> dict:
+                       at_sequence: int | None = None, include_source: bool = True,
+                       before_cursor: int | None = None, tail: bool = False) -> dict:
         """Page by stable Hub ingestion order, independent of source sequences."""
         limit = _bounded_limit(limit)
         try:
+            if before_cursor is not None and (tail or after_cursor != 0):
+                raise SessionServiceError('invalid_cursor')
+            if tail and after_cursor != 0:
+                raise SessionServiceError('invalid_cursor')
             if at_sequence is not None:
                 after_cursor = self.transcript_repo.event_cursor_before_sequence(session_id, at_sequence)
             rows = self.transcript_repo.read_redacted(
                 session_id, limit=limit + 1, after_cursor=after_cursor,
+                before_cursor=before_cursor, tail=tail,
                 **({'include_source': False} if not include_source else {}))
         except TranscriptError as exc:
             raise SessionServiceError(exc.code) from None
+        except SessionServiceError:
+            raise
         except Exception:
             raise SessionServiceError("session_unavailable") from None
-        events = [{**self._public_event_row(r), 'cursor': str(r['cursor'])} for r in rows[:limit]]
+        reverse_page = tail or before_cursor is not None
+        has_more = len(rows) > limit
+        page_rows = rows[-limit:] if reverse_page else rows[:limit]
+        events = [{**self._public_event_row(row), 'cursor': str(row['cursor'])}
+                  for row in page_rows]
+        if events:
+            next_cursor = events[-1]['cursor']
+            page_before_cursor = events[0]['cursor']
+        elif tail:
+            # Keep the empty-tail checkpoint at the request's starting cursor.
+            # Reading a separate high-water mark here could skip an event
+            # ingested after the empty page query but before this response.
+            next_cursor = str(after_cursor)
+            page_before_cursor = next_cursor
+        else:
+            next_cursor = str(before_cursor if before_cursor is not None else after_cursor)
+            page_before_cursor = next_cursor
         return {'events': events, 'after_cursor': str(after_cursor),
-                'next_cursor': events[-1]['cursor'] if events else str(after_cursor),
-                'has_more': len(rows) > limit}
+                'next_cursor': next_cursor, 'before_cursor': page_before_cursor,
+                'has_more': has_more}
 
     def policy_signals(self, session_id: str) -> dict:
         """Return the bounded policy-signal index for one session."""

@@ -18,9 +18,7 @@
 
 ## 最新更新
 
-2026-11-21：Agent 能力、会话准入、CLI 续接及采集已拆分为独立层，前端统一依据公开能力契约展示续聊。开发扩展见 [Agent 分层架构](docs/agent-capability-architecture.md)。
-
-2026-11-21：补齐 Windows / macOS 的 Agent 原生命令、结构化采集和同会话续聊适配，新增 macOS CI 与双端工具证据测试。能力边界及安装状态见 [Agent 验收矩阵](docs/testing/agent-platform-acceptance.md)，完整历史见 [Release Notes](docs/releases/release-notes.md)。
+2026-11-22：原生会话 API 支持普通消息投递响应恢复、事件最新页与向前翻页，以及稳定的会话目录分页；原有文本发送、问题回答和实时读取继续兼容。完整历史见 [Release Notes](docs/releases/release-notes.md)。
 
 ## Why Agent Fleet?
 
