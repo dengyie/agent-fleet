@@ -126,7 +126,9 @@ _CONTROL_OUTCOMES = frozenset({
 # Post-exit tail-flush bounds: per-pump step, inactivity and total budgets.
 _FLUSH_STEP = 0.2
 _FLUSH_BUDGET = 2.0
-_FLUSH_TOTAL_BUDGET = 30.0
+# Dense JSON tails also pay for synchronous encrypted, fsynced capture on
+# Windows. Allow a finite two-minute drain while retaining the quiet-pipe cap.
+_FLUSH_TOTAL_BUDGET = 120.0
 
 
 # --------------------------------------------------------------------------- #

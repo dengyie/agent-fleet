@@ -89,6 +89,13 @@ class RunnerCapture:
                 # The spool writer lock above excludes running captures.
                 from fleet_core.session_models import AGENT_PROTOCOLS
                 data = json.loads(self.record.read_text(encoding='utf-8'))
+                if data.get('closed') and data.get('resumable') and self._failed_native_completion():
+                    # Repair older clients' identity-only claim without resuming
+                    # or rewriting the original failed native session.
+                    self.bridge.ingest_one({'kind': 'session_metadata', 'payload': {
+                        'native_resume': False, 'model_takeover': False}})
+                    data['resumable'] = False
+                    self.record.write_text(json.dumps(data), encoding='utf-8')
                 if (data.get('closed') and data.get('resumable') and not data.get('model_takeover_version')
                         and data.get('agent_type') in AGENT_PROTOCOLS):
                     self.bridge.ingest_one({'kind': 'session_metadata', 'payload': {'model_takeover': True}})
@@ -97,6 +104,19 @@ class RunnerCapture:
         except Exception:
             self.bridge.close()
             raise
+
+    def _failed_native_completion(self):
+        from tools.supervisor.model import ManagedSessionManifest
+        root = self.cfg.supervisor_manifest_dir
+        if root is None:
+            return False
+        try:
+            manifest = ManagedSessionManifest.from_json(
+                (Path(root) / (self.session_id + '.json')).read_text(encoding='utf-8'))
+            return (manifest.session_id == self.session_id and manifest.machine_id == self.cfg.machine
+                    and manifest.state == 'terminated' and manifest.reason != 'completed')
+        except (OSError, ValueError, TypeError):
+            return False
 
     def _post(self, post, batch):
         status, body = post(self.cfg, '/api/runner-session-events', batch['events'])
@@ -194,8 +214,7 @@ class RunnerCapture:
             data = json.loads(self.record.read_text())
             if isinstance(data, dict) and not data.get('closed'):
                 data['closed'] = True
-                if resumable:
-                    data['resumable'] = True
+                data['resumable'] = bool(resumable)
                 self.record.write_text(json.dumps(data))
         except (OSError, ValueError):
             pass

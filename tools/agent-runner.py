@@ -629,7 +629,7 @@ def run_task_managed(cfg, task, supervisor):
             capture.bridge.close()
         # 删除 worktree 前确保进程组已死：异常路径下组内进程可能仍在写 worktree
         _ensure_session_dead(supervisor, session_id)
-        if wt is not None and not (session_id and supervisor.continuation_ready(session_id)):
+        if wt is not None and not (session_id and supervisor.continuation_retained(session_id)):
             worktree.cleanup_worktree(project, wt, task["task_id"])
 
 

@@ -84,3 +84,60 @@ def test_quiet_member_keeps_the_original_inactivity_deadline(finished, monkeypat
     result = supervisor.wait_session(sid, timeout_s=10)
     assert clock.now == pytest.approx(adapter._FLUSH_BUDGET)
     assert result.exit_code == 124 and result.outcome == 'group_remaining'
+
+
+def test_dense_pi_tail_persists_final_message_before_bounded_completion(tmp_path, monkeypatch):
+    ops = FakeOps(platform='windows')
+    supervisor = Supervisor(tmp_path / 'manifests', 'win', ops=ops)
+    manifest = supervisor.launch(agent='pi', command=['node', 'pi.js', '--print', '--mode', 'json', 'first'],
+                                 cwd=str(tmp_path), env_allowlist={})
+    handle = ops.children[0]
+    handle.alive, handle.exit_code = False, 0
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(adapter, 'time', SimpleNamespace(monotonic=lambda: clock.now))
+    lines = [json.dumps({'type': 'session', 'id': 'same-pi-id'})]
+    lines += [json.dumps({'type': 'message_update', 'assistantMessageEvent': {
+        'type': 'text_delta', 'delta': str(i)}}) for i in range(160)]
+    lines += [json.dumps({'type': 'message_end', 'message': {'role': 'assistant',
+        'content': [{'type': 'text', 'text': 'complete final reply'}]}})]
+    handle.stdio = lines.copy()
+    seen = []
+
+    def durable_capture(line):
+        seen.append(line)
+        clock.now += 0.3
+
+    result = supervisor.wait_session(manifest.session_id, timeout_s=10, on_line=durable_capture)
+    assert seen == lines
+    assert 30 < clock.now < adapter._FLUSH_TOTAL_BUDGET
+    assert result.outcome == 'finished' and result.exit_code == 0
+    assert supervisor.continuation_ready(manifest.session_id)
+    assert supervisor._entries[manifest.session_id].resume_token == 'same-pi-id'
+
+
+@pytest.mark.parametrize('reason', ['group_remaining', 'timed_out', 'terminated'])
+def test_retained_failed_identity_is_not_deliverable(finished, reason):
+    supervisor, sid, handle, clock = finished
+    entry = supervisor._entries[sid]
+    supervisor._capture_native_identity(entry, json.dumps({'type': 'system', 'session_id': 'retained-id'}))
+    supervisor._mark_terminated(entry.manifest, reason)
+    supervisor._release_handle(sid)
+    identity = supervisor._continuations.path(sid).read_bytes()
+    assert not supervisor.continuation_ready(sid)
+    assert supervisor.continuation_retained(sid)
+    before = len(supervisor._ops.create_calls)
+    assert supervisor.append_user_turn(sid, 'must not spawn') != 'appended'
+    assert len(supervisor._ops.create_calls) == before
+    assert supervisor._continuations.path(sid).read_bytes() == identity
+    restored = Supervisor(supervisor._manifest_dir, 'win', ops=FakeOps())
+    assert not restored.continuation_ready(sid)
+    assert restored.continuation_retained(sid)
+
+
+def test_completed_nonzero_exit_remains_deliverable(finished):
+    supervisor, sid, handle, clock = finished
+    handle.exit_code = 1
+    handle.stdio = [json.dumps({'type': 'system', 'session_id': 'recoverable-upstream-error'})]
+    result = supervisor.wait_session(sid, timeout_s=10)
+    assert result.exit_code == 1 and result.outcome == 'finished'
+    assert supervisor.continuation_ready(sid)

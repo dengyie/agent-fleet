@@ -374,6 +374,16 @@ class NativeResumeMixin:
             return 'model_restored' if value['mode'] == 'original' else 'model_configured'
 
     def continuation_ready(self, session_id: str) -> bool:
+        """True only when the retained identity can accept another turn safely."""
+        m = self.get(session_id)
+        return (m.state == 'terminated' and m.reason == 'completed'
+                and self.continuation_retained(session_id))
+
+    def continuation_retained(self, session_id: str) -> bool:
+        """Keep the original worktree/identity even after degraded completion.
+
+        Retention is not permission to deliver into an unverified process group.
+        """
         self.get(session_id)
         entry = self._entries[session_id]
         return bool(self._continuations.restore(entry)
