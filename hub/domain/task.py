@@ -82,6 +82,13 @@ def _invalid(code: str, detail: str) -> DomainError:
     return DomainError(code, detail)
 
 
+class TaskSubmissionConflict(DomainError):
+    """An opaque token cannot return a different actor's or request's task."""
+
+    def __init__(self):
+        super().__init__("idempotency_conflict", "同一提交标识不能用于不同请求")
+
+
 def validate_task_input(
     data: Mapping[str, Any], *, agent_types=DEFAULT_AGENT_TYPES
 ) -> dict[str, Any]:
@@ -113,9 +120,12 @@ def validate_task_input(
     if not isinstance(instruction, str) or not (1 <= len(instruction) <= MAX_INSTRUCTION):
         raise _invalid("invalid_instruction", "instruction 长度须为 1-2000 字符")
 
-    raw_token = data.get("client_token") or None
-    if raw_token is not None and not (1 <= len(str(raw_token)) <= MAX_CLIENT_TOKEN):
-        raise _invalid("invalid_client_token", "client_token 长度须为 1-128")
+    raw_token = data.get("client_token")
+    if raw_token is not None and raw_token != "":
+        if not isinstance(raw_token, str) or not (1 <= len(raw_token) <= MAX_CLIENT_TOKEN):
+            raise _invalid("invalid_client_token", "client_token 须为 1-128 字符的字符串")
+    else:
+        raw_token = None
 
     result = {
         "machine": machine,
@@ -124,7 +134,7 @@ def validate_task_input(
         "instruction": instruction,
     }
     if raw_token is not None:
-        result["client_token"] = str(raw_token)
+        result["client_token"] = raw_token
     confirm = data.get("confirm")
     if confirm is True or confirm == "true" or confirm == 1:
         result["confirm"] = True
@@ -133,6 +143,21 @@ def validate_task_input(
     else:
         raise _invalid("invalid_confirm", "confirm 必须是布尔值")
     return result
+
+
+def validate_task_replay(
+    task: Mapping[str, Any], request: Mapping[str, Any], *, original_confirm: bool,
+) -> None:
+    """A submission token binds the actor and immutable execution request.
+
+    Confirmation is the original gate requirement, not its current decision.
+    The generic error must not disclose the task or actor that owns a token.
+    Storage adapters supply this evidence inside the same read/write snapshot.
+    """
+    fields = ("requested_by", "machine", "agent_type", "project", "instruction")
+    if (any(task[key] != request[key] for key in fields)
+            or original_confirm != bool(request.get("confirm"))):
+        raise TaskSubmissionConflict()
 
 
 def _bounded_text(value: Any, limit: int):

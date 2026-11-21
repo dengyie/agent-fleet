@@ -358,6 +358,9 @@ class FakeTaskRepository:
         self.heartbeat_called = None
         self.completed = None
 
+    def find_task_submission(self, **request):
+        return None
+
     def create_task(self, *, machine, agent_type, project, instruction,
                     requested_by, client_token=None, **extra):
         row = {

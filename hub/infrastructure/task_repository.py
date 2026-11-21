@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from hub.domain.task import (
     LEASE_HOLDING_STATES, TASK_STATES, DomainError, TaskStopObservation, can_cancel, can_continue, can_pause, can_retry,
-    holds_lease,
+    holds_lease, validate_task_replay, TaskSubmissionConflict,
 )
 from hub.infrastructure.sqlite import connect as sqlite_connect
 from fleet_core.task_result import (
@@ -292,10 +292,63 @@ class SqliteTaskRepository:
         ):
             conn.execute(ddl)
 
+    @staticmethod
+    def _find_task_submission(conn, request, *, handoff=None, legacy_origin=None):
+        """Match the original request in the caller's consistent transaction."""
+        token = request.get("client_token")
+        if not token:
+            return None
+        existing = conn.execute(
+            "SELECT * FROM tasks WHERE client_token=?", (token,)).fetchone()
+        if existing is None:
+            cancelled = conn.execute(
+                "SELECT 1 FROM task_submission_cancellations WHERE client_token=?",
+                (token,)).fetchone()
+            if cancelled is not None:
+                raise DomainError("task_submission_cancelled", "task_submission_cancelled")
+            return None
+        if existing["requested_by"] != request["requested_by"]:
+            raise TaskSubmissionConflict()
+        origin = conn.execute(
+            "SELECT owner_id,run_id,repository_id FROM legacy_task_origins WHERE task_id=?",
+            (existing["task_id"],)).fetchone()
+        if (dict(origin) if origin is not None else None) != legacy_origin:
+            if legacy_origin is None:
+                raise TaskSubmissionConflict()
+            raise DomainError("legacy_task_conflict", "legacy_task_conflict")
+        receipt = conn.execute(
+            "SELECT request_digest,source_session_id FROM handoff_receipts WHERE client_token=?",
+            (token,)).fetchone()
+        if (dict(receipt) if receipt is not None else None) != handoff:
+            if handoff is None:
+                raise TaskSubmissionConflict()
+            raise HandoffConflict()
+        gate = conn.execute(
+            "SELECT 1 FROM task_gates WHERE task_id=?", (existing["task_id"],)).fetchone()
+        validate_task_replay(existing, request, original_confirm=gate is not None)
+        return dict(existing)
+
+    def find_task_submission(self, *, machine, agent_type, project, instruction,
+                             requested_by, client_token, confirm=False,
+                             handoff=None, legacy_origin=None):
+        """Read-only recovery before new-task admission; never queues an attempt.
+
+        Read all immutable fields, original gate and internal origin bindings
+        from one snapshot. Creation repeats this check under BEGIN IMMEDIATE
+        because concurrent callers may both miss this read.
+        """
+        request = {"machine": machine, "agent_type": agent_type, "project": project,
+                   "instruction": instruction[:2000], "requested_by": requested_by,
+                   "client_token": client_token, "confirm": confirm}
+        with contextlib.closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            return self._find_task_submission(
+                conn, request, handoff=handoff, legacy_origin=legacy_origin)
+
     def create_task(self, *, machine, agent_type, project, instruction, requested_by,
                     client_token=None, ttl_s=TASK_TTL_S, now=None, confirm=False,
                     handoff=None, legacy_origin=None):
-        """创建任务；(client_token 命中, False) 幂等返回已有任务。
+        """创建任务；相同 token 和完整请求幂等返回已有任务，否则拒绝。
 
         超长 instruction 服务端截断至 2000 字符后再 INSERT（不依赖 SQLite CHECK
         抛错），符合全局约束「超限服务端截断」。
@@ -306,25 +359,13 @@ class SqliteTaskRepository:
         conn = self._connect()
         try:
             with _tx(conn):
-                if client_token:
-                    existing = conn.execute(
-                        "SELECT * FROM tasks WHERE client_token=?", (client_token,)).fetchone()
-                    if existing:
-                        if legacy_origin is not None:
-                            origin = conn.execute("SELECT owner_id,run_id,repository_id FROM legacy_task_origins WHERE task_id=?",
-                                                  (existing["task_id"],)).fetchone()
-                            if origin is None or dict(origin) != legacy_origin:
-                                raise DomainError("legacy_task_conflict", "legacy_task_conflict")
-                        if handoff is not None:
-                            receipt = conn.execute(
-                                "SELECT request_digest FROM handoff_receipts WHERE client_token=?",
-                                (client_token,)).fetchone()
-                            if not receipt or receipt["request_digest"] != handoff["request_digest"]:
-                                raise HandoffConflict()
-                        return dict(existing), False
-                    cancelled = conn.execute("SELECT requested_by FROM task_submission_cancellations WHERE client_token=?", (client_token,)).fetchone()
-                    if cancelled is not None:
-                        raise DomainError("task_submission_cancelled", "task_submission_cancelled")
+                existing = self._find_task_submission(conn, {
+                    "machine": machine, "agent_type": agent_type, "project": project,
+                    "instruction": instruction, "requested_by": requested_by,
+                    "client_token": client_token, "confirm": confirm,
+                }, handoff=handoff, legacy_origin=legacy_origin)
+                if existing is not None:
+                    return existing, False
                 attempt_id = uuid.uuid4().hex
                 conn.execute(
                     "INSERT INTO tasks (task_id, client_token, machine, agent_type, project,"
