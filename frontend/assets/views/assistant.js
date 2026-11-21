@@ -6,6 +6,7 @@ import { createConversationState, mergeConversationPage as mergeConversationStat
 import { mountWorkflowPanel } from './assistant/workflow.js';
 import { mountNodePanel } from './assistant/nodes.js';
 import { mountInspector } from './assistant/workspace.js';
+import {conversationTargets} from './conversation-target.js';
 import { el, clear, showError, renderMessages, renderEvents, renderExecutionWindow, renderArtifacts, renderLegacyProjection, renderUnknownCommands, memoryReference, renderMemoryItems, renderSelectedMemoryItems } from './assistant/panels.js';
 function token() { if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID(); return 'turn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2); }
 
@@ -84,6 +85,7 @@ export function mountAssistant(target, options) {
   if (canAdminister) inspectorGroups.push({id: 'nodes', title: '节点', sections: [nodeSection], onSelect: () => nodePanel.activate()});
   if (canAdminister) inspectorGroups.push({id: 'workflows', title: '流程', sections: [workflowSection], hidden: true});
   var inspectorUi = mountInspector(root, heading, inspector, inspectorGroups);
+  if (canAdminister) intro.prepend(conversationTargets('assistant'));
   var conversationId = options.conversationId || null; var conversationWorkspaceId = null; var conversationArchived = false; var activeRunId = null; var latestRunId = null; var cursor = 0; var polling = false; var windowEventCursor = 0; var windowPolling = false; var windowState = { loading: false, error: null, window: null, mode: 'disconnected', events: [], holderId: token(), leaseToken: null, leaseExpiresAt: 0 };
   var disposed = false; var suspended = false; var timers = new Set(); var windowPollTimer = null; var resumeWindowPoll = false;
   // A cached (suspended) route view must not poll runs or renew the writer lease.

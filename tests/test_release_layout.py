@@ -100,6 +100,11 @@ class ReleaseLayoutTests(unittest.TestCase):
                         'assets/views/account/workflow-summary-generation.js'})
         allowed.update({'assets/views/session-handoff.js', 'assets/views/session-questions.js',
                         'assets/views/session-search.js', 'assets/views/usage.js'})
+        allowed.update({'assets/views/agent-chat.js', 'assets/views/conversation-target.js',
+                        'assets/views/sessions.js', 'assets/views/agent-chat/dom.js',
+                        'assets/views/agent-chat/paths.js', 'assets/views/agent-chat/state.js',
+                        'assets/views/agent-chat/service.js', 'assets/views/agent-chat/live.js',
+                        'assets/views/agent-chat/messages.js', 'assets/views/agent-chat/inspector.js'})
         allowed.update({'assets/views/muse.js', 'assets/views/muse/cards.js', 'assets/views/muse/model.js', 'assets/api/muse.js'})
         allowed.update({'assets/api/plugins.js', 'assets/views/plugins.js', 'assets/plugins/registry.js',
                         'assets/plugins/dom.js', 'assets/plugins/github-cli.js'})

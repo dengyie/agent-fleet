@@ -107,5 +107,9 @@ export function mountInspector(root, heading, inspector, groups) {
     }
   }
   select(entries.find(entry => !entry.button.hidden).id); setOpen(open);
-  return { select, setVisible, dispose: () => { narrow?.removeEventListener('change', onResize); setOpen(false); } };
+  let resumeOpen = false;
+  return { select, setVisible,
+    suspend() { resumeOpen = open; setOpen(false); },
+    resume() { setOpen(resumeOpen); },
+    dispose: () => { narrow?.removeEventListener('change', onResize); setOpen(false); } };
 }

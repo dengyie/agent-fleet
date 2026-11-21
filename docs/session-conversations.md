@@ -1,6 +1,7 @@
 # VPS agent 对话采集与反馈
 
 See [Agent capability layers](agent-capability-architecture.md) for native Agent execution, access policy, storage ports and browser contracts.
+网页聊天、电脑会话目录、前后端职责和当前接口接点见[电脑 Agent 网页前端接入](native-web-frontend.md)。
 
 第一版以可见、可回看、能验证的完整对话为目标。任务日志摘要不再作为会话正文。Hub 继续使用既有 operator/runner 认证。
 

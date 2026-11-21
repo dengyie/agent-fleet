@@ -12,6 +12,9 @@ import { mountMachine } from './views/machine.js';
 import { mountTask } from './views/task.js';
 import { mountSession } from './views/session.js';
 import { mountSessionSearch } from './views/session-search.js';
+import {mountAgentChat} from './views/agent-chat.js';
+import {mountSessions} from './views/sessions.js';
+import {nativeChatPath, nativeDirectoryPath} from './views/agent-chat/paths.js';
 import { mountUsage } from './views/usage.js';
 import { mountAssistant } from './views/assistant.js';
 import { mountMuse } from './views/muse.js';
@@ -42,7 +45,15 @@ function protectConsole() {
   let loggingOut = false;
   let identityLifetime = null;
   function routeKey(value) {
+    if (value.page === 'agent-chat') return value.page + ':' + value.nativeKind + ':' + (value.id || value.machine || '');
+    if (value.page === 'sessions') return value.page + ':' + (value.machine || '');
     return value.page + ':' + (value.id || '');
+  }
+  function routeUrl(value) {
+    if (value.page === 'agent-chat') return nativeChatPath(value.nativeKind === 'session' ? {sessionId: value.id} : value.nativeKind === 'task' ? {taskId: value.id} : {machine: value.machine});
+    if (value.page === 'sessions') return nativeDirectoryPath(value.machine);
+    if (value.page === 'assistant') return value.id ? pagePath('conversation', value.id) : pagePath('assistant');
+    return value.id ? pagePath(value.page, value.id) : pagePath(value.page);
   }
   function suspendRouteView(view) {
     if (!view || view.suspended) return;
@@ -92,8 +103,10 @@ function protectConsole() {
     redirectToLogin();
   }
   function adoptConversation(view, conversationId) {
+    adoptRoute(view, {page: 'assistant', id: conversationId});
+  }
+  function adoptRoute(view, nextRoute) {
     if (routeViews.get(view.key) !== view) return;
-    const nextRoute = {page: 'assistant', id: conversationId};
     const key = routeKey(nextRoute);
     const previous = routeViews.get(key);
     const replacingActive = previous && previous !== view && activeRouteView === previous;
@@ -108,10 +121,10 @@ function protectConsole() {
     }
     // A background submission may finish after the user opens another page.
     // Update its cache identity without navigating away from that page.
-    if (settingsBackgroundView === view) settingsReturnUrl = pagePath('conversation', conversationId);
+    if (settingsBackgroundView === view) settingsReturnUrl = routeUrl(nextRoute);
     if (activeRouteView !== view) return;
     route = nextRoute;
-    window.history.replaceState(null, '', pagePath('conversation', conversationId));
+    window.history.replaceState(null, '', routeUrl(nextRoute));
     disposeNavigation?.updateRoute?.(route);
   }
   function mountRoute(view, {animateEntrance = true} = {}) {
@@ -130,6 +143,13 @@ function protectConsole() {
       conversationId: route.id, account, store, identitySignal: identityLifetime.signal,
       onConversationCreated: id => adoptConversation(view, id),
     });
+    else if (route.page === 'agent-chat') view.teardown = mountAgentChat(target, {
+      sessionId: route.nativeKind === 'session' ? route.id : null,
+      taskId: route.nativeKind === 'task' ? route.id : null, machine: route.machine,
+      api: client, store, account, identitySignal: identityLifetime.signal,
+      onIdentity: ref => adoptRoute(view, {page: 'agent-chat', nativeKind: ref.sessionId ? 'session' : 'task', id: ref.sessionId || ref.taskId}),
+    });
+    else if (route.page === 'sessions') view.teardown = mountSessions(target, {api: client, store, machine: route.machine, identitySignal: identityLifetime.signal});
     else if (route.page === 'muse') view.teardown = mountMuse(target);
     else if (route.page === 'monitoring') view.teardown = mountMonitoring(target, client);
     else if (route.page === 'plugins') view.teardown = mountPlugins(target);
@@ -156,9 +176,7 @@ function protectConsole() {
       settingsReturnFocus = document.activeElement;
       while (settingsReturnFocus?.shadowRoot?.activeElement) settingsReturnFocus = settingsReturnFocus.shadowRoot.activeElement;
       settingsBackgroundView = activeRouteView;
-      settingsReturnUrl = route.page === 'assistant'
-        ? (route.id ? pagePath('conversation', route.id) : pagePath('assistant'))
-        : (route.id ? pagePath(route.page, route.id) : pagePath(route.page));
+      settingsReturnUrl = routeUrl(route);
       if (settingsBackgroundView) settingsBackgroundView.host.inert = true;
     } else suspendRouteView(activeRouteView);
     if (nextRoute.page !== 'settings' && settingsBackgroundView) {
@@ -244,7 +262,7 @@ function protectConsole() {
   function mount() {
     // Sensitive results can outlive a cached route, but never its identity.
     identityLifetime = new AbortController();
-    disposeNavigation = mountNavigation(route, store);
+    disposeNavigation = mountNavigation(route, store, account);
     if (route.page === 'settings') {
       const settingsRoute = route;
       route = {page: 'assistant'};

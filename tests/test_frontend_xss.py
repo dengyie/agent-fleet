@@ -40,9 +40,16 @@ class ViewXssProtectionTests(unittest.TestCase):
 
     def _view_sources(self):
         return {
-            p.name: p.read_text()
+            p.relative_to(VIEWS_DIR).as_posix(): p.read_text(encoding='utf-8')
             for p in VIEWS_DIR.glob('*.js') if p.is_file()
         }
+
+    def _render_source(self, source):
+        # Native views share one safe element builder; inspect its actual sink
+        # rather than requiring every caller to duplicate document.createElement.
+        if "from './agent-chat/dom.js'" in source:
+            source += (VIEWS_DIR / 'agent-chat/dom.js').read_text(encoding='utf-8')
+        return source
 
     def test_views_never_write_dynamic_markup(self):
         sources = self._view_sources()
@@ -53,11 +60,18 @@ class ViewXssProtectionTests(unittest.TestCase):
             self.assertNotIn('document.write', source, name)
 
     def test_views_write_dynamic_text_via_textcontent(self):
-        # 每个视图都必须包含 textContent 写入路径（浏览器自动转义）。
+        # 每个视图的直接或共享 helper 路径都必须使用安全 DOM 写入。
         sources = self._view_sources()
         for name, source in sources.items():
+            source = self._render_source(source)
             self.assertIn('textContent', source, name)
             self.assertIn('createElement', source, name)
+
+    def test_native_helpers_never_write_dynamic_markup(self):
+        for path in (VIEWS_DIR / 'agent-chat').glob('*.js'):
+            source = path.read_text(encoding='utf-8')
+            for sink in ('innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write'):
+                self.assertNotIn(sink, source, path.name)
 
     def test_views_do_not_build_html_strings_from_dynamic_values(self):
         # 视图不得用字符串拼接构造 HTML 片段（反引号模板 / join 标签均禁止）。

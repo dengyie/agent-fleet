@@ -1,5 +1,7 @@
 import { uiIcon, pagePath, navigatePage } from '../routes.js';
 import {mountMenu} from './menus.js';
+import {listSessions} from '../api/client.js';
+import {nativeChatPath} from '../views/agent-chat/paths.js';
 import {
   getConversations, renameConversation, archiveConversation,
   restoreConversation, deleteConversation,
@@ -16,6 +18,8 @@ const labels = {
   session: ['会话', '会话详情', '连接你的执行会话，保留完整工作上下文。', 'SESSION'],
   'session-search': ['会话搜索', '会话搜索', '搜索脱敏会话记录，定位消息与工具结果。', 'SESSION SEARCH'],
   usage: ['用量看板', '用量看板', '按日期、项目、机器、Agent 和模型查看用量与费用来源。', 'USAGE'],
+  'agent-chat': ['电脑 Agent', '电脑 Agent', '连接电脑上的原生会话。', 'COMPUTER AGENT'],
+  sessions: ['电脑会话', '电脑会话', '阅读已同步记录，继续原生会话。', 'COMPUTER SESSIONS'],
 };
 // The single allow-list of pages a non-admin account may open. Click/history
 // navigation and the post-login guard both consult it, so they cannot drift.
@@ -38,10 +42,15 @@ export function resolveRoute(location = window.location) {
   }
   if (page === 'account') return {page: 'settings', id: 'account'};
   if (page === 'conversation') return {page: 'assistant', id};
+  if (page === 'assistant' && query.get('view') === 'sessions') return {page: 'sessions', machine: query.get('machine') || ''};
+  if (page === 'assistant' && query.get('view') === 'computer') return {page: 'agent-chat', nativeKind: 'new', machine: query.get('machine') || ''};
+  if ((page === 'session' || page === 'task') && id && query.get('view') === 'chat') return {page: 'agent-chat', nativeKind: page, id};
   return {page: labels[page] ? page : 'invalid', id,
     sequence: page === 'session' ? query.get('sequence') : null};
 }
-export function mountNavigation(route, store) {
+export function mountNavigation(route, store, account) {
+  const canAdminister = !account || account.role === 'admin';
+  document.querySelectorAll('[data-native-entry]').forEach(node => { node.hidden = !canAdminister; });
   document.querySelectorAll('[data-icon]').forEach(slot => slot.replaceChildren(uiIcon(slot.dataset.icon, {size: 18})));
   const disposeAccountMenu = mountMenu(document.getElementById('account-menu-trigger'), document.getElementById('account-menu'));
   let currentRoute = route;
@@ -55,7 +64,8 @@ export function mountNavigation(route, store) {
       else link.removeAttribute('aria-current');
     });
     document.querySelectorAll('#sidebar-conversations a').forEach(link => {
-      if (new URL(link.href, window.location.href).pathname === window.location.pathname) link.setAttribute('aria-current', 'page');
+      const target = resolveRoute(new URL(link.href, window.location.href));
+      if (target.page === currentRoute.page && target.id === currentRoute.id && target.nativeKind === currentRoute.nativeKind) link.setAttribute('aria-current', 'page');
       else link.removeAttribute('aria-current');
     });
   }
@@ -261,39 +271,56 @@ export function mountNavigation(route, store) {
     } else {
       addHistoryAction(menu, '归档', () => runHistoryAction(async () => {
         await archiveConversation(row.conversation_id);
-        if (resolveRoute().id === row.conversation_id) navigatePage(pagePath('assistant'), {replace: true});
+        if (resolveRoute().page === 'assistant' && resolveRoute().id === row.conversation_id) navigatePage(pagePath('assistant'), {replace: true});
       }));
     }
     entry.appendChild(menu);
     return entry;
   }
+  function nativeHistoryEntry(row) {
+    const entry = document.createElement('div'); entry.className = 'conversation-history-entry native-history-entry';
+    entry.dataset.searchText = [row.agent_family, row.machine_id, row.session_id].join(' ').toLocaleLowerCase();
+    const link = document.createElement('a'); link.href = nativeChatPath({sessionId: row.session_id});
+    const text = document.createElement('span'); text.textContent = [row.agent_family || 'Agent', row.machine_id].filter(Boolean).join(' · ');
+    link.append(uiIcon('monitor', {size: 13}), text); link.title = text.textContent + ' · 电脑会话';
+    if (currentRoute.page === 'agent-chat' && currentRoute.nativeKind === 'session' && currentRoute.id === row.session_id) link.setAttribute('aria-current', 'page');
+    entry.append(link); return entry;
+  }
   async function refreshHistory() {
     const request = ++historyRequest;
     const list = document.getElementById('sidebar-conversations');
-    try {
-      const mode = historyArchived;
-      const data = await getConversations(50, mode);
+    const mode = historyArchived;
+    let assistantRows = [], nativeRows = [], failed = [], pending = 2;
+    function paintHistory() {
       if (disposed || request !== historyRequest || mode !== historyArchived) return;
       list.replaceChildren();
-      for (const row of (data.conversations || []).slice(0, 50)) {
-        if (!row.conversation_id) continue;
-        list.appendChild(historyEntry(row));
+      const items = assistantRows.filter(row => row.conversation_id).map(row => ({row, native: false}));
+      items.push(...nativeRows.filter(row => row.session_id).map(row => ({row, native: true})));
+      items.sort((a, b) => (Date.parse(b.row.updated_at || b.row.created_at) || 0) - (Date.parse(a.row.updated_at || a.row.created_at) || 0));
+      for (const item of items.slice(0, 50)) {
+        list.appendChild(item.native ? nativeHistoryEntry(item.row) : historyEntry(item.row));
       }
-      if (!list.childElementCount) { const empty = document.createElement('p'); empty.className = 'sidebar-empty'; empty.textContent = historyArchived ? '没有已归档对话' : '新对话会保存在这里'; list.appendChild(empty); }
+      if (!list.childElementCount) {
+        const empty = document.createElement('p'); empty.className = 'sidebar-empty';
+        empty.textContent = pending ? '正在获取对话…' : failed.length ? failed.join('；') : historyArchived ? '没有已归档对话' : '新对话会保存在这里';
+        list.appendChild(empty);
+      }
+      if (!pending && failed.length) {
+        const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = '重试加载对话';
+        retry.title = failed.join('；'); retry.addEventListener('click', refreshHistory); list.append(retry);
+      }
       filterHistory();
-    } catch (error) {
-      if (disposed || request !== historyRequest) return;
-      list.replaceChildren();
-      searchStatus.hidden = true;
-      const message = document.createElement('p'); message.className = 'sidebar-empty';
-      message.textContent = error.status === 401 ? '登录后查看最近对话' : '历史对话加载失败';
-      const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = '重试';
-      retry.addEventListener('click', refreshHistory);
-      list.append(message, retry);
     }
+    // Each source publishes independently: a slow node/session API cannot hold
+    // the owner's platform history behind its own timeout (and vice versa).
+    await Promise.all([
+      getConversations(50, mode).then(data => { assistantRows = data.conversations || []; }, () => { failed.push('主助手历史加载失败'); }).finally(() => { pending--; paintHistory(); }),
+      (canAdminister && !mode ? listSessions({limit: 12}) : Promise.resolve({sessions: []})).then(data => { nativeRows = data.sessions; }, () => { failed.push('电脑会话加载失败'); }).finally(() => { pending--; paintHistory(); }),
+    ]);
   }
   refreshHistory();
   window.addEventListener('fleet-conversations-updated', refreshHistory);
+  window.addEventListener('fleet-native-sessions-updated', refreshHistory);
   window.addEventListener('focus', refreshHistory);
   const onTitleSave = async () => {
     if (!dialogConversationId) return;
@@ -333,7 +360,7 @@ export function mountNavigation(route, store) {
     const conversationId = deleteConversationId;
     deleteConfirm.disabled = true;
     runHistoryAction(() => deleteConversation(conversationId)).then(succeeded => {
-      if (succeeded && resolveRoute().id === conversationId) navigatePage(pagePath('assistant'), {replace: true});
+      if (succeeded && resolveRoute().page === 'assistant' && resolveRoute().id === conversationId) navigatePage(pagePath('assistant'), {replace: true});
     }).finally(() => {
       deleteConfirm.disabled = false;
       deleteDialog.close();
@@ -356,6 +383,7 @@ export function mountNavigation(route, store) {
     deleteConfirm.removeEventListener('click', onDeleteConfirm);
     cancelButtons.forEach(item => item.removeEventListener('click', onDialogCancel));
     window.removeEventListener('fleet-conversations-updated', refreshHistory);
+    window.removeEventListener('fleet-native-sessions-updated', refreshHistory);
     window.removeEventListener('focus', refreshHistory);
     unsubscribe();
     mobile.removeEventListener('change', resetDrawer);

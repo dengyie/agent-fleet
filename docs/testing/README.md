@@ -23,6 +23,8 @@ PYTHONPATH=. python3 -m pytest tests/test_native_session_api.py \
 
 Windows / macOS 各 Agent 的安装、执行、原生续聊、模型接管与外部验收边界见[双端 Agent 验收矩阵](agent-platform-acceptance.md)。
 
+电脑 Agent 的网页新建、会话目录、阅读与续聊交互设计见[原生 Agent 网页工作区实施计划](../superpowers/plans/2026-11-21-native-agent-web-workspace.md)。本轮前端实现、公开 API 接点、真实浏览器测试及等待后端的边界见[网页前端接入](../native-web-frontend.md)。新建目录测试使用测试 app 暴露的真实 TaskService；不能据此宣称产品 HTTP 接口或线上节点已验收。
+
 这份文档是测试入口。可执行范围定义在 [journeys.json](journeys.json)；逐阶段断言、审查回归和证据核验见 [test-chains.md](test-chains.md)；外部验收见 [release-acceptance.md](release-acceptance.md)。测试用例、门禁和文档必须随功能一起更新。
 
 ## 为什么需要这套门禁

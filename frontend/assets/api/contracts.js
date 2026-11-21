@@ -446,6 +446,34 @@ export function parseAgentTypes(data) {
   return { agent_types: out };
 }
 
+/** Public TaskService.targets projection; installation is deliberately tri-state. */
+export function parseTaskTargets(data) {
+  requireObject(data, 'task_targets');
+  if (typeof data.machine !== 'string' || !data.machine || !Array.isArray(data.projects) ||
+      data.projects.length > 200 || !isObject(data.agents)) {
+    throw new ContractError('invalid_task_targets', '节点启动目标无效');
+  }
+  const projects = data.projects.map(project => {
+    if (typeof project !== 'string' || !project || project.length > 128) {
+      throw new ContractError('invalid_task_targets', '登记项目无效');
+    }
+    return project;
+  });
+  const agents = {};
+  const rows = Object.entries(data.agents);
+  if (rows.length > 64) throw new ContractError('invalid_task_targets', 'Agent 目录过大');
+  for (const [family, row] of rows) {
+    requireObject(row, 'task_target_agent');
+    if (!/^[a-z][a-z0-9_-]{0,63}$/.test(family) ||
+        ![true, false, null].includes(row.installed)) {
+      throw new ContractError('invalid_task_targets', '安装状态无效');
+    }
+    Object.defineProperty(agents, family, {value: {installed: row.installed}, enumerable: true});
+  }
+  return {machine: boundOpaque(data.machine, 'machine'), projects: [...new Set(projects)],
+    observed_at: typeof data.observed_at === 'string' ? data.observed_at.slice(0, 64) : null, agents};
+}
+
 /**
  * 解析单个任务 DTO（create / get / cancel / retry 响应中的 task）。
  * 会拒绝 attempt_id / nonce / client_token 以及未知 result 内部字段。
@@ -633,12 +661,24 @@ export function parseSession(data) {
 /**
  * 解析会话列表（GET /api/sessions）。外层 {sessions: [...]}，无 ok。
  */
-export function parseSessionList(data) {
+export function parseSessionList(data, {liveSlice = false} = {}) {
   requireObject(data, 'session_list_response');
   var out = { sessions: [] };
   if (Array.isArray(data.sessions)) {
     out.sessions = data.sessions.map(parseSessionRow);
   }
+  if (liveSlice && data.has_more === undefined && data.next_cursor === undefined) {
+    out.has_more = false;
+    out.next_cursor = null;
+    return out;
+  }
+  if (typeof data.has_more !== 'boolean' || data.next_cursor !== null &&
+      (typeof data.next_cursor !== 'string' || !data.next_cursor || data.next_cursor.length > 4096) ||
+      data.has_more && !data.next_cursor) {
+    throw new ContractError('invalid_session_directory_cursor', '会话目录分页状态无效');
+  }
+  out.has_more = data.has_more;
+  out.next_cursor = data.next_cursor;
   return out;
 }
 
@@ -653,7 +693,7 @@ export function parseSessionEvents(data) {
   if (Array.isArray(data.events)) {
     out.events = data.events.map(parseSessionEventRow);
   }
-  for (var field of ['after_cursor', 'next_cursor']) {
+  for (var field of ['after_cursor', 'next_cursor', 'before_cursor']) {
     if (typeof data[field] !== 'string' || !/^(0|[1-9][0-9]{0,18})$/.test(data[field]) ||
         BigInt(data[field]) > 9223372036854775807n) {
       throw new ContractError('invalid_session_cursor', '事件分页游标无效');
