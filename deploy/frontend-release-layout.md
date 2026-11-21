@@ -70,7 +70,9 @@ CI 的 `agent-fleet-release` artifact 只含后端归档；`agent-fleet-frontend
 
 前端打包保留目录结构并写入稳定排序的 `manifest.json`（版本、文件清单）。输出目录必须尚不存在；打包器以独占目录创建拒绝复用目标，避免将未列入 manifest 的旧文件或凭据带入 release。凭据、私钥、数据库/状态快照路径会使打包整体失败；`assets/state/store.js` 是允许的客户端模块。每次使用新的版本目录。
 
-当前 JS/CSS 文件名**不含内容哈希**。打包器会为 HTML 中的资源引用、JS 模块导入及 CSS 子资源追加本次 release SHA（`?v=<release>`），确保已缓存的旧 URL 不会遮蔽新 release；所有入口和 `/assets/*` 仍须使用 `Cache-Control: no-cache` 并允许 ETag/304 重新验证，不能使用 immutable 缓存。部署公网验收必须检查 `/` 与 `/manifest.json` 的版本；模块图通过 release SHA 查询参数隔离。JSON API 使用 `no-store`；SSE 关闭代理缓冲和缓存，并设置足够长的读超时。
+当前 JS/CSS 文件名**不含内容哈希**。打包器会为 HTML 中的资源引用、JS 模块导入及 CSS 子资源追加本次 release SHA（`?v=<release>`），确保已缓存的旧 URL 不会遮蔽新 release；所有入口和 `/assets/*` 仍须使用 `Cache-Control: no-cache` 并允许 ETag/304 重新验证，不能使用 immutable 缓存。模块图通过 release SHA 查询参数隔离。JSON API 使用 `no-store`；SSE 关闭代理缓冲和缓存，并设置足够长的读超时。
+
+CI 部署后运行 `deploy/verify_frontend_release.py`：通过公网读取 `/`、`/manifest.json` 和 manifest 中每个 `?v=<release>` 资源，与同一 run 的前端产物逐字节比较。检查不附加随机参数或强刷请求头，防止绕开有问题的 CDN 缓存后误报成功。任一缺失、旧内容或版本不符都会令部署 job 失败，验收结果保存在 `agent-fleet-deployment` artifact；此检查位于宿主部署事务之后，失败不代表已自动回滚。首次部署前必须配置仓库变量 `FRONTEND_ORIGIN` 为公网源站地址（例如 `https://fleet.example.com`），缺失时在提交宿主部署前失败。
 
 同源 Nginx 示例见 [nginx-frontend-backend.example.conf](nginx-frontend-backend.example.conf)。`/assets/` 与 `/config.js` 缺失返回 404，页面路径回退到原样 `index.html`，`/api/*` 不允许回退到 HTML。
 
