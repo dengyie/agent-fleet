@@ -6,6 +6,10 @@ recorded separately in [the platform acceptance matrix](testing/agent-platform-a
 The surrounding system remains [push-only](architecture-v3.md); backend, static
 frontend and signed node client releases remain independently packaged.
 
+The browser-facing registered task directory and accepted-submission recovery
+share `TaskService` with the assistant; their HTTP, domain and transactional
+repository responsibilities are documented in the [native task API contract](native-task-api.md).
+
 ```mermaid
 flowchart TB
     View[Static session and machine views] --> UI[Shared UI presentation]

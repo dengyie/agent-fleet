@@ -14,6 +14,7 @@
   POST /api/tasks/<task_id>/reject     闸拒绝并取消
   GET  /api/tasks/<task_id>/diff       脱敏 patch 正文
   GET  /api/agent-types                可下发 agent 类型（注册表派生）
+  GET  /api/machines/<n>/task-targets   登记项目和观测安装状态（无需任务存储）
 
 只做 transport：认证（operator 域，``@require_operator`` 内部用
 ``extract_operator_identity``）→ 调 ``TaskService`` → 统一错误序列化。
@@ -82,6 +83,19 @@ def list_tasks():
 def list_agent_types():
     """可下发 agent 类型（从 agent_profiles 注册表派生，非硬编码清单）。"""
     return jsonify({"agent_types": list(EXECUTABLE_AGENT_TYPES)})
+
+
+@bp.route("/api/machines/<machine>/task-targets")
+@require_operator
+def task_targets(machine):
+    """Read dispatch hints from configuration/observation, not the task DB."""
+    try:
+        response = jsonify(_tasks().targets(machine))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    except ApplicationError as exc:
+        return _error(exc)
+
 
 @bp.route("/api/tasks/<task_id>")
 @require_operator

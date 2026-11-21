@@ -153,7 +153,7 @@ class TaskService:
         try:
             return fn(*args, **kwargs)
         except DomainError as exc:
-            if exc.code == "workflow_control_required":
+            if exc.code in {"workflow_control_required", "idempotency_conflict"}:
                 raise ApplicationError(exc.code, exc.detail, 409) from exc
             raise
         except (ApplicationError, HandoffConflict):
@@ -177,6 +177,15 @@ class TaskService:
         """
         validated = validate_task_input(
             data, agent_types=DEFAULT_AGENT_TYPES)
+        submission = {**validated, "requested_by": actor}
+        if handoff is not None:
+            submission["handoff"] = handoff
+        if legacy_origin is not None:
+            submission["legacy_origin"] = legacy_origin
+        if validated.get("client_token"):
+            existing = self._task_op(self.task_repo.find_task_submission, **submission)
+            if existing is not None:
+                return {"ok": True, "created": False, "task": self._public_task(existing)}
         machine = validated["machine"]
         project = validated["project"]
         snapshot = self._online_snapshot(machine)
@@ -189,16 +198,7 @@ class TaskService:
         if not self.hosts.project_allowed(machine, project):
             raise ApplicationError(
                 "project_not_allowed", f"{machine} 未注册项目 {project}")
-        internal = {"handoff": handoff} if handoff is not None else {}
-        if legacy_origin is not None:
-            internal["legacy_origin"] = legacy_origin
-        task, created = self._task_op(
-            self.task_repo.create_task,
-            machine=machine, agent_type=validated["agent_type"],
-            project=project, instruction=validated["instruction"],
-            requested_by=actor,
-            client_token=validated.get("client_token"),
-            confirm=bool(validated.get("confirm")), **internal)
+        task, created = self._task_op(self.task_repo.create_task, **submission)
         if created:
             self._emit("task_queued", task["machine"], task["task_id"], "queued")
         return {"ok": True, "created": created, "task": self._public_task(task)}
