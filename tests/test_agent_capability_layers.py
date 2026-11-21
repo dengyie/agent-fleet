@@ -145,5 +145,5 @@ def test_sqlite_adapters_implement_ports_and_preserve_error_result_imports(tmp_p
     assert isinstance(session_repository.SessionRepository(tmp_path / 'sessions.db'), ports.SessionStore)
     assert isinstance(transcript_repository.TranscriptRepository(tmp_path / 'transcripts', key=b'a' * 32),
                       ports.TranscriptStore)
-    source = (ROOT / 'hub/application/session_service.py').read_text()
+    source = (ROOT / 'hub/application/session_service.py').read_text(encoding='utf-8')
     assert 'hub.infrastructure' not in source
