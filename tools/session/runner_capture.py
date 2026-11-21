@@ -83,7 +83,7 @@ class RunnerCapture:
                 self.bridge.start()
                 self.bridge.ingest_one({'kind': 'session_metadata', 'payload': {'task_id': task['task_id']}})
                 if 'instruction' in task:
-                    self.bridge.ingest_one({'kind': 'user_message', 'payload': {'text': task['instruction']}})
+                    self.bridge.record_user_turn(task['instruction'])
             elif replay and process_group_id is None:
                 # Upgrade retained idle conversations without replaying a prompt.
                 # The spool writer lock above excludes running captures.
@@ -184,7 +184,7 @@ class RunnerCapture:
             self.record.write_text(json.dumps(data), encoding='utf-8')
             self.bridge.ingest_one({'kind': 'session_metadata', 'payload': {
                 'native_resume': True, 'resumed': True}})
-            self.bridge.ingest_one({'kind': 'user_message', 'payload': {'text': text}})
+            self.bridge.record_user_turn(text)
 
     def finish(self, exit_code, *, resumable=False):
         self.stop_upload()
