@@ -32,7 +32,6 @@ Invariants under test (matching the brief and the frozen design spec):
 import json
 import math
 import os
-import posixpath
 import subprocess
 import tempfile
 import unittest
@@ -69,7 +68,7 @@ def _run_fake_factory(entries):
     ``missing`` / ``resume_fail`` / ``resume_timeout``.
     """
     def _run(argv, **kwargs):
-        exe = posixpath.basename(argv[0])
+        exe = os.path.basename(argv[0])
         spec = entries.get(exe, entries.get("__missing__", {}))
         if spec.get("missing"):
             raise FileNotFoundError(exe)
@@ -558,7 +557,7 @@ class SubprocessIsolationTests(unittest.TestCase):
             self.assertNotEqual(kw["cwd"], os.getcwd())
             self.assertNotIn("HOME", kw["env"])
             self.assertTrue(kw["env"]["PATH"].startswith(
-                os.path.dirname(CLAUDE) + ":"))
+                os.path.dirname(os.path.realpath(CLAUDE)) + os.pathsep))
             self.assertIn("LANG", kw["env"])
 
     def test_spawn_goes_through_run_bounded(self):
@@ -759,7 +758,7 @@ class PathAdditionsTests(unittest.TestCase):
             self.assertTrue(calls)
             canonical_helper = os.path.realpath(helper)
             for argv, kw in calls:
-                parts = kw["env"]["PATH"].split(":")
+                parts = kw["env"]["PATH"].split(os.pathsep)
                 self.assertIn(canonical_helper, parts)
                 self.assertIn(os.path.realpath(os.path.dirname(CODEX)), parts)
                 # the executable is still invoked by an absolute path;
@@ -788,7 +787,7 @@ class PathAdditionsTests(unittest.TestCase):
             canonical_helper = os.path.realpath(helper)
             for kw in calls:
                 self.assertIn(canonical_helper,
-                              kw["env"]["PATH"].split(":"))
+                              kw["env"]["PATH"].split(os.pathsep))
 
     def test_path_adds_never_leak_into_manifest_or_json(self):
         with tempfile.TemporaryDirectory() as tmp:

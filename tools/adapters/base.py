@@ -44,16 +44,21 @@ class BaseAdapter:
         """instruction 以 '-' 开头：支持 '--' 的默认 CLI 插 '--'，否则抛 UnsafeInstruction。"""
         supports_eoo = bool(self.end_of_options and self.default_command
                             and list(self.command) == list(self.default_command))
-        return place_instruction(self.command, instruction, end_of_options=supports_eoo)
+        from tools.agent_command import resolve_command
+        command = resolve_command(self.name, self.command, self.child_env())
+        return place_instruction(command, instruction, end_of_options=supports_eoo)
 
     def child_env(self):
         return build_child_env(self.env_keys, source={**os.environ, **self.environment})
+
+    def execution_env(self, workdir):
+        return self.child_env()
 
     def run(self, instruction, workdir, on_line=None, should_abort=None):
         if not self.command:
             return AdapterResult(exit_code=127,
                                  log_tail=f"adapter {self.name} 未配置 command")
-        env = self.child_env()
+        env = self.execution_env(workdir)
         try:
             argv = self.build_argv(instruction)
             refuse_windows_batch(argv, instruction, env)

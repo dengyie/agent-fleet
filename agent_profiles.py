@@ -57,8 +57,8 @@ PROFILES: dict[str, Profile] = {
         basenames=("claude",),
         native_session_root="~/.claude/projects", native_session_depth=2,
         native_resume=True, resume_verifiable=True, probe_family="claude"),
-    "hermes": Profile("hermes", None, basenames=("hermes",)),
-    "pi": Profile("pi", ("pi", "-p", "{instruction}"),
+    "hermes": Profile("hermes", None, basenames=("hermes",), native_resume=True),
+    "pi": Profile("pi", ("pi", "--print", "--mode", "json", "{instruction}"),
         basenames=("pi",),
         native_session_root="~/.pi/agent/sessions",
         native_session_depth=2,
@@ -68,10 +68,10 @@ PROFILES: dict[str, Profile] = {
     # ["node", "<...>/resources/glm/zcode.cjs", "-p", "{instruction}"]）；
     # basenames 覆盖 shim（zcode）与脚本直跑（zcode.cjs）两种进程形态，
     # 会话元数据在 ~/.zcode/cli/rollout（平铺 model-io-sess_*.jsonl）。
-    "zcode": Profile("zcode", ("zcode", "-p", "{instruction}"),
+    "zcode": Profile("zcode", ("zcode", "--json", "-p", "{instruction}"),
         basenames=("zcode", "zcode.cjs"),
         native_session_root="~/.zcode/cli/rollout",
-        native_session_depth=1),
+        native_session_depth=1, native_resume=True),
     "generic": Profile(
         "generic", None, executable=False,
         pattern="claude|codex|astrbot|openclaw|opencode|aider",

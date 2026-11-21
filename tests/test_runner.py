@@ -78,7 +78,7 @@ class RunnerConfigTests(unittest.TestCase):
         cfg = runner_config.load_config(self._write())
         self.assertEqual(cfg.agents["claude_code"]["command"],
                          ["claude", "-p", "--verbose", "--output-format", "stream-json", "{instruction}"])
-        self.assertEqual(cfg.agents["pi"]["command"], ["pi", "-p", "{instruction}"])
+        self.assertEqual(cfg.agents["pi"]["command"], ["pi", "--print", "--mode", "json", "{instruction}"])
         self.assertIsNone(cfg.agents["hermes"]["command"])
         self.assertEqual(cfg.agents["pi"]["timeout_s"], 1800)
 
@@ -454,15 +454,16 @@ class AdapterTests(unittest.TestCase):
 
 
 class AdapterDefaultsTests(unittest.TestCase):
-    def test_default_commands(self):
+    @mock.patch('tools.agent_command.resolve_command', side_effect=lambda family, command, env: list(command))
+    def test_default_commands(self, _resolve):
         self.assertEqual(adapters.create("codex").build_argv("修 bug"),
                          ["codex", "exec", "--approve-for-me", "--json", "修 bug"])
         self.assertEqual(adapters.create("claude_code").build_argv("修 bug"),
                          ["claude", "-p", "--verbose", "--output-format", "stream-json", "修 bug"])
         self.assertEqual(adapters.create("pi").build_argv("修 bug"),
-                         ["pi", "-p", "修 bug"])
+                         ["pi", "--print", "--mode", "json", "修 bug"])
         self.assertEqual(adapters.create("zcode").build_argv("修 bug"),
-                         ["zcode", "-p", "修 bug"])
+                         ["zcode", "--json", "-p", "修 bug"])
         self.assertIsNone(adapters.create("hermes").command)
 
     def test_argv_without_placeholder_appends_instruction(self):

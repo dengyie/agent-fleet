@@ -1,5 +1,11 @@
 # Release notes
 
+### 2026-11-21
+
+- 补齐 macOS / Windows Agent 原生命令解析：Windows 已知 npm 安装优先使用原生 exe / Node 脚本，保留 Unicode 与带引号指令，避免批处理转义。
+- Pi 使用非交互 JSON 采集与精确会话续聊；ZCode、Hermes 从验证过 ID 和 cwd 的原生 SQLite 读取真实消息及工具，续聊保留脚本和本机 provider 参数。Hermes 工具工作目录隔离到任务配置；技能缓存目录不再误报为安装。
+- 增加 macOS Agent CI、扩展 Windows 回归与真实子进程到 Hub 的工具证据测试；模型目录接管仍限定 Codex / Claude Code，未安装的 Windows Hermes 明确不可用。
+
 ### 2026-11-20
 
 - 设置内容区统一标题、配置列表、状态标识、编辑器与保存操作区；模型 API 地址和凭据使用完整行，节点和工作区展示连接与路径信息，空状态和选中状态更清楚。

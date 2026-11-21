@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import json
 import subprocess
+import re
 from pathlib import Path
 from typing import Mapping
 
@@ -73,12 +74,17 @@ def _resume_token_from_native_path(path: str | None) -> str | None:
     if not isinstance(path, str) or not path:
         return None
     stem = Path(path).stem
-    if stem.startswith("rollout-"):
+    if stem.startswith(("rollout-", "model-io-")):
         try:
             with open(path, encoding='utf-8') as stream:
                 first = json.loads(stream.readline(1 << 20))
-            token = first.get('payload', {}).get('id') if first.get('type') == 'session_meta' else None
-            return token if isinstance(token, str) and token and stem.endswith('-' + token) else None
+            if stem.startswith('model-io-'):
+                token = first.get('sessionId') if first.get('type') == 'model_io' else None
+                matches = stem == 'model-io-' + token if isinstance(token, str) else False
+            else:
+                token = first.get('payload', {}).get('id') if first.get('type') == 'session_meta' else None
+                matches = stem.endswith('-' + token) if isinstance(token, str) else False
+            return token if isinstance(token, str) and token and matches else None
         except (OSError, ValueError, AttributeError):
             return None
     if not stem:
@@ -148,14 +154,29 @@ def continuation_options(family: str, command: list[str]) -> list[str]:
         'claude_code': {'--model', '--fallback-model', '--settings', '--setting-sources',
                         '--permission-mode', '--effort', '--agent', '--agents',
                         '--system-prompt', '--append-system-prompt', '--mcp-config'},
+        'pi': {'--provider', '--model', '--thinking', '--session-dir', '--tools',
+               '--exclude-tools', '--system-prompt', '--append-system-prompt'},
+        'zcode': {'--mode', '--surface', '--locale', '--toolsearch-mode', '--workflow-mode'},
+        'hermes': {'--model', '-m', '--provider', '--reasoning', '--toolsets', '-t', '--run-budget', '--max-turns'},
     }.get(family, set())
     switches = {
         'codex': {'--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check',
                   '--strict-config', '--ignore-rules', '--approve-for-me'},
         'claude_code': {'--dangerously-skip-permissions', '--bare', '--strict-mcp-config'},
+        'pi': {'--offline', '--no-extensions', '--no-mcp', '--no-skills',
+               '--no-prompt-templates', '--no-context-files', '--no-tools', '--approve', '--no-approve'},
+        'zcode': {'--force-mcs', '--no-color'},
+        'hermes': {'--no-restore-cwd', '--ignore-rules', '--safe-mode'},
     }.get(family, set())
     result = []
-    args = iter(command[1:])
+    start = 1
+    # A trusted node launcher needs its original script before any CLI flags.
+    executable = command[0].replace('\\', '/').rsplit('/', 1)[-1].lower() if command else ''
+    if (executable in {'node', 'node.exe'} and len(command) > 1
+            and command[1].lower().endswith(('.js', '.cjs', '.mjs'))):
+        result.append(command[1])
+        start = 2
+    args = iter(command[start:])
     for arg in args:
         if arg == '--':
             break
@@ -186,10 +207,16 @@ def _native_resume_argv(family: str, exe: str, token: str, text: str) -> list[st
     elif family == "claude_code":
         argv = [exe, "--print", "--verbose", "--output-format", "stream-json", "--resume", token] + (["--", text] if leading_dash else [text])
     elif family == "pi":
+        # --resume is an interactive picker; --session takes path or id.
+        argv = [exe, "--print", "--mode", "json", "--session", token] + (["--", text] if leading_dash else [text])
+    elif family == 'zcode':
         if leading_dash:
             return []
-        # --resume is an interactive picker; --session takes path or id.
-        argv = [exe, "--session", token, text]
+        argv = [exe, '--json', '--resume', token, '-p', text]
+    elif family == 'hermes':
+        if leading_dash:
+            return []
+        argv = [exe, 'chat', '--quiet', '--resume', token, '--query', text]
     else:
         return []
     if any(flag in argv for flag in _RESUME_FORBIDDEN_FLAGS):
@@ -252,7 +279,7 @@ class NativeResumeMixin:
 
         ``create(argv, None, {})`` would land in ``/tmp``, inherit a secret-free
         env, close unused stdout (SIGPIPE), and orphan the handle — that is
-        not resume.  Hermes stays ``unsupported_action``.  Families without
+        not resume. Unverified attached sessions stay unsupported. Families without
         proven resume stay ``resume_unverified``.  Claimed resume without a
         private native identity (cwd/env/token/exe) is still refused.  A
         complete identity starts a new CLI process with ``--resume``, the
@@ -273,8 +300,6 @@ class NativeResumeMixin:
         if gate:
             return gate
         family = str(getattr(m, "agent", "") or "")
-        if family == "hermes":
-            return "unsupported_action"
         if family not in _NATIVE_RESUME_FAMILIES:
             return "unsupported_action"
         if not self._resume_allowed(m, session_id):
@@ -298,8 +323,13 @@ class NativeResumeMixin:
             return 'model_config_unavailable'
         argv = _native_resume_argv(family, exe, token, text)
         if argv:
-            at = 2 if family == 'codex' else 1
+            script = []
+            if (exe.replace('\\', '/').rsplit('/', 1)[-1].lower() in {'node', 'node.exe'}
+                    and options and options[0].lower().endswith(('.js', '.cjs', '.mjs'))):
+                script, options = options[:1], options[1:]
+            at = 2 if family in {'codex', 'hermes'} else 1
             argv[at:at] = options
+            argv[1:1] = script
         if not validate_command(argv) or not cwd:
             return "unsupported_action"
         return m, entry.handle, argv, cwd, env
@@ -353,12 +383,36 @@ class NativeResumeMixin:
         if not entry.persist_continuation:
             return
         try:
-            row = json.loads(line)
+            family = entry.manifest.agent
+            if family == 'hermes':
+                match = re.fullmatch(r'\s*session_id: ([A-Za-z0-9_-]{1,256})\s*', line)
+                row = {'session_id': match.group(1)} if match else {}
+            elif family == 'zcode':
+                if not entry.native_output and not line.lstrip().startswith('{'):
+                    return
+                entry.native_output += line + '\n'
+                if len(entry.native_output) > (1 << 20):
+                    entry.native_output = ''
+                    return
+                try:
+                    row = json.loads(entry.native_output)
+                except ValueError:
+                    return
+                entry.native_output = ''
+            else:
+                row = json.loads(line)
             token = None
             if entry.manifest.agent == 'codex' and row.get('type') == 'thread.started':
                 token = row.get('thread_id')
             elif entry.manifest.agent == 'claude_code' and row.get('type') in {'system', 'result'}:
                 token = row.get('session_id')
+            elif entry.manifest.agent == 'pi' and row.get('type') == 'session':
+                token = row.get('id')
+            elif family in {'zcode', 'hermes'}:
+                token = row.get('sessionId') if family == 'zcode' else row.get('session_id')
+                from tools.session.native_storage import database_path, verify_identity
+                if not verify_identity(family, database_path(family, entry.env or {}), token, entry.cwd):
+                    return
             if not isinstance(token, str) or not token or token.startswith('-'):
                 return
             entry.resume_token = token
@@ -367,3 +421,17 @@ class NativeResumeMixin:
                 self._persist(entry.manifest)
         except (OSError, ValueError, TypeError, AttributeError):
             return
+
+    def _capture_native_storage(self, entry, consumer):
+        if entry.manifest.agent not in {'zcode', 'hermes'} or not entry.resume_token:
+            return
+        from tools.session.native_storage import database_path, read_events
+        try:
+            events, cursor = read_events(entry.manifest.agent, database_path(entry.manifest.agent, entry.env or {}),
+                                         entry.resume_token, entry.native_cursor)
+            for event in events:
+                consumer(json.dumps(event, ensure_ascii=False))
+            entry.native_cursor = cursor
+            self._continuations.save(entry)
+        except Exception:
+            consumer(json.dumps({'kind': 'capture_gap', 'payload': {'reason': 'source_unavailable'}}))

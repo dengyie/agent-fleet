@@ -158,9 +158,11 @@ def _shape_native_row(raw: Mapping) -> list[tuple[str, Mapping]]:
     if rtype in ("event_msg", "response_item"):
         # codex rollout rows (type/payload wrapper) — see _shape_codex_row.
         return _shape_codex_row(raw)
-    if rtype == "message":
+    if rtype in ("message", "message_end"):
         # pi transcript rows (role/message envelope) — see _shape_pi_row.
         return _shape_pi_row(raw)
+    # Pi also emits tool_execution_end before message_end(toolResult).
+    # Project only the complete transcript message, once.
     if rtype not in ("user", "assistant"):
         return []
     message = raw.get("message")

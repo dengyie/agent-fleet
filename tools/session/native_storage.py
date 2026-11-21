@@ -1,0 +1,130 @@
+"""Bounded read-only projections of exact ZCode and Hermes native sessions.
+
+No most-recent-session guesses and no writes to vendor storage. Only public
+conversation text and tool evidence are projected; reasoning/system data stays
+out of the capture stream.
+"""
+from __future__ import annotations
+
+from contextlib import contextmanager
+import json
+import os
+from pathlib import Path
+import sqlite3
+import time
+
+MAX_ROWS = 4096
+MAX_BYTES = 4 << 20
+MAX_FIELD = 262144
+
+
+def database_path(family, environment):
+    home = Path(environment.get('HOME') or environment.get('USERPROFILE') or Path.home())
+    if family == 'zcode':
+        return Path(environment.get('ZCODE_DATA_BASE_DIR') or home) / '.zcode/cli/db/db.sqlite'
+    return Path(environment.get('HERMES_HOME') or home / '.hermes') / 'state.db'
+
+
+@contextmanager
+def _database(path):
+    db = sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True, timeout=.5)
+    try:
+        db.execute('PRAGMA query_only=ON')
+        deadline = time.monotonic() + 2
+        db.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
+        yield db
+    finally:
+        db.close()
+
+
+def verify_identity(family, path, token, cwd):
+    if not isinstance(token, str) or not token or len(token) > 256:
+        return False
+    table, column = ('session', 'directory') if family == 'zcode' else ('sessions', 'cwd')
+    try:
+        with _database(path) as db:
+            row = db.execute(f'SELECT {column} FROM {table} WHERE id=?', (token,)).fetchone()
+        return bool(row and row[0] and os.path.normcase(os.path.realpath(row[0])) == os.path.normcase(os.path.realpath(cwd)))
+    except (OSError, ValueError, sqlite3.Error, TypeError):
+        return False
+
+
+def _json(text, default=None):
+    try:
+        return json.loads(text) if isinstance(text, str) else default
+    except ValueError:
+        return default
+
+
+def _text(value):
+    return value[:MAX_FIELD] if isinstance(value, str) else ''
+
+
+def _event(kind, **payload):
+    return {'kind': kind, 'payload': payload}
+
+
+def _zcode(message, part):
+    if not isinstance(message, dict) or not isinstance(part, dict):
+        return []
+    semantics = message.get('semantics') or {}
+    if (message.get('synthetic') or part.get('synthetic') or message.get('visibility') == 'model-only'
+            or semantics.get('transcriptVisibility') == 'hidden' or message.get('role') != 'assistant'):
+        return []
+    if part.get('type') == 'text' and part.get('text'):
+        return [_event('assistant_message', text=_text(part['text']), is_complete=True)]
+    if part.get('type') != 'tool':
+        return []
+    state = part.get('state')
+    if not isinstance(state, dict) or state.get('status') not in {'completed', 'error'}:
+        return []
+    call = dict(tool_name=_text(part.get('tool')), call_id=_text(part.get('callID')))
+    return [_event('tool_call', **call, arguments=json.dumps(state.get('input'), ensure_ascii=False)[:MAX_FIELD]),
+            _event('tool_result', **call, result=_text(state.get('output') or state.get('error')),
+                   status='error' if state['status'] == 'error' else 'ok')]
+
+
+def _hermes(role, content, calls, call_id, tool_name):
+    if role == 'tool':
+        return [_event('tool_result', tool_name=_text(tool_name), call_id=_text(call_id), result=_text(content))]
+    if role != 'assistant':
+        return []
+    result = [_event('assistant_message', text=_text(content), is_complete=True)] if content else []
+    calls = _json(calls, [])
+    for call in calls if isinstance(calls, list) else []:
+        if not isinstance(call, dict) or not isinstance(call.get('function'), dict):
+            continue
+        function = call['function']
+        result.append(_event('tool_call', call_id=_text(call.get('id')), tool_name=_text(function.get('name')),
+                             arguments=_text(function.get('arguments'))))
+    return result
+
+
+def read_events(family, path, token, cursor):
+    """Return ordered native evidence and an exclusive durable row cursor.
+
+    Read one bounded snapshot only after the owned CLI has closed its turn.
+    A malformed/oversized snapshot raises, leaving the old cursor available.
+    """
+    if type(cursor) is not int or cursor < 0:
+        raise ValueError('native_cursor_invalid')
+    with _database(path) as db:
+        if family == 'zcode':
+            sql = ('SELECT p.rowid, substr(m.data,1,262145), substr(p.data,1,262145) FROM part p '
+                   'JOIN message m ON m.id=p.message_id AND m.session_id=p.session_id '
+                   'WHERE p.session_id=? AND p.rowid>? ORDER BY p.rowid LIMIT ?')
+        elif family == 'hermes':
+            sql = ('SELECT id,role,substr(content,1,262145),substr(tool_calls,1,262145),tool_call_id,tool_name '
+                   'FROM messages WHERE session_id=? AND id>? ORDER BY id LIMIT ?')
+        else:
+            raise ValueError('native_family_invalid')
+        rows = db.execute(sql, (token, cursor, MAX_ROWS + 1))
+        result, total, count, latest = [], 0, 0, cursor
+        for row in rows:
+            count += 1
+            total += sum(len(value.encode('utf-8')) for value in row if isinstance(value, str))
+            if count > MAX_ROWS or total > MAX_BYTES or any(isinstance(v, str) and len(v) > MAX_FIELD for v in row):
+                raise ValueError('native_capture_overflow')
+            latest = row[0]
+            result.extend(_zcode(_json(row[1]), _json(row[2])) if family == 'zcode' else _hermes(*row[1:]))
+        return result, latest

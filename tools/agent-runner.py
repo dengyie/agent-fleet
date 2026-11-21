@@ -554,7 +554,7 @@ def run_task_managed(cfg, task, supervisor):
 
         # 与 legacy 路径同一套 argv/env 策略：'-' 开头的 instruction 插 '--' 或拒绝，
         # Windows .cmd/.bat 不接受不可信参数，子进程只拿 allow-list 环境变量。
-        env = adapter.child_env()
+        env = adapter.execution_env(wt)
         try:
             argv = adapter.build_argv(str(task["instruction"]))
             refuse_windows_batch(argv, str(task["instruction"]), env)

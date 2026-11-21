@@ -8,6 +8,8 @@
 
 尚未完成的真实浏览器、接管、凭据、Browserbase 与通知工作见[待确认实施决策](browser-notification-proposal.md)；该提案不是已批准规格或通过证明。
 
+Windows / macOS 各 Agent 的安装、执行、原生续聊、模型接管与外部验收边界见[双端 Agent 验收矩阵](agent-platform-acceptance.md)。
+
 这份文档是测试入口。可执行范围定义在 [journeys.json](journeys.json)；逐阶段断言、审查回归和证据核验见 [test-chains.md](test-chains.md)；外部验收见 [release-acceptance.md](release-acceptance.md)。测试用例、门禁和文档必须随功能一起更新。
 
 ## 为什么需要这套门禁
