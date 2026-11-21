@@ -20,6 +20,7 @@ Windows Hermes 的缺失是安装状态，不记为通过。存在 `.hermes/skil
 - Pi 只投影完整消息，忽略 thinking 和增量事件；`tool_execution_end` 与 `message_end(toolResult)` 同时出现时只采集后者。
 - 原生续聊身份、Node 脚本前缀、provider/model/policy 参数、工作目录与增量游标仅存节点私有记录；不能以最新会话猜测原会话。
 - ZCode/Hermes SQLite 只读，先核对 ID 和精确 cwd；读取有行数、字节数、字段大小和时间上限。异常保留旧游标并记录 capture gap。
+- ZCode/Hermes 原生 CLI 续聊仅对持有 `native_resume` 能力的 Runner 自有会话开放；普通采集元数据、接管会话不据此获得续聊权限。ZCode 桌面桥保留其独立能力路径。
 - Hermes 在任务私有 home 快照 provider/auth，固定工具 cwd；不修改用户原始配置。任意附加 JSON 文件不能证明 Hermes 可续聊。
 - 不持久化 ephemeral 会话的续聊能力；上游失败、未知投递与未安装状态均保留真实结果，不能自动重建替代任务。
 

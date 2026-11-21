@@ -82,4 +82,5 @@
 - Windows frozen v4: 236 passed, 2 platform skips, 101 subtests; source hashes retained. Initial namespace collection failures and platform-fixture failures preserved.
 - Actual pre-release native FIRST/FOLLOW: Mac Pi/ZCode/Hermes and Windows Pi/ZCode; exact native ID restored, real UTF-8 file tool output, unchanged probe bytes.
 - Pi dual result events and ZCode filename-prefix token error reproduced red and corrected; arbitrary Hermes transcript cannot assert attached resume.
+- Full Linux CI found three Hub capability regressions after expanding the native registry. Reproduced all three; restricted new ZCode/Hermes delivery to proven owned Runner sessions. Added six ownership/capability cases (two red before the fix); 134 focused regressions and Ruff now pass. Exact full release gates remain pending.
 - GitHub merge, signed clients and deployed Hub acceptances remain pending until their exact receipts are verified.
