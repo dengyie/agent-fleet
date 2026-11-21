@@ -7,7 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 from urllib.parse import quote
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 
 def verify_release(release: Path, origin: str, version: str) -> dict:
@@ -23,7 +23,10 @@ def verify_release(release: Path, origin: str, version: str) -> dict:
     def verify(resource):
         url_path, name = resource
         expected = (release / name).read_bytes()
-        with urlopen(origin.rstrip('/') + url_path, timeout=15) as response:
+        request = Request(origin.rstrip('/') + url_path,
+                          headers={'User-Agent': 'AgentFleet-ReleaseVerifier/1.0',
+                                   'Accept': '*/*'})
+        with urlopen(request, timeout=15) as response:
             actual = response.read(len(expected) + 1)
         if actual != expected:
             raise ValueError(

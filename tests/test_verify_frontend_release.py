@@ -35,7 +35,19 @@ def test_public_frontend_verification(tmp_path, fault):
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
+            # Mirror the public edge's browser-integrity rule. A release probe
+            # identifies itself rather than using urllib's generic Python UA.
+            if self.headers.get('User-Agent', '').startswith('Python-urllib/'):
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b'error code: 1010')
+                return
             content = public.get(self.path)
+            if (content is not None and self.path in ('/', '/index.html?v=release-2')
+                    and self.headers.get('Accept') != '*/*'):
+                # The edge injects its analytics beacon for HTML negotiation;
+                # curl-style asset negotiation returns the original artifact.
+                content += b'<script src="https://analytics.example/beacon.js"></script>'
             self.send_response(200 if content is not None else 404)
             self.end_headers()
             self.wfile.write(content or b'not found')

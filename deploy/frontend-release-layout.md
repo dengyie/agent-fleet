@@ -74,6 +74,8 @@ CI 的 `agent-fleet-release` artifact 只含后端归档；`agent-fleet-frontend
 
 CI 部署后运行 `deploy/verify_frontend_release.py`：通过公网读取 `/`、`/manifest.json` 和 manifest 中每个 `?v=<release>` 资源，与同一 run 的前端产物逐字节比较。检查不附加随机参数或强刷请求头，防止绕开有问题的 CDN 缓存后误报成功。任一缺失、旧内容或版本不符都会令部署 job 失败，验收结果保存在 `agent-fleet-deployment` artifact；此检查位于宿主部署事务之后，失败不代表已自动回滚。首次部署前必须配置仓库变量 `FRONTEND_ORIGIN` 为公网源站地址（例如 `https://fleet.example.com`），缺失时在提交宿主部署前失败。
 
+公网探针声明 `AgentFleet-ReleaseVerifier/1.0` User-Agent 与 `Accept: */*`，按静态产物客户端协商原始内容。默认 Python UA 会被当前边缘完整性规则拒绝（403/1010），HTML 协商还可能插入边缘分析脚本；不通过修改站点规则、剥除返回内容或绕过公网来隐藏差异。
+
 同源 Nginx 示例见 [nginx-frontend-backend.example.conf](nginx-frontend-backend.example.conf)。`/assets/` 与 `/config.js` 缺失返回 404，页面路径回退到原样 `index.html`，`/api/*` 不允许回退到 HTML。
 
 ## 5. 发布和回滚
