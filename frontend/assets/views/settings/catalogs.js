@@ -59,7 +59,7 @@ export function mountCatalog(root, kind, {identitySignal} = {}) {
   function renderCatalog() {
     const ticket = sequence, formOwner = currentOwner;
     const [title, addLabel, idKey, idTitle] = info[kind];
-    const section = panel(content, title, kind === 'models' ? '添加 OpenAI 兼容的第三方服务，填写服务商 Base URL、API Key 和模型 ID。每个模型单独保存；凭据在服务器加密保存。保存后用于新任务，已排队任务保留原配置。' : kind === 'nodes' ? '连接已有 VM 或物理机，配置执行能力。节点连接 Hub 并上报心跳后即可使用；登记不会创建或启动云主机。' : '管理工作目录和默认执行节点。目录位于实际执行节点；保存不会创建、搬迁或删除文件。', icons[kind]);
+    const section = panel(content, title, kind === 'models' ? '接入兼容 OpenAI Chat Completions 的第三方模型服务。每个模型配置独立的 Base URL、API Key 和模型 ID；密钥保存在服务端私密文件中，读取时不会回显。保存后用于新任务，已排队任务保留原配置。' : kind === 'nodes' ? '连接已有 VM 或物理机，配置执行能力。节点连接 Hub 并上报心跳后即可使用；登记不会创建或启动云主机。' : '管理工作目录和默认执行节点。目录位于实际执行节点；保存不会创建、搬迁或删除文件。', icons[kind]);
     const toolbar = el('div', null, 'settings-toolbar'); section.append(toolbar);
     const count = el('span', catalog[kind].length + ' 项配置', 'settings-count');
     const add = button(addLabel, () => editor(null), 'button-primary'); add.append(uiIcon('arrow-right', {size: 16}));
@@ -97,27 +97,38 @@ export function mountCatalog(root, kind, {identitySignal} = {}) {
       list.querySelectorAll('.settings-record').forEach(entry => entry.setAttribute('aria-pressed', String(entry.dataset.recordId === row?.[idKey])));
       const form = el('form', null, 'settings-form settings-editor'); editorRoot.append(form);
       const heading = el('div', null, 'settings-editor-heading');
-      heading.append(el('h3', row ? '编辑 ' + row[idKey] : kind === 'models' ? '连接第三方模型服务' : addLabel), el('p', row ? '更新连接信息，保存后用于之后的新任务。' : kind === 'models' ? '按服务商提供的信息填写。Base URL 通常以 /v1 结尾；模型 ID 需与服务商控制台中的名称完全一致。' : '填写基本信息，高级选项可按需配置。', 'settings-description')); form.append(heading);
-      const id = field(form, idKey, idTitle, row?.[idKey], {required: true, readOnly: !!row});
-      id.pattern = '[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}';
-      if (kind === 'models') id.placeholder = '例如 openrouter-gpt-4o';
+      heading.append(el('h3', row ? '编辑 ' + row[idKey] : kind === 'models' ? '添加第三方模型' : addLabel), el('p', row ? '更新服务连接信息；不填写新 Key 会保留当前凭据。' : kind === 'models' ? '依次填写服务商、Base URL、API Key 和服务商实际使用的模型 ID。' : '填写基本信息，高级选项可按需配置。', 'settings-description')); form.append(heading);
+      let id;
       const controls = {};
       let value;
       if (kind === 'models') {
         controls.provider = field(form, 'provider', '模型协议', (row?.provider === 'openai-compatible' ? 'openai_compatible' : row?.provider) || 'openai_compatible', {options: [['openai_compatible', 'OpenAI 兼容 API'], ['deterministic', '本地确定性测试模型']]});
         const config = row?.provider_config || {};
-        controls.provider_name = field(form, 'provider_name', '服务商名称', config.provider_name || '', {required: !row && controls.provider.value !== 'deterministic', help: '显示名称，例如 OpenRouter、硅基流动或自建网关。'});
-        controls.model = field(form, 'model', '模型 ID', row?.model, {required: true, help: '填写服务商 API 实际接受的模型标识。'});
-        controls.model.closest('label').classList.add('settings-field-wide');
-        controls.base_url = field(form, 'url', 'Base URL', config.endpoint || config.base_url || '', {type: 'url', required: !row && controls.provider.value !== 'deterministic', help: '例如 https://api.example.com/v1。支持 OpenAI Chat Completions 兼容服务。'});
-        controls.api_key = field(form, 'api_key', 'API Key', '', {type: 'password', required: !row?.secret_configured && (row?.enabled ?? true) && controls.provider.value !== 'deterministic', help: row?.secret_configured ? '已安全保存。留空保留原凭据；输入新 Key 会轮换凭据。' : '保存后不会回显；仅发送到你配置的模型服务。'});
+        controls.provider_name = field(form, 'provider_name', '服务商名称', config.provider_name || '', {required: !row && controls.provider.value !== 'deterministic', help: '例如 OpenRouter、硅基流动或自建网关。'});
+        controls.base_url = field(form, 'url', 'Base URL', config.endpoint || config.base_url || '', {type: 'url', required: !row && controls.provider.value !== 'deterministic', help: '服务商提供的 API 根地址，例如 https://api.example.com/v1。'});
+        controls.api_key = field(form, 'api_key', 'API Key', '', {type: 'password', required: !row?.secret_configured && (row?.enabled ?? true) && controls.provider.value !== 'deterministic', help: row?.secret_configured ? '当前凭据已保存。留空以保留；填写新 Key 会替换当前凭据。' : '仅写入服务端私密凭据文件，不会在后续读取中回显。'});
         controls.base_url.placeholder = 'https://api.example.com/v1';
         controls.api_key.placeholder = row?.secret_configured ? '留空以保留当前 Key' : '粘贴服务商提供的 API Key';
         controls.provider_name.closest('label').classList.add('settings-field-wide');
         controls.base_url.closest('label').classList.add('settings-field-wide');
         controls.api_key.closest('label').classList.add('settings-field-wide');
+        const keyControl = controls.api_key;
+        const keyActions = el('span', null, 'settings-secret-input');
+        keyControl.parentElement.insertBefore(keyActions, keyControl);
+        keyActions.append(keyControl);
+        const revealKey = button('', () => {
+          const visible = keyControl.type === 'password';
+          keyControl.type = visible ? 'text' : 'password';
+          revealKey.setAttribute('aria-label', visible ? '隐藏 API Key' : '显示 API Key');
+          revealKey.title = visible ? '隐藏 API Key' : '显示 API Key';
+        }, 'icon-button settings-secret-toggle');
+        revealKey.setAttribute('aria-label', '显示 API Key'); revealKey.title = '显示 API Key'; revealKey.append(uiIcon('eye', {size: 16}));
+        keyActions.append(revealKey);
+        controls.model = field(form, 'model', '模型 ID', row?.model, {required: true, help: '填写服务商 API 实际接受的名称，通常可在模型列表或 API 文档中找到。'});
+        controls.model.placeholder = '例如 vendor/model-name';
+        controls.model.closest('label').classList.add('settings-field-wide');
         const guide = el('div', null, 'settings-model-source-guide');
-        guide.append(uiIcon('globe', {size: 17}), el('span', '适用于自建网关和第三方 OpenAI 兼容 API。Base URL 使用服务商给出的地址，模型 ID 需逐字匹配；密钥只会写入服务器凭据库，不会在列表或后续读取中回显。'));
+        guide.append(uiIcon('globe', {size: 17}), el('span', '支持自建网关和第三方 OpenAI 兼容 API。仅提供 Anthropic Messages 或其他非兼容协议的地址不能用于此配置。'));
         form.insertBefore(guide, controls.provider.closest('label'));
         controls.provider.addEventListener('change', () => {
           const required = controls.provider.value !== 'deterministic' && enabled.checked;
@@ -136,9 +147,16 @@ export function mountCatalog(root, kind, {identitySignal} = {}) {
         controls.headers = field(advanced, 'headers', '附加请求头（JSON）', JSON.stringify(config.headers || {}, null, 2), {type: 'textarea', help: '支持 user-agent、accept-language、x-client-name、openai-organization；认证信息使用 API Key。'});
         controls.pricing = field(advanced, 'pricing', '用量单价（JSON，可留空）', config.pricing ? JSON.stringify(config.pricing, null, 2) : '', {type: 'textarea', help: 'USD / 百万 token，示例：{"currency":"USD","input":"1","output":"2","cache_read":"0","cache_write":"0"}。'});
         controls.capabilities = field(advanced, 'capabilities', '能力声明（JSON）', JSON.stringify(row?.capabilities || {}, null, 2), {type: 'textarea', help: '例如 {"streaming": true, "tools": true}。'});
+        id = field(advanced, idKey, '模型配置 ID', row?.[idKey] || 'model-' + (globalThis.crypto?.randomUUID?.().slice(0, 12) || Date.now().toString(36)), {required: true, readOnly: !!row, help: 'Fleet 内部引用 ID，用于默认模型选择；可以与服务商模型 ID 不同。'});
+        id.pattern = '[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}';
+        if (!row) id.placeholder = '例如 openrouter-gpt-4o';
       } else if (kind === 'nodes') {
+        id = field(form, idKey, idTitle, row?.[idKey], {required: true, readOnly: !!row});
+        id.pattern = '[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}';
         controls.label = field(form, 'label', '节点名称', row?.label, {required: true});
       } else {
+        id = field(form, idKey, idTitle, row?.[idKey], {required: true, readOnly: !!row});
+        id.pattern = '[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}';
         controls.name = field(form, 'name', '工作区名称', row?.name, {required: true});
         controls.root_path = field(form, 'root_path', '工作目录绝对路径', row?.root_path, {required: true});
         controls.node = field(form, 'default_node_id', '默认执行节点', row?.default_node_id, {options: [['', '使用账号默认节点'], ...catalog.nodes.filter(n => n.enabled).map(n => [n.node_id, n.label])]});
@@ -203,9 +221,12 @@ export function mountCatalog(root, kind, {identitySignal} = {}) {
         finally { submit.disabled = false; }
       });
       heading.scrollIntoView({block: 'nearest'});
-      id.focus({preventScroll: true});
+      (kind === 'models' ? controls.provider_name : id).focus({preventScroll: true});
     }
   }
   load();
-  return () => { disposed = true; sequence++; root.querySelectorAll('input[type=password]').forEach(input => { input.value = ''; }); };
+  const clearSecrets = () => root.querySelectorAll('input[name="api_key"]').forEach(input => { input.value = ''; });
+  const dispose = () => { disposed = true; sequence++; clearSecrets(); };
+  dispose.suspend = clearSecrets;
+  return dispose;
 }
