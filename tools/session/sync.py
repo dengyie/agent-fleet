@@ -194,7 +194,23 @@ def sync_desktop(cfg, desktop, row, native_path, send=post, *, budget_s=1, shoul
         except FileNotFoundError:
             state = {'cursor':None, 'seen':[]}
             checkpoint.write_text(json.dumps(state), encoding='utf-8')
-        capture.bridge.ingest_one({'kind':'session_metadata','payload':{'desktop_bridge':True}})
+        metadata = {'desktop_bridge': True}
+        native_session = row.get('session') if isinstance(row, dict) else None
+        if isinstance(native_session, dict):
+            for source, target, maximum in (
+                    ('title', 'title', 160), ('model', 'model', 160),
+                    ('provider', 'provider', 96)):
+                value = native_session.get(source)
+                if isinstance(value, str) and value.strip():
+                    metadata[target] = value.strip()[:maximum]
+        metadata_key = {key: value for key, value in metadata.items()
+                        if key != 'desktop_bridge'}
+        if (state.get('metadata') != metadata_key
+                or state.get('desktop_bridge') is not True):
+            capture.bridge.ingest_one({'kind':'session_metadata','payload':metadata})
+            state['metadata'] = metadata_key
+            state['desktop_bridge'] = True
+            checkpoint.write_text(json.dumps(state), encoding='utf-8')
         cursors = {state['cursor']}
         while row.get('status') == 'idle' and not should_stop():
             query = {'session_id':native_id}

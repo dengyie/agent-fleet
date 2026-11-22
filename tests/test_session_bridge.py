@@ -659,6 +659,42 @@ class NativeTranscriptShapeTests(BridgeBase):
         self.assertEqual([k for k in kinds if k not in ("session_start", "agent_state_changed")],
                          ["user_message"])
 
+    def test_claude_text_deltas_keep_message_identity_and_drop_thinking(self):
+        import tempfile as _tf
+        tmp = Path(_tf.mkdtemp(prefix="fleet-claude-stream-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        bridge = self._native_bridge()
+        path = self._tail_file(tmp, [
+            {"type": "stream_event", "event": {"type": "message_start",
+             "timestamp": "2026-09-01T00:00:00Z", "message": {
+                 "id": "msg_1", "model": "claude-model", "provider": "anthropic"}}},
+            {"type": "stream_event", "event": {"type": "content_block_delta",
+             "timestamp": "2026-09-01T00:00:01Z", "delta": {
+                 "type": "text_delta", "text": "Visible "}}},
+            {"type": "stream_event", "event": {"type": "content_block_delta",
+             "timestamp": "2026-09-01T00:00:02Z", "delta": {
+                 "type": "thinking_delta", "thinking": "PRIVATE_REASONING_SENTINEL"}}},
+            {"type": "stream_event", "event": {"type": "content_block_delta",
+             "timestamp": "2026-09-01T00:00:03Z", "delta": {
+                 "type": "text_delta", "text": "answer"}}},
+            {"type": "stream_event", "event": {"type": "message_stop",
+             "timestamp": "2026-09-01T00:00:04Z"}},
+        ])
+        bridge.ingest_native(str(path))
+        rows = bridge.spool.read_after(0, 30, 1 << 20)
+        messages = [row for row in rows if row.get("kind") == "assistant_message"]
+        self.assertEqual([row["payload"]["text"] for row in messages],
+                         ["Visible ", "answer", ""])
+        self.assertTrue(all(row["payload"]["message_id"] == "msg_1"
+                            for row in messages))
+        self.assertEqual([row["payload"]["is_complete"] for row in messages],
+                         [False, False, True])
+        metadata = next(row["payload"] for row in rows
+                        if row.get("kind") == "session_metadata")
+        self.assertEqual(metadata["model"], "claude-model")
+        self.assertEqual(metadata["provider"], "anthropic")
+        self.assertNotIn("PRIVATE_REASONING_SENTINEL", json.dumps(rows))
+
 
 class CodexRolloutShapeTests(BridgeBase):
     """codex rollout JSONL rows ({type: event_msg|response_item, payload})
@@ -697,6 +733,46 @@ class CodexRolloutShapeTests(BridgeBase):
         self.assertIn("assistant_message", kinds)
         user = next(r for r in rows if r["kind"] == "user_message")
         self.assertEqual(user["payload"]["text"], "继续")
+
+    def test_codex_snapshot_and_delta_updates_share_the_native_message(self):
+        import tempfile as _tf
+        tmp = Path(_tf.mkdtemp(prefix="fleet-codex-stream-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        bridge = self._native_bridge()
+        path = self._tail_file(tmp, [
+            {"type": "session_meta", "payload": {
+                "id": "thread_1", "timestamp": "2026-09-01T00:00:00Z",
+                "model": "codex-model", "model_provider": "openai",
+                "cli_version": "0.1.2", "cwd": "/private/workspace"}},
+            {"type": "custom-title", "customTitle": "Native Codex title"},
+            {"type": "event_msg", "payload": {"type": "item_updated", "item": {
+                "id": "item_1", "type": "AgentMessage",
+                "content": [{"type": "text", "text": "partial"}]}}},
+            {"type": "event_msg", "payload": {"type": "agent_message_delta",
+                "item_id": "item_1", "delta": "+ delta"}},
+            {"type": "response_item", "payload": {"type": "reasoning",
+                "summary": ["PRIVATE_REASONING_SENTINEL"]}},
+            {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+                "id": "item_1", "type": "AgentMessage",
+                "content": [{"type": "text", "text": "Final answer"}]}}},
+        ])
+        bridge.ingest_native(str(path))
+        rows = bridge.spool.read_after(0, 30, 1 << 20)
+        metadata = [row["payload"] for row in rows
+                    if row.get("kind") == "session_metadata"]
+        self.assertEqual(metadata[0]["model"], "codex-model")
+        self.assertEqual(metadata[0]["provider"], "openai")
+        self.assertEqual(metadata[0]["client_version"], "0.1.2")
+        self.assertEqual(metadata[0]["native_started_at"], "2026-09-01T00:00:00Z")
+        self.assertEqual(metadata[1]["title"], "Native Codex title")
+        messages = [row for row in rows if row.get("kind") == "assistant_message"]
+        self.assertEqual([row["payload"]["text"] for row in messages],
+                         ["partial", "+ delta", "Final answer"])
+        self.assertEqual([row["payload"]["content_mode"] for row in messages],
+                         ["snapshot", "delta", "snapshot"])
+        self.assertTrue(all(row["payload"]["message_id"] == "item_1"
+                            for row in messages))
+        self.assertNotIn("PRIVATE_REASONING_SENTINEL", json.dumps(rows))
 
     def test_function_and_custom_tool_calls_map(self):
         import tempfile as _tf
@@ -815,8 +891,11 @@ class PiTranscriptShapeTests(BridgeBase):
         assistant = next(r for r in rows if r["kind"] == "assistant_message")
         self.assertEqual(assistant["payload"]["text"], "done")
         # the empty assistant row yields nothing; thinking never leaks
-        self.assertEqual([k for k in kinds if k not in ("session_start", "agent_state_changed")],
+        self.assertEqual([k for k in kinds if k not in ("session_start", "agent_state_changed", "session_metadata")],
                          ["user_message", "assistant_message"])
+        metadata = next(r["payload"] for r in rows if r.get("kind") == "session_metadata")
+        self.assertEqual(metadata["native_started_at"], "2026-09-01T00:00:00Z")
+        self.assertEqual(metadata["client_version"], "0.84.4")
 
     def test_tool_call_and_tool_result_roles_map(self):
         import tempfile as _tf
@@ -849,7 +928,7 @@ class PiTranscriptShapeTests(BridgeBase):
         self.assertIn("file body", ok["payload"]["result"])
         self.assertEqual(err["payload"]["status"], "error")
 
-    def test_non_message_envelopes_are_dropped(self):
+    def test_non_message_envelopes_keep_only_observed_model_metadata(self):
         import tempfile as _tf
         tmp = Path(_tf.mkdtemp(prefix="fleet-pi-"))
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
@@ -862,8 +941,39 @@ class PiTranscriptShapeTests(BridgeBase):
         count = bridge.ingest_native(str(path))
         rows = bridge.spool.read_after(0, 20, 1 << 20)
         kinds = [r.get("kind") for r in rows if r.get("kind") != "session_start"]
-        self.assertEqual(count, 0)
-        self.assertEqual(kinds, [])
+        self.assertEqual(count, 1)
+        metadata = [r["payload"] for r in rows if r.get("kind") == "session_metadata"]
+        self.assertEqual(metadata[0]["model"], "m")
+        self.assertEqual(len(metadata), 1)
+        self.assertEqual(kinds, ["session_metadata"])
+
+    def test_title_and_start_time_require_explicit_session_metadata(self):
+        import tempfile as _tf
+        tmp = Path(_tf.mkdtemp(prefix="fleet-pi-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        bridge = self._native_bridge()
+        path = self._tail_file(tmp, [
+            {"type": "session", "id": "s1", "name": "Native Pi title",
+             "timestamp": "2026-09-01T00:00:00Z", "version": "1.2.3",
+             "cwd": "/private/workspace"},
+            {"type": "custom-title", "customTitle": "Reviewed project"},
+            {"type": "summary", "summary": "private compaction summary"},
+            {"type": "assistant", "timestamp": "2026-09-01T00:05:00Z",
+             "message": {"role": "assistant", "content": "Visible answer"}},
+        ])
+        bridge.ingest_native(str(path))
+        rows = bridge.spool.read_after(0, 20, 1 << 20)
+        metadata = [row["payload"] for row in rows
+                    if row.get("kind") == "session_metadata"]
+        self.assertEqual(metadata[0]["title"], "Native Pi title")
+        self.assertEqual(metadata[0]["native_started_at"], "2026-09-01T00:00:00Z")
+        self.assertEqual(metadata[0]["client_version"], "1.2.3")
+        self.assertEqual(metadata[1]["title"], "Reviewed project")
+        self.assertTrue(all("cwd" not in row and "id" not in row
+                            for row in metadata))
+        self.assertTrue(all("private compaction summary" not in str(row)
+                            for row in rows))
+        self.assertEqual(sum("native_started_at" in row for row in metadata), 1)
 
     def test_text_plus_tool_call_row_maps_to_both(self):
         """A pi assistant row mixing text and toolCall blocks maps onto BOTH

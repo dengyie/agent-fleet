@@ -572,10 +572,11 @@ class TranscriptRepository:
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT event_id,session_id,stream_id,machine_id,sequence,kind,"
-                "capture_quality,emitted_at,redacted_json FROM redacted_events"
-                " WHERE session_id=? AND event_id IN (" + ",".join("?" for _ in ids)
-                + ") ORDER BY sequence ASC LIMIT 100", (session_id, *ids)).fetchall()
+                "SELECT o.cursor,e.event_id,e.session_id,e.stream_id,e.machine_id,e.sequence,e.kind,"
+                "e.capture_quality,e.emitted_at,e.redacted_json FROM redacted_events e"
+                " JOIN redacted_event_order o USING(session_id,event_id)"
+                " WHERE e.session_id=? AND e.event_id IN (" + ",".join("?" for _ in ids)
+                + ") ORDER BY o.cursor ASC LIMIT 100", (session_id, *ids)).fetchall()
             result = []
             for row in rows:
                 parsed = json.loads(row["redacted_json"])

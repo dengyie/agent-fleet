@@ -42,7 +42,7 @@ from session_schema import (
 )
 from hub.infrastructure.sqlite import connect as sqlite_connect
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _FAMILY_REJECT_MARKERS = ("/", "\\", "token", "key", "secret", "private", "password")
 
@@ -130,6 +130,37 @@ class SessionRepository:
                      "ORDER BY COALESCE(updated_at,started_at,''),session_id")
 
     @staticmethod
+    def _migrate_v5(conn) -> None:
+        """Add bounded native display metadata with its projection cursor."""
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
+        additions = {
+            "native_title": "TEXT",
+            "title_preview": "TEXT",
+            "title_preview_cursor": "INTEGER",
+            "model": "TEXT",
+            "model_cursor": "INTEGER",
+            "provider": "TEXT",
+            "provider_cursor": "INTEGER",
+            "client_version": "TEXT",
+            "client_version_cursor": "INTEGER",
+            "adapter": "TEXT",
+            "adapter_cursor": "INTEGER",
+            "native_started_at": "TEXT",
+            "native_started_cursor": "INTEGER",
+            "native_title_cursor": "INTEGER",
+        }
+        for name, declaration in additions.items():
+            if name in columns:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE sessions ADD COLUMN {name} {declaration}")
+            except sqlite3.OperationalError:
+                columns = {row["name"] for row in conn.execute(
+                    "PRAGMA table_info(sessions)")}
+                if name not in columns:
+                    raise
+
+    @staticmethod
     def _stored_schema_version(conn) -> int:
         table = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
@@ -203,6 +234,7 @@ class SessionRepository:
                 self._stored_schema_version(conn)
                 self._migrate_v3(conn)
                 self._migrate_v4(conn)
+                self._migrate_v5(conn)
                 conn.execute("INSERT INTO meta (key,value) VALUES ('schema_version',?) "
                              "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                              (str(SCHEMA_VERSION),))
@@ -285,6 +317,13 @@ class SessionRepository:
             "started_at": row.get("started_at"),
             "updated_at": row.get("updated_at"),
             "finished_at": row.get("finished_at"),
+            "native_title": str(row.get("native_title") or "")[:160],
+            "title_preview": str(row.get("title_preview") or "")[:160],
+            "model": str(row.get("model") or "")[:160],
+            "provider": str(row.get("provider") or "")[:96],
+            "client_version": str(row.get("client_version") or "")[:96],
+            "adapter": str(row.get("adapter") or "")[:64],
+            "native_started_at": row.get("native_started_at"),
         }
 
     @staticmethod
@@ -538,6 +577,78 @@ class SessionRepository:
         finally:
             conn.close()
         return self._clean_row(row) if row is not None else None
+
+    def update_session_metadata(self, session_id: str, cursor: int,
+                                payload: Mapping[str, Any]) -> None:
+        """Project explicitly observed metadata in Hub ingestion order."""
+        self._validate_session_id(session_id)
+        if (type(cursor) is not int or cursor < 1 or cursor > (1 << 63) - 1
+                or not isinstance(payload, Mapping)):
+            raise SessionError("invalid_session_metadata")
+        values = {
+            "native_title": (payload.get("title") or payload.get("name"), 160),
+            "model": (payload.get("model"), 160),
+            "provider": (payload.get("provider"), 96),
+            "client_version": (payload.get("client_version") or payload.get("cli_version"), 96),
+            "adapter": (payload.get("adapter"), 64),
+            "native_started_at": (payload.get("native_started_at"), 40),
+        }
+        bounded = {}
+        for field, (value, maximum) in values.items():
+            if not isinstance(value, str):
+                bounded[field] = None
+                continue
+            value = value.strip()
+            if not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+                bounded[field] = None
+                continue
+            bounded[field] = value[:maximum]
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for field, value in bounded.items():
+                if value is None:
+                    continue
+                cursor_field = {
+                    "native_title": "native_title_cursor",
+                    "native_started_at": "native_started_cursor",
+                }.get(field, field + "_cursor")
+                comparison = ">" if field == "native_started_at" else "<"
+                conn.execute(
+                    f"UPDATE sessions SET {field}=?,{cursor_field}=? "
+                    f"WHERE session_id=? AND ({cursor_field} IS NULL OR {cursor_field}{comparison}?)",
+                    (value, cursor, session_id, cursor),
+                )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def update_title_preview(self, session_id: str, cursor: int, text: str) -> None:
+        """Retain a short, redacted first-user-message fallback for directories."""
+        self._validate_session_id(session_id)
+        if (type(cursor) is not int or cursor < 1 or cursor > (1 << 63) - 1
+                or not isinstance(text, str)):
+            raise SessionError("invalid_session_metadata")
+        preview = " ".join(text.split())[:160]
+        if not preview:
+            return
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE sessions SET title_preview=?,title_preview_cursor=? "
+                "WHERE session_id=? AND (title_preview_cursor IS NULL OR title_preview_cursor>?)",
+                (preview, cursor, session_id, cursor),
+            )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def finish_managed_session(self, session_id: str,
                                 finished_at: str) -> dict[str, Any] | None:

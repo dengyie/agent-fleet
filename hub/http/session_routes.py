@@ -88,6 +88,15 @@ def _query_bool(name: str) -> bool:
     }
 
 
+def _include_source_records() -> bool:
+    values = request.args.getlist("include_source")
+    if not values:
+        return True
+    if len(values) != 1 or values[0].lower() not in {"0", "1", "false", "true"}:
+        raise SessionServiceError("invalid_include_source")
+    return values[0].lower() in {"1", "true"}
+
+
 def _ingest_machine_binding_error(events):
     """会话事件的机器绑定（与 /api/ingest 同一规则）。
 
@@ -245,7 +254,8 @@ def api_session_events_query(session_id):
             raise SessionServiceError("invalid_cursor")
         result = _sessions().session_events(
             session_id, limit=_query_limit(), after_cursor=after_cursor or 0,
-            before_cursor=before_cursor, tail=tail, at_sequence=at_sequence)
+            before_cursor=before_cursor, tail=tail, at_sequence=at_sequence,
+            include_source=_include_source_records())
     except SessionServiceError as exc:
         return _session_error(exc)
     return jsonify(result)

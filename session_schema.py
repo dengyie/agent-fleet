@@ -131,8 +131,12 @@ _FORBIDDEN_PAYLOAD_KEYS = frozenset({
 # whitelisted, so a process_spawn may carry ``process_family``/``owner`` and a
 # ``process_group_id`` binding but never ``cmd``/``argv``/``env``/``cwd``/``pid``.
 _GENERIC_PAYLOAD_FIELDS: dict[str, tuple[str, ...]] = {
-    'session_start': ('agent_family', 'adapter', 'cli_version', 'interactive_questions'),
-    'session_metadata': ('agent_family', 'adapter', 'task_id', 'agent_ref', 'interactive_questions', 'native_resume', 'resumed', 'desktop_bridge', 'model_takeover'),
+    'session_start': ('agent_family', 'adapter', 'cli_version', 'client_version',
+                      'model', 'provider', 'native_started_at', 'interactive_questions'),
+    'session_metadata': ('agent_family', 'adapter', 'task_id', 'agent_ref',
+                         'title', 'model', 'provider', 'client_version',
+                         'native_started_at', 'interactive_questions', 'native_resume',
+                         'resumed', 'desktop_bridge', 'model_takeover'),
     'process_spawn': ('process_family', 'owner', 'group_binding',
                       'process_group_id'),
     'process_exit': ('exit_code', 'duration_s', 'reason'),
@@ -534,6 +538,29 @@ def _generic_payload(payload: Mapping[str, Any], kind: str) -> dict[str, Any]:
     return clean
 
 
+def _session_metadata_payload(payload: Mapping[str, Any], kind: str) -> dict[str, Any]:
+    """Keep bounded, explicitly observed session metadata only."""
+    clean = _generic_payload(payload, kind)
+    for field, maximum in (('title', 160), ('model', 160), ('provider', 96),
+                           ('client_version', 96), ('cli_version', 96),
+                           ('adapter', 64), ('agent_family', 64),
+                           ('native_started_at', 40)):
+        if field not in clean:
+            continue
+        if not isinstance(clean[field], str):
+            clean.pop(field, None)
+            continue
+        value = clean[field].strip()
+        if not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            clean.pop(field, None)
+            continue
+        clean[field] = value[:maximum]
+    native_started_at = clean.get('native_started_at')
+    if native_started_at and not _is_rfc3339(native_started_at):
+        clean.pop('native_started_at', None)
+    return clean
+
+
 # ---------------------------------------------------------------------------
 # Event validation
 # ---------------------------------------------------------------------------
@@ -617,6 +644,17 @@ def validate_event(event: Mapping[str, Any]) -> dict[str, Any]:
                                   _MAX_TEXT),
             'is_complete': bool(plain_payload.get('is_complete', True)),
         }
+        if plain_payload.get('message_id') is not None:
+            message_id = _payload_text(plain_payload.get('message_id'),
+                                       'message_id', 128)
+            if message_id and _is_opaque_shape(message_id):
+                clean_payload['message_id'] = message_id
+        content_mode = plain_payload.get('content_mode')
+        if content_mode is not None:
+            if content_mode not in ('delta', 'snapshot'):
+                raise SessionValidationError('invalid_content_mode',
+                                             'unknown message update mode')
+            clean_payload['content_mode'] = content_mode
     elif kind in _TOOL_PAYLOAD_KINDS:
         clean_payload = _tool_payload(plain_payload)
     elif kind == _QUALITY_CHANGE_KIND:
@@ -676,6 +714,8 @@ def validate_event(event: Mapping[str, Any]) -> dict[str, Any]:
         clean_payload = _interaction_request_payload(plain_payload)
     elif kind == 'interaction_response':
         clean_payload = _interaction_response_payload(plain_payload)
+    elif kind in ('session_start', 'session_metadata'):
+        clean_payload = _session_metadata_payload(plain_payload, kind)
     else:
         # Generic kinds (session_start, session_metadata, process_spawn,
         # process_exit, step_start, step_end, session_close, policy_signal,
@@ -853,10 +893,20 @@ def public_session_dto(session: Mapping[str, Any]) -> dict[str, Any]:
         value = _public_id(session.get(field))
         if value:
             dto[field] = value[:64]
+    for field, maximum in (('native_title', 160), ('title_preview', 160), ('model', 160),
+                           ('provider', 96), ('client_version', 96),
+                           ('adapter', 64)):
+        value = session.get(field)
+        if (isinstance(value, str) and value.strip()
+                and not any(ord(char) < 32 or ord(char) == 127 for char in value)):
+            dto[field] = value.strip()[:maximum]
     for field in ('started_at', 'updated_at', 'finished_at'):
         value = session.get(field)
         if _is_rfc3339(value):
             dto[field] = value
+    native_started_at = session.get('native_started_at')
+    if _is_rfc3339(native_started_at):
+        dto['native_started_at'] = native_started_at
 
     capabilities = session.get('capabilities')
     if isinstance(capabilities, list):

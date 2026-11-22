@@ -44,6 +44,19 @@ def test_zcode_logs_normalize_current_turn_and_tool_results_without_replaying_co
     assert 'old answer' not in str(events) and 'private system' not in str(events)
 
 
+def test_zcode_model_io_projects_explicit_model_metadata_without_request_body():
+    row = {'type': 'model_io', 'sessionId': SID,
+        'request': {'model': 'zcode-model', 'provider': 'zcode-provider',
+            'messages': [{'role': 'system', 'content': 'private system prompt'},
+                         {'role': 'user', 'content': 'inspect tests'}]},
+        'response': {'text': 'visible answer'}}
+    events = _shape_native_row(row)
+    assert events[0] == ('session_metadata', {
+        'model': 'zcode-model', 'provider': 'zcode-provider'})
+    assert ('user_message', {'text': 'inspect tests', 'is_complete': True}) in events
+    assert all('private system prompt' not in str(event) for event in events)
+
+
 def test_default_archive_sync_reads_zcode_history_without_adoption(tmp_path, monkeypatch):
     from tools.session.sync import default_sources, sync_file
     from test_review_node_sync import _client, _cfg

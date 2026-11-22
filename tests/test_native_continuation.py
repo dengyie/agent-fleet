@@ -254,15 +254,29 @@ def test_desktop_without_rollout_has_control_and_original_messages(tmp_path):
         assert r.status_code == 200 and not r.get_json().get('rejected')
         return r.status_code,r.get_json()
     path = tmp_path/'model-io-sess_desktop.jsonl'
-    row = {'session':{'sessionId':'sess_desktop'}, 'status':'idle'}
-    sync_desktop(cfg, desktop, row, path, send)
+    row = {'session':{'sessionId':'sess_desktop', 'title':'Native desktop title',
+                      'model':'desktop-model', 'provider':'desktop-provider'},
+           'status':'idle'}
     sync_desktop(cfg, desktop, row, path, send)
     from tools.session.runner_capture import session_prefix
     sid = session_prefix(cfg.machine)+native_identity('zcode',path)
     info = client.get('/api/sessions/'+sid).get_json()['session']
     assert info['managed'] and info['message_delivery']['mechanism']=='zcode_desktop_bridge'
+    assert info['native_title'] == 'Native desktop title'
+    assert info['model'] == 'desktop-model'
+    assert info['provider'] == 'desktop-provider'
     events = client.get('/api/sessions/'+sid+'/events').get_json()['events']
     assert [e['payload']['text'] for e in events if e['kind'] in {'user_message','assistant_message'}]==['hello','ACK']
+    metadata_count = sum(event['kind'] == 'session_metadata' for event in events)
+    sync_desktop(cfg, desktop, row, path, send)
+    repeated = client.get('/api/sessions/'+sid+'/events').get_json()['events']
+    assert sum(event['kind'] == 'session_metadata' for event in repeated) == metadata_count
+    row['session']['title'] = 'Renamed desktop title'
+    sync_desktop(cfg, desktop, row, path, send)
+    updated = client.get('/api/sessions/'+sid).get_json()['session']
+    assert updated['native_title'] == 'Renamed desktop title'
+    refreshed = client.get('/api/sessions/'+sid+'/events').get_json()['events']
+    assert sum(event['kind'] == 'session_metadata' for event in refreshed) == metadata_count + 1
 
 
 def test_codex_continuation_keeps_original_execution_policy(tmp_path):

@@ -267,7 +267,8 @@ class SessionService:
                     }:
                         search_events.setdefault(session_id, []).append(clean["event_id"])
                     if clean.get("kind") in {"agent_state_changed", "interaction_request",
-                            "interaction_response", "session_start", "session_metadata", "session_close"}:
+                            "interaction_response", "session_start", "session_metadata",
+                            "session_close", "user_message"}:
                         projected_events.setdefault(session_id, []).append(clean["event_id"])
                     if result.status != "duplicate":
                         publish_event = clean
@@ -389,11 +390,22 @@ class SessionService:
             return
         try:
             rows = reader(session_id, event_ids)
-            for event in sorted(rows, key=lambda row: row["sequence"]):
+            for event in sorted(rows, key=lambda row: row["cursor"]):
                 kind, payload = event["kind"], event.get("payload") or {}
-                if kind == "agent_state_changed":
+                if kind == "user_message":
+                    project_preview = getattr(self.session_repo,
+                                              "update_title_preview", None)
+                    if (callable(project_preview) and isinstance(payload, Mapping)
+                            and isinstance(payload.get("text"), str)):
+                        project_preview(session_id, int(event["cursor"]),
+                                        payload["text"])
+                elif kind == "agent_state_changed":
                     self._apply_agent_state(event)
                 elif kind in ("session_start", "session_metadata"):
+                    project_metadata = getattr(self.session_repo,
+                                               "update_session_metadata", None)
+                    if callable(project_metadata) and isinstance(payload, Mapping):
+                        project_metadata(session_id, int(event["cursor"]), payload)
                     if any(key in payload for key in ('interactive_questions', 'native_resume', 'desktop_bridge', 'model_takeover')):
                         caps = set(self.session_repo.get_capabilities(session_id))
                         for key in ('interactive_questions', 'native_resume', 'desktop_bridge', 'model_takeover'):
