@@ -59,7 +59,7 @@ export function mountCatalog(root, kind, {identitySignal} = {}) {
   function renderCatalog() {
     const ticket = sequence, formOwner = currentOwner;
     const [title, addLabel, idKey, idTitle] = info[kind];
-    const section = panel(content, title, kind === 'models' ? '集中管理 API 地址、模型和凭据。保存后用于新任务；已排队任务保留原配置，工作流模板需重新发布。' : kind === 'nodes' ? '连接已有 VM 或物理机，配置执行能力。节点连接 Hub 并上报心跳后即可使用；登记不会创建或启动云主机。' : '管理工作目录和默认执行节点。目录位于实际执行节点；保存不会创建、搬迁或删除文件。', icons[kind]);
+    const section = panel(content, title, kind === 'models' ? '添加 OpenAI 兼容的第三方服务，填写服务商 Base URL、API Key 和模型 ID。每个模型单独保存；凭据在服务器加密保存。保存后用于新任务，已排队任务保留原配置。' : kind === 'nodes' ? '连接已有 VM 或物理机，配置执行能力。节点连接 Hub 并上报心跳后即可使用；登记不会创建或启动云主机。' : '管理工作目录和默认执行节点。目录位于实际执行节点；保存不会创建、搬迁或删除文件。', icons[kind]);
     const toolbar = el('div', null, 'settings-toolbar'); section.append(toolbar);
     const count = el('span', catalog[kind].length + ' 项配置', 'settings-count');
     const add = button(addLabel, () => editor(null), 'button-primary'); add.append(uiIcon('arrow-right', {size: 16}));
@@ -71,10 +71,17 @@ export function mountCatalog(root, kind, {identitySignal} = {}) {
       const entry = button('', () => editor(row), 'settings-record');
       entry.dataset.recordId = row[idKey]; entry.setAttribute('aria-pressed', 'false');
       const glyph = el('span', null, 'settings-record-icon'); glyph.append(uiIcon(icons[kind], {size: 18}));
-      const copy = el('span', null, 'settings-record-copy'); copy.append(el('strong', label), el('small', row[idKey]));
-      if (kind === 'models') copy.append(el('small', row.provider_config.endpoint || row.provider_config.base_url || row.provider));
-      if (kind === 'nodes') copy.append(el('small', row.last_seen_at ? '最近心跳：' + new Date(row.last_seen_at * 1000).toLocaleString() : '尚无心跳'));
-      if (kind === 'workspaces') copy.append(el('small', row.root_path));
+      const copy = el('span', null, 'settings-record-copy');
+      if (kind === 'models') {
+        copy.append(el('strong', row.provider_config.provider_name || (row.provider === 'deterministic' ? '本地测试模型' : 'OpenAI 兼容服务')));
+        copy.append(el('small', '模型：' + row.model + ' · ' + row[idKey]));
+        copy.append(el('small', row.provider_config.endpoint || row.provider_config.base_url || '未设置 Base URL'));
+        copy.append(el('small', row.secret_configured ? 'API Key 已配置' : '未配置 API Key'));
+      } else {
+        copy.append(el('strong', label), el('small', row[idKey]));
+        if (kind === 'nodes') copy.append(el('small', row.last_seen_at ? '最近心跳：' + new Date(row.last_seen_at * 1000).toLocaleString() : '尚无心跳'));
+        if (kind === 'workspaces') copy.append(el('small', row.root_path));
+      }
       const state = el('span', row.enabled ? '已启用' : '已停用', 'settings-record-state'); state.dataset.enabled = String(row.enabled);
       entry.append(glyph, copy, state, uiIcon('chevron-right', {size: 16}));
       list.append(entry);
@@ -90,21 +97,34 @@ export function mountCatalog(root, kind, {identitySignal} = {}) {
       list.querySelectorAll('.settings-record').forEach(entry => entry.setAttribute('aria-pressed', String(entry.dataset.recordId === row?.[idKey])));
       const form = el('form', null, 'settings-form settings-editor'); editorRoot.append(form);
       const heading = el('div', null, 'settings-editor-heading');
-      heading.append(el('h3', row ? '编辑 ' + row[idKey] : addLabel), el('p', row ? '更新连接信息，保存后用于之后的新任务。' : '填写基本信息，高级选项可按需配置。', 'settings-description')); form.append(heading);
+      heading.append(el('h3', row ? '编辑 ' + row[idKey] : kind === 'models' ? '连接第三方模型服务' : addLabel), el('p', row ? '更新连接信息，保存后用于之后的新任务。' : kind === 'models' ? '按服务商提供的信息填写。Base URL 通常以 /v1 结尾；模型 ID 需与服务商控制台中的名称完全一致。' : '填写基本信息，高级选项可按需配置。', 'settings-description')); form.append(heading);
       const id = field(form, idKey, idTitle, row?.[idKey], {required: true, readOnly: !!row});
       id.pattern = '[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}';
+      if (kind === 'models') id.placeholder = '例如 openrouter-gpt-4o';
       const controls = {};
       let value;
       if (kind === 'models') {
         controls.provider = field(form, 'provider', '模型协议', (row?.provider === 'openai-compatible' ? 'openai_compatible' : row?.provider) || 'openai_compatible', {options: [['openai_compatible', 'OpenAI 兼容 API'], ['deterministic', '本地确定性测试模型']]});
-        controls.model = field(form, 'model', '模型名称', row?.model, {required: true});
-        controls.model.closest('label').classList.add('settings-field-wide');
         const config = row?.provider_config || {};
-        controls.base_url = field(form, 'url', 'API URL', config.endpoint || config.base_url || '', {type: 'url', help: '填写 API Base URL（如 https://api.example.com/v1），或完整的 /chat/completions 地址。'});
-        controls.api_key = field(form, 'api_key', 'API Key', '', {type: 'password', help: row?.secret_configured ? '已配置。留空保留原凭据；填写新值即轮换。' : '首次接入请填写；保存后不会回显。'});
+        controls.provider_name = field(form, 'provider_name', '服务商名称', config.provider_name || '', {required: !row && controls.provider.value !== 'deterministic', help: '显示名称，例如 OpenRouter、硅基流动或自建网关。'});
+        controls.model = field(form, 'model', '模型 ID', row?.model, {required: true, help: '填写服务商 API 实际接受的模型标识。'});
+        controls.model.closest('label').classList.add('settings-field-wide');
+        controls.base_url = field(form, 'url', 'Base URL', config.endpoint || config.base_url || '', {type: 'url', required: !row && controls.provider.value !== 'deterministic', help: '例如 https://api.example.com/v1。支持 OpenAI Chat Completions 兼容服务。'});
+        controls.api_key = field(form, 'api_key', 'API Key', '', {type: 'password', required: !row?.secret_configured && (row?.enabled ?? true) && controls.provider.value !== 'deterministic', help: row?.secret_configured ? '已安全保存。留空保留原凭据；输入新 Key 会轮换凭据。' : '保存后不会回显；仅发送到你配置的模型服务。'});
         controls.base_url.placeholder = 'https://api.example.com/v1';
+        controls.api_key.placeholder = row?.secret_configured ? '留空以保留当前 Key' : '粘贴服务商提供的 API Key';
+        controls.provider_name.closest('label').classList.add('settings-field-wide');
         controls.base_url.closest('label').classList.add('settings-field-wide');
         controls.api_key.closest('label').classList.add('settings-field-wide');
+        const guide = el('div', null, 'settings-model-source-guide');
+        guide.append(uiIcon('globe', {size: 17}), el('span', '适用于自建网关和第三方 OpenAI 兼容 API。Base URL 使用服务商给出的地址，模型 ID 需逐字匹配；密钥只会写入服务器凭据库，不会在列表或后续读取中回显。'));
+        form.insertBefore(guide, controls.provider.closest('label'));
+        controls.provider.addEventListener('change', () => {
+          const required = controls.provider.value !== 'deterministic' && enabled.checked;
+          controls.provider_name.required = controls.provider.value !== 'deterministic' && !row;
+          controls.base_url.required = required;
+          controls.api_key.required = required && !row?.secret_configured;
+        });
         const advanced = el('details', null, 'settings-advanced');
         advanced.append(el('summary', '高级参数'));
         form.append(advanced);
@@ -125,6 +145,11 @@ export function mountCatalog(root, kind, {identitySignal} = {}) {
       }
       if (kind === 'nodes') controls.capabilities = field(form, 'capabilities', '能力声明（JSON）', JSON.stringify(row?.capabilities || {'workspace.list': true, 'workspace.read': true, 'workspace.write': true, 'workspace.exec': true}, null, 2), {type: 'textarea', help: '工作区节点默认支持列目录、读写文件和执行命令。仅声明实际安装的能力。'});
       const enabled = field(form, 'enabled', '启用此配置', row?.enabled ?? true, {type: 'checkbox'});
+      if (kind === 'models') enabled.addEventListener('change', () => {
+        const compatible = controls.provider.value !== 'deterministic';
+        controls.base_url.required = compatible;
+        controls.api_key.required = compatible && enabled.checked && !row?.secret_configured;
+      });
       const submit = el('button', '保存配置', 'button-primary'); submit.type = 'submit';
       const result = el('p'); result.setAttribute('role', 'status');
       const actions = el('div', null, 'settings-form-actions');
@@ -163,6 +188,7 @@ export function mountCatalog(root, kind, {identitySignal} = {}) {
         try {
           if (kind === 'models') {
             const provider_config = {timeout_s: Number(controls.timeout.value), max_retries: Number(controls.retries.value), stream: controls.stream.checked, headers: jsonValue(controls.headers)};
+            if (controls.provider_name.value.trim()) provider_config.provider_name = controls.provider_name.value.trim();
             if (controls.base_url.value.trim()) provider_config[/\/chat\/completions\/?$/.test(controls.base_url.value.trim()) ? 'endpoint' : 'base_url'] = controls.base_url.value.trim();
             if (controls.pricing.value.trim()) provider_config.pricing = jsonValue(controls.pricing);
             const agent_endpoints = Object.fromEntries(['anthropic', 'responses'].filter(key => controls[key].value.trim()).map(key => [key, controls[key].value.trim()]));

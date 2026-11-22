@@ -99,9 +99,11 @@ def validate_model_profile(data: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(provider_config, Mapping):
         raise PlatformValidationError("invalid_model", "provider 配置不合法")
     normalized_config: dict[str, Any] = {}
-    allowed_config = {"endpoint", "base_url", "timeout_s", "max_retries", "stream", "headers", "pricing", "agent_endpoints"}
+    allowed_config = {"provider_name", "endpoint", "base_url", "timeout_s", "max_retries", "stream", "headers", "pricing", "agent_endpoints"}
     if any(not isinstance(key, str) or key not in allowed_config for key in provider_config):
         raise PlatformValidationError("invalid_model", "provider 配置不合法")
+    if "provider_name" in provider_config:
+        normalized_config["provider_name"] = bounded_text(provider_config["provider_name"], "provider_name", MAX_NAME)
     for key in ("endpoint", "base_url"):
         if key in provider_config:
             value = provider_config[key]

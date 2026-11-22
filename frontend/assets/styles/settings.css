@@ -107,6 +107,8 @@ body:has(.settings-dialog[open]) { overflow: hidden; }
 .settings-editor { padding: 22px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); }
 .settings-editor-heading { grid-column: 1/-1; padding-bottom: 16px; border-bottom: 1px solid var(--border-subtle); scroll-margin-top: 12px; }
 .settings-editor-heading .settings-description { margin: 6px 0 0; font-size: 12px; }
+.settings-model-source-guide { grid-column: 1/-1; display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; border: 1px solid var(--border-subtle); border-radius: 9px; background: var(--bg); color: var(--text-2); font-size: 12px; line-height: 1.7; }
+.settings-model-source-guide svg { flex: none; margin-top: 2px; color: var(--link); }
 .settings-advanced { grid-column: 1/-1; padding: 14px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .settings-advanced > summary { color: var(--text-2); cursor: pointer; font-size: 13px; }
 .settings-advanced[open] { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px; }
