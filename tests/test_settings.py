@@ -29,7 +29,7 @@ def put(client, suffix, body):
 
 
 def model():
-    return {'provider': 'openai_compatible', 'model': 'example-model', 'provider_config': {'base_url': 'https://models.example.test/v1', 'timeout_s': 90}, 'enabled': True}
+    return {'provider': 'openai_compatible', 'model': 'example-model', 'provider_config': {'provider_name': 'Example Gateway', 'base_url': 'https://models.example.test/v1', 'timeout_s': 90}, 'enabled': True}
 
 
 def test_model_edit_secret_preservation_rotation_and_restart(setup):
@@ -38,6 +38,7 @@ def test_model_edit_secret_preservation_rotation_and_restart(setup):
     assert first.status_code == 200, first.json
     row = first.json['value']
     assert row['provider_config']['timeout_s'] == 90
+    assert row['provider_config']['provider_name'] == 'Example Gateway'
     assert row['secret_configured']
     assert 'secret_ref' not in row and 'private-value' not in str(first.json)
     stored = app.extensions['fleet']['platform_repository'].get_model(owner, 'main-model')
@@ -63,6 +64,7 @@ def test_model_edit_secret_preservation_rotation_and_restart(setup):
     listing = get(client)
     assert listing.status_code == 200 and listing.headers['Cache-Control'] == 'no-store'
     assert listing.json['models'][0]['provider_config']['base_url'] == 'https://new.example.test/v1'
+    assert listing.json['models'][0]['provider_config']['provider_name'] == 'Example Gateway'
     assert 'private-value' not in listing.text and 'managed://' not in listing.text
 
 
