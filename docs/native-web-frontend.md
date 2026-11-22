@@ -68,7 +68,13 @@ GET /api/machines/<machine>/task-targets
 - **后端接口已发布**：分页、消息 token 和任务找回接口已由 PR #111 合入 main（`d3e77f0`）。本前端适配需基于该 main 版本联调后一起发布；旧线上后端若尚未升级，不支持这些请求和响应字段。
 - **响应未知找回语义**：收到 HTTP admission 后显示 queued/receipt 状态，不等同 Agent 已完成；只对用户显式点击的恢复操作重放冻结 token 和正文。刷新本页会恢复未确认操作卡片，但不会自动发送 POST。
 - **模型目录切换**：新任务沿用本机模型配置。后台尚无网页专用 models / model 路由，前端不借用主助手工具 RPC，也不伪造任意 Agent 的模型切换能力。本机 profile 的既有入口仍在原始时间线中。
-- **源端流式边界**：页面实时显示已产生的消息、工具和状态；Agent 未提供增量正文时等待真实内容。不会生成模拟打字或把 source_record 当思考内容。
+- **源端流式边界**：页面实时显示源端实际产生的可见回答增量、完整消息快照、工具调用/结果和状态活动；Agent 未提供增量正文时按完整消息呈现。聊天读取带 `include_source=0`，不下载 source_record；内部 `thinking` / `reasoning`、系统提示词和原始记录字段不会作为对话内容展示。
+
+## 会话名称与详细信息
+
+目录和聊天标题优先使用节点原生明确提供的会话名；缺失时以首条已脱敏用户消息作为明确标注的回退。目录卡和工作面板展示客户端/采集适配器、客户端版本、provider、模型、原生开始时间或 Hub 首次采集时间、最后活动和持续时间。开始时间缺少原生来源时不从普通消息时间推断。
+
+消息正文与工具结果来自带 Hub ingestion cursor 的逐事件 HTTP 记录。`message_id` 将同一原生回答的 delta 或 snapshot 更新合并；快照覆盖当前消息文本，delta 追加文本。交互问题及回答、工具、状态变化也显示在时间线。Pi、ZCode rollout 和 ZCode 桌面分页等不提供增量流的记录保持真实完成态，不模拟打字。ZCode 桌面会话只投影原生会话摘要明确提供的标题、模型与 provider，并在变化时记录。source_record 仍是独立诊断存档，原生聊天不请求该存档。
 
 ## 验证
 
@@ -79,6 +85,8 @@ GET /api/machines/<machine>/task-targets
 2026-11-22 前端分页与恢复补充：聊天首读使用 tail，历史页和实时增量使用独立游标；目录使用 snapshot cursor 的加载更多；普通消息持久化当前账号 / 会话下的同 token 操作，结果未知时只由用户点击恢复。配套浏览器验收需在后端 session API 变更合入后运行。
 
 2026-11-21 交互回归补充：长消息展开后的完整原文随真实片段更新；已完成投递卡在读轮询时保留同一 DOM 与展开状态；节点最初离线时可点击“刷新节点与目录”重新读取状态与目录，恢复后启用发送，不重复追加节点或产生写请求。刷新和初始节点查询均接受页面生命周期的取消信号。
+
+2026-11-23 会话详情补充：原生名称优先、首条用户消息回退、客户端/版本/provider/model 与起始/持续时间展示；Codex snapshots/deltas 和 Claude visible text deltas 按原生消息 ID 投影。source_record 通过 `include_source=0` 从聊天 HTTP 响应排除；隐藏推理内容不会进入消息流。
 
 ```sh
 FLEET_PLAYWRIGHT_MODULE=/path/to/existing/playwright FLEET_BROWSER_CHANNEL=chrome \

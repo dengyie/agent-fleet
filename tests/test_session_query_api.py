@@ -38,7 +38,7 @@ def _event(seq, session_id="sess_q_1", kind="user_message",
         "source": "bridge",
         "emitted_at": emitted,
     }
-    if kind in ("user_message", "assistant_message"):
+    if kind in ("user_message", "assistant_message", "source_record"):
         evt["payload"] = {"text": text, "is_complete": True}
     elif kind == "session_start":
         evt["payload"] = {"agent_family": "codex", "adapter": "codex_stream"}
@@ -159,6 +159,53 @@ class SessionQueryDtoTests(SessionQueryTestBase):
         self.assertEqual(session["control_capability"], "unavailable")
         self.assertEqual(session['allowed_actions'], [])  # Supervisor is disabled.
 
+    def test_list_projects_native_display_metadata_only(self):
+        metadata = _event(5, kind="session_metadata", event_id="evt_session_metadata")
+        metadata["payload"] = {
+            "title": "VM native session",
+            "model": "model-x",
+            "provider": "provider-y",
+            "client_version": "client-1.2",
+            "native_started_at": "2026-08-26T00:00:00Z",
+            "cwd": "/private/workspace",
+            "api_key": "never-return-this",
+        }
+        result = self.client.post(
+            "/api/session-events", json=[metadata],
+            headers={"X-Agent-Fleet-Token": "ingest-secret"})
+        self.assertEqual(result.status_code, 200)
+        sessions = self.client.get("/api/sessions").get_json()["sessions"]
+        session = next(row for row in sessions if row["session_id"] == "sess_q_1")
+        self.assertEqual(session["native_title"], "VM native session")
+        self.assertEqual(session["model"], "model-x")
+        self.assertEqual(session["provider"], "provider-y")
+        self.assertEqual(session["client_version"], "client-1.2")
+        self.assertEqual(session["native_started_at"], "2026-08-26T00:00:00Z")
+        self.assertNotIn("cwd", session)
+        self.assertNotIn("api_key", session)
+
+    def test_native_titles_and_first_message_previews_are_redacted(self):
+        title = _event(5, kind="session_metadata", session_id="sess_redacted_title",
+                       event_id="evt_redacted_title")
+        title["payload"] = {"title": "Review Bearer hunter2-secret-value"}
+        preview = _event(1, session_id="sess_redacted_preview",
+                         text="Inspect token=sk-abcdefghijklmnopqrstuvwxyz123456",
+                         event_id="evt_redacted_preview")
+        for event in (title, preview):
+            response = self.client.post(
+                "/api/session-events", json=[event],
+                headers={"X-Agent-Fleet-Token": "ingest-secret"})
+            self.assertEqual(response.status_code, 200)
+
+        title_row = self.client.get("/api/sessions/sess_redacted_title").get_json()["session"]
+        preview_row = self.client.get("/api/sessions/sess_redacted_preview").get_json()["session"]
+        self.assertEqual(title_row["native_title"],
+                         "Review Bearer [REDACTED:credential]")
+        self.assertEqual(preview_row["title_preview"],
+                         "Inspect token=[REDACTED:credential]")
+        self.assertNotIn("hunter2-secret-value", str(title_row))
+        self.assertNotIn("sk-abcdefghijklmnopqrstuvwxyz123456", str(preview_row))
+
     def test_active_filter_excludes_terminal_and_idle_sessions(self):
         repo = self.app.extensions["fleet"]["services"]["sessions"].session_repo
         conn = repo._connect()
@@ -220,6 +267,29 @@ class SessionQueryDtoTests(SessionQueryTestBase):
         resp = self.client.get("/api/sessions/sess_q_1/events?limit=2")
         events_ = resp.get_json()["events"]
         self.assertLessEqual(len(events_), 2)
+
+    def test_source_records_are_explicit_and_can_be_excluded_from_chat_reads(self):
+        source = _event(5, kind="source_record", text="hidden reasoning sentinel",
+                        event_id="evt_source_005")
+        accepted = self.client.post(
+            "/api/session-events", json=[source],
+            headers={"X-Agent-Fleet-Token": "ingest-secret"})
+        self.assertEqual(accepted.status_code, 200)
+
+        default_page = self.client.get("/api/sessions/sess_q_1/events?tail=1")
+        self.assertIn("source_record", [row["kind"]
+                                         for row in default_page.get_json()["events"]])
+        chat_page = self.client.get(
+            "/api/sessions/sess_q_1/events?tail=1&include_source=0")
+        self.assertEqual(chat_page.status_code, 200)
+        events = chat_page.get_json()["events"]
+        self.assertNotIn("source_record", [row["kind"] for row in events])
+        self.assertNotIn("hidden reasoning sentinel", str(events))
+
+        invalid = self.client.get(
+            "/api/sessions/sess_q_1/events?include_source=maybe")
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(invalid.get_json()["error"], "invalid_include_source")
 
     def test_corrupt_event_sequence_degrades_to_bounded_skeleton(self):
         service = self.app.extensions["fleet"]["services"]["sessions"]

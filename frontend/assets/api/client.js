@@ -443,11 +443,12 @@ export async function getSession(sessionId, options) {
     API.sessions + '/' + encodeURIComponent(sessionId), options));
 }
 
-export async function getSessionEvents(sessionId, {limit = 100, afterCursor, beforeCursor, tail, atSequence, signal} = {}) {
+export async function getSessionEvents(sessionId, {limit = 100, afterCursor, beforeCursor, tail, atSequence, includeSource, signal} = {}) {
   return parseSessionEvents(await request(
     API.sessions + '/' + encodeURIComponent(sessionId) + '/events' +
     queryString({limit, after_cursor: atSequence == null && beforeCursor == null && !tail ? afterCursor || '0' : undefined,
-      before_cursor: beforeCursor, tail: tail ? 1 : undefined, at_sequence: atSequence}), {signal}));
+      before_cursor: beforeCursor, tail: tail ? 1 : undefined, at_sequence: atSequence,
+      include_source: includeSource === false ? 0 : undefined}), {signal}));
 }
 
 export async function sendSessionMessage(sessionId, text, clientToken) {

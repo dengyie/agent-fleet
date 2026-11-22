@@ -16,9 +16,18 @@ const [origin, scenario, sid] = process.argv.slice(2);
         const response = await route.fetch(), body = await response.json();
         await route.fulfill({response, json:{...body, authenticated:true, user:{id:'browser-owner',role:'admin',name:'Browser Owner'}}});
       });
-      if (scenario === 'directory' || scenario === 'directory-pagination') {
+      if (scenario === 'directory' || scenario === 'directory-pagination' || scenario === 'directory-metadata') {
         await page.goto(origin + '/assistant?view=sessions');
         await page.locator('.native-session-card').first().waitFor();
+        if (scenario === 'directory-metadata') {
+          const card = page.locator('.native-session-card').filter({hasText:'VM native title'}).first();
+          await card.waitFor();
+          const detail = await card.innerText();
+          for (const fact of ['client-1.2','provider-y','model-x']) {
+            assert.ok(detail.includes(fact), 'missing directory detail fact: ' + fact + '\n' + detail);
+          }
+          assert.deepEqual(errors,[]); await page.close(); continue;
+        }
         if (scenario === 'directory-pagination') {
           const loadMore = page.getByRole('button',{name:'加载更多会话'});
           if (!await loadMore.isVisible().catch(() => false)) throw new Error('directory page has no continuation; status=' + await page.locator('.native-directory-status').innerText() + ', button=' + await page.locator('.native-directory > button').evaluate(node => node.outerHTML) + ', rows=' + await page.locator('.native-session-card').count());
@@ -96,7 +105,27 @@ const [origin, scenario, sid] = process.argv.slice(2);
           await page.reload(); await page.locator('.native-chat-view').waitFor();
         }
       } else {
+        const sourceResponse = scenario === 'source-record' ? page.waitForResponse(response =>
+          response.url().includes('/api/sessions/' + sid + '/events') &&
+          response.url().includes('include_source=0')) : null;
         await page.goto(origin + '/session/' + sid + '?view=chat');
+        if (scenario === 'source-record') {
+          const body = await (await sourceResponse).json();
+          assert.equal(body.events.some(event => event.kind === 'source_record'), false);
+          assert.equal(JSON.stringify(body).includes('PRIVATE_REASONING_SENTINEL'), false);
+          assert.equal(await page.getByText('PRIVATE_REASONING_SENTINEL',{exact:true}).count(),0);
+          assert.deepEqual(errors,[]); await page.close(); continue;
+        }
+        if (scenario === 'native-metadata') {
+          await page.getByRole('heading',{name:'VM native title',exact:true}).waitFor();
+          const context = page.locator('.native-context');
+          const detail = await context.innerText();
+          for (const fact of ['client-1.2','provider-y','model-x','原生开始','持续时间']) {
+            assert.ok(detail.includes(fact), 'missing session detail fact: ' + fact + '\n' + detail);
+          }
+          await page.getByText('会话信息更新 · model-x / provider-y',{exact:true}).waitFor();
+          assert.deepEqual(errors,[]); await page.close(); continue;
+        }
         if (scenario === 'history-pagination') {
           await page.getByText('History page message 104',{exact:true}).waitFor();
           const loadOlder = page.getByRole('button',{name:'加载更早记录'});

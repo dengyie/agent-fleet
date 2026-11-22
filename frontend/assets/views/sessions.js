@@ -16,7 +16,7 @@ export function mountSessions(target, {api, store, machine: initialMachine, iden
   const filters = el('div', 'native-directory-filters');
   const machine = el('select'), family = el('select'), search = el('input');
   machine.setAttribute('aria-label', '筛选电脑'); family.setAttribute('aria-label', '筛选 Agent');
-  search.type = 'search'; search.placeholder = '筛选节点、Agent 或会话标识'; search.setAttribute('aria-label', '筛选已载入会话');
+  search.type = 'search'; search.placeholder = '筛选会话名、节点、Agent 或模型'; search.setAttribute('aria-label', '筛选已载入会话');
   function option(select, value, text) { const row = el('option', null, text); row.value = value; select.append(row); }
   option(machine, '', '全部电脑'); option(family, '', '全部 Agent');
   const refresh = button('刷新', load); refresh.prepend(uiIcon('refresh', {size: 14}));
@@ -32,12 +32,17 @@ export function mountSessions(target, {api, store, machine: initialMachine, iden
     list.replaceChildren();
     const query = search.value.trim().toLocaleLowerCase();
     const visible = rows.filter(row => (!family.value || row.agent_family === family.value) &&
-      [row.machine_id, row.agent_family, row.session_id].join(' ').toLocaleLowerCase().includes(query));
+      [row.machine_id, row.agent_family, row.session_id, row.native_title,
+        row.title_preview, row.provider, row.model].join(' ').toLocaleLowerCase().includes(query));
     for (const row of visible) {
       const card = link('', nativeChatPath({sessionId: row.session_id}), 'native-session-card');
       const glyph = el('span', 'native-session-glyph'); glyph.append(uiIcon('code', {size: 18}));
       const text = el('div', 'native-session-copy');
-      text.append(el('strong', null, sessionTitle(row)), el('span', 'meta', row.session_id));
+      text.append(el('strong', null, sessionTitle(row)), el('span', 'meta',
+        (row.native_title ? '原生会话名' : row.title_preview ? '首条用户消息' : '未提供会话名') + ' · ' + row.session_id));
+      const client = [row.agent_family, row.adapter, row.client_version].filter(Boolean).join(' · ');
+      const model = [row.provider, row.model].filter(Boolean).join(' / ');
+      if (client || model) text.append(el('span', 'meta', [client, model].filter(Boolean).join(' · ')));
       const time = row.updated_at || row.started_at;
       if (time && Number.isFinite(Date.parse(time))) text.append(el('time', 'meta', '最近同步 ' + new Date(time).toLocaleString()));
       const state = el('div', 'native-session-state');

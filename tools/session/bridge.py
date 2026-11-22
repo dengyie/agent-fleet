@@ -374,6 +374,7 @@ class SessionBridge:
         self._last_reject: str | None = None
         self._expected_user_echo: str | None = None
         self._started = False
+        self._active_native_message_id: str | None = None
         self._reported_quality: str | None = None
         self.sources = select_sources(self._manifest)
         self.source = self.sources[0] if self.sources else "metadata"
@@ -394,6 +395,7 @@ class SessionBridge:
         start = self._build("session_start", payload={
             "agent_family": self._agent_family,
             "adapter": self.source or "metadata",
+            "client_version": _bounded(self._manifest.get("version"), 96),
             "interactive_questions": self._manifest.get("interactive_questions") is True
                 and self.source in ("hooks", "structured_stream", "native_transcript"),
         })
@@ -781,12 +783,67 @@ class SessionBridge:
         if rtype is not None:
             event = self._shape_typed(rtype, raw)
             return [event] if event is not None else []
+        raw_type = str(raw.get("type") or "")
+        stream_event = raw.get("event") if isinstance(raw.get("event"), Mapping) else {}
+        stream_type = stream_event.get("type")
+        if raw_type == "stream_event" and stream_type == "message_start":
+            message = stream_event.get("message")
+            candidate_id = message.get("id") if isinstance(message, Mapping) else None
+            self._active_native_message_id = (
+                candidate_id if isinstance(candidate_id, str) and candidate_id else None)
+
+        native_time = self._native_source_time(raw)
         events = []
         for kind, payload in _shape_native_row(raw):
+            payload = dict(payload)
+            if (kind == "assistant_message" and not payload.get("message_id")
+                    and self._active_native_message_id):
+                payload["message_id"] = self._active_native_message_id
             event = self._shape_typed(kind, payload)
             if event is not None:
+                if native_time and kind != "session_metadata":
+                    event = validate_event(dict(event, emitted_at=native_time))
                 events.append(event)
+
+        if raw_type == "stream_event" and stream_type == "message_stop":
+            message_id = self._active_native_message_id
+            if message_id:
+                completed = self._shape_typed("assistant_message", {
+                    "text": "", "is_complete": True, "message_id": message_id,
+                    "content_mode": "delta",
+                })
+                if completed is not None:
+                    if native_time:
+                        completed = validate_event(dict(completed, emitted_at=native_time))
+                    events.append(completed)
+            self._active_native_message_id = None
         return events
+
+    @staticmethod
+    def _native_source_time(raw: Mapping) -> str | None:
+        candidates = [raw.get("timestamp"), raw.get("created_at")]
+        payload = raw.get("payload")
+        message = raw.get("message")
+        stream = raw.get("event")
+        if isinstance(payload, Mapping):
+            candidates.append(payload.get("timestamp"))
+        if isinstance(message, Mapping):
+            candidates.append(message.get("timestamp"))
+        if isinstance(stream, Mapping):
+            candidates.append(stream.get("timestamp"))
+            stream_message = stream.get("message")
+            if isinstance(stream_message, Mapping):
+                candidates.append(stream_message.get("created_at"))
+        for value in candidates:
+            if not isinstance(value, str) or len(value) > 40:
+                continue
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if parsed.tzinfo is not None:
+                return value
+        return None
 
     def _shape_typed(self, rtype: str, raw: Mapping) -> dict | None:
         ev = self._build(rtype, payload={})
@@ -796,6 +853,14 @@ class SessionBridge:
                 "text": _first_text(raw, ("text", "content", "result")),
                 "is_complete": True,
             }
+            message_id = raw.get("message_id")
+            content_mode = raw.get("content_mode")
+            if isinstance(message_id, str) and message_id:
+                ev["payload"]["message_id"] = message_id
+            if content_mode in ("delta", "snapshot"):
+                ev["payload"]["content_mode"] = content_mode
+            if raw.get("is_complete") is False:
+                ev["payload"]["is_complete"] = False
         elif rtype in ("tool_call", "tool_result"):
             ev["payload"] = {
                 "tool_name": _first_text(raw, ("tool_name",)),
@@ -805,9 +870,16 @@ class SessionBridge:
                 "result": _first_text(raw, ("result", "output")),
                 "digest": "",
             }
-        elif rtype == "session_start":
-            ev["payload"] = {"agent_family": self._agent_family,
-                             "adapter": self.source}
+        elif rtype in ("session_start", "session_metadata"):
+            allowed = ("agent_family", "adapter", "task_id", "agent_ref",
+                       "title", "model", "provider", "client_version",
+                       "native_started_at", "interactive_questions",
+                       "native_resume", "resumed", "desktop_bridge",
+                       "model_takeover")
+            ev["payload"] = {key: raw[key] for key in allowed if key in raw}
+            if rtype == "session_start":
+                ev["payload"].setdefault("agent_family", self._agent_family)
+                ev["payload"].setdefault("adapter", self.source)
         try:
             return validate_event(ev)
         except (ValueError, TypeError):

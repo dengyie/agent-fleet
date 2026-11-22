@@ -73,6 +73,69 @@ Interactive question answers keep their existing, separate
 stored as ordinary message operations and retain their current reservation and
 reconciliation behavior.
 
+## Session name, client metadata, and conversation content
+
+`GET /api/sessions` and `GET /api/sessions/<session_id>` keep the existing
+`public_session_dto` shape and add observed display metadata when the native
+source provides it:
+
+```json
+{
+  "session": {
+    "session_id": "sess_abc123",
+    "machine_id": "my-mac",
+    "agent_family": "codex",
+    "adapter": "native_transcript",
+    "client_version": "0.1.2",
+    "native_title": "Review the API boundary",
+    "model": "codex-model-x",
+    "provider": "openai",
+    "native_started_at": "2026-11-22T10:00:00Z",
+    "started_at": "2026-11-22T10:00:02Z",
+    "updated_at": "2026-11-22T10:35:00Z",
+    "finished_at": null
+  }
+}
+```
+
+The title is taken only from an explicit native title/session-name record.
+When none exists, `title_preview` is the first observed, redacted user message;
+it is a visibly different fallback, not a fabricated native name. The directory
+and chat heading prefer `native_title`, then `title_preview`, then a neutral
+Agent/session identifier. Provider, model, adapter, version, and timestamps are
+included only when explicitly observed. Unsupported fields are omitted.
+
+`native_started_at` is populated only from an explicit native session header.
+If a client does not provide one, `started_at` is the Hub's first observation
+time and the UI labels it accordingly. Duration runs from the native start when
+present, otherwise from that first Hub observation, until `finished_at` or the
+current time. It is a displayed duration, not an Agent-reported runtime.
+
+The event DTO remains the source for each user-visible message, tool call/result,
+and lifecycle transition. Message payloads may include `message_id` and
+`content_mode` (`delta` or `snapshot`): deltas append to the same native message,
+while snapshots replace that message's current text. These are real source
+updates persisted as separate Hub events and merged using Hub ingestion cursors;
+vendor sequence numbers and equal text are never used for identity. Codex
+rollouts provide snapshots and, where available, text deltas; Claude stream
+records provide visible text deltas; Pi, ZCode model I/O, and ZCode desktop
+message pages generally provide completed snapshots. ZCode desktop metadata
+uses only explicit title/model/provider fields from its native session summary.
+A source that has no streaming surface stays completed-message-only. User-visible
+assistant text, tool evidence, interaction questions/answers, state changes,
+and capture gaps are retained. Internal `thinking`/`reasoning`, system prompts,
+and unrecognized source fields are not conversation content.
+
+The event endpoint accepts `include_source=0` (or `false`) to exclude separate
+`source_record` archive rows. Native chat always uses this option so raw source
+records cannot leak into the browser's conversation response. Omitting the
+parameter preserves the existing operator diagnostic behavior; use
+`include_source=1` only when deliberately reading the separate source archive.
+Duplicate or unrecognized values return 400 `invalid_include_source`. This does
+not change the event cursor contract: hidden source-record rows may leave gaps
+between returned Hub cursors, and clients continue from the last returned
+cursor.
+
 ## Event history
 
 `GET /api/sessions/<session_id>/events` supports three mutually exclusive
@@ -153,6 +216,10 @@ Example response:
 }
 ```
 
+The native chat client requests the same endpoint with `include_source=0`; its
+message timeline still includes every retained, allowlisted user-visible text,
+tool, and lifecycle event, without fetching the separate source archive.
+
 ## Session directory
 
 `GET /api/sessions` returns the existing `public_session_dto` rows plus
@@ -197,12 +264,28 @@ separate and already available on `main`.
 The HTTP and SQLite regression suite is:
 
 ```sh
-PYTHONPATH=. python3 -m pytest tests/test_native_session_api.py \
+PYTHONPATH=. python3 -m pytest tests/test_session_schema.py \
+  tests/test_session_bridge.py tests/test_native_session_api.py \
+  tests/test_session_query_api.py \
   tests/test_agent_lifecycle.py \
   tests/test_session_repository.py tests/test_transcript_repository.py \
-  tests/test_transcript_cursors.py tests/test_session_query_api.py \
+  tests/test_transcript_cursors.py \
   tests/test_session_interactions.py tests/test_adoption_control_http.py \
-  tests/test_adoption_control_guard.py tests/test_supervisor_control.py -q
+  tests/test_adoption_control_guard.py tests/test_supervisor_control.py \
+  tests/test_zcode_session_binding.py tests/test_native_continuation.py \
+  tests/test_review_node_sync.py -q
+```
+
+The native display regressions cover explicit title/model/client extraction,
+snapshot and delta assembly, hidden-reasoning exclusion, metadata projection,
+v4-to-v5 migration rollback, and the browser's source-record exclusion. Real
+Chrome coverage for the new metadata and source boundary is:
+
+```sh
+FLEET_PLAYWRIGHT_MODULE=/path/to/playwright \
+FLEET_BROWSER_CHANNEL=chrome PYTHONPATH=. \
+python3 -m pytest tests/test_native_chat_frontend.py \
+  -k 'source-record or native-metadata or directory-metadata' -q
 ```
 
 These tests exercise Hub authorization and local SQLite behavior. They do not

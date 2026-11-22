@@ -4,7 +4,8 @@ export function createNativeChatService(api) {
   return {
     async readSession(id, {position = {tail: true}, signal} = {}) {
       const jobs = [api.getSession(id, {signal})];
-      jobs.push(api.getSessionEvents(id, {...position, limit: 100, signal}));
+      jobs.push(api.getSessionEvents(id, {...position, limit: 100,
+        includeSource: false, signal}));
       const [detail, transcript] = await Promise.allSettled(jobs);
       const session = detail.status === 'fulfilled' ? detail.value.session : null;
       const page = transcript?.status === 'fulfilled' ? transcript.value : null;

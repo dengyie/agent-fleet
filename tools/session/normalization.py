@@ -51,8 +51,9 @@ def normalize_native_row(raw: Mapping) -> list[tuple[str, Mapping]]:
     is now captured rather than only the first tool block).
     """
     rtype = str(raw.get("type") or "")
+    metadata = _native_metadata(raw)
     if rtype == 'model_io':
-        return _shape_zcode_row(raw)
+        return _prepend_metadata(metadata, _shape_zcode_row(raw))
     if rtype in ("item.started", "item.updated", "item.completed"):
         item = raw.get("item")
         if not isinstance(item, Mapping):
@@ -60,23 +61,32 @@ def normalize_native_row(raw: Mapping) -> list[tuple[str, Mapping]]:
         itype = item.get("type")
         completed = rtype == "item.completed"
         if itype == "agent_message":
-            return [("assistant_message", {"text": item.get("text", ""),
-                                            "is_complete": completed})] if completed else []
+            text = item.get("text", "")
+            shaped = [("assistant_message", {
+                "text": text, "is_complete": completed,
+                "message_id": item.get("id"), "content_mode": "snapshot",
+            })] if isinstance(text, str) and (text or completed) else []
+            return _prepend_metadata(metadata, shaped)
         if itype in ("command_execution", "mcp_tool_call", "file_change", "web_search"):
-            return [("tool_result" if completed else "tool_call", {
+            shaped = [("tool_result" if completed else "tool_call", {
                 "tool_name": str(item.get("tool") or itype),
                 "call_id": str(item.get("id") or ""),
                 "arguments": _bounded_json(item.get("command", item.get("arguments", item.get("changes", item.get("query"))))),
                 "result": _bounded_json(item.get("aggregated_output", item.get("result", item.get("error")))),
                 "status": str(item.get("status") or ("completed" if completed else "running")),
             })]
-        return []
+            return _prepend_metadata(metadata, shaped)
+        return _prepend_metadata(metadata, [])
+    if rtype == "stream_event":
+        return _prepend_metadata(metadata, _shape_claude_stream(raw))
     if rtype in ("event_msg", "response_item"):
         # codex rollout rows (type/payload wrapper) — see _shape_codex_row.
-        return _shape_codex_row(raw)
+        return _prepend_metadata(metadata, _shape_codex_row(raw))
     if rtype in ("message", "message_end"):
         # pi transcript rows (role/message envelope) — see _shape_pi_row.
-        return _shape_pi_row(raw)
+        return _prepend_metadata(metadata, _shape_pi_row(raw))
+    if rtype in ("session_meta", "session", "model_change", "custom-title", "summary", "system"):
+        return _prepend_metadata(metadata, [])
     # Pi also emits tool_execution_end before message_end(toolResult).
     # Project only the complete transcript message, once.
     if rtype not in ("user", "assistant"):
@@ -97,7 +107,9 @@ def normalize_native_row(raw: Mapping) -> list[tuple[str, Mapping]]:
             if block.get("type") == "tool_use":
                 if pending_text:
                     shaped.append((kind, {"text": "\n".join(pending_text)
-                                          [:_MAX_TEXT], "is_complete": True}))
+                                          [:_MAX_TEXT], "is_complete": True,
+                                          "message_id": _message_id(raw, message),
+                                          "content_mode": "snapshot"}))
                     pending_text = []
                 shaped.append(("tool_call", {
                     "tool_name": str(block.get("name") or "")[:128],
@@ -109,7 +121,9 @@ def normalize_native_row(raw: Mapping) -> list[tuple[str, Mapping]]:
             elif block.get("type") == "tool_result":
                 if pending_text:
                     shaped.append((kind, {"text": "\n".join(pending_text)
-                                          [:_MAX_TEXT], "is_complete": True}))
+                                          [:_MAX_TEXT], "is_complete": True,
+                                          "message_id": _message_id(raw, message),
+                                          "content_mode": "snapshot"}))
                     pending_text = []
                 shaped.append(("tool_result", {
                     "tool_name": "",
@@ -127,12 +141,91 @@ def normalize_native_row(raw: Mapping) -> list[tuple[str, Mapping]]:
                 pending_text.append(block["text"])
         if pending_text:
             shaped.append((kind, {"text": "\n".join(pending_text)[:_MAX_TEXT],
-                                  "is_complete": True}))
-        return shaped
+                                  "is_complete": True,
+                                  "message_id": _message_id(raw, message),
+                                  "content_mode": "snapshot"}))
+        return _prepend_metadata(metadata, shaped)
     text = _native_message_text(content)
     if not text:
+        return _prepend_metadata(metadata, [])
+    return _prepend_metadata(metadata, [(kind, {
+        "text": text, "is_complete": True,
+        "message_id": _message_id(raw, message), "content_mode": "snapshot",
+    })])
+
+
+def _prepend_metadata(metadata, events):
+    return ([('session_metadata', metadata)] if metadata else []) + events
+
+
+def _native_metadata(raw: Mapping) -> dict[str, str]:
+    """Extract only display-safe native title and model facts."""
+    rtype = str(raw.get('type') or '')
+    payload = raw.get('payload') if isinstance(raw.get('payload'), Mapping) else {}
+    message = raw.get('message') if isinstance(raw.get('message'), Mapping) else {}
+    request = raw.get('request') if isinstance(raw.get('request'), Mapping) else {}
+    response = raw.get('response') if isinstance(raw.get('response'), Mapping) else {}
+    stream = raw.get('event') if isinstance(raw.get('event'), Mapping) else {}
+    stream_message = stream.get('message') if isinstance(stream.get('message'), Mapping) else {}
+    result = {}
+    title = None
+    if rtype == 'custom-title':
+        title = raw.get('customTitle')
+    elif rtype in ('session_meta', 'session'):
+        title = (raw.get('title') or payload.get('title')
+                 or raw.get('name') or payload.get('name'))
+    if isinstance(title, str) and title.strip():
+        result['title'] = title.strip()[:160]
+
+    model = (message.get('model') or stream_message.get('model')
+             or payload.get('model') or response.get('model')
+             or request.get('model') or raw.get('model') or raw.get('modelId'))
+    provider = (message.get('provider') or stream_message.get('provider')
+                or payload.get('model_provider') or response.get('provider')
+                or request.get('provider') or payload.get('provider')
+                or raw.get('provider'))
+    if rtype == 'model_change':
+        model = raw.get('modelId') or model
+    if isinstance(model, str) and model.strip():
+        result['model'] = model.strip()[:160]
+    if isinstance(provider, str) and provider.strip():
+        result['provider'] = provider.strip()[:96]
+
+    version = payload.get('cli_version') or raw.get('cli_version')
+    if rtype == 'session':
+        version = raw.get('version') or version
+    if isinstance(version, str) and version.strip():
+        result['client_version'] = version.strip()[:96]
+
+    if rtype in ('session_meta', 'session'):
+        timestamp = (payload.get('timestamp') or raw.get('timestamp')
+                     or raw.get('created_at'))
+        if isinstance(timestamp, str) and timestamp.strip():
+            result['native_started_at'] = timestamp.strip()[:40]
+    return result
+
+
+def _message_id(raw: Mapping, message: Mapping | None = None):
+    value = raw.get('uuid') or raw.get('id')
+    if message is not None:
+        value = message.get('id') or value
+    return value if isinstance(value, str) and value else None
+
+
+def _shape_claude_stream(raw: Mapping):
+    event = raw.get('event')
+    if not isinstance(event, Mapping):
         return []
-    return [(kind, {"text": text, "is_complete": True})]
+    etype = event.get('type')
+    if etype == 'content_block_delta':
+        delta = event.get('delta')
+        if (isinstance(delta, Mapping) and delta.get('type') == 'text_delta'
+                and isinstance(delta.get('text'), str) and delta['text']):
+            return [('assistant_message', {
+                'text': delta['text'], 'is_complete': False,
+                'content_mode': 'delta',
+            })]
+    return []
 
 
 def _shape_zcode_row(raw: Mapping) -> list[tuple[str, Mapping]]:
@@ -165,7 +258,8 @@ def _shape_zcode_row(raw: Mapping) -> list[tuple[str, Mapping]]:
     if isinstance(response, Mapping):
         text = _native_message_text(response.get('text'))
         if text:
-            shaped.append(('assistant_message', {'text': text, 'is_complete': True}))
+            shaped.append(('assistant_message', {'text': text, 'is_complete': True,
+                'message_id': response.get('id'), 'content_mode': 'snapshot'}))
         calls = response.get('toolCalls')
         for call in calls if isinstance(calls, list) else []:
             if isinstance(call, Mapping):
@@ -231,7 +325,9 @@ def _shape_pi_row(raw: Mapping) -> list[tuple[str, Mapping]]:
                 if pending_text:
                     text = "\n".join(pending_text)[:_MAX_TEXT]
                     shaped.append((message_kind,
-                                   {"text": text, "is_complete": True}))
+                                   {"text": text, "is_complete": True,
+                                    "message_id": message.get("id") or raw.get("uuid"),
+                                    "content_mode": "snapshot"}))
                     pending_text = []
                 shaped.append(("tool_call", {
                     "tool_name": str(block.get("name") or "")[:128],
@@ -243,11 +339,15 @@ def _shape_pi_row(raw: Mapping) -> list[tuple[str, Mapping]]:
         if pending_text:
             shaped.append((message_kind,
                            {"text": "\n".join(pending_text)[:_MAX_TEXT],
-                            "is_complete": True}))
+                            "is_complete": True,
+                            "message_id": message.get("id") or raw.get("uuid"),
+                            "content_mode": "snapshot"}))
     else:
         text = _native_message_text(content)
         if text:
-            shaped.append((message_kind, {"text": text, "is_complete": True}))
+            shaped.append((message_kind, {"text": text, "is_complete": True,
+                "message_id": message.get("id") or raw.get("uuid"),
+                "content_mode": "snapshot"}))
     return shaped
 
 
@@ -280,28 +380,41 @@ def _shape_codex_row(raw: Mapping) -> list[tuple[str, Mapping]]:
         return []
     ptype = str(payload.get("type") or "")
     if rtype == "event_msg":
-        if ptype == "item_completed":
+        if ptype in ("item_started", "item_updated", "item_completed"):
             item = payload.get("item")
+            complete = ptype == "item_completed"
             if isinstance(item, Mapping) and item.get("type") in ("UserMessage", "AgentMessage"):
                 blocks = item.get("content") or []
                 text = "\n".join(block["text"] for block in blocks
                                  if isinstance(block, Mapping)
                                  and block.get("type") in ("text", "Text")
                                  and isinstance(block.get("text"), str))
-                return [("user_message" if item["type"] == "UserMessage" else "assistant_message",
-                         {"text": text, "is_complete": True})]
+                if text or complete:
+                    return [("user_message" if item["type"] == "UserMessage" else "assistant_message",
+                        {"text": text, "is_complete": complete,
+                         "message_id": item.get("id"), "content_mode": "snapshot"})]
             return []
         if ptype == "user_message":
             text = payload.get("message")
             if isinstance(text, str) and text:
                 return [("user_message", {"text": text[:_MAX_TEXT],
-                                          "is_complete": True})]
+                    "is_complete": True, "message_id": payload.get("item_id") or payload.get("message_id"),
+                    "content_mode": "snapshot"})]
             return []
         if ptype == "agent_message":
             text = payload.get("message")
             if isinstance(text, str) and text:
                 return [("assistant_message", {"text": text[:_MAX_TEXT],
-                                               "is_complete": True})]
+                    "is_complete": True, "message_id": payload.get("item_id") or payload.get("message_id"),
+                    "content_mode": "snapshot"})]
+            return []
+        if ptype == "agent_message_delta":
+            text = payload.get("delta") or payload.get("message")
+            if isinstance(text, str) and text:
+                return [("assistant_message", {"text": text[:_MAX_TEXT],
+                    "is_complete": False,
+                    "message_id": payload.get("item_id") or payload.get("message_id"),
+                    "content_mode": "delta"})]
             return []
         if ptype == "mcp_tool_call_end":
             invocation = payload.get("invocation")

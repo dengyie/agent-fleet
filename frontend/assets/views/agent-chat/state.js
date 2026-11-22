@@ -15,19 +15,31 @@ export function mergeNativeEvents(current, incoming, max = 500) {
 }
 
 export function nativeMessages(events) {
-  const messages = [], fragments = new Map(), tools = new Map();
+  const messages = [], fragments = new Map(), identifiedMessages = new Map(), tools = new Map();
+  const interactions = new Map();
   for (const event of events) {
     const p = event.payload || {}, stream = event.stream_id || '';
     if (event.kind === 'user_message' || event.kind === 'assistant_message') {
-      const chunkKey = stream + ':' + event.kind;
-      let row = fragments.get(chunkKey);
-      if (row) { row.text += p.text || ''; row.complete = p.is_complete !== false; }
-      else {
-        row = {key: event.cursor, kind: event.kind, text: p.text || '', complete: p.is_complete !== false, sequence: event.sequence};
+      const kind = event.kind;
+      const messageId = p.message_id || '';
+      const mode = p.content_mode || 'delta';
+      const chunkKey = stream + ':' + kind;
+      const identityKey = messageId ? chunkKey + ':' + messageId : '';
+      let row = messageId ? identifiedMessages.get(identityKey) : fragments.get(chunkKey);
+      if (!row || (!messageId && row.complete)) {
+        row = {key: event.cursor, kind, text: '', complete: false,
+          sequence: event.sequence, emitted_at: event.emitted_at || ''};
         messages.push(row);
+        if (messageId) identifiedMessages.set(identityKey, row);
       }
-      if (p.is_complete === false) fragments.set(chunkKey, row);
-      else fragments.delete(chunkKey);
+      if (mode === 'snapshot') row.text = p.text || '';
+      else row.text += p.text || '';
+      row.complete = p.is_complete !== false;
+      row.updated_at = event.emitted_at || row.updated_at || '';
+      if (!messageId) {
+        if (row.complete) fragments.delete(chunkKey);
+        else fragments.set(chunkKey, row);
+      }
     } else if (event.kind === 'tool_call' || event.kind === 'tool_result') {
       const key = p.call_id ? stream + ':' + p.call_id : event.cursor;
       let row = tools.get(key);
@@ -42,10 +54,52 @@ export function nativeMessages(events) {
       row.status = /^(error|failed|timeout|timed_out|cancelled)$/.test(status) ? 'error'
         : /^(ok|completed|success|succeeded|done)$/.test(status) ? 'success'
         : event.kind === 'tool_call' ? 'running' : 'unknown';
+      row.emitted_at = event.emitted_at || row.emitted_at || '';
     } else if (event.kind === 'capture_gap') {
-      messages.push({key: event.cursor, kind: 'notice', text: '记录存在采集缺口：' + (p.reason || '详情见原始记录')});
-    } else if (event.kind === 'process_exit' && p.exit_code !== undefined && p.exit_code !== 0) {
-      messages.push({key: event.cursor, kind: 'notice', text: 'Agent 进程退出，退出码 ' + p.exit_code});
+      messages.push({key: event.cursor, kind: 'notice', text: '记录存在采集缺口：' + (p.reason || 'source_unavailable'), emitted_at: event.emitted_at});
+    } else if (event.kind === 'session_start') {
+      messages.push({key: event.cursor, kind: 'activity',
+        text: ['原生会话开始', p.agent_family, p.adapter].filter(Boolean).join(' · '), emitted_at: event.emitted_at});
+    } else if (event.kind === 'session_metadata') {
+      const facts = [p.model, p.provider].filter(Boolean).join(' / ');
+      messages.push({key: event.cursor, kind: 'activity',
+        text: ['会话信息更新', facts].filter(Boolean).join(' · '), emitted_at: event.emitted_at});
+    } else if (event.kind === 'interaction_request') {
+      interactions.set(p.request_id, p);
+      messages.push({key: event.cursor, kind: 'activity',
+        text: ['Agent 提问', p.prompt].filter(Boolean).join(' · '), emitted_at: event.emitted_at});
+    } else if (event.kind === 'interaction_response') {
+      const question = interactions.get(p.request_id);
+      const labels = new Map((question?.options || []).map(option => [option.id, option.label]));
+      const selected = Array.isArray(p.selected) ? p.selected.map(id => labels.get(id) || id) : [];
+      messages.push({key: event.cursor, kind: 'activity',
+        text: ['你的回答', ...selected, p.text].filter(Boolean).join(' · '), emitted_at: event.emitted_at});
+    } else if (event.kind === 'agent_state_changed') {
+      messages.push({key: event.cursor, kind: 'activity', text: AGENT_LABELS[p.state] || 'Agent 状态更新', emitted_at: event.emitted_at});
+    } else if (event.kind === 'capture_quality_changed') {
+      messages.push({key: event.cursor, kind: 'activity',
+        text: ['采集质量', p.old_quality, p.new_quality].filter(Boolean).join(' · '), emitted_at: event.emitted_at});
+    } else if (event.kind === 'process_spawn') {
+      messages.push({key: event.cursor, kind: 'activity',
+        text: ['Agent 进程启动', p.process_family].filter(Boolean).join(' · '), emitted_at: event.emitted_at});
+    } else if (event.kind === 'step_start' || event.kind === 'step_end') {
+      messages.push({key: event.cursor, kind: 'activity',
+        text: [p.step_name, event.kind === 'step_end' ? p.status : '开始'].filter(Boolean).join(' · '),
+        emitted_at: event.emitted_at});
+    } else if (event.kind === 'supervisor_state_changed') {
+      messages.push({key: event.cursor, kind: 'activity',
+        text: ['接力状态', p.old_state, p.new_state].filter(Boolean).join(' · '), emitted_at: event.emitted_at});
+    } else if (event.kind === 'policy_signal') {
+      messages.push({key: event.cursor, kind: 'activity',
+        text: ['策略提示', p.severity, p.reason].filter(Boolean).join(' · '), emitted_at: event.emitted_at});
+    } else if (event.kind === 'session_close') {
+      messages.push({key: event.cursor, kind: 'activity',
+        text: ['会话结束', p.reason, p.exit_code === undefined ? '' : '退出码 ' + p.exit_code].filter(Boolean).join(' · '),
+        emitted_at: event.emitted_at});
+    } else if (event.kind === 'process_exit') {
+      messages.push({key: event.cursor, kind: 'activity',
+        text: 'Agent 进程退出' + (p.exit_code === undefined ? '' : ' · 退出码 ' + p.exit_code),
+        emitted_at: event.emitted_at});
     }
   }
   return messages;
@@ -61,6 +115,8 @@ function toolLabel(name, args) {
 }
 
 export function sessionTitle(session, events = []) {
+  if (session?.native_title) return session.native_title;
+  if (session?.title_preview) return session.title_preview;
   const first = events.find(event => event.kind === 'user_message' && event.payload?.text);
   return first?.payload.text.slice(0, 60) || [session?.agent_family || '电脑 Agent', session?.machine_id].filter(Boolean).join(' · ');
 }

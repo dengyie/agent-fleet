@@ -89,8 +89,8 @@ class SessionRepositoryTests(unittest.TestCase):
         self.repo.init()
 
     def test_init_records_schema_version(self):
-        self.assertEqual(SCHEMA_VERSION, 4)
-        self.assertEqual(self.repo.schema_version(), 4)
+        self.assertEqual(SCHEMA_VERSION, 5)
+        self.assertEqual(self.repo.schema_version(), 5)
 
     def test_upsert_and_get_session(self):
         spec = _spec()
@@ -301,6 +301,25 @@ class SessionRepositoryTests(unittest.TestCase):
         row = self.repo.upsert_session(_spec(managed=False))
         self.assertFalse(row["managed"])
 
+    def test_native_metadata_projection_uses_per_field_hub_cursors(self):
+        sid = "sess_metadata_order"
+        self.repo.upsert_session(_spec(session_id=sid))
+        self.repo.update_session_metadata(sid, 12, {"model": "model-new"})
+        self.repo.update_session_metadata(sid, 10, {"title": "Native title"})
+        self.repo.update_session_metadata(sid, 11, {"model": "model-stale"})
+        self.repo.update_session_metadata(sid, 13, {"title": "Renamed title"})
+        self.repo.update_session_metadata(sid, 15, {
+            "native_started_at": "2026-09-01T00:00:00Z",
+        })
+        self.repo.update_session_metadata(sid, 14, {
+            "native_started_at": "2026-08-31T00:00:00Z",
+        })
+
+        row = self.repo.get_session(sid)
+        self.assertEqual(row["native_title"], "Renamed title")
+        self.assertEqual(row["model"], "model-new")
+        self.assertEqual(row["native_started_at"], "2026-08-31T00:00:00Z")
+
     def test_stray_session_row_does_not_poison_listing(self):
         # A row written directly with an unknown status must not break reads
         # of other, well-formed rows.
@@ -402,11 +421,77 @@ def test_v3_database_migrates_stable_directory_order_without_losing_sessions(tmp
     migrated = SessionRepository(db)
     migrated.init()
     assert migrated.management_available is True
-    assert migrated.schema_version() == 4
+    assert migrated.schema_version() == 5
     page = migrated.list_sessions_page(limit=10)
     assert [row["session_id"] for row in page["sessions"]] == [
         "same-time-b", "same-time-a", "older"]
     assert page["has_more"] is False
+
+
+def test_v4_database_migrates_native_metadata_atomically_without_losing_sessions(
+        tmp_path):
+    import sqlite3
+
+    db = tmp_path / "native-metadata-v4.db"
+    repo = SessionRepository(db)
+    repo.init()
+    repo.upsert_session({"session_id": "kept", "machine_id": "m1"})
+    native_columns = (
+        "native_title", "title_preview", "title_preview_cursor", "model",
+        "model_cursor", "provider", "provider_cursor", "client_version",
+        "client_version_cursor", "adapter", "adapter_cursor",
+        "native_started_at", "native_started_cursor", "native_title_cursor",
+    )
+    with sqlite3.connect(db) as connection:
+        for column in native_columns:
+            connection.execute(f"ALTER TABLE sessions DROP COLUMN {column}")
+        connection.execute("UPDATE meta SET value='4' WHERE key='schema_version'")
+
+    migrated = SessionRepository(db)
+    migrated.init()
+    assert migrated.management_available is True
+    assert migrated.schema_version() == 5
+    assert migrated.get_session("kept")["session_id"] == "kept"
+    with sqlite3.connect(db) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(sessions)")}
+    assert set(native_columns) <= columns
+
+
+def test_native_metadata_migration_rolls_back_columns_and_version_atomically(
+        tmp_path, monkeypatch):
+    import sqlite3
+
+    db = tmp_path / "native-metadata-v4-failure.db"
+    original = SessionRepository(db)
+    original.init()
+    original.upsert_session({"session_id": "kept", "machine_id": "m1"})
+    native_columns = (
+        "native_title", "title_preview", "title_preview_cursor", "model",
+        "model_cursor", "provider", "provider_cursor", "client_version",
+        "client_version_cursor", "adapter", "adapter_cursor",
+        "native_started_at", "native_started_cursor", "native_title_cursor",
+    )
+    with sqlite3.connect(db) as connection:
+        for column in native_columns:
+            connection.execute(f"ALTER TABLE sessions DROP COLUMN {column}")
+        connection.execute("UPDATE meta SET value='4' WHERE key='schema_version'")
+
+    repo = SessionRepository(db)
+    migrate = repo._migrate_v5
+
+    def fail_after_columns(connection):
+        migrate(connection)
+        raise sqlite3.OperationalError("private migration marker")
+
+    monkeypatch.setattr(repo, "_migrate_v5", fail_after_columns)
+    repo.init()
+    assert repo.management_available is False
+    with sqlite3.connect(db) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(sessions)")}
+        version = connection.execute(
+            "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
+    assert not set(native_columns) & columns
+    assert version == "4"
 
 
 def test_directory_migration_rolls_back_table_backfill_and_version_atomically(
@@ -440,7 +525,7 @@ def test_directory_migration_rolls_back_table_backfill_and_version_atomically(
     assert version == "3"
 
 
-@pytest.mark.parametrize("version", ["5", "-1", "broken", "9" * 5000])
+@pytest.mark.parametrize("version", ["6", "-1", "broken", "9" * 5000])
 def test_unsupported_or_damaged_schema_version_is_preserved_and_disables_management(
         tmp_path, version):
     import sqlite3

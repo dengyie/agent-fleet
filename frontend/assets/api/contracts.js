@@ -93,7 +93,8 @@ var ERROR_FIELDS = ['ok', 'error', 'detail', 'request_id'];
 var SESSION_FIELDS = ['machine_id', 'session_id', 'managed', 'capture_quality',
                       'control_capability', 'attempt_id', 'process_group_id',
                       'agent_family', 'status', 'started_at', 'updated_at',
-                      'finished_at',
+                      'finished_at', 'native_title', 'title_preview', 'model', 'provider',
+                      'client_version', 'adapter', 'native_started_at',
                       'capabilities', 'current_state', 'state_source',
                       'state_confidence', 'adoption_status', 'allowed_actions'];
 
@@ -104,12 +105,14 @@ var SESSION_EVENT_FIELDS = ['schema_version', 'event_id', 'stream_id',
 
 // 通用 event 的 payload 允许含的字段：数字/字符串/布尔值都会被 bound，
 // 嵌套容器一律拒绝（与 session_schema._GENERIC_PAYLOAD_FIELDS 对齐）。
-var EVENT_PAYLOAD_FIELDS = ['text', 'is_complete',
+var EVENT_PAYLOAD_FIELDS = ['text', 'is_complete', 'message_id', 'content_mode',
                             'tool_name', 'call_id', 'status', 'arguments',
                             'result', 'digest',
                             'start_sequence', 'end_sequence', 'reason',
                             'old_quality', 'new_quality',
                             'agent_family', 'adapter', 'task_id', 'agent_ref',
+                            'title', 'model', 'provider', 'client_version',
+                            'cli_version', 'native_started_at',
                             'process_family', 'owner', 'group_binding',
                             'process_group_id', 'exit_code', 'duration_s',
                             'step_id', 'step_name', 'severity', 'policy',
@@ -1203,6 +1206,14 @@ function parseSessionRow(row) {
   out.control_capability = out.control_capability === 'available' && out.allowed_actions.length
     ? 'available' : 'unavailable';
   if (out.control_capability === 'unavailable') out.allowed_actions = [];
+  for (const [field, maximum] of Object.entries({native_title: 160, title_preview: 160, model: 160,
+    provider: 96, client_version: 96, adapter: 64})) {
+    if (typeof out[field] !== 'string') delete out[field];
+    else out[field] = out[field].trim().slice(0, maximum);
+  }
+  if (typeof out.native_started_at !== 'string' || !validRfc3339(out.native_started_at)) {
+    delete out.native_started_at;
+  }
   // Additive public facts; missing fields remain compatible with older Hubs.
   // A delivery claim can narrow an action, never grant control authority.
   if (row.message_delivery !== undefined) {
@@ -1271,6 +1282,12 @@ function parseSessionRow(row) {
   return out;
 }
 
+function validRfc3339(value) {
+  return typeof value === 'string' &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
+    Number.isFinite(Date.parse(value));
+}
+
 function boundOpaque(v, label) {
   if (typeof v !== 'string' || !v) {
     return '';
@@ -1308,6 +1325,13 @@ function parseSessionEventRow(row) {
   out.capture_quality = clampQuality(out.capture_quality);
   if (row.payload !== undefined) {
     out.payload = parseEventPayload(String(row.kind), row.payload);
+    if (out.payload.message_id !== undefined) {
+      out.payload.message_id = String(out.payload.message_id).slice(0, 128);
+    }
+    if (out.payload.content_mode !== undefined &&
+        !['delta', 'snapshot'].includes(out.payload.content_mode)) {
+      throw new ContractError('invalid_content_mode', '消息更新模式无效');
+    }
   } else {
     delete out.payload;
   }
