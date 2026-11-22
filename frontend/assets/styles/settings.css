@@ -109,6 +109,10 @@ body:has(.settings-dialog[open]) { overflow: hidden; }
 .settings-editor-heading .settings-description { margin: 6px 0 0; font-size: 12px; }
 .settings-model-source-guide { grid-column: 1/-1; display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; border: 1px solid var(--border-subtle); border-radius: 9px; background: var(--bg); color: var(--text-2); font-size: 12px; line-height: 1.7; }
 .settings-model-source-guide svg { flex: none; margin-top: 2px; color: var(--link); }
+.settings-secret-input { display: flex; position: relative; min-width: 0; }
+.settings-secret-input input { padding-right: 46px; }
+.settings-secret-toggle { position: absolute; right: 2px; top: 2px; width: 44px; height: 44px; min-height: 44px !important; padding: 0 !important; border: 0; color: var(--text-2); background: transparent; }
+.settings-secret-toggle:hover { color: var(--text); background: var(--bg); }
 .settings-advanced { grid-column: 1/-1; padding: 14px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .settings-advanced > summary { color: var(--text-2); cursor: pointer; font-size: 13px; }
 .settings-advanced[open] { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px; }
