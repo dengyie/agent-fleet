@@ -25,6 +25,13 @@ def git(root, *args):
 @pytest.fixture
 def project(tmp_path):
     from tools.worktree import create_worktree
+    if os.name == 'nt':
+        # Hosted Windows C:\ inherits Authenticated Users modify rights.
+        # Set up a private workspace case without changing the host ACL.
+        from tools.platform.artifact_windows import root_handle
+        tmp_path = tmp_path / 'owned'
+        with root_handle(tmp_path, create_private=True):
+            pass
     root = tmp_path / 'project'
     root.mkdir()
     git(root, 'init')
@@ -450,44 +457,38 @@ def test_windows_source_reader_uses_pinned_handle_and_bounded_read(monkeypatch, 
         _source_file_windows(tmp_path, b'unsafe:ads', 100)
 
 
-@pytest.mark.skipif(os.name != 'nt', reason='Requires a real Windows runner ACL')
-def test_windows_pytest_temp_acl_is_accepted(tmp_path):
-    """Keep the Windows CI temp-root inheritance pattern inside the ACL contract."""
-    import ctypes as C
-    from tools.platform import artifact_windows as win
+@pytest.mark.skipif(os.name != 'nt', reason='Requires the Windows NTFS ACL boundary')
+def test_windows_shared_cache_keeps_results_private(tmp_path):
+    from fleet_core.artifact_receive import ArtifactReceiveError
     from tools.worktree import _source_file_windows, WorktreeError
 
-    source = tmp_path / 'source.txt'
-    source.write_bytes(b'owned fixture')
-    try:
-        assert _source_file_windows(tmp_path, b'source.txt', 32) == (b'owned fixture', '100644')
-    except WorktreeError as exc:
-        native = win._native()
-        handle = native.kernel.CreateFileW(str(tmp_path), win._CONTROL | win._SYNC | 0x81,
-            3, None, 3, 0x02200000, None)
-        if handle in {None, C.c_void_p(-1).value}:
-            pytest.fail(f'cannot inspect rejected CI temp ACL: {C.WinError(C.get_last_error())}')
-        owner, acl, descriptor = win.HANDLE(), win.HANDLE(), win.HANDLE()
-        try:
-            error = native.security.GetSecurityInfo(handle, 1, 5, C.byref(owner), None,
-                C.byref(acl), None, C.byref(descriptor))
-            if error:
-                pytest.fail(f'cannot inspect rejected CI temp ACL: {C.WinError(error)}')
-            size = win._ACLSize()
-            native.checked(native.security.GetAclInformation(acl, C.byref(size), C.sizeof(size), 2))
-            aces = []
-            for index in range(size.AceCount):
-                pointer = win.HANDLE()
-                native.checked(native.security.GetAce(acl, index, C.byref(pointer)))
-                ace = C.cast(pointer, C.POINTER(win._ACE)).contents
-                aces.append({'type': ace.AceType, 'flags': ace.AceFlags,
-                             'mask': hex(ace.Mask),
-                             'sid': native.sid(pointer.value + win._ACE.SidStart.offset)})
-            pytest.fail(f'CI temp ACL rejected ({exc}); owner={native.sid(owner.value)}; '
-                        f'user={native.current_user()}; aces={aces}')
-        finally:
-            native.kernel.LocalFree(descriptor)
-            native.close(handle)
+    cache = tmp_path / 'shared-cache'
+    cache.mkdir()
+    subprocess.run(['icacls', str(cache), '/grant', '*S-1-5-11:(OI)(CI)(M)'],
+                   check=True, capture_output=True, timeout=20)
+    before = subprocess.check_output(['icacls', str(cache)], timeout=20)
+    source = cache / 'source.txt'
+    source.write_bytes(b'not a private workspace')
+    with pytest.raises(WorktreeError, match='source_file_boundary_unavailable'):
+        _source_file_windows(cache, b'source.txt', 32)
+    sent = []
+    def post(_config, _path, body):
+        sent.append(body['command_id'])
+        return 200, {'command_id': body['command_id']}
+    uploader = ContinuationResultUpload(SimpleNamespace(cache_dir=cache), post)
+    uploader.save(result())
+    uploader.replay()
+    assert sent == ['cmd_turn_1']
+    receipt = uploader.root / 'acknowledged' / 'cmd_turn_1.json'
+    assert uploader._read(receipt) == {'command_id': 'cmd_turn_1', 'acknowledged': True}
+    assert subprocess.check_output(['icacls', str(cache)], timeout=20) == before
+    # An existing spool with broad write access must be refused and preserved.
+    subprocess.run(['icacls', str(uploader.root), '/grant', '*S-1-5-11:(W)'],
+                   check=True, capture_output=True, timeout=20)
+    with pytest.raises(ArtifactReceiveError, match='unsafe_input_path'):
+        uploader.save(result(command_id='cmd_unsafe'))
+    assert not (uploader.root / 'cmd_unsafe.json').exists()
+    assert receipt.is_file()
 
 
 @pytest.mark.parametrize('owner,writer,accepted', [

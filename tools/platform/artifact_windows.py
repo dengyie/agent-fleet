@@ -186,10 +186,11 @@ class _Native:
             self.close(token.value)
 
     @contextmanager
-    def private_security(self) -> Iterator[int]:
+    def private_security(self, *, inherit: bool = False) -> Iterator[int]:
         user = self.current_user()
         descriptor, size = HANDLE(), U32()
-        sddl = f"O:{user}D:P(A;;FA;;;{user})(A;;FA;;;SY)(A;;FA;;;BA)"
+        flags = "OICI" if inherit else ""
+        sddl = f"O:{user}D:P(A;{flags};FA;;;{user})(A;{flags};FA;;;SY)(A;{flags};FA;;;BA)"
         self.checked(self.security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl, 1, C.byref(descriptor), C.byref(size)))
         try:
@@ -270,7 +271,7 @@ class _Native:
         attributes = _Attributes(C.sizeof(_Attributes), parent, C.pointer(text), 0x1040, None, None)
         options = 0x20 | 0x200000 | 2 | (1 if directory else 0x40)
         handle, status = HANDLE(), _Status()
-        with self.private_security() if create else nullcontext(None) as security:
+        with self.private_security(inherit=directory) if create else nullcontext(None) as security:
             attributes.SecurityDescriptor = security if create else None
             self.status(self.nt.NtCreateFile(C.byref(handle), access | _SYNC | _CONTROL, C.byref(attributes),
                 C.byref(status), None, 0x80, 3 if share_write else 1,
@@ -317,7 +318,7 @@ def _descriptor(handle: int, *, writable: bool) -> int:
 
 
 @contextmanager
-def root_handle(root: Path) -> Iterator[int]:
+def root_handle(root: Path, *, create_private: bool = False) -> Iterator[int]:
     path = validate_root(str(root))
     if not windows_supported():
         raise ArtifactReceiveError("capability_unavailable")
@@ -333,8 +334,9 @@ def root_handle(root: Path) -> Iterator[int]:
             if not native.info(handle).directory:
                 raise ArtifactReceiveError("unsafe_input_path")
             native.validate_volume(handle)
-            for part in path.parts[1:]:
-                handle = native.child(handle, part, access=0x81, directory=True)
+            for index, part in enumerate(path.parts[1:], 1):
+                create = create_private and index == len(path.parts) - 1
+                handle = native.child(handle, part, access=0x81, directory=True, create=create)
                 stack.callback(native.close, handle)
             native.validate_acl(handle)
             yield _borrowed_directory(handle, stack)

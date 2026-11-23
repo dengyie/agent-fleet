@@ -222,11 +222,15 @@ def test_original_result_survives_continuation(result_service, completed_turn):
   the set includes native kernel artifact probes, NTFS Git collection and durable
   HTTP upload retries. It used the node's Python 3.12.7. The exact macOS CI command
   passed **630 tests, 2 skips and 103 subtests in 34.75s**. The formal pinned
-  Windows Python 3.10 gate then exposed a remaining difference: GitHub's
-  `C:/fleet-tests` inherited ACL rejects the Git source root and spool, while the
-  installed node's isolated temporary root is accepted. A Windows-only diagnostic
-  regression now records that exact root's owner and complete ACE SID/flags/masks
-  in the bounded JUnit artifact if rejected; fix and fresh official CI are pending.
+  Windows Python 3.10 gate exposed an inherited `Authenticated Users` modify
+  ACE on `C:/fleet-tests` (run 45239773924). Git fixtures now start under a
+  private directory. The result spool creates protected directories under the
+  configured cache using the existing NT handle layer. A native regression
+  verifies inherited write access still prevents source reads, a private spool
+  uploads under the shared parent, and a pre-existing writable spool is refused
+  without changing its contents. The previous code failed the last check. The
+  four-module Windows run including the NTFS probes passed 145 tests with 34
+  platform skips after the change. GitHub platform checks remain pending.
 - This file is the pre-publication execution checkpoint. Exact final platform
   counts, GitHub merge SHA, deployment receipt and external/client boundaries are
   recorded in the publication PR and the existing canonical operations entry;

@@ -156,9 +156,11 @@ unverified, non-Git or unavailable workspaces return explicit unavailability.
 
 On Windows the collector uses the pinned NTFS source reader. It accepts a directory
 owned by the current user, SYSTEM or Administrators and treats OWNER RIGHTS ACE as
-applying to that verified owner only; unrelated principals with dangerous write rights
-remain rejected. The Hub signed-command SQLite store continues to enforce its POSIX
-ownership/mode invariant on POSIX hosts.
+applying to that verified owner only. Source directories writable by other principals
+are ineligible for collection. The result spool creates Fleet-owned directories with
+protected, inheritable ACLs under the configured cache and rejects existing spool
+directories with unsafe permissions. The Hub signed-command SQLite store continues
+to enforce its POSIX ownership/mode invariant on POSIX hosts.
 
 Publication uses the existing authenticated node/runner delivery pattern,
 durable idempotent persistence and operator-scoped read DTOs. Native paths,

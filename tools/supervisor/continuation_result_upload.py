@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from fleet_core.continuation_result import MAX_RESULT_BYTES, validate_result
@@ -21,28 +22,38 @@ class ContinuationResultUpload:
         self._draft_scan = None
 
     @staticmethod
+    @contextmanager
     def _directory(path: Path):
+        if os.name == 'nt':
+            from tools.platform.artifact_windows import root_handle
+
+            # The configured cache container can inherit a broad ACL. The
+            # Fleet-owned child is created with a protected, inheritable ACL.
+            with root_handle(path.absolute(), create_private=True):
+                yield
+            return
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         info = path.lstat()
         if not stat.S_ISDIR(info.st_mode) or path.is_symlink():
             raise ValueError('unsafe_result_store')
-        if os.name != 'nt' and (info.st_uid != os.getuid() or info.st_mode & 0o077):
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise ValueError('unsafe_result_store')
+        yield
 
     def _atomic(self, path: Path, value: dict):
-        self._directory(self.root)
-        self._directory(path.parent)
-        descriptor, name = tempfile.mkstemp(prefix='.result-', dir=self.root)
-        try:
-            with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
-                json.dump(value, stream, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(name, path)
-        finally:
-            # Only this call's own known temporary file can be cleaned up.
-            if os.path.exists(name):
-                os.unlink(name)
+        self.root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with self._directory(self.root), self._directory(path.parent):
+            descriptor, name = tempfile.mkstemp(prefix='.result-', dir=path.parent)
+            try:
+                with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+                    json.dump(value, stream, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(name, path)
+            finally:
+                # Only this call's own known temporary file can be cleaned up.
+                if os.path.exists(name):
+                    os.unlink(name)
 
     def save(self, value):
         value = validate_result(value)
@@ -66,9 +77,8 @@ class ContinuationResultUpload:
         source = self.root / 'drafts' / (command_id + '.json')
         if source.exists():
             target = self.root / 'drafts-finished'
-            self._directory(target)
             self._atomic(source, {'command_id': command_id, 'finished': True})
-            os.replace(source, target / source.name)
+            self._move(source, target)
 
     def drafts(self, limit=32, *, session_id=None):
         if session_id is not None:
@@ -77,8 +87,6 @@ class ContinuationResultUpload:
             fence = self.root / 'draft-sessions' / (session_id + '.json')
             if not fence.exists():
                 return []
-            self._directory(self.root)
-            self._directory(fence.parent)
             binding = self._read(fence)
             cid = binding.get('command_id') if isinstance(binding, dict) else None
             if (not isinstance(cid, str) or not re.fullmatch(r'cmd_[A-Za-z0-9._-]{1,124}', cid)
@@ -98,11 +106,10 @@ class ContinuationResultUpload:
         directory = self.root / 'drafts'
         if not directory.exists():
             return []
-        self._directory(self.root)
-        self._directory(directory)
-        if self._draft_scan is None:
-            self._draft_scan = os.scandir(directory)
-        batch = list(itertools.islice(self._draft_scan, limit))
+        with self._directory(self.root), self._directory(directory):
+            if self._draft_scan is None:
+                self._draft_scan = os.scandir(directory)
+            batch = list(itertools.islice(self._draft_scan, limit))
         if len(batch) < limit:
             self._draft_scan.close()
             self._draft_scan = None
@@ -125,18 +132,20 @@ class ContinuationResultUpload:
     def reject_draft(self, command_id):
         source = self.root / 'drafts' / (command_id + '.json')
         target = self.root / 'invalid-drafts'
-        self._directory(target)
-        os.replace(source, target / source.name)
+        self._move(source, target)
 
     def _archive(self, path, *, acknowledged, rejected=False):
         target = self.root / ('acknowledged' if acknowledged else 'rejected' if rejected else 'invalid')
-        self._directory(target)
-        os.replace(path, target / path.name)
+        self._move(path, target)
+
+    def _move(self, source, target):
+        with self._directory(self.root), self._directory(source.parent), self._directory(target):
+            os.replace(source, target / source.name)
 
     def _read(self, path):
         if os.name == 'nt':
             from tools.platform.artifact_windows import source_handle
-            with source_handle(path.parent, path.name) as (stream, _identity):
+            with self._directory(self.root), source_handle(path.parent.absolute(), path.name) as (stream, _identity):
                 raw = stream.read(MAX_RESULT_BYTES + 1025)
         else:
             descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -154,13 +163,12 @@ class ContinuationResultUpload:
         if not self.root.exists():
             return
         try:
-            self._directory(self.root)
             # Scandir is consumed lazily; no list of an unbounded spool exists.
-            if self._pending_scan is None:
-                self._pending_scan = os.scandir(self.root)
-            # Keep the directory iterator between passes. Transient failures
-            # in one batch cannot repeatedly hide all later pending results.
-            batch = list(itertools.islice(self._pending_scan, limit))
+            with self._directory(self.root):
+                if self._pending_scan is None:
+                    self._pending_scan = os.scandir(self.root)
+                # Keep the iterator so failures cannot hide later results.
+                batch = list(itertools.islice(self._pending_scan, limit))
             if len(batch) < limit:
                 self._pending_scan.close()
                 self._pending_scan = None
