@@ -139,6 +139,7 @@ const [origin, scenario, sid] = process.argv.slice(2);
         const sourceResponse = scenario === 'source-record' ? page.waitForResponse(response =>
           response.url().includes('/api/sessions/' + sid + '/events') &&
           response.url().includes('include_source=0')) : null;
+        if (scenario === 'snapshot-revision') await page.request.post(origin + '/_fixture/native-event',{data:{reset_snapshot:true}});
         await page.goto(origin + '/session/' + sid + '?view=chat');
         if (scenario === 'source-record') {
           const body = await (await sourceResponse).json();
@@ -229,7 +230,7 @@ const [origin, scenario, sid] = process.argv.slice(2);
           assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false,'no operation panel overflow');
           assert.deepEqual(errors,[]); await page.close(); continue;
         }
-        if (scenario === 'results') {
+        if (scenario === 'results' || scenario === 'result-file-concurrency') {
           let resultGets = 0;
           page.on('request', request => {if (/\/api\/tasks\/.+\/(files|diff)/.test(request.url())) resultGets++;});
           if (width < 1100) await page.getByRole('button',{name:'工作面板',exact:true}).click();
@@ -237,10 +238,56 @@ const [origin, scenario, sid] = process.argv.slice(2);
           assert.equal(resultGets,0,'result snapshots are fetched only on request');
           await page.getByRole('button',{name:'查看原任务结果',exact:true}).click();
           await page.getByText('pytest · 通过 12 · 失败 0 · 跳过 1 · 错误 0 · 1.2 秒',{exact:true}).waitFor();
+          if (scenario === 'result-file-concurrency') {
+            let release;
+            const held = new Promise(resolve => {release=resolve;});
+            await page.route('**/api/tasks/*/files/test.py', async route => {
+              const response = await route.fetch();
+              await held; await route.fulfill({response}).catch(() => {});
+            });
+            const first = page.locator('.native-result-files details').filter({has:page.locator('summary',{hasText:/^test.py/})});
+            const second = page.locator('.native-result-files details').filter({has:page.locator('summary',{hasText:/^other.py/})});
+            await first.locator('summary').click();
+            const requested = page.waitForRequest('**/api/tasks/*/files/test.py');
+            await first.getByRole('button',{name:'读取文件快照',exact:true}).click();
+            await requested;
+            await second.locator('summary').click();
+            await second.getByRole('button',{name:'读取文件快照',exact:true}).click();
+            await second.locator('pre').waitFor();
+            release();
+            await first.locator('pre').waitFor();
+            assert.equal(await first.locator('pre').innerText(),'print("<img src=x onerror=alert(1)>")\n');
+            assert.equal(await second.locator('pre').innerText(),'second retained snapshot\n');
+            await page.evaluate(async () => {
+              const {mountNativeResults} = await import('/assets/views/agent-chat/results.js');
+              const host = document.createElement('div'); document.body.append(host);
+              const pending = [];
+              const settle = () => new Promise(resolve => setTimeout(resolve,0));
+              const ui = mountNativeResults(host,{
+                readResults:async () => ({task:{state:'succeeded'},files:[{path:'fixture.py'}]}),
+                readResultFile:(_id,_sid,_path,signal) => new Promise(resolve => pending.push({signal,resolve})),
+              });
+              ui.update('t','s'); host.querySelector('button').click(); await settle();
+              const action = host.querySelector('.native-result-files button');
+              action.click(); ui.suspend();
+              if (!pending[0].signal.aborted || action.disabled) throw new Error('file read was not cancelled on suspension');
+              ui.resume(); action.click();
+              pending[0].resolve({content:'STALE_FILE'}); await settle();
+              if (!action.disabled || host.textContent.includes('STALE_FILE')) throw new Error('late read changed the resumed file request');
+              pending[1].resolve({content:'CURRENT_FILE'}); await settle();
+              if (action.disabled || !host.textContent.includes('CURRENT_FILE')) throw new Error('resumed file read did not publish');
+              action.click(); ui.update('new','new-session');
+              if (!pending[2].signal.aborted) throw new Error('identity change did not abort file read');
+              pending[2].resolve({content:'WRONG_SESSION_FILE'}); await settle();
+              if (host.textContent.includes('WRONG_SESSION_FILE')) throw new Error('file published to a different session');
+              ui.dispose(); host.remove();
+            });
+            assert.equal(writes,0); assert.deepEqual(errors,[]); await page.close(); continue;
+          }
           await page.getByText('保留的 diff',{exact:true}).click();
           assert.ok((await page.locator('.native-result-body').innerText()).includes('<img src=x onerror=alert(1)>'));
           assert.equal(await page.locator('.native-result-body img,.native-result-body script').count(),0);
-          const file = page.locator('.native-result-files details');
+          const file = page.locator('.native-result-files details').filter({has:page.locator('summary',{hasText:/^test.py/})});
           await file.locator('summary').click();
           await file.getByRole('button',{name:'读取文件快照',exact:true}).click();
           await file.locator('pre').waitFor();
@@ -266,6 +313,15 @@ const [origin, scenario, sid] = process.argv.slice(2);
           });
           await page.screenshot({path:'/tmp/fleet-native-web/results-' + width + '.png',fullPage:true});
           assert.deepEqual(errors,[]); await page.close(); continue;
+        }
+        if (scenario === 'snapshot-revision') {
+          await page.getByText('查看完整原文',{exact:true}).click();
+          await page.request.post(origin + '/_fixture/native-event');
+          await page.waitForFunction(() => document.querySelectorAll('.assistant-message.assistant').length === 2 &&
+            document.querySelectorAll('.assistant-message.assistant')[1].querySelector('stream-markdown')?.getAttribute('content') === 'Live native update',null,{timeout:12000});
+          assert.equal(await page.locator('.native-full-text').count(),0,'final short snapshot must remove the superseded full-text disclosure');
+          assert.equal((await page.locator('.native-chat-view').textContent()).includes('OLD_SNAPSHOT_'),false,'superseded content must leave the DOM');
+          assert.equal(writes,0); assert.deepEqual(errors,[]); await page.close(); continue;
         }
         if (scenario === 'long-message') {
           await page.getByText('查看完整原文',{exact:true}).click();
@@ -336,6 +392,18 @@ const [origin, scenario, sid] = process.argv.slice(2);
           assert.equal(messageRequests[0].client_token, messageRequests[1].client_token);
           assert.equal(messageRequests[0].text, messageRequests[1].text);
         } else {
+          if (scenario === 'receipt-failure') {
+            await page.waitForFunction(() => document.querySelector('.native-delivery-card').textContent.includes('已入队'));
+            const failed = await page.request.post(origin + '/_fixture/fail-command');
+            assert.ok((await failed.json()).commands > 0,'fixture records a real signed command failure');
+            await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+            await page.waitForFunction(() => document.querySelector('.native-delivery-card').textContent.includes('投递失败'));
+            assert.ok((await page.locator('.native-operation-feedback').textContent()).includes('native_session_unbound'),'node failure reason must reach the operation feedback');
+            assert.ok((await page.locator('.native-delivery-card').textContent()).includes('native_session_unbound'),'failure reason must reach the delivery card');
+            await page.waitForFunction(() => !document.querySelector('[aria-label="发送给电脑 Agent"]').disabled);
+            assert.equal(writes,1,'failed delivery must not retry automatically');
+            assert.deepEqual(errors,[]); await page.close(); continue;
+          }
           if (scenario === 'delivery-disclosure') {
             const detail = page.locator('details.native-delivery-card');
             await page.waitForFunction(() => document.querySelector('details.native-delivery-card'));

@@ -123,3 +123,19 @@ python3 -m pytest tests/test_native_chat_frontend.py -q
 
 Google Antigravity CLI 以 `agy` 从目标目录动态出现，遵循现有启动、读取与消息
 投递接口。网页不能据此推断任意旧会话可续聊或可切换模型。
+
+## 原生工作区可靠性回归
+
+- 节点命令进入 failed / expired / rejected / cancelled 时，保留公开回执的
+  `reason`，同时显示在消息投递卡、操作反馈和投递记录中。终态不会触发自动重发。
+- 原生消息的最终 snapshot 可以缩短或替换先前正文；不足完整原文阈值时移除旧的
+  原文展开区，避免最终回答与展开内容矛盾。
+- 不同文件快照独立加载；打开第二个文件不会取消第一个文件。刷新整个结果、挂起、
+  销毁或切换关联会话才统一取消。旧请求完成不能覆盖新文件内容或解锁新请求按钮。
+- 接力首次响应丢失后，后续恢复即使收到 4xx 也保留原 token、目标和指令。
+  恢复请求被限流不代表原任务未创建；首次提交被明确拒绝时仍允许修改表单。
+
+`tests/test_native_chat_frontend.py` 的 snapshot-revision、receipt-failure 和
+result-file-concurrency 场景覆盖以上消息、回执、并发文件与迟到响应行为；
+`tests/test_handoff_routes.py` 的真实浏览器场景覆盖“已创建但响应丢失 → 429 →
+原凭据找回”，同时验证聊天面板和原始时间线入口，桌面与手机宽度均执行。

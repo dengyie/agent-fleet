@@ -138,6 +138,7 @@ export function mountHandoffPanel(host, { api, sessionId }) {
       if (!preview.snapshot.objective && !prompt.value.trim()) {
         setStatus('未采集到用户目标，请填写接力初始指令', true); return;
       }
+      const recovering = !!pending;
       pending = pending || { target_machine: machine.value, target_project: project.value,
         target_agent: agent.value, instruction_override: prompt.value, client_token: clientToken() };
       busy = true;
@@ -155,7 +156,9 @@ export function mountHandoffPanel(host, { api, sessionId }) {
         setStatus('接力标识：' + receipt.handoff_id);
       } catch (error) {
         if (disposed) return;
-        const definitive = error && error.status >= 400 && error.status < 500;
+        // A rejected recovery says nothing about the original admission. Keep
+        // its frozen token/content even after a later 4xx (for example 429).
+        const definitive = !recovering && error && error.status >= 400 && error.status < 500;
         if (definitive) pending = null;
         freeze(!definitive);
         submit.disabled = false;
