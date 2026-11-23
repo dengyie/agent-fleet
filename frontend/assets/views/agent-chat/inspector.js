@@ -9,7 +9,7 @@ export function mountNativeInspector(root, heading, {api, onControl}) {
   const inspector = el('dialog', 'assistant-inspector'); inspector.setAttribute('aria-label', '电脑会话工作面板');
   const context = el('section', 'native-context'), receipts = el('section', 'native-receipts');
   const operationsHost = el('section', 'native-operations'), handoffHost = el('section', 'native-handoff');
-  const operationsPanel = mountNativeOperations(operationsHost, {api, onControl});
+  const operationsPanel = mountNativeOperations(operationsHost, {api, onControl, dialogHost: root});
   let handoff, handoffId = '';
   root.append(inspector);
   const ui = mountInspector(root, heading, inspector, [

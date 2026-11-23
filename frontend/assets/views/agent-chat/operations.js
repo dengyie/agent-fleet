@@ -10,7 +10,7 @@ export const CONTROL_LABELS = Object.freeze({pause_session: '暂停会话', resu
 
 // The Hub declares actions; machine observations only supply registered choices.
 // Keep the panel mounted so polling cannot replace drafts or the focused select.
-export function mountNativeOperations(host, {api, onControl}) {
+export function mountNativeOperations(host, {api, onControl, dialogHost}) {
   let current = {}, disposed = false, suspended = false, active = false;
   let profiles = [], loadedKey = '', requestedKey = '', generation = 0, controller, loading = false;
   let profileError = '';
@@ -47,7 +47,10 @@ export function mountNativeOperations(host, {api, onControl}) {
   }, 'button-danger');
   confirmation.append(el('h2', null, '确认会话控制'), confirmationText,
     button('取消', () => { confirming = ''; confirmation.close(); }), confirm);
-  host.append(heading, access, availability, feedback, links, delivery, profileSection, lifecycle, confirmation);
+  host.append(heading, access, availability, feedback, links, delivery, profileSection, lifecycle);
+  // Keep confirmation outside the inspector's Escape/focus handlers. On mobile
+  // the browser stacks the two native dialogs and restores inspector focus.
+  dialogHost.append(confirmation);
   const actionButtons = new Map();
   for (const [action, title] of Object.entries(CONTROL_LABELS)) {
     if (action === 'apply_local_profile') continue;
@@ -130,6 +133,6 @@ export function mountNativeOperations(host, {api, onControl}) {
     activate() { active = true; loadProfiles(); },
     suspend() { suspended = true; stop(); },
     resume() { suspended = false; if (active) loadProfiles(); },
-    dispose() { disposed = true; stop(); },
+    dispose() { disposed = true; stop(); confirmation.remove(); },
   };
 }
