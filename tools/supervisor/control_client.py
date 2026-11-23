@@ -79,6 +79,7 @@ _SCOPE_BLOCKED = {
     "append_user_turn": frozenset({"quarantined", "terminated"}),
     "apply_local_profile": frozenset({"terminated"}),
     "configure_model": frozenset({"quarantined", "terminated"}),
+    "answer_native_request": frozenset({"quarantined", "terminated", "paused"}),
 }
 
 #: Supervisor method callable keyed exactly by control action (fixed surface).
@@ -375,6 +376,9 @@ class ControlClient:
         what the caller logs/backs off on.
         """
         self._maybe_prune_nonces()
+        replay_results = getattr(self.continuation, 'replay_results', None)
+        if callable(replay_results):
+            replay_results()
         try:
             request = ({"adoption_recovery_after": self._adoption_recovery_after}
                        if self._adoption_recovery_after is not None else None)
@@ -533,6 +537,9 @@ class ControlClient:
             self._receipt(cid, 'rejected', 'unsupported_action')
             return
         if action in {'append_user_turn', 'configure_model'} and state == 'running' and not is_desktop:
+            self._receipt(cid, 'rejected', 'session_busy')
+            return
+        if action == 'answer_native_request' and state != 'running':
             self._receipt(cid, 'rejected', 'session_busy')
             return
         if (action in _SCOPE_BLOCKED and state in _SCOPE_BLOCKED[action]
@@ -737,7 +744,7 @@ class ControlClient:
                 if self.desktop is not None and self._supervisor.get(session_id).capability_manifest.get('desktop_bridge'):
                     return self.desktop.send(session_id, cid, clean['text'])
                 if self.continuation is not None and session_id.startswith("runner_"):
-                    result = self.continuation.send(session_id, clean["text"])
+                    result = self.continuation.send(session_id, clean["text"], command_id=cid)
                 else:
                     result = self._supervisor.append_user_turn(session_id, clean["text"])
             elif action == 'configure_model':
@@ -752,6 +759,9 @@ class ControlClient:
                             for k in ('profile_id', 'digest')))):
                     return 'rejected', 'model_configuration_mismatch'
                 result = self._supervisor.configure_model(session_id, config)
+            elif action == 'answer_native_request':
+                result = self._supervisor.answer_native_request(session_id,
+                    clean['request_id'], clean['selected'])
             else:
                 result = self._supervisor.apply_local_profile(
                     session_id, clean["profile_id"])
@@ -764,12 +774,20 @@ class ControlClient:
             return ("rejected", result)
         if result in ("unsupported_action", "resume_unverified",
                       "unknown_profile", "family_mismatch",
-                      "invalid_payload", "session_busy", "native_session_unbound", "capture_unavailable"):
+                      "invalid_payload", "session_busy", "native_session_unbound", "capture_unavailable",
+                      "interaction_expired", "interaction_unavailable"):
             return ("rejected", result)
         if action == 'configure_model':
             if result in {'model_configured', 'model_restored'}:
                 return 'succeeded', result
             return 'rejected', result if result in _MODEL_FAILURES else 'model_configuration_unavailable'
+        if action == 'answer_native_request':
+            if result == 'answered':
+                return 'succeeded', result
+            if result == 'execution_unknown':
+                return 'failed', result
+            return 'rejected', result if result in {
+                'interaction_expired', 'invalid_payload', 'interaction_unavailable'} else 'interaction_unavailable'
         if result == {"append_user_turn": "appended", "apply_local_profile": "applied"}[action]:
             return ("succeeded", result)
         if result in ("already_finished", "no_live_process"):

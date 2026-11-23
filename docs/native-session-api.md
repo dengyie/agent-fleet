@@ -73,6 +73,85 @@ Interactive question answers keep their existing, separate
 stored as ordinary message operations and retain their current reservation and
 reconciliation behavior.
 
+## Native ACP permission answers
+
+A live, owned Agy ACP worker can emit a validated `interaction_request`:
+
+```json
+{
+  "kind": "interaction_request",
+  "payload": {
+    "request_id": "agy_4f6e168ed6a51a9b9b73f661599a0eb3",
+    "question_type": "single",
+    "prompt": "Run the test command?",
+    "options": [
+      {"id": "option_0", "label": "Allow once"},
+      {"id": "option_1", "label": "Reject once"}
+    ],
+    "allow_custom": false,
+    "delivery": "native_permission"
+  }
+}
+```
+
+The marker is additive. It allows only `single`/`confirm`, at least one offered
+option and no custom answer. The browser checks `answer_native_request` in the
+session's `allowed_actions`; ordinary questions continue to check
+`append_user_turn`. A family label alone cannot enable native answers. Capture
+enables this channel only after a managed structured worker persists explicit
+`runtime_protocol="acp"` and `interactive_questions=true` metadata. Hub admission
+also checks current owned Runner authority, ACP evidence, the capability and
+nonterminal session state.
+
+Answer using the existing question endpoint, preserving the token on retries:
+
+```http
+POST /api/sessions/<session_id>/messages
+Content-Type: application/json
+```
+
+```json
+{
+  "request_id": "agy_4f6e168ed6a51a9b9b73f661599a0eb3",
+  "client_token": "permission-response-b928",
+  "selected": "option_0"
+}
+```
+
+A one-element `selected` array is also accepted. Empty text is compatible with
+the existing question form; nonempty text or multiple selections returns 400
+`invalid_interaction_answer`. The Hub reserves this exact question/answer/token
+and authenticated operator before creating one signed `answer_native_request`
+command. Its payload contains only the public request ID and one public option
+ID. It never appends a new user turn. The general `/control` endpoint rejects
+direct native-answer dispatch with 409 `session_action_unavailable` so callers
+cannot bypass the question reservation.
+
+HTTP 202 returns `{ "session_id": "...", "command_id": "cmd_...", "status":
+"queued" }`. This is admission. An exact retry recovers the same command ID;
+question admission continues to use `queued`, while the current delivery outcome
+is read with `GET /api/supervisor/receipts/<command_id>`. Reusing a reserved
+question with another token, selection or operator returns 409
+`interaction_answered` without the original answer or command. Concurrent retries
+may briefly return 409 `interaction_pending`; retry the original request. Closed
+questions return 409 `interaction_expired`, missing capability returns 409
+`interaction_unavailable`, revoked authority is denied by existing session
+authorization, and storage failures return bounded 503 without SQLite details.
+Question state, capability and authorization are rechecked on replay; recovery
+after a session closes uses the original command receipt endpoint.
+
+The node resolves the private mailbox from the Supervisor-owned session, checks
+the exact worker PID/start identity, session and current mailbox incarnation,
+then validates the unexpired request and offered option. Native RPC and option
+IDs remain only in the worker. A `succeeded`/`answered` receipt requires the ACP
+response bytes to have flushed and the current worker to acknowledge delivery.
+Only then does capture emit `interaction_response` and resume the running state.
+Expired/unavailable requests produce rejected receipts. A timeout or ambiguous
+post-write outcome yields failed `execution_unknown`; the signed journal
+replays that receipt and never sends the selection again. Late ACKs cannot turn
+an unknown outcome into a confirmed answer. A new worker incarnation does not
+reuse pending requests from an earlier worker.
+
 ## Session name, client metadata, and conversation content
 
 `GET /api/sessions` and `GET /api/sessions/<session_id>` keep the existing
@@ -135,6 +214,66 @@ Duplicate or unrecognized values return 400 `invalid_include_source`. This does
 not change the event cursor contract: hidden source-record rows may leave gaps
 between returned Hub cursors, and clients continue from the last returned
 cursor.
+
+## Observable Agent evidence
+
+Both session detail and directory DTOs add `agent_evidence`; callers that do not
+use it remain compatible. The fixed fields describe observations for this
+session independently of current control authorization. For example, an Agy
+session that negotiated ACP, emitted visible deltas and a native permission
+question may contain:
+
+```json
+{
+  "agent_evidence": {
+    "family": "agy",
+    "adapter_support": "supported",
+    "installation": "unknown",
+    "protocol": {"name": "acp", "state": "observed", "source": "session_metadata"},
+    "capture": {"source": "structured_stream", "quality": "structured", "history": "unknown"},
+    "features": {
+      "visible_text": {"state": "observed", "source": "session_event"},
+      "text_deltas": {"state": "observed", "source": "session_event"},
+      "message_identity": {"state": "observed", "source": "session_event"},
+      "tool_calls": {"state": "unknown", "source": "none"},
+      "tool_results": {"state": "unknown", "source": "none"},
+      "interactive_questions": {"state": "observed", "source": "session_event"},
+      "native_permissions": {"state": "observed", "source": "session_event"},
+      "model": {"state": "unknown", "source": "none"},
+      "provider": {"state": "unknown", "source": "none"},
+      "native_title": {"state": "unknown", "source": "none"},
+      "client_version": {"state": "unknown", "source": "none"},
+      "native_started_at": {"state": "unknown", "source": "none"},
+      "resume_identity": {"state": "unknown", "source": "none"},
+      "usage": {"state": "unsupported", "source": "public_contract"},
+      "hidden_reasoning": {"state": "unsupported", "source": "public_contract"}
+    }
+  }
+}
+```
+
+The three feature states mean observed fact, absence of evidence, and absence
+from Fleet's current public contract respectively. `unknown` never means the
+vendor cannot produce the field. `installation` remains `unknown`; historical
+session capture cannot prove current binary availability/authentication.
+`protocol.name` is `acp`, `cli_json`, `native_transcript`, `desktop_bridge`, or
+`unknown`. Generic structured output alone does not determine a protocol.
+`capture.history` is `unknown`, `retained_source_from_checkpoint`, or
+`gaps_observed`; none claims recovery of never-captured vendor history.
+
+The evidence has no arbitrary strings or raw metadata values; values such as a
+model/name already live in existing bounded display fields. It cannot expand
+`allowed_actions`. Ordinary questions do not count as native permissions without
+the explicit validated native-delivery marker. Events are projected from stored
+redacted rows, with a fixed set union per bounded ingest batch. Exact retries
+recover projection after a bounded `503 session_unavailable` without changing
+stored events; malformed duplicate payloads cannot add new facts.
+
+Session metadata SQLite schema v6 adds protocol/projection fields in the existing
+atomic migration. Old sessions default to unknown and empty observations until
+normal ingestion/replay; no full-history migration scan is performed. Per-family
+source details, enum/provenance meanings, corruption handling and protocol upgrade
+criteria are specified by [Agent observation contract](agent-observability.md).
 
 ## Event history
 
@@ -300,7 +439,43 @@ stream delta、block stop 和最终完整快照使用同一块身份；Hub curso
 唯一身份，message_id 只负责消息展示更新。ZCode 桌面分页推进保留元数据 checkpoint，
 相同标题/模型不会在每次扫描重复上报。
 
-agy Runner 流使用既有 assistant_message/tool_call/tool_result DTO。每次原生
-调用有独立的消息命名空间，同一次调用按 step index 合并增量。重复 init 会开启新
-调用命名空间；不以文本或 vendor step index 替代 Hub ingestion cursor。源端未
-提供的标题、版本、模型或历史不做推断。内部 reasoning/thinking 不作为聊天内容。
+agy Runner 新执行通过 `agy acp`，继续使用既有
+assistant_message/tool_call/tool_result DTO。每轮连接具有独立的消息命名空间，
+可见文本增量按该轮消息身份追加，工具更新按原生 tool ID 在节点内部合并；
+Hub ingestion cursor 仍是唯一公开事件身份。大段可见文本分片而不丢弃尾部，
+工具预览超界时有明确截断标记，完整脱敏字段进入单独 source archive。
+旧 print 记录可继续只读，但保留旧原生 ID 不会授予 ACP 续聊能力。
+源端未提供的标题、版本、模型或历史不做推断。内部 reasoning/thinking 不作为聊天内容。
+
+## Managed continuation results
+
+Managed follow-up turns publish immutable, command-bound results independently of the startup task snapshot. A node posts the completed result to `POST /api/runner-continuation-results` using its existing runner credential. The command must be the same machine/session's dispatched `append_user_turn`, and the result task ID must match that command attempt. Repeating the exact result returns `{ok:true, command_id, stored:false}`; reusing the command ID with changed content returns a bounded `409 continuation_result_conflict`. Invalid bodies return `400`, wrong bindings `403`, undispatched commands `409`, and unavailable SQLite `503`. The startup task result is never updated.
+
+Operators read an immutable newest-first cursor page at `GET /api/sessions/<session_id>/results?limit=20&before=<cursor>` (limit 1–50) and fetch a patch on demand at `GET /api/sessions/<session_id>/results/<command_id>`. The first request omits `before`; `before_cursor` is the last returned opaque decimal SQLite cursor and is passed to get older results. New rows have greater cursors and do not shift existing pages. Empty history is HTTP 200 with `results:[]`, `has_more:false`, `before_cursor:"0"`; repeated, noncanonical, zero, overflow or future cursors return `400 invalid_cursor`. List rows omit `diff_patch` and structured test summaries. Both endpoints require the operator/account session, while publication requires node runner authentication; either credential does not substitute for the other.
+
+Each DTO binds `command_id`, `session_id`, `task_id`, execution state, collection state/reason, exit status, duration, completion time, redacted bounded diff statistics/patch and an optional structured test summary. Execution can be known while collection is unavailable. Non-Git, unsafe, too-large or unverified workspaces are explicit `collection_state:"unavailable"`; malformed newly written test summaries can be partial. Patch bodies are UTF-8 bounded to 100 KiB, stat to 5 KiB, and full result JSON to 150 KiB. Only the deterministic configured task worktree is eligible; snapshots use a private Git index and safe source-file handles and never change the task index or startup result. Windows source reads reuse the pinned NT/reparse-safe artifact reader; macOS/POSIX reads use pinned no-follow directory descriptors.
+
+Example operator read (the list deliberately omits patch/test-summary bodies):
+
+```http
+GET /api/sessions/runner_example/results?limit=20
+```
+
+```json
+{"ok":true,"session_id":"runner_example","results":[{"cursor":"7","command_id":"cmd_example","session_id":"runner_example","task_id":"t-example","execution_state":"succeeded","collection_state":"complete","collection_reason":"","exit_code":0,"duration_s":1.2,"finished_at":"2026-11-24T00:00:00Z","diff_stat":" src/example.py | 2 +-\n","diff_truncated":false,"stat_truncated":false,"redacted":false}],"has_more":false,"before_cursor":"7"}
+```
+
+`GET /api/sessions/runner_example/results/cmd_example` returns
+`{"ok":true,"session_id":"runner_example","result":{...}}` with the same row
+plus `diff_patch` and nullable `test_summary`. The node's publication body is
+that result without `cursor`; the server assigns the stable cursor. No file path
+to the VM workspace, argv, native session ID or credential is accepted in this
+public result shape.
+
+Binary changes include only Git's `Binary files differ` notice, never reconstructable `GIT binary patch` hunks. The Hub also rejects encoded binary hunks. Structured test summaries come only from a report changed in this turn's immutable after-tree; an unchanged report from an earlier turn and a later workspace replacement cannot become this turn's test evidence.
+
+SQLite migration uses the independent `continuation_results_schema=1` key in the session database and `BEGIN IMMEDIATE`; required columns and the actual unique-command/session-cursor index definitions are validated. Unknown, partial and corrupt schemas fail closed without changing the existing session schema. The supervisor database separately migrates `dispatch_schema=1`, adding `dispatched_s REAL NOT NULL DEFAULT 0`. First poll dispatch is immutable across lease expiry and superseding commands; an expired command can publish a delayed result only when dispatch was proven. Old delivered commands and confirmed execution receipts are backfilled, while old expired/queued commands without proof remain undispatched. Unknown metadata, invalid column/default definitions and nonfinite/negative dispatch values fail closed atomically.
+
+Before execution, the node atomically replaces a private result draft and persists a direct session-to-command fence; the next turn resolves that exact session's pending draft before it can alter the workspace. Recovery validates original attempt, process group, configured project and retained cwd. A dispatched terminal draft can recover its bounded workspace delta, but reports `execution_state:"unknown"`, `exit_code:-1` because the manifest does not retain the exit code. Prepared, still-live or changed-incarnation drafts report unavailable collection and never cause another Agent invocation, wait or signal. A failed draft write prevents execution admission. Old retained records without a verifiable configured project cannot collect results.
+
+Completed results are atomically retained on the node until the HTTP receipt is confirmed. Replay uploads saved result data only and never starts another Agent process. Each pass reads at most 32 spool entries and continues its iterator across passes, so transient failures cannot indefinitely hide later results. Confirmed uploads become content-free acknowledgement tombstones; deterministic HTTP 400/403/404/409/413/422 rejections and malformed entries are preserved in separate diagnostic directories. Draft completion also leaves a content-free tombstone. This release preserves rejected/damaged evidence and does not add a global spool quota or automatic retention pruning; operators must monitor cache disk capacity.

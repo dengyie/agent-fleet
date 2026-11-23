@@ -88,6 +88,7 @@ from tools.supervisor.native_resume import (  # noqa: F401
     _native_resume_identity,
     _resume_token_from_native_path,
 )
+from tools.supervisor.native_requests import NativeRequestMixin
 
 # --------------------------------------------------------------------------- #
 # Fixed control surface (the ONLY actions a Supervisor knows).
@@ -104,6 +105,7 @@ CONTROL_ACTIONS = frozenset({
     "append_user_turn",
     "apply_local_profile",
     "configure_model",
+    "answer_native_request",
 })
 
 # Bounded outcome codes for every control action.  Every persisted
@@ -117,7 +119,7 @@ _CONTROL_OUTCOMES = frozenset({
     "terminated", "terminated_forced", "escape_unverified",
     "group_remaining", "completed",
     "already_finished", "no_live_process", "control_failed",
-    "appended", "applied", "unknown_profile", "family_mismatch",
+    "appended", "applied", "answered", "unknown_profile", "family_mismatch",
     "resume_unverified", "unsupported_action",
     # 跨实例控制时无法证明进程身份/存活：既不是成功也不是 already_finished。
     "liveness_unknown",
@@ -146,7 +148,7 @@ class ManagedRunResult:
     outcome: str = ""  # bounded terminate/control outcome code
 
 
-class Supervisor(HandlesMixin, NativeResumeMixin):
+class Supervisor(HandlesMixin, NativeResumeMixin, NativeRequestMixin):
     """Local authority over managed CLI process groups."""
 
     MANIFEST_SUFFIX = ".json"
@@ -227,6 +229,11 @@ class Supervisor(HandlesMixin, NativeResumeMixin):
             updated_at=now,
         )
         from tools.supervisor.native_resume import continuation_options
+        if (agent == 'agy' and len(command) > 1
+                and command[1].replace('\\', '/').endswith('/providers/agy_worker.py')):
+            if '--control-dir' in command:
+                raise ValueError('acp control directory is Supervisor-owned')
+            command = [*command, '--control-dir', str((self._manifest_dir / 'acp' / session_id).resolve())]
         handle = self._ops.create(command, cwd, env_allowlist)
         entry = _ManagedEntry(
             manifest, handle,
@@ -803,6 +810,16 @@ class Supervisor(HandlesMixin, NativeResumeMixin):
                                   entry: _ManagedEntry) -> str:
         """Stateful terminate: graceful SIGTERM -> bounded grace -> SIGKILL."""
         m = entry.manifest
+        if m.agent == 'agy' and '--control-dir' in entry.resume_options:
+            from tools.providers.acp_mailbox import AcpMailbox
+            root = (self._manifest_dir / 'acp' / session_id).resolve()
+            if AcpMailbox.cancel(root):
+                # Native cancellation must reach agy before signalling its
+                # whole group; SIGTERM to both peers would race the RPC.
+                until = time.monotonic() + min(.5, max(0, grace_s))
+                while time.monotonic() < until:
+                    if entry.handle is not None and self._ops.proc_poll(entry.handle) is not None: break
+                    time.sleep(.02)
         if m.state in TERMINAL_STATES:
             return m.state
         handle, code = self._live_handle(session_id, entry)
@@ -904,6 +921,9 @@ class Supervisor(HandlesMixin, NativeResumeMixin):
             entry = self._entries.get(session_id)
             if entry is not None and entry.handle is handle:
                 self._capture_native_identity(entry, line)
+                if (entry.manifest.agent == 'agy' and
+                        ('"type":"fleet_acp_session"' in line or '"type": "fleet_acp_session"' in line)):
+                    return
             consumer(line)
         should_abort = should_abort or (lambda: False)
         deadline = time.monotonic() + max(0.0, float(timeout_s))

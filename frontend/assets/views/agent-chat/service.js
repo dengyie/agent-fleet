@@ -47,6 +47,16 @@ export function createNativeChatService(api) {
       await readBoundTask(id, sessionId, signal);
       return file;
     },
+    async readContinuationResults(sessionId, {before, signal} = {}) {
+      const page = await api.getContinuationResults(sessionId, {before, signal});
+      if (page.session_id !== sessionId || page.results.some(row => row.session_id !== sessionId)) throw new Error('续聊成果与当前会话不一致');
+      return page;
+    },
+    async readContinuationResult(sessionId, commandId, signal) {
+      const value = await api.getContinuationResult(sessionId, commandId, {signal});
+      if (value.session_id !== sessionId || value.result.session_id !== sessionId || value.result.command_id !== commandId) throw new Error('续聊成果与当前操作不一致');
+      return value.result;
+    },
     create: input => api.createTask(input),
     send: (id, operation) => api.sendSessionMessage(id, operation.text, operation.client_token),
     control: (id, action, payload) => api.controlSession(id, action, 'operator_requested', payload),

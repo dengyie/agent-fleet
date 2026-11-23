@@ -138,9 +138,17 @@ Fleet 同样把浏览器 operator/account 身份与 runner、node、ingest 凭�
 
 ## Google Antigravity：两种接入不能混为一谈
 
-Fleet 当前上游主线用 `agy --output-format stream-json --print` 执行普通轮次；经过
-init UUID/cwd 验证后，以精确 conversation ID 续聊，采集可见 text/tool 数据，尚无真实
-agy 模型执行验收。T3 则在专用
+> **时点说明：**本次源码比较写于 ACP 实施前。用户随后明确要求 Agy
+> 完全按 T3 Code 的 `agy acp` 方式接入；当前分支已据此替换新执行路径，
+> 本节原有“仅建议可选调研”的结论已被实施契约
+> [native-provider-runtime.md](../native-provider-runtime.md) 取代。下列旧路径描述仅解释迁移来源。
+
+Fleet 实施前主线用 `agy --output-format stream-json --print` 执行普通轮次；经过
+init UUID/cwd 验证后，以精确 conversation ID 续聊。当前分支的新执行改为节点受管
+`agy acp` worker：通过有界 stdio JSON-RPC、显式认证、精确 `session/resume`、协商模型/模式、
+审批邮箱、可见增量/工具事件及续聊结果收集接入。旧 print 输出只保留给历史会话读取，
+不能启动新 turn。严格独立 ACP 对端和真实 Hub/SQLite/HTTP 测试已覆盖多轮与失败边界；
+真实 agy 二进制和模型调用尚无验收。T3 则在专用
 [`AntigravityAdapterV2`](https://github.com/pingdotgg/t3code/blob/1bc44f2732ce0a24c0608626d59409f1a0893db4/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts)
 和[`Antigravity ACP support`](https://github.com/pingdotgg/t3code/blob/1bc44f2732ce0a24c0608626d59409f1a0893db4/apps/server/src/provider/acp/AntigravityAcpSupport.ts)
 里通过 `agy acp` 驱动持续 ACP session，基于握手版本识别能力，并实现 model/runtime-mode
@@ -148,11 +156,10 @@ agy 模型执行验收。T3 则在专用
 与 continuation。它不是将 `--output-format stream-json` wrapper 改名为 ACP；两者控制面和
 生命周期保证不同。
 
-如果产品目标扩展到从网页持续控制 Antigravity 内的审批、模型、运行模式和长任务，建议
-先调查并逐项实测 `agy acp` 在 Windows/macOS 的 handshake、会话恢复、权限请求、取消与
-后台活动，然后在 Fleet 现有 Agent adapter/node 命令层新增**可选的 ACP execution path**。
-维持 CLI 路径可用；能力仅按握手及平台版本启用，新增录制的协议 fixture 与故障注入，
-不在 Hub 运行 `agy`，不把 T3 的 host runtime 当成可直接依赖的组件。
+实现有意复用 T3 的 ACP 会话/权限/配置/后台结算模式，不复制 Effect.js、server RPC、
+前端框架或 provider host。Hub 不执行 `agy`；权限答案仍由 Fleet operator 身份、SQLite 预约、
+签名命令和节点私有 mailbox 交付。运行时 feature 来自握手能力，模型/模式必须是对端
+公布的选项。Windows/macOS 的真实安装、认证和模型调用仍是独立发布验收项。
 
 ## 工程验证方式的启发
 
@@ -176,7 +183,7 @@ Fleet 已有 Mac/Windows CI、CLI 生命周期/续聊身份接受、Hub SQLite/H
 | Codex | `CodexAdapterV2.ts` 通过 app-server protocol client 处理 thread/turn、原生 item、usage、审批与中断；有 session/model policy 与 resume 身份。 | 当前 CLI 执行 + native rollout/capture 路径已打通。可评估受控 node app-server path 增加 native turn/item、审批和 usage 的清晰度；不把它变成 Hub 或浏览器直接管理 RPC。 |
 | Claude Code | `ClaudeAdapterV2.ts` 用 Agent SDK query session，暴露 message stream、模型切换、权限请求、interrupt 和原 session resume。 | 已有 CLI stream 与原 JSONL 逐块 capture。优先用 protocol replay 增强边界与 terminal-path 行为；引入 SDK 之前先证明审批/持续控制收益及平台安装/版本成本。 |
 | Pi | `provider-pi/server/adapter.ts` 有 RPC stream、原生 session 文件绑定、tool/extension events、model/usage 和生命周期处理。 | 已支持 CLI 及原生文件采集/续聊。RPC 是可能改善实时性与原生交互的数据面，不意味着能从 JSONL 事后回答已过期的 live request。 |
-| Antigravity | 专用 flavor 运行 `agy acp`，按版本与握手 feature 启用控制。 | 当前 `--output-format stream-json --print` + 精确 conversation resume；ACP 是独立、待验证的 node 接入选择。 |
+| Antigravity | 专用 flavor 运行 `agy acp`，按版本与握手 feature 启用控制。 | 当前分支已运行节点受管 ACP worker；严格对端覆盖 handshake、认证、精确 resume、配置、审批、工具、增量文本与后台结算。真实 Agy/模型及两平台二进制验收仍待完成。 |
 | ZCode CLI/desktop、Hermes | 本次查看的 T3 provider 包/adapter 清单没有对应专用实现。 | 继续保留 Fleet 的 adapter、verified storage / desktop bridge 和 Runner-only guards；不能以 T3 对其它厂商的实现当这两个 Agent 的兼容性证明。 |
 
 实现证据：
@@ -206,11 +213,13 @@ PID 重用及未排空输出。T3 的 Node process worker 不应替换 Python �
 
 ## 对 Fleet 的优先级
 
-1. **P0 — 每轮续聊成果绑定。** 继续复用 Task、session operation receipt 和公开 task result
+1. **P0 — 每轮续聊成果绑定。** 已实现 command 绑定的逐轮结果、durable draft、崩溃恢复、
+   有界结果分页/详情及上传重放；仍须走发布门禁。继续复用 Task、session operation receipt 和公开 task result
    API；增加基于 command/native turn identity 的 per-turn result，而不是重写会话服务。
    先限定 managed Runner + 已登记 Git workspace，并测成功、部分失败、截断、无改动、续聊并发、
    response loss 与 task/session 错绑。
-2. **P1 — Agent 能力与采集完整度账本。** 对 Codex、Claude、Pi、ZCode CLI/desktop、Hermes、
+2. **P1 — Agent 能力与采集完整度账本。** 已加入只读、带来源/版本/质量的 evidence DTO 与
+   持久化采集事实；对 Codex、Claude、Pi、ZCode CLI/desktop、Hermes、
    agy 的版本和来源逐项列出可见 delta/snapshot、message/item identity、tools、approvals、
    model/usage、resume、stop、历史深度及平台安装状态；每项用来源证据/unknown 标记。管理按钮
    仍由授权 DTO 决定。
@@ -219,8 +228,9 @@ PID 重用及未排空输出。T3 的 Node process worker 不应替换 Python �
    真实存档不丢事件，离开会话退避，旧 cursor 仍从 API 恢复。
 4. **P2 — 历史 metadata 回填。** 在现有 exact native ID/cwd 只读快照下更新旧 title/model/provider/start
    metadata，并记录更新来源/质量；损坏、删除、复用 ID 或 revoked adoption 都 fail closed。
-5. **P2 — agy ACP feasibility。** 以跨平台 capability matrix 和 recorded handshake 做决策；只有在
-   native approval/steer/resume 收益由平台实测证明后才增加 ACP node adapter。
+5. **P2 — agy ACP feasibility。** T3 模式的 ACP node adapter 已实现并由独立对端及 Hub 集成
+   验证；真实 Agy handshake、审批、resume 和模型仍需按 macOS/Windows 分别实测，且不得把
+   fixture 结果记为 vendor 验收。
 
 不照搬 T3 完整 Effect.js runtime、host WebSocket/RPC 连接、Electron/React Native 客户端、
 完整 provider catalog 或 MCP 编排器。它们依赖其单机工作区所有权模型、账户和产品范围，
@@ -249,6 +259,6 @@ thread projection、按轮次区分 Agent 完成与结果收尾，以及高保�
 native session capture 与跨平台 CLI 生命周期。现有幂等、分页、会话事件身份、授权和
 静态前端隔离无需重新实现。
 
-尚未完成：本文提出的 per-turn result 能力、统一 provider 能力账本、旧 metadata 回填、
-活跃 timeline latency/virtualization 测量及真实双端 `agy acp` 调研。本轮未运行真实 Agent
-CLI、外部模型或 T3 程序，也未触发产品发布或部署。
+尚未完成：旧会话 metadata 回填、活跃 timeline latency/virtualization 测量、真实双端
+`agy acp` / 外部模型验收，以及当前分支的完整 release journey、main 集成和生产部署。
+本轮没有运行真实 Agent CLI、外部模型或 T3 程序。

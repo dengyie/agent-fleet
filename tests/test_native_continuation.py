@@ -56,7 +56,7 @@ def test_claude_stream_identity_persists_but_ephemeral_codex_does_not(tmp_path):
     assert not sv.continuation_ready(n.session_id)
 
 
-@pytest.mark.parametrize('family', ['codex', 'agy'])
+@pytest.mark.parametrize('family', ['codex'])
 def test_followup_cross_instance_uses_original_stream_and_can_repeat(tmp_path, monkeypatch, family):
     import json
     import sys

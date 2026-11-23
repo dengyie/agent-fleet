@@ -79,7 +79,9 @@ class RunnerCapture:
         try:
             if not self.record.exists():
                 # No credential or prompt in this recovery index.
-                self.record.write_text(json.dumps({k: task[k] for k in ('attempt_id', 'agent_type', 'task_id')}))
+                self.record.write_text(json.dumps({k: task[k] for k in
+                    ('attempt_id', 'agent_type', 'task_id', 'project') if k in task},
+                    ensure_ascii=False), encoding='utf-8')
                 self.bridge.start()
                 self.bridge.ingest_one({'kind': 'session_metadata', 'payload': {'task_id': task['task_id']}})
                 if 'instruction' in task:
@@ -271,7 +273,7 @@ def prune_if_done(capture, *, now=None):
         # 删除 spool 正文，仅保留不含内容的小墓碑（attempt/task id），
         # 供本地按 attempt 定位会话 id；墓碑不再重放，超保留期后删除。
         shutil.rmtree(capture.root / capture.session_id, ignore_errors=True)
-        tomb = {k: data[k] for k in ('attempt_id', 'agent_type', 'task_id') if k in data}
+        tomb = {k: data[k] for k in ('attempt_id', 'agent_type', 'task_id', 'project') if k in data}
         tomb.update(closed=closed, pruned=True)
         capture.record.write_text(json.dumps(tomb))
     return True

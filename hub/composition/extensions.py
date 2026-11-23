@@ -116,6 +116,21 @@ def register_fleet_extension(app, config, repositories, core, platform, sessions
             fleet["integrations"] = {"komari": p.komari_client}
     if sessions.session_service is not None:
         services["sessions"] = sessions.session_service
+        if config.supervisor_enabled and config.session_db is not None:
+            from hub.application.continuation_result_service import ContinuationResultService
+            from hub.infrastructure.continuation_result_repository import ContinuationResultRepository
+            from hub.domain.continuation_results import ContinuationResultStoreError
+            result_repo = ContinuationResultRepository(config.session_db)
+            try:
+                result_repo.init()
+            except ContinuationResultStoreError:
+                # A damaged/unknown optional result schema does not disable
+                # existing session ingestion; its routes fail closed with 503.
+                pass
+            else:
+                services['continuation_results'] = ContinuationResultService(
+                    result_repo, sessions.session_service, control.supervisor_service,
+                    core.task_repository)
     if sessions.transcript_repo is not None:
         repos["transcript"] = sessions.transcript_repo
     if sessions.session_service is not None:

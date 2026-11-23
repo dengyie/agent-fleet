@@ -17,6 +17,19 @@ PYTHONPATH=. python3 -m pytest tests/test_session_schema.py \
   tests/test_review_node_sync.py -q
 ```
 
+受管续聊的逐轮快照、Git 安全读取、SQLite 幂等/迁移、丢包恢复、HTTP 鉴权和原任务结果隔离：
+
+```sh
+python3 -m pytest tests/test_continuation_results.py tests/test_task_patch_bounds.py \
+  tests/test_task_summary_collection.py tests/test_native_continuation.py \
+  tests/test_supervisor_control.py tests/test_native_chat_frontend.py \
+  tests/test_release_layout.py -q
+```
+
+Windows CI 同时在原生 Artifact Export probe 中运行受管续聊 source reader 测试，验证 NT 固定句柄、junction/ADS/共享写入拒绝和有限读取；实际跨平台 Git+Hub 集成仍由各平台 `tests/test_continuation_results.py` 执行。
+
+`test_continuation_results.py` 还覆盖 prepared/live/terminal 崩溃草稿、超过一批待恢复记录时的精确会话 fence、cwd/attempt/process-group 变更隔离、执行前磁盘失败、二进制补丁拒绝、不可变 after-tree 测试证据、32 条失败上传后的公平重试，以及 dispatch 默认值/损坏数据和分页索引定义的原子迁移拒绝。浏览器 `continuation-results` 场景通过真实 HTTP/SQLite 在桌面和手机宽度检查按需详情、20+3 分页与暂停/恢复竞态；不运行真实 Agent CLI。
+
 agy 原生 Runner 接入、精确 ID 续聊、可见文本/工具 NDJSON、元数据和消息块身份回归：
 
 ```sh
@@ -32,6 +45,50 @@ FLEET_PLAYWRIGHT_MODULE=/path/to/existing/playwright FLEET_BROWSER_CHANNEL=chrom
 `results` 浏览器场景经真实 Hub/SQLite HTTP 检查原任务 diff/文件/测试摘要、按需读取、
 纯文本 XSS 边界、迟到响应取消及 1440/390px。新节点测试加入 Windows/macOS CI。
 测试不运行真实 vendor CLI 或外部模型；安装状态与真实供应商验收单列。
+
+Agy ACP 原生审批回路及旧交互兼容入口：
+
+```sh
+python3 -m pytest tests/test_acp_interactions.py tests/test_session_interactions.py \
+  tests/test_agy_acp.py tests/test_acp_transport_bounds.py \
+  tests/test_acp_lifecycle_races.py \
+  tests/test_session_bridge.py tests/test_native_session_api.py \
+  tests/test_supervisor_control.py tests/test_supervisor_process.py -q
+```
+
+`test_real_acp_permission_http_capture_signed_answer_and_ack` 实际启动 Supervisor
+受管 worker 和独立 stdio 对端，经过 RunnerCapture 加密 spool、runner HTTP、临时
+SQLite、operator 问题预约、签名 poll、独立恢复的 Supervisor、私有 mailbox 和
+ACP 响应写出，再验证成功回执、单条回答事件和恢复运行态。并发和响应丢失只生成
+一条命令，普通消息／旧问题回答保持原协议。另验通用 control 接口不能绕过预约、
+未协商或非受管来源不能取得审批能力、owner 进程身份不符拒绝、迟到 ACK 不能
+声明成功、功能门禁、权限及 SQLite 失败脱敏。以上是本地严格对端证据，不代表
+真实供应商 CLI、外部模型或 Windows/macOS 实机验收。
+
+大文本回归覆盖三万 Unicode 字符的有界分片、工具字段预览的明确截断标记，
+以及完整可见工具输出经过真实 RunnerCapture、加密 spool、HTTP 和 SQLite 后
+可在 source archive 找回，而普通聊天读取继续排除这些归档行。旧 print 身份
+不会因保留 ID 就获得 ACP 续聊能力；未协商 resume 的新会话可完成但不可续聊。
+
+全 Agent 的协议、可见文本增量、工具、原生审批、模型/名称和历史质量证据见
+[Agent 观测契约](../agent-observability.md)。`agent_evidence` 为只读追加 DTO，不授予
+操作权限；SQLite v6 原子迁移、损坏旧库、HTTP 鉴权、并发事实合并、不可伪造重放及
+JavaScript 实际解析入口：
+
+```sh
+python3 -m pytest tests/test_agent_evidence.py tests/test_session_repository.py \
+  tests/test_agent_capability_layers.py tests/test_native_transcript_detail.py \
+  tests/test_native_session_api.py tests/test_session_interactions.py \
+  tests/test_frontend_contracts.py tests/test_session_frontend_contracts.py \
+  tests/test_boundaries.py tests/test_frontend_separation.py -q
+FLEET_PLAYWRIGHT_MODULE=/path/to/existing/playwright FLEET_BROWSER_CHANNEL=chrome \
+  python3 -m pytest tests/test_agent_capability_frontend.py \
+  tests/test_native_chat_frontend.py -q
+```
+
+首次迁移不扫描完整历史，未重放的旧会话显示未知；usage 和内部 reasoning 当前未进入
+公开会话契约。专项测试只访问临时 HTTP/SQLite/Node parser，不能代填各平台真实 Agent
+及模型验收。浏览器缺依赖或未配置跳过时须另跑有依赖的浏览器门禁。
 
 官方插件及 GitHub CLI 的节点接入、设备码任务与验收边界见[官方插件文档](../platform/official-plugins.md)。
 

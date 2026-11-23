@@ -106,7 +106,8 @@ class ReleaseLayoutTests(unittest.TestCase):
                         'assets/views/agent-chat/service.js', 'assets/views/agent-chat/live.js',
                         'assets/views/agent-chat/messages.js', 'assets/views/agent-chat/inspector.js',
                         'assets/views/agent-chat/operations.js'})
-        allowed.add('assets/views/agent-chat/results.js')
+        allowed.update({'assets/views/agent-chat/results.js', 'assets/views/agent-chat/turn-results.js',
+                        'assets/api/continuation-results.js'})
         allowed.update({'assets/views/muse.js', 'assets/views/muse/cards.js', 'assets/views/muse/model.js', 'assets/api/muse.js'})
         allowed.update({'assets/api/plugins.js', 'assets/views/plugins.js', 'assets/plugins/registry.js',
                         'assets/plugins/dom.js', 'assets/plugins/github-cli.js'})

@@ -186,6 +186,10 @@ def _source_file(root: Path, encoded: bytes, remaining: int) -> tuple[bytes, str
     """Open every component relative to pinned, non-link directory descriptors."""
     from fleet_core.workflow.source import _parts
 
+    if type(remaining) is not int or remaining < 0:
+        raise WorktreeError("source_archive_too_large")
+    if os.name == "nt":
+        return _source_file_windows(root, encoded, remaining)
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         raise WorktreeError("source_file_boundary_unavailable")
     parts = _parts(encoded.decode("utf-8", errors="strict"))
@@ -210,6 +214,27 @@ def _source_file(root: Path, encoded: bytes, remaining: int) -> tuple[bytes, str
             return raw, "100755" if info.st_mode & 0o111 else "100644"
     finally:
         os.close(directory)
+
+
+def _source_file_windows(root: Path, encoded: bytes, remaining: int) -> tuple[bytes, str] | None:
+    """Reuse the pinned NT reader; never follow junctions or open by pathname."""
+    from fleet_core.artifact_receive import ArtifactReceiveError
+    from tools.platform.artifact_windows import source_handle
+
+    try:
+        with source_handle(root, encoded.decode("utf-8", errors="strict")) as (handle, _identity):
+            raw = handle.read(remaining + 1)
+            if len(raw) > remaining:
+                raise WorktreeError("source_archive_too_large")
+            return raw, "100644"
+    except FileNotFoundError:
+        return None
+    except ArtifactReceiveError as exc:
+        # The NT reader intentionally bounds every OS failure. A missing leaf
+        # still represents a Git-tracked deletion, not a collection failure.
+        if isinstance(exc.__cause__, FileNotFoundError):
+            return None
+        raise WorktreeError("source_file_boundary_unavailable") from exc
 
 
 def freeze_source_commit(worktree: Path, base_commit: str, *, task_id: str, timestamp: float,

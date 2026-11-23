@@ -23,24 +23,45 @@ def step(index, kind, state='DONE', **fields):
 
 
 def test_agy_registered_native_command_and_exact_discovery():
-    assert default_command('agy') == ('agy', '--output-format', 'stream-json', '--print', '{instruction}')
+    assert default_command('agy') == ('agy', 'acp')
     assert PROFILES['agy'].runner_resume_only
     assert classify_family('/opt/bin/agy', 'agy --print prompt') == 'agy'
     assert classify_family(r'C:\bin\agy.exe', 'agy.exe --print prompt') == 'agy'
     assert classify_family('/opt/bin/antigravity', 'antigravity') is None
-    assert create('agy').build_argv('literal $(touch nope)')[-1] == 'literal $(touch nope)'
+    argv = create('agy').build_argv('literal $(touch nope)')
+    assert argv[-1] == '--instruction=literal $(touch nope)'
+    assert json.loads(argv[argv.index('--vendor-command') + 1])[-1] == 'acp'
 
 
-def test_agy_exact_resume_preserves_options_without_latest_selector():
+def test_agy_exact_resume_uses_owned_acp_without_print_fallback():
     command = ['agy', '--output-format', 'stream-json', '--project', 'my-project',
                '--model', 'observed-model', '--effort', 'high', '--mode', 'plan',
                '--settings', '{"theme":"dark"}', '--print', 'FIRST']
     options = continuation_options('agy', command)
     argv = build_resume_argv('agy', 'agy', CONVERSATION, 'FOLLOW', options)
-    assert argv == ['agy', *options, '--output-format', 'stream-json',
-                    '--conversation', CONVERSATION, '--print', 'FOLLOW']
-    assert '--continue' not in argv and 'FIRST' not in argv
+    assert argv == [], 'pre-ACP identities must fail closed instead of print fallback'
+    owned = create('agy').build_argv('FIRST')
+    options = continuation_options('agy', owned)
+    argv = build_resume_argv('agy', owned[0], CONVERSATION, '--literal', options)
+    assert argv[-3:] == ['--resume-session', CONVERSATION, '--instruction=--literal']
+    assert not any(flag in argv for flag in ('--continue', '--print', '--conversation'))
     assert build_resume_argv('agy', 'agy', CONVERSATION, '--unsafe') == []
+
+
+def test_agy_configured_native_model_and_mode_use_rpc_not_cli_flags():
+    argv = create('agy', command=['agy', 'acp', '--model', 'native-model', '--mode=plan']).build_argv('hi')
+    assert json.loads(argv[argv.index('--vendor-command') + 1])[-1] == 'acp'
+    assert argv[argv.index('--requested-model') + 1] == 'native-model'
+    assert argv[argv.index('--requested-mode') + 1] == 'plan'
+
+
+def test_agy_rejects_custom_print_selector_and_missing_acp():
+    import pytest
+    from tools.spawn_policy import UnsafeInstruction
+    for command in [['agy'], ['agy', '--print=hidden'], ['agy', 'acp', '--continue=latest'],
+                    ['agy', 'acp', 'prompt={instruction}']]:
+        with pytest.raises(UnsafeInstruction):
+            create('agy', command=command).build_argv('hi')
 
 
 def test_agy_stream_retains_text_tools_errors_and_distinct_turns():
@@ -103,7 +124,7 @@ def test_agy_rejects_unbound_identity_and_does_not_claim_arbitrary_adoption(tmp_
     assert 'configure_model' not in project('agy')['allowed_actions']
 
 
-def test_agy_identity_survives_supervisor_restart(tmp_path):
+def test_pre_acp_agy_identity_never_advertises_unsupported_resume(tmp_path):
     rows = [init(), {'event': 'result', 'result': {
         'conversation_id': CONVERSATION, 'status': 'SUCCESS', 'response': 'ok'}}]
     rows[0]['init']['cwd'] = str(tmp_path)
@@ -113,9 +134,25 @@ def test_agy_identity_survives_supervisor_restart(tmp_path):
                      cwd=str(tmp_path), env_allowlist={})
     assert first.wait_session(m.session_id, timeout_s=5).exit_code == 0
     second = Supervisor(tmp_path / 'manifests', 'fixture-node')
-    assert second.continuation_ready(m.session_id)
-    assert second._entries[m.session_id].resume_token == CONVERSATION
+    assert not second.continuation_ready(m.session_id)
     assert CONVERSATION not in (tmp_path / 'manifests' / (m.session_id + '.json')).read_text(encoding='utf-8')
+
+
+def test_persisted_pre_acp_identity_is_retained_without_resume_authority(tmp_path):
+    first = Supervisor(tmp_path / 'manifests', 'fixture-node')
+    m = first.launch(agent='agy', command=[sys.executable, '-c', 'print("legacy")'],
+                     cwd=str(tmp_path), env_allowlist={})
+    first.wait_session(m.session_id, timeout_s=5)
+    entry = first._entries[m.session_id]
+    entry.resume_token = CONVERSATION
+    assert first._continuations.save(entry)
+    entry.manifest.capability_manifest = {'resume': True}
+    first._persist(entry.manifest)
+    second = Supervisor(tmp_path / 'manifests', 'fixture-node')
+    assert not second.continuation_ready(m.session_id)
+    assert second._entries[m.session_id].resume_token == CONVERSATION
+    assert second._entries[m.session_id].manifest.capability_manifest['resume'] is False
+    assert second.continuation_retained(m.session_id), 'legacy identity and workspace stay recoverable'
 
 
 def test_agy_runner_capture_real_sqlite_http_round_trip(tmp_path):

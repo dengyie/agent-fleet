@@ -54,6 +54,8 @@ def _register_blueprints(app, config, platform, sessions, control):
 
         app.register_blueprint(session_bp)
         app.register_blueprint(session_v1_bp)
+        from hub.http.continuation_result_routes import bp as continuation_result_bp
+        app.register_blueprint(continuation_result_bp)
 
     # Task 9: supervisor 蓝图仅在显式启用时注册（无 503/404 歧义，旧 surface 不变）。
     # 有签名 key 时 supervisor_service 才真正签发命令；无 key = fail-closed。

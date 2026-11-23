@@ -89,8 +89,8 @@ class SessionRepositoryTests(unittest.TestCase):
         self.repo.init()
 
     def test_init_records_schema_version(self):
-        self.assertEqual(SCHEMA_VERSION, 5)
-        self.assertEqual(self.repo.schema_version(), 5)
+        self.assertEqual(SCHEMA_VERSION, 6)
+        self.assertEqual(self.repo.schema_version(), 6)
 
     def test_upsert_and_get_session(self):
         spec = _spec()
@@ -421,7 +421,7 @@ def test_v3_database_migrates_stable_directory_order_without_losing_sessions(tmp
     migrated = SessionRepository(db)
     migrated.init()
     assert migrated.management_available is True
-    assert migrated.schema_version() == 5
+    assert migrated.schema_version() == 6
     page = migrated.list_sessions_page(limit=10)
     assert [row["session_id"] for row in page["sessions"]] == [
         "same-time-b", "same-time-a", "older"]
@@ -450,7 +450,7 @@ def test_v4_database_migrates_native_metadata_atomically_without_losing_sessions
     migrated = SessionRepository(db)
     migrated.init()
     assert migrated.management_available is True
-    assert migrated.schema_version() == 5
+    assert migrated.schema_version() == 6
     assert migrated.get_session("kept")["session_id"] == "kept"
     with sqlite3.connect(db) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(sessions)")}
@@ -525,7 +525,7 @@ def test_directory_migration_rolls_back_table_backfill_and_version_atomically(
     assert version == "3"
 
 
-@pytest.mark.parametrize("version", ["6", "-1", "broken", "9" * 5000])
+@pytest.mark.parametrize("version", ["7", "-1", "broken", "9" * 5000])
 def test_unsupported_or_damaged_schema_version_is_preserved_and_disables_management(
         tmp_path, version):
     import sqlite3

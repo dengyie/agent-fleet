@@ -24,12 +24,14 @@ export function renderQuestions(host, {events, session, api, state, paint, enabl
     clearTimeout(draft.timer);
     state.questions.delete(id);
   }
-  const canAnswer = enabled && session.allowed_actions?.includes('append_user_turn') && session.capabilities?.includes('interactive_questions') &&
+  const answerAvailable = enabled && session.capabilities?.includes('interactive_questions') &&
     !['closed', 'failed'].includes(session.status) && !['completed', 'failed', 'stopped'].includes(session.current_state);
   const rendered = new Set();
   for (const event of events) {
     if (event.kind !== 'interaction_request') continue;
     const q = event.payload;
+    const canAnswer = answerAvailable && session.allowed_actions?.includes(
+      q.delivery === 'native_permission' ? 'answer_native_request' : 'append_user_turn');
     if (rendered.has(q.request_id)) continue;
     rendered.add(q.request_id);
     let draft = state.questions.get(q.request_id);

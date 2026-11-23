@@ -14,6 +14,17 @@ def continuation_options(family: str, command: list[str]) -> list[str]:
     These are options supported by the family's resume command. Output paths,
     session selectors and initial-turn attachments must not be replayed.
     """
+    if (family == 'agy' and len(command) > 1
+            and command[1].replace('\\', '/').endswith('/providers/agy_worker.py')):
+        result = [command[1]]
+        valued = {'--vendor-command', '--control-dir', '--request-timeout', '--settle-gap',
+                  '--requested-model', '--requested-mode'}
+        args = iter(command[2:])
+        for arg in args:
+            if arg in valued:
+                value = next(args, None)
+                if value is not None: result.extend((arg, value))
+        return result
     valued = {
         'codex': {'-c', '--config', '-m', '--model', '--enable', '--disable'},
         'claude_code': {'--model', '--fallback-model', '--settings', '--setting-sources',
@@ -86,9 +97,9 @@ def native_resume_argv(family: str, exe: str, token: str, text: str) -> list[str
             return []
         argv = [exe, 'chat', '--quiet', '--resume', token, '--query', text]
     elif family == 'agy':
-        if leading_dash:
-            return []
-        argv = [exe, '--output-format', 'stream-json', '--conversation', token, '--print', text]
+        # Retained pre-ACP executions cannot be safely replayed with print.
+        # Only the negotiated owned ACP worker path below can resume Agy.
+        return []
     else:
         return []
     if any(flag in argv for flag in _RESUME_FORBIDDEN_FLAGS):
@@ -101,6 +112,10 @@ def build_resume_argv(family: str, exe: str, token: str, text: str,
                       options=(), *, resume_builder=None) -> list[str]:
     """Compose retained adapter options without interpreting prompt or shell text."""
     builder = resume_builder or native_resume_argv
+    if (family == 'agy' and options and
+            str(options[0]).replace('\\', '/').endswith('/providers/agy_worker.py')):
+        if not exe or not token or not text or str(token).startswith('-'): return []
+        return [exe, *list(options), '--resume-session', token, '--instruction=' + text]
     argv = builder(family, exe, token, text)
     if not argv:
         return []

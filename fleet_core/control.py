@@ -48,6 +48,7 @@ CONTROL_ACTIONS = frozenset({
     "append_user_turn",
     "apply_local_profile",
     "configure_model",
+    "answer_native_request",
 })
 
 #: Operator source-control tokens that require a bounded signed payload.
@@ -55,6 +56,7 @@ PAYLOAD_ACTIONS = frozenset({
     "append_user_turn",
     "apply_local_profile",
     "configure_model",
+    "answer_native_request",
 })
 
 _MAX_TURN_TEXT = 2000
@@ -310,6 +312,15 @@ def validated_control_payload(action: str, payload: Any) -> dict:
     if not isinstance(payload, Mapping):
         raise ValueError("invalid_payload")
     keys = set(payload)
+    if action == 'answer_native_request':
+        if keys != {'request_id', 'selected'}:
+            raise ValueError('invalid_payload')
+        for key in ('request_id', 'selected'):
+            value = payload.get(key)
+            if (not isinstance(value, str) or not _PROFILE_ID_RE.fullmatch(value)
+                    or any(marker in value.lower() for marker in _PROFILE_ID_REJECT)):
+                raise ValueError('invalid_payload')
+        return {'request_id': payload['request_id'], 'selected': payload['selected']}
     if action == 'configure_model':
         mode = payload.get('mode')
         required = {'mode', 'owner_id'} | ({'profile_id', 'digest'} if mode == 'catalog' else set())

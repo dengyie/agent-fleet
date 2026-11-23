@@ -146,7 +146,9 @@ def test_supervisor_resume_argv_exists_exactly_for_native_resume_families():
         family for family in OBSERVABLE_AGENT_TYPES
         if sup_mod._native_resume_argv(family, "/bin/agent", "tok", "hi")
     }
-    assert built == set(NATIVE_RESUME_AGENT_TYPES)
+    # Agy is resume-capable only through its owned ACP worker, not the generic
+    # direct CLI argv builder (which intentionally has no legacy print path).
+    assert built == set(NATIVE_RESUME_AGENT_TYPES) - {'agy'}
 
 
 def test_discovery_native_resolver_keys_subset_of_profiles():

@@ -14,6 +14,11 @@ An upstream design comparison with T3 Code's provider capabilities, durable even
 handling, bounded timeline and Agent result lifecycle is recorded in the
 [T3 Code source architecture reference](research/t3code-architecture-reference.md).
 
+The additive, read-only per-session protocol and capture facts are defined by
+[Agent observation contract](agent-observability.md). They are projected from
+durable redacted events and explicit metadata, never inferred authorization or
+current installation status.
+
 ```mermaid
 flowchart TB
     View[Static session and machine views] --> UI[Shared UI presentation]
@@ -40,6 +45,7 @@ flowchart TB
 |---|---|---|---|
 | Shared family definition | `agent_profiles.py` | Family aliases, default commands, potential resume support, runner-only constraint, catalog model protocol | Installation detection, authority grants, process execution |
 | Shared wire validation | `session_schema.py`, `fleet_core/session_models.py` | Bounded events/public fields and private model-delivery validation | Hub repositories, browser state, node launchers |
+| Shared evidence projection | `fleet_core/agent_evidence.py` | Fixed observed/unknown/unsupported facts and provenance | Authority grants, I/O, vendor installation guesses |
 | Hub domain | `hub/domain/session_access.py` | Pure projection of family policy, authoritative adoption snapshot, capture claims and enabled actions into public session access | HTTP, SQLite, filesystem/process probes, command issuance |
 | Hub storage ports | `hub/domain/session_ports.py` | Structural `SessionStore` / `TranscriptStore` protocols, ingest result and bounded storage errors | SQL, encryption keys, schema migration |
 | Hub application | `hub/application/session_service.py` | Load authoritative facts, ingestion/ACK, common HTTP/assistant admission, idempotency and orchestration | Vendor argv, native database layout, browser family policy |
@@ -161,23 +167,32 @@ python3 -m pytest tests/test_agent_capability_layers.py tests/test_agent_capabil
 
 Set `FLEET_PLAYWRIGHT_MODULE` to an existing Playwright installation to run the
 Chromium acceptance; it is a test tool, not a frontend runtime dependency.
-No database or signed command schema migration is introduced by this refactor.
+That capability-architecture refactor introduced no database or signed-command
+schema migration. The later ACP/results work below adds the explicit migrations
+described in its own contract and test entry points.
 
-## Antigravity and retained result inspection
+## Antigravity ACP and continuation results
 
-`agy` follows the same declarative registration and Runner-owned admission as
-Hermes/ZCode CLI. `tools/session/agy.py` owns its bounded stateful NDJSON
-projection; it performs no vendor filesystem/process access. `init` establishes
-an invocation namespace, step indices identify visible message/tool updates,
-and aggregate final text is a fallback only. Supervisor separately verifies
-conversation UUID and cwd before saving private continuation identity.
+New `agy` execution uses the node-owned `tools/providers/` ACP runtime based on
+T3 Code's native handshake, eager authentication, exact session resume and
+permission response protocol. The adapter launches an owned worker; only that
+worker owns vendor stdin. Supervisor verifies the private native identity and
+cwd before preserving continuation. Unsupported/failed resume never falls back
+to print or creates a sibling conversation. The historical
+`tools/session/agy.py` parser remains for retained headless transcript ingestion;
+pre-ACP executions cannot resume through the retired print path.
 
-This CLI path is distinct from T3 Code's `agy acp` session adapter. A future ACP
-path needs its own Windows/macOS handshake, approval, steering, resume and
-background-work evidence; CLI stream-json behavior does not imply those controls.
+The transport bounds frames and pending/client requests, drains stderr, and
+rejects malformed/ambiguous responses. Completion waits for native requests,
+post-flush permission acknowledgement and observed background tools. Separate
+signed native answers reuse Hub question reservation and idempotency. Nodes
+resolve a current process incarnation privately; public control cannot bypass
+question admission or deliver raw RPC. Details and lifecycle limitations are in
+[the native runtime contract](native-provider-runtime.md).
 
-`agent-chat/results.js` owns result panel lifecycle and text rendering;
-`service.js` verifies task/session binding around existing HTTP snapshot reads.
-It adds no filesystem API, background snapshot polling, or Agent-specific browser
-policy. Snapshot data represents the original task result, not continued work.
-There is no new Hub database schema or migration in this iteration.
+`agent-chat/results.js` keeps the startup task snapshot. `turn-results.js` reads
+command-bound continuation results through public HTTP, with paged metadata and
+on-demand bounded patches. The node uses a private Git index and per-turn
+baseline; it does not mutate the Agent's index or overwrite startup output.
+Result storage and native capability evidence use independent atomic schema
+migrations and explicit unavailable/unknown states.

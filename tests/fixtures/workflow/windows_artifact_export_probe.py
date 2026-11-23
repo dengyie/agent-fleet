@@ -535,3 +535,33 @@ def test_real_windows_exit_recovers_same_artifact_and_releases_handles(export_fi
             child.terminate()
         child.join(10)
         assert not child.is_alive()
+
+
+def test_continuation_source_reader_reuses_native_boundary(export_fixture: ExportFixture) -> None:
+    """The Git turn collector must use the same pinned no-reparse reader."""
+    from tools.worktree import _source_file, WorktreeError
+    assert _source_file(export_fixture.root, b'nested/report.bin', 7) == (b'payload', '100644')
+    assert _source_file(export_fixture.root, b'nested/missing.bin', 7) is None
+    with pytest.raises(WorktreeError, match='source_archive_too_large'):
+        _source_file(export_fixture.root, b'nested/report.bin', 6)
+    with pytest.raises(WorktreeError, match='source_file_boundary_unavailable'):
+        _source_file(export_fixture.root, b'nested/report.bin:alternate', 7)
+    with export_fixture.source.open('r+b'):
+        with pytest.raises(WorktreeError, match='source_file_boundary_unavailable'):
+            _source_file(export_fixture.root, b'nested/report.bin', 7)
+    assert export_fixture.source.read_bytes() == b'payload'
+
+
+def test_continuation_source_reader_rejects_native_junction(export_fixture: ExportFixture, tmp_path: Path) -> None:
+    from tools.worktree import _source_file, WorktreeError
+    outside = private_directory(tmp_path / 'outside-turn')
+    (outside / 'report.bin').write_bytes(b'outside stays unchanged')
+    link = str(export_fixture.root / 'turn-junction').replace("'", "''")
+    target = str(outside).replace("'", "''")
+    result = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command',
+        f"New-Item -ItemType Junction -Path '{link}' -Target '{target}' | Out-Null"],
+        capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    with pytest.raises(WorktreeError, match='source_file_boundary_unavailable'):
+        _source_file(export_fixture.root, b'turn-junction/report.bin', 100)
+    assert (outside / 'report.bin').read_bytes() == b'outside stays unchanged'

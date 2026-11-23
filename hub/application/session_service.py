@@ -268,7 +268,8 @@ class SessionService:
                         search_events.setdefault(session_id, []).append(clean["event_id"])
                     if clean.get("kind") in {"agent_state_changed", "interaction_request",
                             "interaction_response", "session_start", "session_metadata",
-                            "session_close", "user_message"}:
+                            "session_close", "user_message", "assistant_message", "tool_call",
+                            "tool_result", "capture_gap", "capture_quality_changed"}:
                         projected_events.setdefault(session_id, []).append(clean["event_id"])
                     if result.status != "duplicate":
                         publish_event = clean
@@ -390,6 +391,9 @@ class SessionService:
             return
         try:
             rows = reader(session_id, event_ids)
+            observe = getattr(self.session_repo, 'observe_events', None)
+            if callable(observe):
+                observe(session_id, rows)
             for event in sorted(rows, key=lambda row: row["cursor"]):
                 kind, payload = event["kind"], event.get("payload") or {}
                 if kind == "user_message":
@@ -653,7 +657,7 @@ class SessionService:
             row["capabilities"] = self.session_repo.get_capabilities(session_id)
         return {"session": self._live_session(row, adoption, self._available_actions())}
 
-    def _check_action(self, session, action):
+    def _check_control_authority(self, session):
         state = session.get('adoption_status')
         if state and state != 'adopted':
             code = {'revoked': 'adoption_revoked', 'pending': 'invalid_status_transition',
@@ -663,6 +667,9 @@ class SessionService:
             raise SessionServiceError('session_not_managed')
         if self.supervisor is None:
             raise SessionServiceError('control_unavailable')
+
+    def _check_action(self, session, action):
+        self._check_control_authority(session)
         if action == 'append_user_turn' and session.get('message_delivery', {}).get('reason') == 'native_resume_unsupported':
             raise SessionServiceError('unsupported_action')
         if action == 'append_user_turn' and session.get('message_delivery', {}).get('reason') == 'session_busy':
@@ -673,6 +680,17 @@ class SessionService:
     def control(self, session_id, *, action, actor, payload=None,
                 reason_code='operator_requested', idempotency_key=None,
                 message_binding=None):
+        # Native answers must first consume their durable question reservation.
+        # The public control endpoint cannot dispatch a raw answer command.
+        if action == 'answer_native_request':
+            raise SessionServiceError('session_action_unavailable')
+        return self._control(session_id, action=action, actor=actor, payload=payload,
+            reason_code=reason_code, idempotency_key=idempotency_key,
+            message_binding=message_binding)
+
+    def _control(self, session_id, *, action, actor, payload=None,
+                 reason_code='operator_requested', idempotency_key=None,
+                 message_binding=None):
         """All session callers use the same admission path; reads confer no grant."""
         if getattr(self.session_repo, "management_available", True) is False:
             raise SessionServiceError("feature_unavailable")
@@ -698,11 +716,11 @@ class SessionService:
         return {'session_id': session_id, 'command_id': command['command_id'], 'status': 'pending'}
 
     def answer_interaction(self, session_id: str, data: Mapping, *, actor: str = '') -> dict:
-        """Answer once through the signed append-user-turn channel, never PTY input."""
+        """Reserve one answer; native requests use their own fixed signed action."""
         session = self.get_session(session_id)["session"]
         if getattr(self.session_repo, "management_available", True) is False:
             raise SessionServiceError("feature_unavailable")
-        self._check_action(session, 'append_user_turn')
+        self._check_control_authority(session)
         if "interactive_questions" not in session.get("capabilities", []):
             raise SessionServiceError("interaction_unavailable")
         if session.get("status") in ("closed", "failed") or session.get("current_state") in ("completed", "failed", "stopped"):
@@ -719,7 +737,16 @@ class SessionService:
             question = self.session_repo.get_interaction(session_id, request_id)
             if question is None:
                 raise SessionServiceError("interaction_expired")
+            native = question.get('delivery') == 'native_permission'
+            action = 'answer_native_request' if native else 'append_user_turn'
+            self._check_action(session, action)
             answer, text = normalize_answer(question, data)
+            if native:
+                if len(answer['selected']) != 1 or answer['text']:
+                    raise ValueError('invalid_interaction_answer')
+                # Retain caller binding with the durable reservation without
+                # exposing native RPC or option identities to the Hub.
+                answer = {**answer, 'operator_id': actor}
             receipt = self.session_repo.reserve_interaction(session_id, request_id, token, answer)
             if receipt is not None:
                 return receipt
@@ -753,10 +780,13 @@ class SessionService:
         except (sqlite3.Error, OSError) as exc:
             raise SessionServiceError("interaction_unavailable") from exc
         try:
-            enqueue_kwargs = {"payload": {"text": text}, 'actor': actor}
+            payload = ({'request_id': request_id, 'selected': answer['selected'][0]}
+                       if native else {'text': text})
+            enqueue_kwargs = {"payload": payload, 'actor': actor}
             if supports_idempotency:
                 enqueue_kwargs["idempotency_key"] = command_key
-            command = self.control(session_id, action='append_user_turn', **enqueue_kwargs)
+            dispatch = self._control if native else self.control
+            command = dispatch(session_id, action=action, **enqueue_kwargs)
         except SessionServiceError:
             raise
         except Exception as exc:

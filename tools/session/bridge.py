@@ -88,6 +88,10 @@ _TYPE_TO_KIND = {
     "UserPromptSubmit": "user_message",
     "AssistantMessage": "assistant_message",
     "SessionStart": "session_start",
+    "session_metadata": "session_metadata",
+    "interaction_request": "interaction_request",
+    "interaction_response": "interaction_response",
+    "agent_state_changed": "agent_state_changed",
 }
 
 # Control/quality events legitimately carry a higher ``capture_quality`` (the
@@ -377,6 +381,9 @@ class SessionBridge:
         self._last_error: str | None = None
         self._last_reject: str | None = None
         self._expected_user_echo: str | None = None
+        # A family name does not prove a live native permission channel. Only
+        # persisted metadata from a managed ACP worker can enable this path.
+        self._native_questions_enabled = False
         self._started = False
         self._active_native_message_id: str | None = None
         self._active_native_text_blocks: set[int] = set()
@@ -622,7 +629,7 @@ class SessionBridge:
             events = [events]
         else:
             events = list(events or [])
-        if state is not None:
+        if state is not None and not any(event.get('kind') == 'agent_state_changed' for event in events):
             events.append(state)
         elif self.managed:
             events.extend(self._states_from_events("structured_stream", events))
@@ -635,7 +642,7 @@ class SessionBridge:
             events = [events]
         else:
             events = list(events or [])
-        if state is not None:
+        if state is not None and not any(event.get('kind') == 'agent_state_changed' for event in events):
             events.append(state)
         elif self.managed:
             events.extend(self._states_from_events("native_transcript", events))
@@ -890,13 +897,23 @@ class SessionBridge:
         elif rtype in ("session_start", "session_metadata"):
             allowed = ("agent_family", "adapter", "task_id", "agent_ref",
                        "title", "model", "provider", "client_version",
-                       "native_started_at", "interactive_questions",
+                       "native_started_at", "interactive_questions", "runtime_protocol",
                        "native_resume", "resumed", "desktop_bridge",
                        "model_takeover")
             ev["payload"] = {key: raw[key] for key in allowed if key in raw}
             if rtype == "session_start":
                 ev["payload"].setdefault("agent_family", self._agent_family)
                 ev["payload"].setdefault("adapter", self.source)
+        elif rtype == "interaction_request":
+            allowed = ("request_id", "question_type", "prompt", "options",
+                       "allow_custom", "tool_name", "delivery")
+            ev["payload"] = {key: raw[key] for key in allowed if key in raw}
+        elif rtype == "interaction_response":
+            allowed = ("request_id", "selected", "text")
+            ev["payload"] = {key: raw[key] for key in allowed if key in raw}
+        elif rtype == "agent_state_changed":
+            allowed = ("state", "source", "confidence", "reason")
+            ev["payload"] = {key: raw[key] for key in allowed if key in raw}
         try:
             return validate_event(ev)
         except (ValueError, TypeError):
@@ -922,6 +939,18 @@ class SessionBridge:
         """
         if event is None:
             return None
+        if event.get("kind") in ("session_start", "session_metadata"):
+            payload = event["payload"]
+            native_channel = (self.managed and self._agent_family == 'agy'
+                and event.get('source') == 'structured_stream'
+                and payload.get('runtime_protocol') == 'acp'
+                and payload.get('interactive_questions') is True)
+            if ('runtime_protocol' in payload and payload['runtime_protocol'] != 'acp'
+                    and self._native_questions_enabled):
+                event = dict(event, payload=dict(payload, interactive_questions=False))
+            elif (payload.get('interactive_questions') is True
+                    and not self._manifest.get('interactive_questions') and not native_channel):
+                event = dict(event, payload=dict(payload, interactive_questions=False))
         if event.get("kind") == "agent_state_changed":
             source = event.get("source", self.source)
             source = "hook" if source == "hooks" else source
@@ -934,8 +963,11 @@ class SessionBridge:
                 payload.update(state="unknown", confidence="low", reason="unstructured_source")
             event = dict(event, payload=payload)
         if event.get("kind") in ("interaction_request", "interaction_response"):
-            if (self._manifest.get("interactive_questions") is not True
+            if ((self._manifest.get("interactive_questions") is not True and not self._native_questions_enabled)
                     or event.get("source") not in ("hook", "hooks", "structured_stream", "native_transcript")):
+                return None
+            if (event['payload'].get('delivery') == 'native_permission'
+                    and not self._native_questions_enabled):
                 return None
         if self.managed:
             return event
@@ -1032,6 +1064,15 @@ class SessionBridge:
             return False
         if result.capture_blocked:
             self._emit_downgrade(event, "spool_quota")
+        if result.accepted and event['kind'] in ('session_start', 'session_metadata'):
+            payload = event['payload']
+            if 'runtime_protocol' in payload and payload['runtime_protocol'] != 'acp':
+                self._native_questions_enabled = False
+            if 'interactive_questions' in payload:
+                self._native_questions_enabled = bool(self.managed and self._agent_family == 'agy'
+                    and event.get('source') == 'structured_stream'
+                    and payload.get('runtime_protocol') == 'acp'
+                    and payload['interactive_questions'] is True)
         if event["kind"] == "source_record":
             return result.accepted
         return result.accepted or result.gap_sequence is not None
