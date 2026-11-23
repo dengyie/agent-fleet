@@ -60,3 +60,5 @@ Files: `frontend/assets/views/agent-chat/results.js`, chat/inspector/service mod
 - Integrated PR116 verification: native chat/package/capability Chrome suite **40 passed** at 1440/390px; agy/transcript/continuation/capture/architecture/frontend/package checks **272 passed, 2 subtests passed**. Ruff and static frontend smoke passed.
 - Rebase integration preserves PR116 native controls, local profiles, stale-authority guards and context handoff. Original PR head Windows timed out after 555 passing tests; no assertion failures. Keep this evidence and verify the integrated head separately.
 - Signed-client publication and production deployment remain pending until exact main CI succeeds.
+
+- Physical Windows integrated full gate: 825 passed, 10 skipped with UTF-8 mode disabled. One existing Node-test capture decoded UTF-8 as GBK; warning-as-error reproduced a failure. Explicit UTF-8 capture plus thread-warning error guard passed all 6 bridge tests on Windows and macOS. This fixture-only fix does not change the signed client closure.
