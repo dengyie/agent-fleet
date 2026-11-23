@@ -48,7 +48,7 @@ returns a validated native outcome and never automatically retries a prompt.
 - [x] Implement cancellation and background/permission settlement; reject unknown
       client file/terminal requests and source identity mismatches.
 - [x] Run `python3 -m pytest tests/test_agy.py tests/test_agy_acp.py tests/test_native_continuation.py tests/test_native_tail_drain.py tests/test_cross_platform_agents.py -q` (included in the final combined scope below).
-- [ ] Commit the verified units together; shared action/evidence/result contracts
+- [x] Commit the verified units together; shared action/evidence/result contracts
       are released atomically rather than as incompatible intermediate versions.
 
 Independent-peer test shape:
@@ -77,7 +77,7 @@ Task 1. It must not alter `allowed_actions` or require installed CLIs.
 - [x] Implement pure projection and additive round-trip DTO parsing.
 - [x] Document per-family facts and protocol upgrade decision criteria.
 - [x] Run `python3 -m pytest tests/test_agent_evidence.py tests/test_agent_capability_layers.py tests/test_native_transcript_detail.py tests/test_boundaries.py tests/test_frontend_separation.py -q`.
-- [ ] Commit and record evidence.
+- [x] Commit and record evidence.
 
 ```python
 def test_evidence_never_grants_control():
@@ -105,7 +105,7 @@ identity. Existing question answers and ordinary messages retain their protocols
 - [x] Add real SQLite/HTTP + signed client/mailbox tests for concurrent retries,
       response loss, revoked authority, closed mailbox and wrong option.
 - [x] Run `python3 -m pytest tests/test_acp_interactions.py tests/test_session_interactions.py tests/test_native_session_api.py tests/test_supervisor_control.py -q` (included in the permission regression scope below).
-- [ ] Commit and record evidence.
+- [x] Commit and record evidence.
 
 ```python
 def test_native_answer_does_not_append_text(hub, pending_native_request):
@@ -135,7 +135,7 @@ Do not rewrite startup task results. HTTP reads are operator-scoped and bounded.
 - [x] Verify concurrent result isolation, dirty baseline, failure/no changes,
       lost upload, migration rollback/corruption and redaction bounds.
 - [x] Run `python3 -m pytest tests/test_continuation_results.py tests/test_task_patch_bounds.py tests/test_task_summary_collection.py tests/test_native_continuation.py tests/test_native_chat_frontend.py -q` (covered by the combined and installed-browser scopes below).
-- [ ] Commit and record evidence.
+- [x] Commit and record evidence.
 
 ```python
 def test_original_result_survives_continuation(result_service, completed_turn):
@@ -147,15 +147,15 @@ def test_original_result_survives_continuation(result_service, completed_turn):
 
 ## Task 5: Integration, platform gates and publication
 
-- [ ] Review implementation against every lifecycle/error/authorization clause in
+- [x] Review implementation against every lifecycle/error/authorization clause in
       the development contract and correct gaps before publication.
-- [ ] Update native session/task API, testing entry points, acceptance matrix,
+- [x] Update native session/task API, testing entry points, acceptance matrix,
       source comparison status and existing Obsidian project/canonical indices.
-- [ ] Run changed tests, architecture/packaging checks and full journey gate with
+- [x] Run changed tests, architecture/packaging checks and full journey gate with
       existing installed browser tooling; do not download large binaries silently.
-- [ ] Check staged diff, UTF-8 no BOM, no unrelated changes, and actual old-store
+- [x] Check staged diff, UTF-8 no BOM, no unrelated changes, and actual old-store
       migration. Rebase onto latest main before merge.
-- [ ] Follow existing GitHub CI/deployment chain and inspect exact revision;
+- [x] Follow existing GitHub CI/deployment chain and inspect exact revision;
       actual client/model checks retain truthful platform-specific evidence.
 
 ## Executed evidence
@@ -230,11 +230,10 @@ def test_original_result_survives_continuation(result_service, completed_turn):
   uploads under the shared parent, and a pre-existing writable spool is refused
   without changing its contents. The previous code failed the last check. The
   four-module Windows run including the NTFS probes passed 145 tests with 34
-  platform skips after the change. GitHub platform checks remain pending.
-- This file is the pre-publication execution checkpoint. Exact final platform
-  counts, GitHub merge SHA, deployment receipt and external/client boundaries are
-  recorded in the publication PR and the existing canonical operations entry;
-  release success must not be inferred from local fixture results.
+  platform skips after the change. The final CI gates are recorded below.
+- The implementation and publication plan completed in PR #120. Final platform
+  results, merge SHA, production receipt and live client verification are recorded
+  below; real vendor/model acceptance remains separate.
 - Fresh real Chrome scope:
   `FLEET_PLAYWRIGHT_MODULE=/tmp/fleet-browser/node_modules/playwright
   FLEET_BROWSER_CHANNEL=chrome PYTHONPATH=. python3 -m pytest
@@ -244,3 +243,36 @@ def test_original_result_survives_continuation(result_service, completed_turn):
   and `git diff --check` passed. All 69 changed files decoded as UTF-8 without
   BOM; 51 Python files parsed with the Python 3.10 grammar, and changed Markdown
   local links resolved. These are checks at this checkpoint, not platform CI.
+
+## Final integration and production verification
+
+- PR [#120](https://github.com/dengyie/agent-fleet/pull/120) merged as
+  `c0b5d071e4e3540cf54b212cb44e8efe77126e98`. The exact tested source tree is
+  the merged main tree. PR CI run `45251224161` passed Linux (8,836 tests,
+  204 subtests, 47 journeys, zero skips), Windows (1,020 passed, 44 platform
+  skips; the real NTFS results-spool probe passed) and macOS (630 passed,
+  2 platform skips, 103 subtests). Main run `45258361764` independently passed
+  Linux, Windows, macOS, package and deploy.
+- Production deployment receipt: `deployed/succeeded`, main
+  `c0b5d071e4e3540cf54b212cb44e8efe77126e98`, run `45258361764`. Read-only
+  verification matched 1,341 backend files, 107 public frontend resources,
+  session schema v6, continuation-results schema 1 and dispatch schema 1;
+  configuration hashes were preserved. Rollback anchor:
+  `/var/lib/agent-fleet-deploy/45258361764-vewym40n`.
+- The independently verified signed client manifest advanced both nodes to
+  `c0b5d071e4e3-s31`, sequence 31. All 199 files matched on macOS and Windows;
+  runner/control-client receipts identify live processes, one-shot probe
+  receipts identify the same release, and prior `e9428d872b1a-s30` releases
+  remain available. Nine native session histories/worktrees and twelve current
+  Agent setting hashes matched their pre-upgrade snapshots.
+- Authenticated production reads revisited all nine retained sessions, task
+  bindings, newest and older event pages, result pages and capability DTOs.
+  Chrome on 1440px and 390px matched the main asset version, read session
+  evidence and continuation results on demand, and generated zero business API
+  writes or page errors. Existing sessions correctly report no continuation
+  result where the old clients never uploaded one.
+- Agy remains installed only on macOS in this environment. No real Agy model
+  call, Windows Agy installation, historical desktop-store import, active
+  steering, idle persistent ACP host, hidden-reasoning projection or usage/cost
+  reporting was tested or claimed. These remain explicit acceptance/design
+  boundaries; CI uses independent ACP protocol peers and no external model.

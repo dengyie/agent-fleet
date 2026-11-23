@@ -8,7 +8,7 @@
 
 | Agent | macOS | Windows | 原生续聊 / 采集 | 平台目录模型接管 |
 |---|---|---|---|---|
-| Google Antigravity (`agy`) | 本机 CLI 1.5.14；新 ACP 真实模型待验收 | 未验证安装；ACP 独立 peer 进入 Windows gate | `agy acp`，原生精确 `session/resume`；消息增量、工具、原生权限、后台结算 | 仅使用原生协商的模型/模式；不声明第三方目录接管 |
+| Google Antigravity (`agy`) | CLI 1.5.14；T3-style ACP runtime shipped in signed client s31; real model call pending | ACP CI passed; Agy binary is not installed | `agy acp`，原生精确 `session/resume`；消息增量、工具、原生权限、后台结算 | 仅使用原生协商的模型/模式；不声明第三方目录接管 |
 | Codex | 已安装 CLI | 已安装原生 exe | JSON stdout；同一 thread ID | 支持 Responses 兼容配置 |
 | Claude Code | 已安装 CLI | 已安装原生 exe | stream-json；同一 session ID | 支持 Anthropic 兼容配置 |
 | Pi | 已安装 CLI | 已安装 Node 包 | print/json；精确 session ID/path | 保留本机 provider/model，不声明目录接管 |
@@ -57,3 +57,15 @@ OWNER RIGHTS ACE 仅映射到经验证的所有者；其它 SID 的危险写入�
 usage/费用投影。运行中 steering、跨空闲轮次的常驻 ACP host 尚未开放；当前
 连接保持到本轮原生请求/后台工具结算，后续轮次精确恢复同一 native session。
 浏览器可以替代操作界面，VM 仍需 Agent 引擎、登录状态和 Fleet 节点。
+
+
+### PR120 production record (2026-11-24)
+
+PR [#120](https://github.com/dengyie/agent-fleet/pull/120) merged as
+`c0b5d071e4e3540cf54b212cb44e8efe77126e98`; main CI run
+[45258361764](https://github.com/dengyie/agent-fleet/actions/runs/45258361764)
+passed test, Windows, macOS, package and deploy jobs. macOS and Windows nodes now
+run the signed 199-file client `c0b5d071e4e3-s31` (sequence 31), with their
+previous s30 releases retained. No vendor binary was installed or model called
+as part of this release. The Windows ACP peer exercises the adapter contract; it
+does not establish Windows Agy installation or authentication.
