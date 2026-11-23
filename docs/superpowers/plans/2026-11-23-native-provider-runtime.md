@@ -208,6 +208,21 @@ def test_original_result_survives_continuation(result_service, completed_turn):
   tests/test_native_session_api.py tests/test_supervisor_control.py
   tests/test_supervisor_process.py -q`: **273 passed, 2 platform skips,
   2 subtests**. Suites overlap and are not summed as unique coverage.
+- Windows CI initially reported 23 setup errors and 29 failures on the first PR
+  head. The exact red paths were reproduced against an isolated source archive on
+  the installed Windows node: POSIX-only Hub command repositories were being
+  initialized by Windows node-path tests; the NTFS reader rejected real owner
+  `S-1-5-32-544` plus `OWNER RIGHTS` ACLs; and a frontend subprocess used the
+  Windows ANSI input codec for Chinese JavaScript. The minimal platform boundary
+  guards, trusted-owner/OWNER RIGHTS mapping, and explicit UTF-8 subprocess input
+  are now implemented. The ACL policy test failed against the prior `security_identity`
+  method for 3 trusted-owner cases and passed all 9 policy cases after the fix.
+  The selected full Windows CI command, run from an isolated archive on the
+  installed Windows node, passed **1019 tests with 44 explicit skips in 383.92s**;
+  the set includes native kernel artifact probes, NTFS Git collection and durable
+  HTTP upload retries. It used the node's Python 3.12.7; GitHub's pinned Python
+  3.10 Windows gate remains the publication check. The exact macOS CI command on
+  the final source passed **630 tests, 2 skips and 103 subtests in 34.75s**.
 - This file is the pre-publication execution checkpoint. Exact final platform
   counts, GitHub merge SHA, deployment receipt and external/client boundaries are
   recorded in the publication PR and the existing canonical operations entry;

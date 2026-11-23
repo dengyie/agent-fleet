@@ -154,6 +154,12 @@ no changes, truncation and unavailable test summary. Never overwrite the startup
 task result or attribute cumulative previous changes to the new turn. Unmanaged,
 unverified, non-Git or unavailable workspaces return explicit unavailability.
 
+On Windows the collector uses the pinned NTFS source reader. It accepts a directory
+owned by the current user, SYSTEM or Administrators and treats OWNER RIGHTS ACE as
+applying to that verified owner only; unrelated principals with dangerous write rights
+remain rejected. The Hub signed-command SQLite store continues to enforce its POSIX
+ownership/mode invariant on POSIX hosts.
+
 Publication uses the existing authenticated node/runner delivery pattern,
 durable idempotent persistence and operator-scoped read DTOs. Native paths,
 credentials, command argv and database details stay private. New SQLite schema

@@ -47,8 +47,11 @@ stderr 饱和、取消、提前 prompt 结果和权限/ACK 并发。原生协商
 模型/模式可在 worker 发 prompt 前选择，且私有续聊记录保留该选择。
 
 Windows 结果文件读取复用已有 pinned NT handle reader，拒绝 reparse/ADS 和
-读取时替换；macOS/POSIX 使用 no-follow 目录描述符。新增专项进入三端 CI；
-CI 通过和真实安装/模型验收是不同证据，不能互相替代。
+读取时替换；接受当前用户、SYSTEM 或 Administrators 为所有者的正常私有目录，并将
+OWNER RIGHTS ACE 仅映射到经验证的所有者；其它 SID 的危险写入权限仍拒绝。macOS/POSIX
+使用 no-follow 目录描述符。Windows 的 POSIX Hub command-store 回归清楚标记平台跳过，
+不以弱化运行时文件权限检查规避测试。新增专项进入三端 CI；CI 通过和真实安装/模型验收
+是不同证据，不能互相替代。
 
 尚未执行新 ACP 对真实 Agy 模型的调用、Windows Agy 安装、旧桌面历史导入和
 usage/费用投影。运行中 steering、跨空闲轮次的常驻 ACP host 尚未开放；当前

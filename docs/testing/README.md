@@ -17,7 +17,7 @@ PYTHONPATH=. python3 -m pytest tests/test_session_schema.py \
   tests/test_review_node_sync.py -q
 ```
 
-受管续聊的逐轮快照、Git 安全读取、SQLite 幂等/迁移、丢包恢复、HTTP 鉴权和原任务结果隔离：
+受管续聊的逐轮快照、Windows NTFS ACL 所有者边界、Git 安全读取、SQLite 幂等/迁移、丢包恢复、HTTP 鉴权和原任务结果隔离：
 
 ```sh
 python3 -m pytest tests/test_continuation_results.py tests/test_task_patch_bounds.py \
@@ -26,7 +26,7 @@ python3 -m pytest tests/test_continuation_results.py tests/test_task_patch_bound
   tests/test_release_layout.py -q
 ```
 
-Windows CI 同时在原生 Artifact Export probe 中运行受管续聊 source reader 测试，验证 NT 固定句柄、junction/ADS/共享写入拒绝和有限读取；实际跨平台 Git+Hub 集成仍由各平台 `tests/test_continuation_results.py` 执行。
+Windows CI 同时在原生 Artifact Export probe 中运行受管续聊 source reader 测试，验证 NT 固定句柄、junction/ADS/共享写入拒绝、受信任 Administrators/SYSTEM owner 与 OWNER RIGHTS ACL、外部 SID 拒绝和有限读取；Windows 上依赖 POSIX `st_uid/getuid` 的 Hub signed-command 迁移测试按平台跳过，Linux CI 继续验证它们。实际跨平台 Git+Hub 节点侧采集仍由各平台 `tests/test_continuation_results.py` 执行。
 
 `test_continuation_results.py` 还覆盖 prepared/live/terminal 崩溃草稿、超过一批待恢复记录时的精确会话 fence、cwd/attempt/process-group 变更隔离、执行前磁盘失败、二进制补丁拒绝、不可变 after-tree 测试证据、32 条失败上传后的公平重试，以及 dispatch 默认值/损坏数据和分页索引定义的原子迁移拒绝。浏览器 `continuation-results` 场景通过真实 HTTP/SQLite 在桌面和手机宽度检查按需详情、20+3 分页与暂停/恢复竞态；不运行真实 Agent CLI。
 

@@ -223,6 +223,8 @@ def test_result_store_rejects_symlink_cache_without_writing_target(tmp_path):
 
 @pytest.fixture
 def result_hub(tmp_path):
+    if os.name == 'nt':
+        pytest.skip('Hub signed-command store requires POSIX ownership; node collection tests run on Windows')
     from hub.bootstrap import create_app
     from hub.config import FleetConfig
     app = create_app(FleetConfig.from_root(tmp_path, dev_operator='owner@example.test',
@@ -342,6 +344,7 @@ def test_http_conflict_and_task_database_failure_are_bounded(result_hub, monkeyp
 
 
 @pytest.mark.parametrize('exit_code', [0, 7])
+@pytest.mark.skipif(os.name == 'nt', reason='Hub signed-command store requires POSIX ownership')
 def test_real_supervisor_turn_collects_only_dirty_delta_and_preserves_startup(project, tmp_path, monkeypatch, exit_code):
     import sys
     import time
@@ -447,6 +450,54 @@ def test_windows_source_reader_uses_pinned_handle_and_bounded_read(monkeypatch, 
         _source_file_windows(tmp_path, b'unsafe:ads', 100)
 
 
+@pytest.mark.parametrize('owner,writer,accepted', [
+    ('current-user', 'S-1-3-4', True),
+    ('S-1-5-32-544', 'S-1-3-4', True),
+    ('S-1-5-18', 'S-1-3-4', True),
+    ('current-user', 'current-user', True),
+    ('current-user', 'S-1-5-32-544', True),
+    ('foreign-user', 'S-1-3-4', False),
+    ('foreign-user', 'current-user', False),
+    ('current-user', 'S-1-1-0', False),
+    ('S-1-5-32-544', 'S-1-5-32-545', False),
+])
+def test_windows_acl_owner_rights_resolve_only_after_trusted_owner(owner, writer, accepted):
+    """Portable policy test; real handle/ACL races run in the NT kernel suite."""
+    import ctypes as C
+    from fleet_core.artifact_receive import ArtifactReceiveError
+    from tools.platform import artifact_windows as win
+
+    ace = win._ACE(0, 0, 16, 0x1f01ff, 0)
+    acl = (win.U8 * 8)(2)
+    def security_info(_handle, _kind, _flags, owner_out, _group, acl_out, _sacl, descriptor):
+        C.cast(owner_out, C.POINTER(win.HANDLE))[0] = 12345
+        C.cast(acl_out, C.POINTER(win.HANDLE))[0] = C.addressof(acl)
+        C.cast(descriptor, C.POINTER(win.HANDLE))[0] = 12346
+        return 0
+    def acl_info(_acl, output, _size, _kind):
+        C.cast(output, C.POINTER(win._ACLSize)).contents.AceCount = 1
+        return 1
+    def get_ace(_acl, _index, output):
+        C.cast(output, C.POINTER(win.HANDLE))[0] = C.addressof(ace)
+        return 1
+    def descriptor_control(_descriptor, control, revision):
+        C.cast(control, C.POINTER(win.U16))[0] = 0x8004
+        C.cast(revision, C.POINTER(win.U32))[0] = 1
+        return 1
+    native = object.__new__(win._Native)
+    native.current_user = lambda: 'current-user'
+    native.sid = lambda pointer: owner if pointer == 12345 else writer
+    native.kernel = SimpleNamespace(LocalFree=lambda _: None)
+    native.security = SimpleNamespace(GetSecurityInfo=security_info, GetAclInformation=acl_info,
+        GetAce=get_ace, GetSecurityDescriptorControl=descriptor_control)
+    if accepted:
+        actual_owner, digest = native.security_identity(1)
+        assert actual_owner == owner and len(digest) == 64
+    else:
+        with pytest.raises(ArtifactReceiveError, match='unsafe_input_path'):
+            native.security_identity(1)
+
+
 def test_frontend_turn_parser_and_service_reject_cross_session_results():
     script = r'''
 import assert from 'node:assert/strict';
@@ -473,7 +524,7 @@ await assert.rejects(service.readContinuationResults('another'),/不一致/);
 await assert.rejects(service.readContinuationResult('s','cmd_x',signal),/不一致/);
 '''
     response = subprocess.run(['node', '--input-type=module'], cwd=Path(__file__).resolve().parents[1],
-        input=script, capture_output=True, text=True, timeout=20)
+        input=script, capture_output=True, text=True, encoding='utf-8', timeout=20)
     assert response.returncode == 0, response.stdout + response.stderr
 
 
@@ -599,6 +650,7 @@ def test_expired_commands_require_immutable_dispatch_evidence(result_hub, dispat
         assert services['continuation_results'].repository.page('sess_turn_1', limit=10, before=None)['results'] == []
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='Hub signed-command store requires POSIX ownership')
 def test_dispatch_migration_backfills_only_proven_delivery_and_retains_first_claim(tmp_path):
     from hub.application.supervisor_service import SupervisorService
     from hub.infrastructure.supervisor_command_repository import SupervisorCommandRepository
@@ -625,6 +677,7 @@ def test_dispatch_migration_backfills_only_proven_delivery_and_retains_first_cla
 
 
 @pytest.mark.parametrize('kind', ['future', 'missing', 'wrong_type', 'wrong_default', 'bad_value'])
+@pytest.mark.skipif(os.name == 'nt', reason='Hub signed-command store requires POSIX ownership')
 def test_dispatch_schema_invalid_or_corrupt_fails_closed_atomically(tmp_path, kind):
     from hub.infrastructure.supervisor_command_repository import SupervisorCommandRepository, SupervisorCommandRepositoryError
     repo = SupervisorCommandRepository(tmp_path / 'dispatch-store/commands.db')

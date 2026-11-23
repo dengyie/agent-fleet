@@ -1,6 +1,7 @@
 """Native permission answers retain question idempotency and use a typed command."""
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 import sqlite3
 
 import pytest
@@ -30,6 +31,8 @@ def native_event(sequence, kind, payload):
 
 @pytest.fixture
 def native_permissions(tmp_path):
+    if os.name == 'nt':
+        pytest.skip('Hub signed-command store requires POSIX ownership; node delivery tests run on Windows')
     app = create_app(FleetConfig.from_root(tmp_path, dev_operator='owner@example.test',
         supervisor_enabled=True, supervisor_signing_raw=bytes(range(32)),
         session_repositories_enabled=True, adoption_repositories_enabled=True,
@@ -192,6 +195,7 @@ def test_native_permission_sqlite_failure_is_bounded(native_permissions, monkeyp
     assert commands(services) == []
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='Hub signed-command store requires POSIX ownership')
 def test_native_answer_action_gate_and_precedence(tmp_path):
     from hub.application.supervisor_service import SupervisorService, SupervisorServiceError
     private, _ = control.generate_ed25519_keypair()
@@ -389,6 +393,7 @@ def test_capture_only_negotiated_owned_acp_enables_native_questions(tmp_path, ma
         bridge.close()
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='Hub signed-command store requires POSIX ownership')
 def test_real_acp_permission_http_capture_signed_answer_and_ack(tmp_path):
     import threading
     from tests.test_agy_acp import worker

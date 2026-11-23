@@ -207,20 +207,26 @@ class _Native:
             raise C.WinError(error)
         try:
             user = self.current_user()
-            if not owner.value or self.sid(owner.value) != user or not acl.value:
+            # Elevated Windows processes commonly create objects owned by the
+            # Administrators group rather than the token's user SID. Both that
+            # group and SYSTEM already belong to the trusted writer boundary.
+            trusted = {user, "S-1-5-18", "S-1-5-32-544"}
+            owner_sid = self.sid(owner.value) if owner.value else None
+            if owner_sid not in trusted or not acl.value:
                 raise ArtifactReceiveError("unsafe_input_path")
             size = _ACLSize()
             self.checked(self.security.GetAclInformation(acl, C.byref(size), C.sizeof(size), 2))
             if size.AceCount > 256:
                 raise ArtifactReceiveError("unsafe_input_path")
-            trusted = {user, "S-1-5-18", "S-1-5-32-544"}
-            entries = [self._validate_ace(acl.value, index, trusted) for index in range(size.AceCount)]
+            # OWNER RIGHTS resolves to the verified owner, not to every user.
+            entries = [self._validate_ace(acl.value, index, trusted | {"S-1-3-4"})
+                       for index in range(size.AceCount)]
             control, revision = U16(), U32()
             self.checked(self.security.GetSecurityDescriptorControl(descriptor, C.byref(control), C.byref(revision)))
             acl_revision = C.cast(acl, C.POINTER(U8)).contents.value
-            encoded = json.dumps([control.value, revision.value, acl_revision, user, entries],
+            encoded = json.dumps([control.value, revision.value, acl_revision, owner_sid, entries],
                 separators=(",", ":"), ensure_ascii=True).encode("ascii")
-            return user, hashlib.sha256(encoded).hexdigest()
+            return owner_sid, hashlib.sha256(encoded).hexdigest()
         finally:
             self.kernel.LocalFree(descriptor)
 
