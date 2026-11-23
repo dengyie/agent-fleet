@@ -108,7 +108,8 @@ def test_creation_failure_has_bounded_error_and_keeps_source(tmp_path, monkeypat
     assert service.sessions.get_session("source-session") == before
 
 
-def test_handoff_in_real_browser(tmp_path):
+@pytest.mark.parametrize('chat', [False, True])
+def test_handoff_in_real_browser(tmp_path, chat):
     if not os.environ.get("FLEET_PLAYWRIGHT_MODULE"):
         pytest.skip("Set FLEET_PLAYWRIGHT_MODULE to run Chromium acceptance")
     app = make_handoff_app(tmp_path)
@@ -117,7 +118,7 @@ def test_handoff_in_real_browser(tmp_path):
     serving.start()
     try:
         result = subprocess.run(["node", str(ROOT / "tests/fixtures/frontend/handoff_browser.cjs"),
-            f"http://127.0.0.1:{server.server_port}"], capture_output=True, text=True, timeout=90)
+            f"http://127.0.0.1:{server.server_port}", 'chat' if chat else 'timeline'], capture_output=True, text=True, timeout=90)
         assert result.returncode == 0, result.stdout + result.stderr
     finally:
         server.shutdown()

@@ -1,15 +1,23 @@
 const {chromium} = require(process.env.FLEET_PLAYWRIGHT_MODULE);
 const assert = require('node:assert/strict');
-const [origin] = process.argv.slice(2);
+const [origin, mode] = process.argv.slice(2);
 (async () => {
   const browser = await chromium.launch({channel: process.env.FLEET_BROWSER_CHANNEL || 'chrome', headless: true});
   try {
     const page = await browser.newPage({viewport: {width: 1440, height: 1000}});
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
+    const open = async id => {
+      await page.goto(origin + '/session/' + id + (mode === 'chat' ? '?view=chat' : ''));
+      if (mode === 'chat') {
+        await page.getByRole('tab', {name:'接力',exact:true,includeHidden:true}).waitFor({state:'attached'});
+        if (page.viewportSize().width === 390) await page.getByRole('button',{name:'工作面板',exact:true}).click();
+        await page.getByRole('tab', {name:'接力',exact:true}).click();
+      }
+    };
     for (const width of [1440, 390]) {
       await page.setViewportSize({width, height: 1000});
-      await page.goto(origin + '/session/source-session');
+      await open('source-session');
       const panel = page.locator('[data-handoff-panel]');
       await panel.getByRole('button', {name:'预览接力包', exact:true}).click();
       await panel.getByRole('button', {name:'确认创建接力任务', exact:true}).waitFor();
@@ -40,7 +48,7 @@ const [origin] = process.argv.slice(2);
       await page.getByText(/待人工确认/).waitFor();
       await page.unroute('**/api/sessions/source-session/handoff');
     }
-    await page.goto(origin + '/session/unmanaged-session');
+    await open('unmanaged-session');
     const panel = page.locator('[data-handoff-panel]');
     await panel.getByRole('button', {name:'预览接力包', exact:true}).click();
     await panel.getByText(/当前会话仅可预览/).waitFor();

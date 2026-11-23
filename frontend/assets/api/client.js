@@ -317,8 +317,8 @@ export async function getStatus(options) {
   return parseStatus(await request(API.status, {signal: options?.signal}));
 }
 
-export async function getMachine(name) {
-  return parseMachine(await request(API.machines + encodeURIComponent(name)));
+export async function getMachine(name, options) {
+  return parseMachine(await request(API.machines + encodeURIComponent(name), options));
 }
 
 export async function getEvents(limit) {
@@ -468,9 +468,9 @@ export async function getSessionSignals(sessionId) {
     API.sessions + '/' + encodeURIComponent(sessionId) + '/policy-signals'));
 }
 
-export async function getSessionHandoff(sessionId) {
+export async function getSessionHandoff(sessionId, options) {
   return parseHandoffPreview(await request(
-    API.sessions + '/' + encodeURIComponent(sessionId) + '/handoff'));
+    API.sessions + '/' + encodeURIComponent(sessionId) + '/handoff', options));
 }
 
 export async function createSessionHandoff(sessionId, input) {

@@ -40,7 +40,7 @@ function clientToken() {
 
 /** Keep host mounted across session redraws to preserve edits and retry tokens. */
 export function mountHandoffPanel(host, { api, sessionId }) {
-  let disposed = false;
+  let disposed = false, suspended = false, generation = 0, previewController;
   let preview = null;
   let pending = null;
   let busy = false;
@@ -70,7 +70,6 @@ export function mountHandoffPanel(host, { api, sessionId }) {
   function renderPreview() {
     content.replaceChildren();
     const details = element('details');
-    details.open = true;
     details.appendChild(element('summary', '结构化证据（脱敏）'));
     const labels = { objective: '用户目标', current_state: '当前状态', completed: '已记录完成',
       changed_files: '写入目标', tests: '测试结果', last_conclusion: '最近结论',
@@ -95,8 +94,9 @@ export function mountHandoffPanel(host, { api, sessionId }) {
     prompt.addEventListener('input', () => {
       finalPrompt.textContent = renderHandoffPrompt(preview.snapshot, prompt.value);
     });
-    content.append(details, field('接力初始指令（可选，最多 500 字符）', prompt),
-      element('h3', '最终 Prompt（提交时应用脱敏）'), finalPrompt);
+    const contextPreview = element('details');
+    contextPreview.append(element('summary', '查看提交给 Agent 的上下文'), finalPrompt);
+    content.append(details, field('接力初始指令（可选，最多 500 字符）', prompt), contextPreview);
     if (!preview.can_create || !preview.targets.length) {
       prompt.readOnly = true;
       content.appendChild(element('p', '当前会话仅可预览；创建接力需要受管会话和已注册的同一项目。', 'meta'));
@@ -134,7 +134,7 @@ export function mountHandoffPanel(host, { api, sessionId }) {
 
     form.addEventListener('submit', async event => {
       event.preventDefault();
-      if (busy || disposed || receipt) return;
+      if (busy || disposed || suspended || receipt) return;
       if (!preview.snapshot.objective && !prompt.value.trim()) {
         setStatus('未采集到用户目标，请填写接力初始指令', true); return;
       }
@@ -149,7 +149,7 @@ export function mountHandoffPanel(host, { api, sessionId }) {
         if (disposed) return;
         const taskLink = element('a', '打开新任务 ' + receipt.task_id);
         taskLink.href = pagePath('task', receipt.task_id);
-        const attemptLink = element('a', '创建 attempt ' + receipt.attempt_id);
+        const attemptLink = element('a', '确认并启动接力');
         attemptLink.href = pagePath('task', receipt.task_id) + '#task-actions';
         content.append(element('p', '接力已创建，等待任务页确认。'), taskLink, element('br'), attemptLink);
         setStatus('接力标识：' + receipt.handoff_id);
@@ -169,21 +169,36 @@ export function mountHandoffPanel(host, { api, sessionId }) {
   }
 
   previewButton.addEventListener('click', async () => {
-    if (busy || disposed || pending) return;
+    if (busy || disposed || suspended || pending) return;
+    const request = ++generation;
+    previewController = new AbortController();
     busy = true;
     previewButton.disabled = true;
     setStatus('正在读取脱敏证据…');
     try {
-      preview = await api.getSessionHandoff(sessionId);
-      if (disposed) return;
+      const result = await api.getSessionHandoff(sessionId, {signal: previewController.signal});
+      if (disposed || suspended || request !== generation) return;
+      preview = result;
       renderPreview();
       setStatus('预览不会创建任务。请核对内容和目标后提交。');
     } catch (error) {
+      if (disposed || suspended || request !== generation) return;
       setStatus(error && (error.detail || error.message) || '预览读取失败', true);
     } finally {
-      busy = false;
-      if (!disposed) previewButton.disabled = false;
+      if (request === generation) {
+        busy = false; previewController = null;
+        if (!disposed) previewButton.disabled = false;
+      }
     }
   });
-  return () => { disposed = true; };
+  function stopPreview() {
+    if (!previewController) return;
+    generation++; previewController.abort(); previewController = null; busy = false;
+    previewButton.disabled = false;
+    setStatus('预览读取已暂停，可重新读取。');
+  }
+  const dispose = () => { stopPreview(); disposed = true; };
+  dispose.suspend = () => { suspended = true; stopPreview(); };
+  dispose.resume = () => { suspended = false; };
+  return dispose;
 }

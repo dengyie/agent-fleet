@@ -5,9 +5,10 @@ import {el, button, link, errorText} from './agent-chat/dom.js';
 import {nativeDirectoryPath} from './agent-chat/paths.js';
 import {createNativeChatService, createMessageJournal, createTaskJournal} from './agent-chat/service.js';
 import {createNativeReader} from './agent-chat/live.js';
-import {mergeNativeEvents, sessionTitle, AGENT_LABELS, TERMINAL_RECEIPTS, RECEIPT_LABELS, uncertainWrite} from './agent-chat/state.js';
+import {mergeNativeEvents, sessionTitle, AGENT_LABELS, TERMINAL_RECEIPTS, RECEIPT_LABELS, operationStatus, uncertainWrite} from './agent-chat/state.js';
 import {createNativeMessages} from './agent-chat/messages.js';
 import {mountNativeInspector} from './agent-chat/inspector.js';
+import {CONTROL_LABELS} from './agent-chat/operations.js';
 import {renderQuestions, disposeQuestions, suspendQuestions} from './session-questions.js';
 
 const newToken = () => globalThis.crypto?.randomUUID?.() || 'native-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
@@ -16,7 +17,7 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
   const service = createNativeChatService(api);
   let disposed = false, suspended = false, submitting = false, targetChoice = null, frozenTask = null;
   let session = null, task = null, events = [], liveCursor = null, beforeCursor = null, hasOlder = false, olderRequested = false;
-  let readError = '', operations = [], readVersion = 0;
+  let readError = '', operations = [], readVersion = 0, authorityVerified = false;
   let journal, taskJournal;
   function restoreMessage() {
     let storage;
@@ -61,7 +62,7 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
   actions.append(destination, send); prompt.append(input, actions); form.append(prompt);
   dock.append(notice, form, el('p', 'composer-hint', 'Enter 发送 · Shift + Enter 换行 · 切换页面后任务继续运行')); chat.append(dock); root.append(chat);
   const sourceLinks = conversationTargets('computer'); intro.prepend(sourceLinks);
-  const inspector = mountNativeInspector(root, heading, {onControl: control});
+  const inspector = mountNativeInspector(root, heading, {api, onControl: control});
   const renderMessages = createNativeMessages(messageHost);
   let picker = null;
   const directoryLink = link('打开已有电脑会话', nativeDirectoryPath(), 'native-directory-link'); intro.append(directoryLink);
@@ -96,8 +97,8 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
       const done = TERMINAL_RECEIPTS.has(op.status) || op.status === 'reviewed' || op.status === 'task_queued';
       const card = el(done ? 'details' : 'article', 'native-delivery-card');
       if (done && previous?.card.open) card.open = true;
-      card.append(el(done ? 'summary' : 'strong', null, (op.text ? '本次发送' : '会话控制') + ' · ' + (RECEIPT_LABELS[op.status] || op.label)), el('p', 'native-delivery-text', op.text || op.action));
-      card.append(el('p', 'meta', RECEIPT_LABELS[op.status] || op.label));
+      card.append(el(done ? 'summary' : 'strong', null, (op.text ? '本次发送' : '会话控制') + ' · ' + operationStatus(op)), el('p', 'native-delivery-text', op.text || op.description || op.action));
+      card.append(el('p', 'meta', operationStatus(op)));
       if (op.error) card.append(el('p', 'meta', op.error));
       if (op.status === 'unknown') {
         card.append(link('查看原始记录确认投递', sessionId ? pagePath('session', sessionId) : taskId ? pagePath('task', taskId) : nativeDirectoryPath()));
@@ -117,7 +118,7 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
     }
     const busy = submitting || !!pending || !!frozenTask;
     input.readOnly = busy || !!taskId && !sessionId;
-    const canSend = sessionId ? controls.appendUserTurn : !taskId && targetChoice?.ready;
+    const canSend = sessionId ? authorityVerified && controls.appendUserTurn : !taskId && targetChoice?.ready;
     input.disabled = !!sessionId && !controls.appendUserTurn && !busy;
     send.disabled = busy || !canSend;
     picker?.setLocked(busy);
@@ -128,7 +129,7 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
     if (last?.status === 'failed') notice.append(el('p', 'err', last.error || '操作失败，请查看投递记录。'));
     if (sessionId && session && !controls.appendUserTurn && !pending) notice.append(el('p', 'meta', controls.deliveryLabel || '当前会话只可阅读。可用控制以节点确认的权限为准。'));
     if (frozenTask && !submitting) notice.append(el('p', 'meta', '启动提交结果待确认，重试将沿用原启动标识和内容。'), button('查询或重试同一启动', submit));
-    inspector.update({session, task, selection: targetChoice, operations, busy, canControl: controls.canControl, features: features()});
+    inspector.update({session, task, selection: targetChoice, operations, busy, authorityVerified, features: features()});
     const follow = anchor.isAtBottom !== false;
     anchor.toggleAttribute('is-streaming', !!session && session.current_state === 'running');
     if (follow && !suspended && !preserveScroll) anchor.scrollToBottom(true);
@@ -154,7 +155,8 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
     const position = mode === 'tail' ? {tail: true} : mode === 'before' ? {beforeCursor} : {afterCursor: liveCursor};
     const result = await service.readSession(id, {position, signal});
     if (!current() || version !== readVersion || sessionId !== id) return;
-    session = result.session || session; readError = result.error ? errorText(result.error) : '';
+    session = result.session || session; authorityVerified = result.authorityVerified;
+    readError = result.error ? errorText(result.error) : '';
     if (result.page) {
       // History grows only on explicit page requests. Live reads retain that
       // window size; trimming updates the older boundary so it is reloadable.
@@ -182,7 +184,7 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
     if (mode === 'before') thread.scrollTop = scrollTop + thread.scrollHeight - scrollHeight;
     if (result.error) throw result.error;
   }
-  const reader = createNativeReader({read, onError(error) { readError = errorText(error); olderRequested = false; paint({preserveScroll: true}); }});
+  const reader = createNativeReader({read, onError(error) { authorityVerified = false; readError = errorText(error); olderRequested = false; paint({preserveScroll: true}); }});
 
   async function deliverMessage(op) {
     if (disposed || submitting) return;
@@ -213,7 +215,7 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
     if (disposed || submitting || pendingOperation()) return;
     const text = frozenTask?.instruction || input.value.trim();
     if (!text || [...text].length > 2000) return;
-    if (sessionId && !sessionControls(session, features()).appendUserTurn) return;
+    if (sessionId && (!authorityVerified || !sessionControls(session, features()).appendUserTurn)) return;
     if (!sessionId && (taskId || !frozenTask && !targetChoice?.ready)) return;
     if (sessionId) {
       const op = {text, client_token: newToken(), action: 'append_user_turn', status: 'submitting'};
@@ -251,12 +253,14 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
       notice.replaceChildren(el('p', 'err', op.error));
     } finally { submitting = false; if (!disposed) paint(); }
   }
-  async function control(action) {
-    if (disposed || submitting || pendingOperation() || !session?.allowed_actions.includes(action)) return;
+  async function control(action, payload, label) {
+    const controls = sessionControls(session, features());
+    if (disposed || suspended || submitting || pendingOperation() || !authorityVerified || !controls.actions.includes(action)) return;
+    if (action === 'apply_local_profile' && (!controls.applyLocalProfile || !payload?.profile_id)) return;
     submitting = true;
-    const op = {action, status: 'submitting', label: '控制请求提交中…'}; operations = operations.slice(-39); operations.push(op); paint();
+    const op = {action, description: label || CONTROL_LABELS[action], status: 'submitting', label: '控制请求提交中…'}; operations = operations.slice(-39); operations.push(op); paint();
     try {
-      const result = await service.control(sessionId, action);
+      const result = await service.control(sessionId, action, payload);
       if (disposed) return;
       if (!result.command_id || result.session_id !== sessionId) throw new Error('控制回执无效');
       op.command_id = result.command_id; op.status = result.status === 'pending' ? 'queued' : result.status;
@@ -270,12 +274,12 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
   let lastKey = '';
   const unsubscribe = store.subscribe(() => {
     const state = store.getState(), summary = state.sessionSummaries[sessionId];
-    const key = JSON.stringify([summary, state.tasks[taskId], state.connection]);
+    const key = JSON.stringify([summary, state.tasks[taskId], state.connection, state.status?.features]);
     if (key !== lastKey) { lastKey = key; reader.wake(); }
   });
   const visibility = () => {
     questionState.suspended = document.hidden || suspended;
-    if (questionState.suspended) { reader.stop(); suspendQuestions(questionState); }
+    if (questionState.suspended) { authorityVerified = false; reader.stop(); suspendQuestions(questionState); paint({preserveScroll: true}); }
     else { reader.start(); renderedQuestionKey = ''; paint(); }
   };
   const focus = () => reader.wake();
@@ -286,7 +290,7 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
     document.removeEventListener('visibilitychange', visibility); window.removeEventListener('focus', focus);
     identitySignal?.removeEventListener('abort', dispose);
   };
-  dispose.suspend = () => { suspended = true; questionState.suspended = true; reader.stop(); suspendQuestions(questionState); inspector.suspend(); };
+  dispose.suspend = () => { suspended = true; authorityVerified = false; questionState.suspended = true; reader.stop(); suspendQuestions(questionState); inspector.suspend(); paint({preserveScroll: true}); };
   dispose.resume = () => { suspended = false; questionState.suspended = false; inspector.resume(); visibility(); };
   identitySignal?.addEventListener('abort', dispose, {once: true});
   if (!sessionId && !taskId) picker = mountTargetPicker(pickerHost, {api, store, machine, onChange(choice) { targetChoice = choice; paint(); }});

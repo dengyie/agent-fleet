@@ -1,30 +1,33 @@
 import {pagePath} from '../../routes.js';
 import {mountInspector} from '../assistant/workspace.js';
 import {el, button, link} from './dom.js';
-import {RECEIPT_LABELS, AGENT_LABELS, sessionTitle} from './state.js';
+import {operationStatus, AGENT_LABELS, sessionTitle} from './state.js';
+import {mountNativeOperations, CONTROL_LABELS} from './operations.js';
+import {mountHandoffPanel} from '../session-handoff.js';
 
-const ACTIONS = Object.freeze({pause_session: '暂停会话', resume_session: '恢复会话',
-  terminate_session: '终止会话', quarantine_session: '隔离会话'});
-
-export function mountNativeInspector(root, heading, {onControl}) {
+export function mountNativeInspector(root, heading, {api, onControl}) {
   const inspector = el('dialog', 'assistant-inspector'); inspector.setAttribute('aria-label', '电脑会话工作面板');
   const context = el('section', 'native-context'), receipts = el('section', 'native-receipts');
+  const operationsHost = el('section', 'native-operations'), handoffHost = el('section', 'native-handoff');
+  const operationsPanel = mountNativeOperations(operationsHost, {api, onControl});
+  let handoff, handoffId = '';
   root.append(inspector);
   const ui = mountInspector(root, heading, inspector, [
     {id: 'native-context', title: '会话', sections: [context]},
+    {id: 'native-operations', title: '操作', sections: [operationsHost], onSelect: () => operationsPanel.activate()},
+    {id: 'native-handoff', title: '接力', sections: [handoffHost], hidden: true},
     {id: 'native-receipts', title: '投递记录', sections: [receipts]},
   ]);
-  const confirmation = el('dialog', 'conversation-dialog');
-  confirmation.setAttribute('aria-label', '确认会话控制');
-  const confirmationText = el('p'), confirm = button('确认执行', () => {
-    const action = confirm.dataset.action; confirmation.close(); onControl(action);
-  }, 'button-danger');
-  const cancel = button('取消', () => confirmation.close());
-  confirmation.append(el('h2', null, '确认会话控制'), confirmationText, cancel, confirm); root.append(confirmation);
   let contextKey = '', receiptKey = '';
   let durationTimer = null;
-  function update({session, task, selection, operations, canControl, busy, features}) {
-    const next = JSON.stringify([session, task, selection, canControl, busy, features]);
+  function update({session, task, selection, operations, authorityVerified, busy, features}) {
+    operationsPanel.update({session, authorityVerified, busy, features, operations});
+    if (session && handoffId !== session.session_id) {
+      handoff?.(); handoffId = session.session_id;
+      handoff = mountHandoffPanel(handoffHost, {api, sessionId: handoffId});
+      ui.setVisible('native-handoff', true);
+    }
+    const next = JSON.stringify([session, task, selection]);
     if (next !== contextKey) {
       contextKey = next; context.replaceChildren(el('h2', 'assistant-section-title', '运行上下文'));
       function fact(label, value) {
@@ -53,18 +56,7 @@ export function mountNativeInspector(root, heading, {onControl}) {
       if (session) durationFact(startedAt, session.finished_at || '');
       if (session) {
         context.append(link('查看原始时间线与接力', pagePath('session', session.session_id)));
-        const actions = canControl ? session.allowed_actions || [] : [];
-        for (const [action, title] of Object.entries(ACTIONS)) {
-          if (!actions.includes(action)) continue;
-          const actionButton = button(title, () => {
-            if (action === 'terminate_session' || action === 'quarantine_session') {
-              confirmationText.textContent = '将对 ' + session.machine_id + ' 的当前会话执行“' + title + '”。' +
-                (action === 'terminate_session' ? '这会终止会话进程，不能保证之后可继续。' : '这会隔离会话，影响后续运行。');
-              confirm.dataset.action = action; confirmation.showModal();
-            } else onControl(action);
-          });
-          actionButton.disabled = busy; context.append(actionButton);
-        }
+        context.append(button('管理会话与本机配置', () => ui.select('native-operations')));
       } else if (task) context.append(link('查看启动任务', pagePath('task', task.task_id)));
     }
     const nextReceipts = JSON.stringify(operations);
@@ -74,11 +66,11 @@ export function mountNativeInspector(root, heading, {onControl}) {
       if (!operations.length) receipts.append(el('p', 'meta', '还没有从本页发出的操作。'));
       for (const op of [...operations].reverse()) {
         const detail = el('details', 'native-operation-detail');
-        detail.append(el('summary', null, (op.text?.slice(0, 48) || ACTIONS[op.action] || '启动会话') + ' · ' + (RECEIPT_LABELS[op.status] || op.label)));
+        detail.append(el('summary', null, (op.text?.slice(0, 48) || op.description || CONTROL_LABELS[op.action] || '启动会话') + ' · ' + operationStatus(op)));
         const body = el('p', 'meta'); body.textContent = [op.command_id, op.error].filter(Boolean).join(' · '); detail.append(body); receipts.append(detail);
       }
-      updateDurations();
     }
+    updateDurations();
   }
   function updateDurations() {
     for (const value of context.querySelectorAll('.native-duration')) {
@@ -92,7 +84,10 @@ export function mountNativeInspector(root, heading, {onControl}) {
     clearInterval(durationTimer); durationTimer = setInterval(updateDurations, 1000);
   }
   setDurationTimer();
-  return {update, suspend() { if (confirmation.open) confirmation.close(); clearInterval(durationTimer); ui.suspend(); }, resume() { ui.resume(); setDurationTimer(); }, dispose() { if (confirmation.open) confirmation.close(); clearInterval(durationTimer); ui.dispose(); }};
+  return {update,
+    suspend() { operationsPanel.suspend(); handoff?.suspend?.(); clearInterval(durationTimer); ui.suspend(); },
+    resume() { ui.resume(); operationsPanel.resume(); handoff?.resume?.(); setDurationTimer(); },
+    dispose() { operationsPanel.dispose(); handoff?.(); clearInterval(durationTimer); ui.dispose(); }};
 }
 
 function formatDate(value) {

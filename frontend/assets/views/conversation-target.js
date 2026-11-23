@@ -20,7 +20,7 @@ export function conversationTargets(active = 'assistant') {
 // Selection only. Dispatch policy, native paths and CLI syntax stay on the Hub.
 export function mountTargetPicker(host, {api, store, machine: initialMachine, onChange}) {
   let disposed = false, generation = 0, controller;
-  let targets = null, locked = false, loadingMachines = false;
+  let targets = null, locked = false, loadingMachines = false, machines = [];
   const fields = el('div', 'native-target-fields');
   function field(name) {
     const label = el('label', 'native-target-field');
@@ -30,19 +30,27 @@ export function mountTargetPicker(host, {api, store, machine: initialMachine, on
   const machine = field('电脑节点'), project = field('项目'), agent = field('Agent');
   const notice = el('p', 'native-target-notice meta'); notice.setAttribute('role', 'status');
   const retry = button('刷新节点与目录', () => loadMachines(true));
-  host.append(fields, notice, retry);
+  const shortcuts = el('div', 'native-target-shortcuts');
+  const sessions = link('查看此节点会话', '#'), manage = link('管理此节点', '#');
+  shortcuts.append(sessions, manage); shortcuts.hidden = true;
+  host.append(fields, notice, retry, shortcuts);
   function option(select, value, text, disabled = false) {
     const row = el('option', null, text); row.value = value; row.disabled = disabled; select.append(row);
   }
   function changed() {
+    shortcuts.hidden = !machine.value;
+    if (machine.value) {
+      sessions.href = nativeDirectoryPath(machine.value);
+      manage.href = pagePath('machine', machine.value);
+    }
     const selected = targets?.agents[agent.value];
-    const ready = !!targets && targets.machine === machine.value && !!project.value &&
+    const ready = !!targets && machines.some(row => row.machine === machine.value && row.online) && targets.machine === machine.value && !!project.value &&
       targets.projects.includes(project.value) && !!selected && selected.installed !== false;
     onChange({ready, machine: machine.value, project: project.value,
       agent_type: agent.value, installed: selected?.installed, observed_at: targets?.observed_at});
   }
   function locks(notify = true) {
-    machine.disabled = locked || loadingMachines || !machine.value;
+    machine.disabled = locked || loadingMachines || !machines.length;
     project.disabled = locked || !targets?.projects.length;
     agent.disabled = locked || !targets || !Object.keys(targets.agents).length;
     retry.disabled = locked || loadingMachines; if (notify) changed();
@@ -52,6 +60,9 @@ export function mountTargetPicker(host, {api, store, machine: initialMachine, on
     controller?.abort(); controller = new AbortController(); targets = null;
     project.replaceChildren(); agent.replaceChildren(); locks();
     if (!machine.value) { notice.textContent = '暂无在线节点，请连接电脑后刷新节点与目录。'; return; }
+    if (!machines.some(row => row.machine === machine.value && row.online)) {
+      notice.textContent = '所选节点当前离线。仍可阅读已同步会话；恢复连接后刷新，或手动选择其它节点。'; return;
+    }
     notice.textContent = '正在读取登记项目和 Agent 安装状态…';
     try {
       const result = await api.getTaskTargets(machine.value, {signal: controller.signal});
@@ -80,10 +91,12 @@ export function mountTargetPicker(host, {api, store, machine: initialMachine, on
       const status = (!fresh && store?.getState().status) || await api.getStatus({signal: controller.signal});
       if (disposed || request !== generation) return;
       const rows = status.machines || [];
+      machines = rows;
       machine.replaceChildren();
+      if (selected && !rows.some(row => row.machine === selected)) option(machine, '', '所选节点不可用，请选择其它节点');
       for (const row of rows) option(machine, row.machine,
         [row.machine, row.system?.platform, row.online ? '在线' : '离线'].filter(Boolean).join(' · '), !row.online);
-      machine.value = rows.find(row => row.online && row.machine === selected)?.machine || rows.find(row => row.online)?.machine || '';
+      machine.value = selected ? rows.find(row => row.machine === selected)?.machine || '' : rows.find(row => row.online)?.machine || '';
       loadingMachines = false;
       await loadTargets();
     } catch (error) {

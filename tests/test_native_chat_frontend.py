@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_native_chat_state_and_contracts():
     result = subprocess.run(['node', '--input-type=module'], cwd=ROOT, text=True, capture_output=True, input=r"""
 import assert from 'node:assert/strict';
-import {mergeNativeEvents, nativeMessages, sessionTitle, uncertainWrite} from './frontend/assets/views/agent-chat/state.js';
+import {mergeNativeEvents, nativeMessages, sessionTitle, uncertainWrite, operationStatus} from './frontend/assets/views/agent-chat/state.js';
 import {parseTaskTargets, parseSession} from './frontend/assets/api/contracts.js';
 import {createNativeReader} from './frontend/assets/views/agent-chat/live.js';
 import {createNativeChatService, createMessageJournal, createTaskJournal} from './frontend/assets/views/agent-chat/service.js';
@@ -62,6 +62,9 @@ assert.throws(() => parseTaskTargets({machine:'m1',projects:[],agents:{codex:{in
 const denied = parseSession({session:{session_id:'adopt_a',machine_id:'m1',managed:true,adoption_status:'revoked',control_capability:'available',allowed_actions:['append_user_turn'],message_delivery:{available:true,reason:'node_receipt_required',mechanism:'native_session_resume'}}});
 assert.deepEqual(denied.session.allowed_actions, []); assert.equal(denied.session.message_delivery.available, false);
 assert.equal(uncertainWrite({status:503}), true); assert.equal(uncertainWrite({status:409}), false);
+assert.equal(operationStatus({action:'append_user_turn',status:'succeeded'}),'已交付到原会话');
+assert.equal(operationStatus({action:'apply_local_profile',status:'succeeded'}),'节点已执行');
+assert.equal(operationStatus({action:'terminate_session',status:'queued'}),'已入队');
 const positions = [], includeSources = [];
 const api = {getSession: async id => ({session:{session_id:id}}), getSessionEvents: async (id, options) => {positions.push(options); includeSources.push(options.includeSource); return {events:[]};}};
 const service = createNativeChatService(api);
@@ -71,6 +74,10 @@ await service.readSession('s', {position:{afterCursor:'30'}});
 assert.deepEqual(positions.map(({tail,beforeCursor,afterCursor}) => [!!tail,beforeCursor || null,afterCursor || null]),
   [[true,null,null],[false,'20',null],[false,null,'30']], 'tail/history/live cursors stay independent');
 assert.deepEqual(includeSources, [false,false,false], 'native chat never downloads archived source records');
+assert.equal((await service.readSession('s')).authorityVerified,true);
+const partial = await createNativeChatService({...api, getSession:async () => {throw new Error('authority unavailable');}}).readSession('s');
+assert.equal(partial.authorityVerified,false);
+assert.ok(partial.page,'transcript and authority failures remain independent');
 const values = new Map();
 const journal = createMessageJournal({getItem:key => values.get(key) || null,
   setItem:(key,value) => values.set(key,value), removeItem:key => values.delete(key)}, 's');
@@ -100,7 +107,7 @@ assert.equal(maximum, 1); assert.equal(reads, 2); assert.equal(publications, 1, 
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize('scenario', ['read-send', 'lost-response', 'reload-recovery', 'directory', 'directory-pagination', 'history-pagination', 'revoked', 'question-draft', 'missing-targets', 'create', 'task-recovery', 'long-message', 'delivery-disclosure', 'refresh-targets', 'source-record', 'native-metadata', 'directory-metadata'])
+@pytest.mark.parametrize('scenario', ['read-send', 'lost-response', 'reload-recovery', 'directory', 'directory-pagination', 'history-pagination', 'revoked', 'question-draft', 'missing-targets', 'create', 'task-recovery', 'long-message', 'delivery-disclosure', 'refresh-targets', 'source-record', 'native-metadata', 'directory-metadata', 'local-profile', 'stale-authority', 'target-links', 'control-confirmation', 'profile-revocation', 'offline-target'])
 def test_native_chat_browser(tmp_path, scenario):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE for native web acceptance')
@@ -109,7 +116,7 @@ def test_native_chat_browser(tmp_path, scenario):
         session_repositories_enabled=True, adoption_repositories_enabled=True,
         project_whitelist={'m1': ['agent-fleet']}, supervisor_enabled=True,
         supervisor_signing_raw=bytes(range(32)), supervisor_credentials={'m1':'browser-receipt'},
-        append_user_turn_enabled=True))
+        append_user_turn_enabled=True, apply_local_profile_enabled=True))
     row = adopted(app, captured=False)
     services = app.extensions['fleet']['services']
     services['observe'].ingest({'machine':'m1', 'reachable':True, 'agents':{'codex':{'installed':True}}})

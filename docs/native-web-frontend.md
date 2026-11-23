@@ -21,6 +21,7 @@
 - `views/agent-chat/state.js`：纯事件合并、分片消息整理和工具展示模型；用 Hub cursor 标识事件，不按文本或原生 sequence 去重。
 - `views/agent-chat/live.js`：单一可见读取调度；SSE 摘要、focus、resume 唤醒。失败退避，挂起中止读，迟到结果不发布。
 - `messages.js` / `inspector.js`：消息与工作面板展示；复用 StreamMarkdown、ToolCallBadge、ChatPromptInput、AutoScrollAnchor、UiIcon 和现有 inspector。
+- `operations.js`：工作面板中的授权说明、本机配置和运行控制；只消费当前会话声明的动作与节点登记的配置，不推导平台或 Agent 权限。
 - `conversation-target.js` / `sessions.js`：选择器和目录；不读取节点本地路径、不生成 CLI 参数。
 
 ## 已消费的接口
@@ -36,6 +37,8 @@
 | `POST /api/sessions/<id>/messages` | 普通消息发送 `{text, client_token}`；响应未知时用户可显式用原 token 和原正文恢复，问题回答继续用独立协议 |
 | `POST /api/sessions/<id>/control` | 当前能力声明允许的具体操作；终止和隔离需在页面确认其后果 |
 | `GET /api/supervisor/receipts/<id>` | 查询原命令，核对 session_id；正文故障与回执读取分别处理 |
+| `GET /api/machines/<machine>` | 打开操作面板时读取匹配当前 Agent 的本机配置；保留未提交选择，提供刷新和错误反馈 |
+| `GET/POST /api/sessions/<id>/handoff` | 在接力页签复用既有上下文预览与同 token 提交；创建后仍到任务页确认放行 |
 
 侧栏最近条目带电脑来源图标。原生条目不会获得平台重命名、归档或删除动作。原始时间线保留为可用诊断入口；现有机器任务表单没有被尚未集成的选择器删除替代。
 
@@ -67,7 +70,7 @@ GET /api/machines/<machine>/task-targets
 - **已实现的前端适配**：session `tail` / `before_cursor` / `after_cursor` 三向读取，稳定目录 cursor，普通消息操作 token 和按用户动作重放；token 仅保存在当前标签页 sessionStorage，并按 API、账号、session 隔离。恢复按钮重放原文本和 token，不自动重发。
 - **后端接口已发布**：分页、消息 token 和任务找回接口已由 PR #111 合入 main（`d3e77f0`）。本前端适配需基于该 main 版本联调后一起发布；旧线上后端若尚未升级，不支持这些请求和响应字段。
 - **响应未知找回语义**：收到 HTTP admission 后显示 queued/receipt 状态，不等同 Agent 已完成；只对用户显式点击的恢复操作重放冻结 token 和正文。刷新本页会恢复未确认操作卡片，但不会自动发送 POST。
-- **模型目录切换**：新任务沿用本机模型配置。后台尚无网页专用 models / model 路由，前端不借用主助手工具 RPC，也不伪造任意 Agent 的模型切换能力。本机 profile 的既有入口仍在原始时间线中。
+- **模型目录切换**：新任务沿用本机模型配置。已有会话可在工作面板“操作”中选择节点上报、匹配当前 Agent 的本机 profile；同时受 feature flag 和 `allowed_actions` 约束。后台尚无网页专用 models / model 路由，前端不借用主助手工具 RPC，也不伪造任意 Agent 的模型切换能力。
 - **源端流式边界**：页面实时显示源端实际产生的可见回答增量、完整消息快照、工具调用/结果和状态活动；Agent 未提供增量正文时按完整消息呈现。聊天读取带 `include_source=0`，不下载 source_record；内部 `thinking` / `reasoning`、系统提示词和原始记录字段不会作为对话内容展示。
 
 ## 会话名称与详细信息
@@ -87,6 +90,10 @@ GET /api/machines/<machine>/task-targets
 2026-11-21 交互回归补充：长消息展开后的完整原文随真实片段更新；已完成投递卡在读轮询时保留同一 DOM 与展开状态；节点最初离线时可点击“刷新节点与目录”重新读取状态与目录，恢复后启用发送，不重复追加节点或产生写请求。刷新和初始节点查询均接受页面生命周期的取消信号。
 
 2026-11-23 会话详情补充：原生名称优先、首条用户消息回退、客户端/版本/provider/model 与起始/持续时间展示；Codex snapshots/deltas 和 Claude visible text deltas 按原生消息 ID 投影。source_record 通过 `include_source=0` 从聊天 HTTP 响应排除；隐藏推理内容不会进入消息流。
+
+2026-11-23 操作面板补充：新聊天可直接进入所选节点会话与节点管理；主助手工作面板的节点卡也提供这两个入口。已有会话工作面板分为会话、操作、接力、投递记录：消息/上下文通过输入框注入，配置与运行控制使用既有签名命令队列，接力使用既有证据预览与任务协议。读取权限失败或页面挂起后，下一次验证完成前停用新写入；已入队命令仍可查询，不自动重放。终止/隔离/取消均需明确确认。目录可按可续聊、可控制、仅阅读筛选，范围仍为已载入的会话。
+
+新增浏览器验收覆盖本机 profile 按 Agent 过滤与轮询保留选择、精确控制载荷、打开页面后撤销权限、权限读取 503、危险操作取消与单次确认、节点快捷导航，以及聊天工作面板中的接力预览/提交/同 token 恢复。均使用临时 Hub/SQLite 与命令入队，不执行真实电脑 Agent 或修改线上会话。
 
 ```sh
 FLEET_PLAYWRIGHT_MODULE=/path/to/existing/playwright FLEET_BROWSER_CHANNEL=chrome \
