@@ -10,6 +10,10 @@ The browser-facing registered task directory and accepted-submission recovery
 share `TaskService` with the assistant; their HTTP, domain and transactional
 repository responsibilities are documented in the [native task API contract](native-task-api.md).
 
+An upstream design comparison with T3 Code's provider capabilities, durable event
+handling, bounded timeline and Agent result lifecycle is recorded in the
+[T3 Code source architecture reference](research/t3code-architecture-reference.md).
+
 ```mermaid
 flowchart TB
     View[Static session and machine views] --> UI[Shared UI presentation]
@@ -167,6 +171,10 @@ projection; it performs no vendor filesystem/process access. `init` establishes
 an invocation namespace, step indices identify visible message/tool updates,
 and aggregate final text is a fallback only. Supervisor separately verifies
 conversation UUID and cwd before saving private continuation identity.
+
+This CLI path is distinct from T3 Code's `agy acp` session adapter. A future ACP
+path needs its own Windows/macOS handshake, approval, steering, resume and
+background-work evidence; CLI stream-json behavior does not imply those controls.
 
 `agent-chat/results.js` owns result panel lifecycle and text rendering;
 `service.js` verifies task/session binding around existing HTTP snapshot reads.
