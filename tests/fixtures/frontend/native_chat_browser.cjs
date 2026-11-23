@@ -1,7 +1,7 @@
 const {chromium} = require(process.env.FLEET_PLAYWRIGHT_MODULE);
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const [origin, scenario, sid] = process.argv.slice(2);
+const [origin, scenario, sid, taskId] = process.argv.slice(2);
 (async () => {
   const browser = await chromium.launch({channel:process.env.FLEET_BROWSER_CHANNEL || 'chrome', headless:true});
   fs.mkdirSync('/tmp/fleet-native-web', {recursive:true});
@@ -140,6 +140,23 @@ const [origin, scenario, sid] = process.argv.slice(2);
           response.url().includes('/api/sessions/' + sid + '/events') &&
           response.url().includes('include_source=0')) : null;
         if (scenario === 'snapshot-revision') await page.request.post(origin + '/_fixture/native-event',{data:{reset_snapshot:true}});
+        if (scenario === 'task-results-binding') {
+          let release;
+          const held = new Promise(resolve => {release=resolve;});
+          await page.route('**/api/sessions/' + sid, async route => {
+            const response = await route.fetch(); await held; await route.fulfill({response});
+          },{times:1});
+          await page.goto(origin + '/task/' + taskId + '?view=chat');
+          if (width === 390) await page.getByRole('button',{name:'工作面板',exact:true}).click();
+          await page.getByRole('tab',{name:'任务结果',exact:true}).click();
+          await page.getByRole('button',{name:'查看原任务结果',exact:true}).click();
+          const status = page.locator('.native-results [role=status]');
+          await status.filter({hasText:'原任务状态：已完成'}).waitFor();
+          release();
+          await page.getByText('Native answer from persisted transcript',{exact:true}).waitFor();
+          assert.equal(await status.textContent(),'原任务状态：已完成','session detail must not invalidate a result already bound by the task response');
+          assert.equal(writes,0); assert.deepEqual(errors,[]); await page.close(); continue;
+        }
         await page.goto(origin + '/session/' + sid + '?view=chat');
         if (scenario === 'source-record') {
           const body = await (await sourceResponse).json();

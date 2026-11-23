@@ -131,7 +131,7 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
     if (frozenTask && !submitting) notice.append(el('p', 'meta', '启动提交结果待确认，重试将沿用原启动标识和内容。'), button('查询或重试同一启动', submit));
     const resultTaskId = task?.task_id || events.find(event =>
       ['session_start', 'session_metadata'].includes(event.kind) && event.payload?.task_id)?.payload.task_id;
-    inspector.update({session, task, resultTaskId, selection: targetChoice, operations, busy, authorityVerified, features: features()});
+    inspector.update({sessionId, session, task, resultTaskId, selection: targetChoice, operations, busy, authorityVerified, features: features()});
     const follow = anchor.isAtBottom !== false;
     anchor.toggleAttribute('is-streaming', !!session && session.current_state === 'running');
     if (follow && !suspended && !preserveScroll) anchor.scrollToBottom(true);

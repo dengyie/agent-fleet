@@ -23,8 +23,10 @@ export function mountNativeInspector(root, heading, {api, onControl, service}) {
   ]);
   let contextKey = '', receiptKey = '';
   let durationTimer = null;
-  function update({session, task, resultTaskId, selection, operations, authorityVerified, busy, features}) {
-    resultUI.update(resultTaskId, session?.session_id);
+  function update({sessionId, session, task, resultTaskId, selection, operations, authorityVerified, busy, features}) {
+    // Route/task binding is known before the session detail read completes.
+    // A later detail response must not reset or cancel the same result view.
+    resultUI.update(resultTaskId, sessionId);
     operationsPanel.update({session, authorityVerified, busy, features, operations});
     if (session && handoffId !== session.session_id) {
       handoff?.(); handoffId = session.session_id;

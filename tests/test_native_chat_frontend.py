@@ -124,7 +124,7 @@ assert.equal(maximum, 1); assert.equal(reads, 2); assert.equal(publications, 1, 
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize('scenario', ['read-send', 'lost-response', 'reload-recovery', 'directory', 'directory-pagination', 'history-pagination', 'revoked', 'question-draft', 'missing-targets', 'create', 'task-recovery', 'long-message', 'snapshot-revision', 'receipt-failure', 'delivery-disclosure', 'refresh-targets', 'source-record', 'native-metadata', 'directory-metadata', 'local-profile', 'stale-authority', 'target-links', 'control-confirmation', 'profile-revocation', 'offline-target', 'results', 'result-file-concurrency'])
+@pytest.mark.parametrize('scenario', ['read-send', 'lost-response', 'reload-recovery', 'directory', 'directory-pagination', 'history-pagination', 'revoked', 'question-draft', 'missing-targets', 'create', 'task-recovery', 'long-message', 'snapshot-revision', 'receipt-failure', 'delivery-disclosure', 'refresh-targets', 'source-record', 'native-metadata', 'directory-metadata', 'local-profile', 'stale-authority', 'target-links', 'control-confirmation', 'profile-revocation', 'offline-target', 'results', 'result-file-concurrency', 'task-results-binding'])
 def test_native_chat_browser(tmp_path, scenario):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE for native web acceptance')
@@ -138,7 +138,7 @@ def test_native_chat_browser(tmp_path, scenario):
     services = app.extensions['fleet']['services']
     services['observe'].ingest({'machine':'m1', 'reachable':True, 'agents':{'codex':{'installed':True}}})
     result_task = None
-    if scenario in {'results', 'result-file-concurrency'}:
+    if scenario in {'results', 'result-file-concurrency', 'task-results-binding'}:
         services['tasks'].create({'machine':'m1', 'project':'agent-fleet', 'agent_type':'codex',
                                   'instruction':'retained result fixture'}, OWNER)
         result_task = services['runner'].poll('m1', 'results-fixture')['task']
@@ -238,7 +238,8 @@ def test_native_chat_browser(tmp_path, scenario):
     thread = Thread(target=server.serve_forever, daemon=True); thread.start()
     try:
         result = subprocess.run(['node', str(ROOT / 'tests/fixtures/frontend/native_chat_browser.cjs'),
-            f'http://127.0.0.1:{server.server_port}', scenario, row.session_id], capture_output=True, text=True, timeout=100)
+            f'http://127.0.0.1:{server.server_port}', scenario, row.session_id,
+            result_task['task_id'] if result_task else ''], capture_output=True, text=True, timeout=100)
         assert result.returncode == 0, result.stdout + result.stderr
     finally:
         server.shutdown(); server.server_close(); thread.join(5)
