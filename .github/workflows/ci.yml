@@ -103,6 +103,7 @@ jobs:
           pip install -r requirements-lock.txt
       - name: Check existing Node runtime
         run: node --version
+      # Use runner temp to avoid inheriting the broad write ACL of C:\.
       - name: Run Windows process and workspace tests
         env:
           PYTHONPATH: .
@@ -144,10 +145,7 @@ jobs:
           tests/test_agy_acp.py tests/test_acp_transport_bounds.py tests/test_acp_lifecycle_races.py
           tests/test_acp_interactions.py tests/test_agent_evidence.py
           tests/test_continuation_results.py
-          # A C:\ root child inherits the hosted image's Everyone-write ACE,
-          # which the NTFS reader's ACL contract must reject. Runner temp is
-          # private to the runner user, so pytest basetemp keeps its owner.
-          --basetemp=${{ runner.temp }}/fleet-tests
+          --basetemp="$env:RUNNER_TEMP/fleet-tests"
           --junitxml=windows-results.xml
       - name: Preserve Windows test evidence
         if: always()
