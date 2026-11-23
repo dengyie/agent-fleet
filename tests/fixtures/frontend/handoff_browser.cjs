@@ -34,14 +34,22 @@ const [origin, mode] = process.argv.slice(2);
           await route.abort('failed');
           return;
         }
+        if (sent.length === 2) {
+          await route.fulfill({status:429,json:{error:'rate_limited',detail:'Retry later'}});
+          return;
+        }
         await route.continue();
       });
       await panel.getByRole('button', {name:'确认创建接力任务', exact:true}).click();
       await panel.getByRole('button', {name:'使用原凭据重试', exact:true}).waitFor();
       assert.equal(await panel.locator('textarea').isDisabled(), true);
       await panel.getByRole('button', {name:'使用原凭据重试', exact:true}).click();
+      await panel.getByText(/Retry later/).waitFor();
+      assert.equal(await panel.locator('textarea').isDisabled(), true, 'a rejected recovery does not prove the original task was never created');
+      await panel.getByRole('button', {name:'使用原凭据重试', exact:true}).click();
       await panel.getByRole('link', {name:/打开新任务/}).waitFor();
       assert.deepEqual(sent[0], sent[1]);
+      assert.deepEqual(sent[0], sent[2], 'recovery preserves the original token after rate limiting');
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
       const target = await panel.getByRole('link', {name:/打开新任务/}).getAttribute('href');
       await page.goto(origin + target);

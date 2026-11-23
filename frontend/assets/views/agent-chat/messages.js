@@ -49,7 +49,7 @@ export function createNativeMessages(host) {
               details = el('details', 'native-full-text'); details.append(el('summary', null, '查看完整原文'), el('pre')); node.append(details);
             }
             details.querySelector('pre').textContent = row.text;
-          }
+          } else node.querySelector('.native-full-text')?.remove();
         }
         entry.signature = signature;
       }

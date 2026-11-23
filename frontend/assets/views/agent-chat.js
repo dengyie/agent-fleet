@@ -177,7 +177,8 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
       try {
         const receipt = await service.receipt(op.command_id, id, signal);
         if (!current() || version !== readVersion) return;
-        op.status = receipt.status; op.label = RECEIPT_LABELS[receipt.status] || receipt.status; op.error = '';
+        op.status = receipt.status; op.label = RECEIPT_LABELS[receipt.status] || receipt.status;
+        op.error = ['failed', 'expired', 'rejected', 'cancelled'].includes(receipt.status) ? receipt.reason || '' : '';
         if (op.client_token && TERMINAL_RECEIPTS.has(op.status)) journal.clear();
       } catch (error) { if (!current()) return; op.error = '命令已入队，回执暂不可读，将继续查询。'; }
     }

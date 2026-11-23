@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from threading import Thread
 
 import pytest
-from flask import jsonify
+from flask import jsonify, request
 from werkzeug.serving import make_server
 
 from hub.bootstrap import create_app
@@ -124,7 +124,7 @@ assert.equal(maximum, 1); assert.equal(reads, 2); assert.equal(publications, 1, 
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize('scenario', ['read-send', 'lost-response', 'reload-recovery', 'directory', 'directory-pagination', 'history-pagination', 'revoked', 'question-draft', 'missing-targets', 'create', 'task-recovery', 'long-message', 'delivery-disclosure', 'refresh-targets', 'source-record', 'native-metadata', 'directory-metadata', 'local-profile', 'stale-authority', 'target-links', 'control-confirmation', 'profile-revocation', 'offline-target', 'results'])
+@pytest.mark.parametrize('scenario', ['read-send', 'lost-response', 'reload-recovery', 'directory', 'directory-pagination', 'history-pagination', 'revoked', 'question-draft', 'missing-targets', 'create', 'task-recovery', 'long-message', 'snapshot-revision', 'receipt-failure', 'delivery-disclosure', 'refresh-targets', 'source-record', 'native-metadata', 'directory-metadata', 'local-profile', 'stale-authority', 'target-links', 'control-confirmation', 'profile-revocation', 'offline-target', 'results', 'result-file-concurrency'])
 def test_native_chat_browser(tmp_path, scenario):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE for native web acceptance')
@@ -138,7 +138,7 @@ def test_native_chat_browser(tmp_path, scenario):
     services = app.extensions['fleet']['services']
     services['observe'].ingest({'machine':'m1', 'reachable':True, 'agents':{'codex':{'installed':True}}})
     result_task = None
-    if scenario == 'results':
+    if scenario in {'results', 'result-file-concurrency'}:
         services['tasks'].create({'machine':'m1', 'project':'agent-fleet', 'agent_type':'codex',
                                   'instruction':'retained result fixture'}, OWNER)
         result_task = services['runner'].poll('m1', 'results-fixture')['task']
@@ -159,7 +159,8 @@ def test_native_chat_browser(tmp_path, scenario):
         services['runner'].result('m1', result_task['attempt_id'], result_task['nonce'], 0,
             log_summary='snapshot complete', diff_stat='1 file changed',
             diff_patch='diff --git a/test.py b/test.py\n+print("<img src=x onerror=alert(1)>")\n',
-            files=[{'path':'test.py', 'content':'print("<img src=x onerror=alert(1)>")\n'}],
+            files=[{'path':'test.py', 'content':'print("<img src=x onerror=alert(1)>")\n'},
+                   {'path':'other.py', 'content':'second retained snapshot\n'}],
             test_summary={'framework':'pytest','passed':12,'failed':0,'skipped':1,'errors':0,'duration_s':1.2})
     if scenario in {'source-record', 'native-metadata', 'directory-metadata'}:
         kind = 'source_record' if scenario == 'source-record' else 'session_metadata'
@@ -189,16 +190,38 @@ def test_native_chat_browser(tmp_path, scenario):
         item = event(6, 'assistant_message', {'text': 'x' * 33000, 'is_complete': False})
         item['session_id'] = row.session_id
         assert services['sessions'].ingest_events([item])['rejected'] == []
+    if scenario == 'snapshot-revision':
+        item = event(6, 'assistant_message', {'text':'OLD_SNAPSHOT_' + 'x' * 33000,
+            'message_id':'revised-message', 'content_mode':'snapshot', 'is_complete':False})
+        item['session_id'] = row.session_id
+        assert services['sessions'].ingest_events([item])['rejected'] == []
     if scenario != 'missing-targets':
         app.add_url_rule('/api/machines/<machine>/task-targets', 'fixture_targets',
             lambda machine: jsonify(services['tasks'].targets(machine)))
 
+    snapshot_sequence = 6
+
     @app.post('/_fixture/native-event')
     def native_event():
-        item = event(7 if scenario == 'long-message' else 6, 'assistant_message',
-                     {'text':'Live native update', 'is_complete':True})
+        nonlocal snapshot_sequence
+        payload = {'text':'Live native update', 'is_complete':True}
+        if scenario == 'snapshot-revision':
+            payload.update(message_id='revised-message', content_mode='snapshot')
+            if (request.get_json(silent=True) or {}).get('reset_snapshot'):
+                payload.update(text='OLD_SNAPSHOT_' + 'x' * 33000, is_complete=False)
+        item = event(7 if scenario in {'long-message', 'snapshot-revision'} else 6, 'assistant_message', payload)
+        if scenario == 'snapshot-revision':
+            snapshot_sequence += 1
+            item.update(sequence=snapshot_sequence, event_id='snapshot_' + str(snapshot_sequence))
         item['session_id'] = row.session_id
         return jsonify(services['sessions'].ingest_events([item]))
+
+    @app.post('/_fixture/fail-command')
+    def fail_command():
+        commands = services['supervisor'].poll('m1')
+        for command in commands:
+            services['supervisor'].receipt(command['command_id'], 'failed', 'native_session_unbound')
+        return jsonify({'commands':len(commands)})
 
     @app.post('/_fixture/bind-task')
     def bind_task():

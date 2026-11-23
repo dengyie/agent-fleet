@@ -5,6 +5,7 @@ import {el, button, link, errorText} from './dom.js';
 export function mountNativeResults(root, service) {
   let identity = '', taskId = '', sessionId = '', controller = null;
   let disposed = false, suspended = false, loaded = false, version = 0;
+  const fileRequests = new Map();
   const heading = el('h2', 'assistant-section-title', '原任务结果');
   const note = el('p', 'meta', '这里展示原启动任务结束时保留的快照。续聊产生的修改和测试不会更新这份快照。');
   const load = button('查看原任务结果', () => refresh());
@@ -12,7 +13,14 @@ export function mountNativeResults(root, service) {
   const body = el('div', 'native-result-body');
   root.append(heading, note, load, status, body);
 
-  function cancel() { version++; controller?.abort(); controller = null; load.disabled = false; }
+  function cancel() {
+    version++; controller?.abort(); controller = null; load.disabled = false;
+    for (const request of fileRequests.values()) {
+      request.controller.abort(); request.action.disabled = false;
+      request.action.textContent = '读取文件快照';
+    }
+    fileRequests.clear();
+  }
   function begin() {
     cancel(); controller = new AbortController();
     const signal = controller.signal, currentVersion = version;
@@ -23,8 +31,14 @@ export function mountNativeResults(root, service) {
     detail.append(el('summary', null, title), el('pre', null, text)); parent.append(detail);
   }
   async function openFile(path, host, action) {
-    if (disposed || suspended) return;
-    const {signal, current} = begin(); action.disabled = true;
+    if (disposed || suspended || fileRequests.has(path)) return;
+    // Independent files may load together. Only refresh/identity/lifecycle
+    // changes invalidate the whole result; another file never cancels this one.
+    const request = {controller: new AbortController(), action}, currentVersion = version;
+    const {signal} = request.controller;
+    const current = () => !disposed && !suspended && version === currentVersion &&
+      fileRequests.get(path) === request && !signal.aborted;
+    fileRequests.set(path, request); action.disabled = true; action.textContent = '正在读取文件快照…';
     try {
       const file = await service.readResultFile(taskId, sessionId, path, signal);
       if (!current()) return;
@@ -33,7 +47,11 @@ export function mountNativeResults(root, service) {
       host.append(el('pre', null, file.content));
     } catch (error) {
       if (current()) host.replaceChildren(el('p', 'err', '文件快照读取失败：' + errorText(error)));
-    } finally { action.disabled = false; }
+    } finally {
+      if (fileRequests.get(path) === request) {
+        fileRequests.delete(path); action.disabled = false; action.textContent = '读取文件快照';
+      }
+    }
   }
   function render(result) {
     body.replaceChildren();
