@@ -168,6 +168,7 @@ const [origin, scenario, sid] = process.argv.slice(2);
         }
         await page.getByText('Native answer from persisted transcript', {exact:true}).waitFor();
         if (['local-profile','stale-authority','control-confirmation','profile-revocation'].includes(scenario)) {
+          if (scenario === 'stale-authority') await page.getByLabel('自定义回答').fill('preserve answer during reconnect');
           if (width === 390) await page.getByRole('button',{name:'工作面板',exact:true}).click();
           await page.getByRole('tab',{name:'操作',exact:true}).click();
           if (scenario === 'local-profile' || scenario === 'profile-revocation') {
@@ -220,6 +221,8 @@ const [origin, scenario, sid] = process.argv.slice(2);
             assert.equal(await page.getByRole('button',{name:'暂停会话',exact:true}).isDisabled(),true);
             if (width === 390) await page.getByRole('button',{name:'收起工作面板',exact:true}).click();
             assert.equal(await page.getByRole('button',{name:'发送给电脑 Agent'}).isDisabled(),true);
+            assert.equal(await page.getByLabel('自定义回答').isDisabled(),true,'authority failure also disables question answers');
+            assert.equal(await page.getByLabel('自定义回答').inputValue(),'preserve answer during reconnect');
             assert.equal(writes,0);
           }
           await page.screenshot({path:'/tmp/fleet-native-web/' + scenario + '-' + width + '.png',fullPage:true});

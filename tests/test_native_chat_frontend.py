@@ -148,7 +148,7 @@ def test_native_chat_browser(tmp_path, scenario):
             assert services['sessions'].ingest_events([item])['rejected'] == []
     if scenario == 'revoked':
         services['adoptions'].revoke(row.session_id, OWNER)
-    if scenario == 'question-draft':
+    if scenario in {'question-draft', 'stale-authority'}:
         item = event(6, 'interaction_request', question()); item['session_id'] = row.session_id
         assert services['sessions'].ingest_events([item])['rejected'] == []
     if scenario == 'long-message':

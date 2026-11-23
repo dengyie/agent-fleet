@@ -71,7 +71,7 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
   function pendingOperation() { return operations.find(op => op.status === 'submitting' || op.status === 'unknown' || op.command_id && !TERMINAL_RECEIPTS.has(op.status)); }
   function questionKey() {
     return JSON.stringify([events.filter(event => event.kind === 'interaction_request' || event.kind === 'interaction_response'),
-      session?.current_state, session?.status, session?.allowed_actions, features().append_user_turn,
+      session?.current_state, session?.status, session?.allowed_actions, features().append_user_turn, authorityVerified,
       [...(questionState.questions?.entries() || [])].map(([id, draft]) => [id, [...draft.selected], draft.busy, draft.status, draft.closed, draft.command])]);
   }
   function paint({preserveScroll = false} = {}) {
@@ -113,7 +113,7 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
     if (session && renderedQuestionKey !== questionKey()) {
       questions.replaceChildren();
       renderQuestions(questions, {events, session, api, state: questionState, paint,
-        enabled: features().append_user_turn === true});
+        enabled: authorityVerified && features().append_user_turn === true});
       renderedQuestionKey = questionKey();
     }
     const busy = submitting || !!pending || !!frozenTask;
