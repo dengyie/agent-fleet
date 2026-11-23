@@ -290,3 +290,17 @@ python3 -m pytest tests/test_native_chat_frontend.py \
 
 These tests exercise Hub authorization and local SQLite behavior. They do not
 run Agent CLIs, contact external models, or prove a production deployment.
+
+### 内容块与补充元数据
+
+Codex `turn_context` 的实际 model/provider 与 Pi `session_info.name` 投影到既有
+session_metadata；未知值保持缺失。Claude 每个原生文本 content block 和 Pi
+每个文本块拥有独立 message_id，避免工具前后的文本被 snapshot 覆盖。Claude
+stream delta、block stop 和最终完整快照使用同一块身份；Hub cursor 继续是事件
+唯一身份，message_id 只负责消息展示更新。ZCode 桌面分页推进保留元数据 checkpoint，
+相同标题/模型不会在每次扫描重复上报。
+
+agy Runner 流使用既有 assistant_message/tool_call/tool_result DTO。每次原生
+调用有独立的消息命名空间，同一次调用按 step index 合并增量。重复 init 会开启新
+调用命名空间；不以文本或 vendor step index 替代 Hub ingestion cursor。源端未
+提供的标题、版本、模型或历史不做推断。内部 reasoning/thinking 不作为聊天内容。

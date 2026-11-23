@@ -115,7 +115,7 @@ def test_desktop_sync_reaches_latest_page_without_waiting_for_archive_scan(tmp_p
         return r.status_code, r.get_json()
     desktop = DesktopControl(cfg, client=Bridge())
     path = tmp_path / 'model-io-sess_desktop.jsonl'
-    row = {'session': {'sessionId': 'sess_desktop'}, 'status': 'idle'}
+    row = {'session': {'sessionId': 'sess_desktop', 'title': 'Native desktop title'}, 'status': 'idle'}
     sync_desktop(cfg, desktop, row, path, send)
     sid = session_prefix(cfg.machine) + native_identity('zcode', path)
     def messages():
@@ -125,6 +125,8 @@ def test_desktop_sync_reaches_latest_page_without_waiting_for_archive_scan(tmp_p
     assert messages() == ['old message', 'latest reply']
     sync_desktop(cfg, desktop, row, path, send)
     assert messages() == ['old message', 'latest reply']
+    events = client.get('/api/sessions/' + sid + '/events').get_json()['events']
+    assert sum(e['payload'].get('title') == 'Native desktop title' for e in events) == 1
 
 
 def test_slow_desktop_history_yields_without_skipping_or_duplicating_messages(tmp_path, monkeypatch):

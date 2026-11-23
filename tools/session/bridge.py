@@ -41,7 +41,9 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import session_schema
-from tools.session.normalization import _MAX_TEXT, normalize_native_row as _shape_native_row
+from tools.session.normalization import (
+    _MAX_TEXT, content_block_message_id, normalize_native_row as _shape_native_row,
+)
 from session_schema import (
     AGENT_STATE_CONFIDENCES,
     AGENT_STATE_SOURCES,
@@ -304,6 +306,8 @@ class SessionBridge:
         self._stream_id = _opaque_opt(config.get("stream_id")) or "stream"
         self._agent_family = _opaque_opt(config.get("agent_family")) or str(
             self._manifest.get("agent") or "claude")
+        from tools.session.agy import AgyStream
+        self._agy_stream = AgyStream() if self._agent_family == 'agy' else None
 
         self._process_group_id = _opaque_opt(config.get("process_group_id"))
         self._attempt_id = _opaque_opt(config.get("attempt_id"))
@@ -375,6 +379,7 @@ class SessionBridge:
         self._expected_user_echo: str | None = None
         self._started = False
         self._active_native_message_id: str | None = None
+        self._active_native_text_blocks: set[int] = set()
         self._reported_quality: str | None = None
         self.sources = select_sources(self._manifest)
         self.source = self.sources[0] if self.sources else "metadata"
@@ -791,32 +796,44 @@ class SessionBridge:
             candidate_id = message.get("id") if isinstance(message, Mapping) else None
             self._active_native_message_id = (
                 candidate_id if isinstance(candidate_id, str) and candidate_id else None)
+            self._active_native_text_blocks.clear()
 
         native_time = self._native_source_time(raw)
         events = []
-        for kind, payload in _shape_native_row(raw):
+        shaped = self._agy_stream.normalize(raw) if self._agy_stream is not None else _shape_native_row(raw)
+        for kind, payload in shaped:
             payload = dict(payload)
             if (kind == "assistant_message" and not payload.get("message_id")
                     and self._active_native_message_id):
-                payload["message_id"] = self._active_native_message_id
+                index = stream_event.get("index", 0)
+                if type(index) is not int or not 0 <= index < 1024:
+                    continue
+                payload["message_id"] = content_block_message_id(self._active_native_message_id, index)
+                self._active_native_text_blocks.add(index)
             event = self._shape_typed(kind, payload)
             if event is not None:
                 if native_time and kind != "session_metadata":
                     event = validate_event(dict(event, emitted_at=native_time))
                 events.append(event)
 
-        if raw_type == "stream_event" and stream_type == "message_stop":
-            message_id = self._active_native_message_id
-            if message_id:
+        if (raw_type == "stream_event" and isinstance(stream_type, str)
+                and stream_type in {"content_block_stop", "message_stop"}):
+            stop_index = stream_event.get("index", 0)
+            indices = set(self._active_native_text_blocks) if stream_type == "message_stop" else (
+                {stop_index} & self._active_native_text_blocks if type(stop_index) is int else set())
+            for index in sorted(indices):
                 completed = self._shape_typed("assistant_message", {
-                    "text": "", "is_complete": True, "message_id": message_id,
+                    "text": "", "is_complete": True,
+                    "message_id": content_block_message_id(self._active_native_message_id, index),
                     "content_mode": "delta",
                 })
                 if completed is not None:
                     if native_time:
                         completed = validate_event(dict(completed, emitted_at=native_time))
                     events.append(completed)
-            self._active_native_message_id = None
+            self._active_native_text_blocks.difference_update(indices)
+            if stream_type == "message_stop":
+                self._active_native_message_id = None
         return events
 
     @staticmethod

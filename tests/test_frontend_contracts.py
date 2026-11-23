@@ -1565,7 +1565,7 @@ class AgentTypesDynamicDropdownTests(unittest.TestCase):
         source = self.MACHINE_JS.read_text()
         # 内置兜底清单存在且含全部四个注册表 family（值 ⊆ EXECUTABLE_AGENT_TYPES）
         self.assertIn('FALLBACK_AGENT_TYPES', source)
-        for family in ('codex', 'claude_code', 'hermes', 'pi', 'zcode'):
+        for family in ('codex', 'claude_code', 'hermes', 'pi', 'zcode', 'agy'):
             self.assertIn(f"'{family}'", source)
         # 填充必须经由助手（去重 + 非 innerHTML），异步覆盖以 isActive 护栏
         self.assertIn('fillAgentSelect(select, FALLBACK_AGENT_TYPES)', source)

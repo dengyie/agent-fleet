@@ -5,7 +5,7 @@ import {el, button, link, errorText} from './agent-chat/dom.js';
 import {nativeDirectoryPath} from './agent-chat/paths.js';
 import {createNativeChatService, createMessageJournal, createTaskJournal} from './agent-chat/service.js';
 import {createNativeReader} from './agent-chat/live.js';
-import {mergeNativeEvents, sessionTitle, AGENT_LABELS, TERMINAL_RECEIPTS, RECEIPT_LABELS, operationStatus, uncertainWrite} from './agent-chat/state.js';
+import {mergeNativeEvents, sessionTitle, agentName, AGENT_LABELS, TERMINAL_RECEIPTS, RECEIPT_LABELS, operationStatus, uncertainWrite} from './agent-chat/state.js';
 import {createNativeMessages} from './agent-chat/messages.js';
 import {mountNativeInspector} from './agent-chat/inspector.js';
 import {CONTROL_LABELS} from './agent-chat/operations.js';
@@ -62,7 +62,7 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
   actions.append(destination, send); prompt.append(input, actions); form.append(prompt);
   dock.append(notice, form, el('p', 'composer-hint', 'Enter 发送 · Shift + Enter 换行 · 切换页面后任务继续运行')); chat.append(dock); root.append(chat);
   const sourceLinks = conversationTargets('computer'); intro.prepend(sourceLinks);
-  const inspector = mountNativeInspector(root, heading, {api, onControl: control});
+  const inspector = mountNativeInspector(root, heading, {api, onControl: control, service});
   const renderMessages = createNativeMessages(messageHost);
   let picker = null;
   const directoryLink = link('打开已有电脑会话', nativeDirectoryPath(), 'native-directory-link'); intro.append(directoryLink);
@@ -78,7 +78,7 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
     if (disposed) return;
     const controls = sessionControls(session, features());
     const pending = pendingOperation();
-    title.textContent = session ? sessionTitle(session, events) : task ? '正在连接 ' + task.agent_type + ' 会话' : '新建电脑 Agent 对话';
+    title.textContent = session ? sessionTitle(session, events) : task ? '正在连接 ' + agentName(task.agent_type) + ' 会话' : '新建电脑 Agent 对话';
     status.textContent = readError ? '连接暂不可用' : session ? AGENT_LABELS[session.current_state] || '状态待确认' : task ? ({queued:'等待节点启动', leased:'节点已领取', running:'等待绑定原生会话', succeeded:'任务已完成', failed:'启动失败', cancelled:'已取消', expired:'启动已过期', paused:'任务已暂停'}[task.state] || task.state) : submitting ? '正在提交' : '准备就绪';
     status.dataset.state = readError ? 'unknown' : session?.current_state || task?.state || 'idle';
     intro.hidden = !!sessionId || !!taskId || submitting;
@@ -122,14 +122,16 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
     input.disabled = !!sessionId && !controls.appendUserTurn && !busy;
     send.disabled = busy || !canSend;
     picker?.setLocked(busy);
-    destination.textContent = session ? [session.agent_family, session.machine_id].filter(Boolean).join(' · ') : [targetChoice?.agent_type, targetChoice?.project].filter(Boolean).join(' · ');
+    destination.textContent = session ? [agentName(session.agent_family), session.machine_id].filter(Boolean).join(' · ') : [agentName(targetChoice?.agent_type), targetChoice?.project].filter(Boolean).join(' · ');
     notice.replaceChildren();
     if (readError) notice.append(el('p', 'err', '读取暂时失败：' + readError), button('重新连接', () => reader.wake()));
     const last = operations.at(-1);
     if (last?.status === 'failed') notice.append(el('p', 'err', last.error || '操作失败，请查看投递记录。'));
     if (sessionId && session && !controls.appendUserTurn && !pending) notice.append(el('p', 'meta', controls.deliveryLabel || '当前会话只可阅读。可用控制以节点确认的权限为准。'));
     if (frozenTask && !submitting) notice.append(el('p', 'meta', '启动提交结果待确认，重试将沿用原启动标识和内容。'), button('查询或重试同一启动', submit));
-    inspector.update({session, task, selection: targetChoice, operations, busy, authorityVerified, features: features()});
+    const resultTaskId = task?.task_id || events.find(event =>
+      ['session_start', 'session_metadata'].includes(event.kind) && event.payload?.task_id)?.payload.task_id;
+    inspector.update({session, task, resultTaskId, selection: targetChoice, operations, busy, authorityVerified, features: features()});
     const follow = anchor.isAtBottom !== false;
     anchor.toggleAttribute('is-streaming', !!session && session.current_state === 'running');
     if (follow && !suspended && !preserveScroll) anchor.scrollToBottom(true);

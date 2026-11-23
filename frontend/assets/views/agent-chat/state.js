@@ -1,6 +1,9 @@
 /* Pure transcript projection. Cursor is Hub ingestion identity; vendor sequence
  * and text equality cannot identify messages across independent streams. */
 export const TERMINAL_RECEIPTS = new Set(['succeeded', 'already_finished', 'failed', 'expired', 'rejected', 'cancelled']);
+export const AGENT_NAMES = Object.freeze({codex:'Codex', claude_code:'Claude Code', hermes:'Hermes',
+  pi:'Pi', zcode:'ZCode', agy:'Google Antigravity'});
+export const agentName = family => AGENT_NAMES[family] || family || '电脑 Agent';
 export const RECEIPT_LABELS = Object.freeze({queued: '已入队', pending: '已入队', delivered: '节点已接收',
   accepted: '节点已接受', executing: '正在投递', succeeded: '已交付到原会话', already_finished: '操作已结束',
   failed: '投递失败', expired: '投递已过期', rejected: '投递被拒绝', cancelled: '已取消'});
@@ -63,7 +66,7 @@ export function nativeMessages(events) {
       messages.push({key: event.cursor, kind: 'notice', text: '记录存在采集缺口：' + (p.reason || 'source_unavailable'), emitted_at: event.emitted_at});
     } else if (event.kind === 'session_start') {
       messages.push({key: event.cursor, kind: 'activity',
-        text: ['原生会话开始', p.agent_family, p.adapter].filter(Boolean).join(' · '), emitted_at: event.emitted_at});
+        text: ['原生会话开始', agentName(p.agent_family), p.adapter].filter(Boolean).join(' · '), emitted_at: event.emitted_at});
     } else if (event.kind === 'session_metadata') {
       const facts = [p.model, p.provider].filter(Boolean).join(' / ');
       messages.push({key: event.cursor, kind: 'activity',
@@ -122,7 +125,7 @@ export function sessionTitle(session, events = []) {
   if (session?.native_title) return session.native_title;
   if (session?.title_preview) return session.title_preview;
   const first = events.find(event => event.kind === 'user_message' && event.payload?.text);
-  return first?.payload.text.slice(0, 60) || [session?.agent_family || '电脑 Agent', session?.machine_id].filter(Boolean).join(' · ');
+  return first?.payload.text.slice(0, 60) || [agentName(session?.agent_family), session?.machine_id].filter(Boolean).join(' · ');
 }
 
 // Unknown admissions require explicit recovery of the frozen operation.

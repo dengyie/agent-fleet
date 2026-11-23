@@ -5,14 +5,14 @@ from agent_profiles import (
 )
 
 
-def test_executable_types_exactly_five():
+def test_executable_types_exactly_six():
     assert EXECUTABLE_AGENT_TYPES == (
-        "codex", "claude_code", "hermes", "pi", "zcode")
+        "codex", "claude_code", "hermes", "pi", "zcode", "agy")
 
 
-def test_observable_types_six_including_generic():
+def test_observable_types_seven_including_generic():
     assert OBSERVABLE_AGENT_TYPES == (
-        "codex", "claude_code", "hermes", "pi", "zcode", "generic")
+        "codex", "claude_code", "hermes", "pi", "zcode", "agy", "generic")
     assert set(OBSERVABLE_AGENT_TYPES) == set(PROFILES)
 
 
@@ -65,13 +65,13 @@ from tools.probe_collectors import DEFAULT_AGENT_TYPES as PROBE_TYPES
 def test_hub_default_agent_types_derived_from_registry():
     # 身份断言:必须与注册表同一个 tuple 对象(派生),而非字面量副本
     assert HUB_TYPES is EXECUTABLE_AGENT_TYPES
-    assert HUB_TYPES == ("codex", "claude_code", "hermes", "pi", "zcode")
+    assert HUB_TYPES == ("codex", "claude_code", "hermes", "pi", "zcode", "agy")
 
 
 def test_probe_default_agent_types_derived_from_registry():
     assert PROBE_TYPES is OBSERVABLE_AGENT_TYPES
     assert set(PROBE_TYPES) == set(OBSERVABLE_AGENT_TYPES)
-    assert len(PROBE_TYPES) == 6
+    assert len(PROBE_TYPES) == 7
 
 
 import connectors
@@ -96,7 +96,7 @@ def test_connector_registry_subset_of_observable_types():
 
 
 def test_resume_capability_types_derived_from_profiles():
-    assert NATIVE_RESUME_AGENT_TYPES == ("codex", "claude_code", "hermes", "pi", "zcode")
+    assert NATIVE_RESUME_AGENT_TYPES == ("codex", "claude_code", "hermes", "pi", "zcode", "agy")
     assert RESUME_VERIFIABLE_AGENT_TYPES == ("codex", "claude_code")
     assert SESSION_PATH_RESUME_AGENT_TYPES == ("pi",)
     # 可探针验证 / 按路径续接 都必须先是原生可续接 family

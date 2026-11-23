@@ -239,7 +239,7 @@ def sync_desktop(cfg, desktop, row, native_path, send=post, *, budget_s=1, shoul
                 break  # Keep this page and its accepted prefix across scan slices.
             cursor = page.get('nextCursor')
             if cursor and cursor not in cursors:
-                state = {'cursor':cursor, 'seen':[]}
+                state.update(cursor=cursor, seen=[])
                 checkpoint.write_text(json.dumps(state), encoding='utf-8')
                 cursors.add(cursor)
             else:

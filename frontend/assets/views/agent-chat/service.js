@@ -1,6 +1,11 @@
 // Native use cases consume the public HTTP client. No platform Run/conversation
 // copies, machine localhost access, CLI arguments or capability inference.
 export function createNativeChatService(api) {
+  async function readBoundTask(id, sessionId, signal) {
+    const {task} = await api.getTask(id, {signal});
+    if (task.task_id !== id || sessionId && task.session_id !== sessionId) throw new Error('任务结果与当前会话不一致');
+    return task;
+  }
   return {
     async readSession(id, {position = {tail: true}, signal} = {}) {
       const jobs = [api.getSession(id, {signal})];
@@ -18,6 +23,29 @@ export function createNativeChatService(api) {
       const {task} = await api.getTask(id, {signal});
       if (task.task_id !== id) throw new Error('任务响应与请求标识不一致');
       return task;
+    },
+    async readResults(id, sessionId, signal) {
+      const task = await readBoundTask(id, sessionId, signal);
+      const [diff, files] = await Promise.allSettled([
+        task.result?.has_diff_patch ? api.getTaskDiff(id, {signal}) : Promise.resolve(null),
+        api.listTaskFiles(id, {signal}),
+      ]);
+      if ((diff.status === 'fulfilled' && diff.value && diff.value.task_id !== id) ||
+          (files.status === 'fulfilled' && files.value.task_id !== id)) throw new Error('任务快照标识不一致');
+      // A task may be retried while its snapshots are loading. Do not publish
+      // snapshots from a newer attempt bound to a different conversation.
+      await readBoundTask(id, sessionId, signal);
+      return {task, diff:diff.status === 'fulfilled' ? diff.value : null,
+        files:files.status === 'fulfilled' ? files.value.files : null,
+        diffError:diff.status === 'rejected' ? diff.reason : null,
+        filesError:files.status === 'rejected' ? files.reason : null};
+    },
+    async readResultFile(id, sessionId, path, signal) {
+      await readBoundTask(id, sessionId, signal);
+      const file = await api.getTaskFile(id, path, {signal});
+      if (file.path !== path) throw new Error('文件快照路径不一致');
+      await readBoundTask(id, sessionId, signal);
+      return file;
     },
     create: input => api.createTask(input),
     send: (id, operation) => api.sendSessionMessage(id, operation.text, operation.client_token),

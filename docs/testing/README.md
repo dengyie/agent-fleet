@@ -17,6 +17,22 @@ PYTHONPATH=. python3 -m pytest tests/test_session_schema.py \
   tests/test_review_node_sync.py -q
 ```
 
+agy 原生 Runner 接入、精确 ID 续聊、可见文本/工具 NDJSON、元数据和消息块身份回归：
+
+```sh
+python3 -m pytest tests/test_agy.py tests/test_native_transcript_detail.py \
+  tests/test_agent_profiles.py tests/test_agent_capability_layers.py \
+  tests/test_release_layout.py \
+  tests/test_cross_platform_agents.py tests/test_discovery.py \
+  tests/test_session_bridge.py tests/test_review_node_sync.py -q
+FLEET_PLAYWRIGHT_MODULE=/path/to/existing/playwright FLEET_BROWSER_CHANNEL=chrome \
+  python3 -m pytest tests/test_native_chat_frontend.py -q
+```
+
+`results` 浏览器场景经真实 Hub/SQLite HTTP 检查原任务 diff/文件/测试摘要、按需读取、
+纯文本 XSS 边界、迟到响应取消及 1440/390px。新节点测试加入 Windows/macOS CI。
+测试不运行真实 vendor CLI 或外部模型；安装状态与真实供应商验收单列。
+
 官方插件及 GitHub CLI 的节点接入、设备码任务与验收边界见[官方插件文档](../platform/official-plugins.md)。
 
 请求级模型、五项 Token、耗时、费用来源、重试与交互验收详见[请求元数据测试矩阵](request-metadata.md)。

@@ -75,6 +75,8 @@ PROFILES: dict[str, Profile] = {
         basenames=("zcode", "zcode.cjs"),
         native_session_root="~/.zcode/cli/rollout",
         native_session_depth=1, native_resume=True, runner_resume_only=True),
+    "agy": Profile("agy", ("agy", "--output-format", "stream-json", "--print", "{instruction}"),
+        basenames=("agy",), native_resume=True, runner_resume_only=True),
     "generic": Profile(
         "generic", None, executable=False,
         pattern="claude|codex|astrbot|openclaw|opencode|aider",

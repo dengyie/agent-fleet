@@ -23,6 +23,8 @@ def continuation_options(family: str, command: list[str]) -> list[str]:
                '--exclude-tools', '--system-prompt', '--append-system-prompt'},
         'zcode': {'--mode', '--surface', '--locale', '--toolsearch-mode', '--workflow-mode'},
         'hermes': {'--model', '-m', '--provider', '--reasoning', '--toolsets', '-t', '--run-budget', '--max-turns'},
+        'agy': {'--model', '--project', '--agent', '--effort', '--mode', '--settings',
+                '--add-dir', '--print-timeout'},
     }.get(family, set())
     switches = {
         'codex': {'--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check',
@@ -32,6 +34,7 @@ def continuation_options(family: str, command: list[str]) -> list[str]:
                '--no-prompt-templates', '--no-context-files', '--no-tools', '--approve', '--no-approve'},
         'zcode': {'--force-mcs', '--no-color'},
         'hermes': {'--no-restore-cwd', '--ignore-rules', '--safe-mode'},
+        'agy': {'--sandbox', '--disable-slash-commands', '--dangerously-skip-permissions'},
     }.get(family, set())
     result = []
     start = 1
@@ -82,6 +85,10 @@ def native_resume_argv(family: str, exe: str, token: str, text: str) -> list[str
         if leading_dash:
             return []
         argv = [exe, 'chat', '--quiet', '--resume', token, '--query', text]
+    elif family == 'agy':
+        if leading_dash:
+            return []
+        argv = [exe, '--output-format', 'stream-json', '--conversation', token, '--print', text]
     else:
         return []
     if any(flag in argv for flag in _RESUME_FORBIDDEN_FLAGS):

@@ -105,7 +105,7 @@ def test_layer_modules_keep_io_and_orchestration_out_of_pure_rules():
         'hub/domain/session_access.py': {'__future__', 'collections.abc', 'dataclasses', 'typing', 'agent_profiles', 'session_schema', 'hub.domain.agent_session'},
         'hub/domain/session_ports.py': {'__future__', 'collections.abc', 'dataclasses', 'typing'},
         'tools/adapters/native_resume.py': {'__future__'},
-        'tools/session/normalization.py': {'__future__', 'json', 'typing'},
+        'tools/session/normalization.py': {'__future__', 'hashlib', 'json', 'typing'},
     }
     for name, permitted in allowed.items():
         tree = ast.parse((ROOT / name).read_text(encoding='utf-8'))

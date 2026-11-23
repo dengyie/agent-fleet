@@ -140,10 +140,11 @@ def test_genuine_cli_processes_still_detected(monkeypatch):
         "claude",
         "python3 /opt/tools/hermes chat",
         "node /opt/cli/zcode.cjs -p hi",
+        "/opt/homebrew/bin/agy --output-format stream-json --print hi",
     )
     rows = _rows(monkeypatch, lines)
     got = [discovery.classify_family(r.exe_path, r.cmdline) for r in rows]
-    assert got == ["codex", "claude_code", "claude_code", "hermes", "zcode"]
+    assert got == ["codex", "claude_code", "claude_code", "hermes", "zcode", "agy"]
 
 
 def test_argv1_ignored_for_non_interpreters():

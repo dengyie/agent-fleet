@@ -2,7 +2,7 @@ import {uiIcon, pagePath} from '../routes.js';
 import {conversationTargets} from './conversation-target.js';
 import {nativeChatPath} from './agent-chat/paths.js';
 import {el, button, link, errorText} from './agent-chat/dom.js';
-import {sessionTitle, AGENT_LABELS} from './agent-chat/state.js';
+import {sessionTitle, agentName, AGENT_LABELS} from './agent-chat/state.js';
 import {sessionControls} from '../ui/session-capabilities.js';
 
 export function mountSessions(target, {api, store, machine: initialMachine, identitySignal}) {
@@ -47,7 +47,7 @@ export function mountSessions(target, {api, store, machine: initialMachine, iden
       const text = el('div', 'native-session-copy');
       text.append(el('strong', null, sessionTitle(row)), el('span', 'meta',
         (row.native_title ? '原生会话名' : row.title_preview ? '首条用户消息' : '未提供会话名') + ' · ' + row.session_id));
-      const client = [row.agent_family, row.adapter, row.client_version].filter(Boolean).join(' · ');
+      const client = [agentName(row.agent_family), row.adapter, row.client_version].filter(Boolean).join(' · ');
       const model = [row.provider, row.model].filter(Boolean).join(' / ');
       if (client || model) text.append(el('span', 'meta', [client, model].filter(Boolean).join(' · ')));
       const time = row.updated_at || row.started_at;
