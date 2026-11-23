@@ -220,9 +220,13 @@ def test_original_result_survives_continuation(result_service, completed_turn):
   The selected full Windows CI command, run from an isolated archive on the
   installed Windows node, passed **1019 tests with 44 explicit skips in 383.92s**;
   the set includes native kernel artifact probes, NTFS Git collection and durable
-  HTTP upload retries. It used the node's Python 3.12.7; GitHub's pinned Python
-  3.10 Windows gate remains the publication check. The exact macOS CI command on
-  the final source passed **630 tests, 2 skips and 103 subtests in 34.75s**.
+  HTTP upload retries. It used the node's Python 3.12.7. The exact macOS CI command
+  passed **630 tests, 2 skips and 103 subtests in 34.75s**. The formal pinned
+  Windows Python 3.10 gate then exposed a remaining difference: GitHub's
+  `C:/fleet-tests` inherited ACL rejects the Git source root and spool, while the
+  installed node's isolated temporary root is accepted. A Windows-only diagnostic
+  regression now records that exact root's owner and complete ACE SID/flags/masks
+  in the bounded JUnit artifact if rejected; fix and fresh official CI are pending.
 - This file is the pre-publication execution checkpoint. Exact final platform
   counts, GitHub merge SHA, deployment receipt and external/client boundaries are
   recorded in the publication PR and the existing canonical operations entry;

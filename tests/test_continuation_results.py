@@ -450,6 +450,46 @@ def test_windows_source_reader_uses_pinned_handle_and_bounded_read(monkeypatch, 
         _source_file_windows(tmp_path, b'unsafe:ads', 100)
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='Requires a real Windows runner ACL')
+def test_windows_pytest_temp_acl_is_accepted(tmp_path):
+    """Keep the Windows CI temp-root inheritance pattern inside the ACL contract."""
+    import ctypes as C
+    from tools.platform import artifact_windows as win
+    from tools.worktree import _source_file_windows, WorktreeError
+
+    source = tmp_path / 'source.txt'
+    source.write_bytes(b'owned fixture')
+    try:
+        assert _source_file_windows(tmp_path, b'source.txt', 32) == (b'owned fixture', '100644')
+    except WorktreeError as exc:
+        native = win._native()
+        handle = native.kernel.CreateFileW(str(tmp_path), win._CONTROL | win._SYNC | 0x81,
+            3, None, 3, 0x02200000, None)
+        if handle in {None, C.c_void_p(-1).value}:
+            pytest.fail(f'cannot inspect rejected CI temp ACL: {C.WinError(C.get_last_error())}')
+        owner, acl, descriptor = win.HANDLE(), win.HANDLE(), win.HANDLE()
+        try:
+            error = native.security.GetSecurityInfo(handle, 1, 5, C.byref(owner), None,
+                C.byref(acl), None, C.byref(descriptor))
+            if error:
+                pytest.fail(f'cannot inspect rejected CI temp ACL: {C.WinError(error)}')
+            size = win._ACLSize()
+            native.checked(native.security.GetAclInformation(acl, C.byref(size), C.sizeof(size), 2))
+            aces = []
+            for index in range(size.AceCount):
+                pointer = win.HANDLE()
+                native.checked(native.security.GetAce(acl, index, C.byref(pointer)))
+                ace = C.cast(pointer, C.POINTER(win._ACE)).contents
+                aces.append({'type': ace.AceType, 'flags': ace.AceFlags,
+                             'mask': hex(ace.Mask),
+                             'sid': native.sid(pointer.value + win._ACE.SidStart.offset)})
+            pytest.fail(f'CI temp ACL rejected ({exc}); owner={native.sid(owner.value)}; '
+                        f'user={native.current_user()}; aces={aces}')
+        finally:
+            native.kernel.LocalFree(descriptor)
+            native.close(handle)
+
+
 @pytest.mark.parametrize('owner,writer,accepted', [
     ('current-user', 'S-1-3-4', True),
     ('S-1-5-32-544', 'S-1-3-4', True),
