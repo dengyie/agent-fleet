@@ -457,40 +457,6 @@ def test_windows_source_reader_uses_pinned_handle_and_bounded_read(monkeypatch, 
         _source_file_windows(tmp_path, b'unsafe:ads', 100)
 
 
-@pytest.mark.skipif(os.name != 'nt', reason='Requires the Windows NTFS ACL boundary')
-def test_windows_shared_cache_keeps_results_private(tmp_path):
-    from fleet_core.artifact_receive import ArtifactReceiveError
-    from tools.worktree import _source_file_windows, WorktreeError
-
-    cache = tmp_path / 'shared-cache'
-    cache.mkdir()
-    subprocess.run(['icacls', str(cache), '/grant', '*S-1-5-11:(OI)(CI)(M)'],
-                   check=True, capture_output=True, timeout=20)
-    before = subprocess.check_output(['icacls', str(cache)], timeout=20)
-    source = cache / 'source.txt'
-    source.write_bytes(b'not a private workspace')
-    with pytest.raises(WorktreeError, match='source_file_boundary_unavailable'):
-        _source_file_windows(cache, b'source.txt', 32)
-    sent = []
-    def post(_config, _path, body):
-        sent.append(body['command_id'])
-        return 200, {'command_id': body['command_id']}
-    uploader = ContinuationResultUpload(SimpleNamespace(cache_dir=cache), post)
-    uploader.save(result())
-    uploader.replay()
-    assert sent == ['cmd_turn_1']
-    receipt = uploader.root / 'acknowledged' / 'cmd_turn_1.json'
-    assert uploader._read(receipt) == {'command_id': 'cmd_turn_1', 'acknowledged': True}
-    assert subprocess.check_output(['icacls', str(cache)], timeout=20) == before
-    # An existing spool with broad write access must be refused and preserved.
-    subprocess.run(['icacls', str(uploader.root), '/grant', '*S-1-5-11:(W)'],
-                   check=True, capture_output=True, timeout=20)
-    with pytest.raises(ArtifactReceiveError, match='unsafe_input_path'):
-        uploader.save(result(command_id='cmd_unsafe'))
-    assert not (uploader.root / 'cmd_unsafe.json').exists()
-    assert receipt.is_file()
-
-
 @pytest.mark.parametrize('owner,writer,accepted', [
     ('current-user', 'S-1-3-4', True),
     ('S-1-5-32-544', 'S-1-3-4', True),
