@@ -251,6 +251,10 @@ tool-call-badge #drawer pre { white-space: pre-wrap; overflow-wrap: anywhere; ma
 .workspace-node-row { display: flex; align-items: center; gap: 9px; padding: 11px 10px; border: 1px solid var(--border); border-radius: 9px; color: var(--text); }
 .workspace-node-row span { min-width: 0; overflow-wrap: anywhere; }
 .workspace-node-row small { margin-left: auto; flex: none; color: var(--text-2); }
+.workspace-node-entry { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.workspace-node-entry .workspace-node-row { border: 0; border-radius: 0; }
+.workspace-node-actions { display: flex; flex-wrap: wrap; gap: 16px; padding: 0 10px 12px 27px; font-size: 11px; }
+.workspace-node-actions a { min-height: 28px; display: inline-flex; align-items: center; }
 .workspace-node-config { margin: 18px 0; border-top: 1px solid var(--border); padding-top: 14px; }
 .workspace-node-config > summary { cursor: pointer; color: var(--text); font-size: 13px; font-weight: 600; }
 .workspace-node-editor { padding-top: 14px; }

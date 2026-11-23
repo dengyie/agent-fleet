@@ -4,6 +4,10 @@ export const TERMINAL_RECEIPTS = new Set(['succeeded', 'already_finished', 'fail
 export const RECEIPT_LABELS = Object.freeze({queued: '已入队', pending: '已入队', delivered: '节点已接收',
   accepted: '节点已接受', executing: '正在投递', succeeded: '已交付到原会话', already_finished: '操作已结束',
   failed: '投递失败', expired: '投递已过期', rejected: '投递被拒绝', cancelled: '已取消'});
+export function operationStatus(operation) {
+  if (operation.status === 'succeeded' && operation.action !== 'append_user_turn') return '节点已执行';
+  return RECEIPT_LABELS[operation.status] || operation.label || '等待确认';
+}
 export const AGENT_LABELS = Object.freeze({running: 'Agent 正在执行', idle: '等待下一条消息', completed: '本轮已结束',
   waiting_for_user: '等待你回答', waiting_for_approval: '等待审批', failed: 'Agent 执行失败', stopped: '已停止', unknown: '状态待确认'});
 

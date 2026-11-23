@@ -11,7 +11,8 @@ export function createNativeChatService(api) {
       const page = transcript?.status === 'fulfilled' ? transcript.value : null;
       if (session && session.session_id !== id) throw new Error('会话响应与请求标识不一致');
       if (page?.events.some(event => event.session_id !== id)) throw new Error('事件不属于当前会话');
-      return {session, page, error: detail.status === 'rejected' ? detail.reason : transcript?.status === 'rejected' ? transcript.reason : null};
+      return {session, page, authorityVerified: detail.status === 'fulfilled',
+        error: detail.status === 'rejected' ? detail.reason : transcript?.status === 'rejected' ? transcript.reason : null};
     },
     async readTask(id, signal) {
       const {task} = await api.getTask(id, {signal});

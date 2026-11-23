@@ -14,14 +14,16 @@ export function mountSessions(target, {api, store, machine: initialMachine, iden
   copy.append(el('h1', null, '电脑上的 Agent 会话'), el('p', 'meta', '从已同步的会话中查看记录，按当前权限继续工作。'));
   heading.append(copy, link('新建电脑对话', nativeChatPath(), 'button-primary')); root.append(heading);
   const filters = el('div', 'native-directory-filters');
-  const machine = el('select'), family = el('select'), search = el('input');
+  const machine = el('select'), family = el('select'), capability = el('select'), search = el('input');
   machine.setAttribute('aria-label', '筛选电脑'); family.setAttribute('aria-label', '筛选 Agent');
   search.type = 'search'; search.placeholder = '筛选会话名、节点、Agent 或模型'; search.setAttribute('aria-label', '筛选已载入会话');
   function option(select, value, text) { const row = el('option', null, text); row.value = value; select.append(row); }
   option(machine, '', '全部电脑'); option(family, '', '全部 Agent');
+  capability.setAttribute('aria-label', '筛选会话能力');
+  for (const [value, title] of [['', '全部会话'], ['message', '可继续对话'], ['control', '可控制'], ['read', '仅可阅读']]) option(capability, value, title);
   const refresh = button('刷新', load); refresh.prepend(uiIcon('refresh', {size: 14}));
   const node = link('节点与活动实例', '#'); node.hidden = true;
-  filters.append(machine, family, search, refresh, link('搜索消息正文', pagePath('session-search')), node); root.append(filters);
+  filters.append(machine, family, capability, search, refresh, link('搜索消息正文', pagePath('session-search')), node); root.append(filters);
   const status = el('p', 'native-directory-status meta'); status.setAttribute('role', 'status');
   const list = el('div', 'native-session-list'); list.setAttribute('aria-label', '电脑会话列表'); root.append(status, list);
   const more = button('加载更多会话', () => load(true)); more.hidden = true; root.append(more);
@@ -31,9 +33,14 @@ export function mountSessions(target, {api, store, machine: initialMachine, iden
     more.textContent = busy ? '正在加载…' : '加载更多会话';
     list.replaceChildren();
     const query = search.value.trim().toLocaleLowerCase();
-    const visible = rows.filter(row => (!family.value || row.agent_family === family.value) &&
+    const features = store.getState().status?.features;
+    const visible = rows.filter(row => {
+      const controls = sessionControls(row, features);
+      return (!capability.value || (capability.value === 'message' ? controls.appendUserTurn : capability.value === 'control' ? controls.canControl : !controls.canControl)) &&
+      (!family.value || row.agent_family === family.value) &&
       [row.machine_id, row.agent_family, row.session_id, row.native_title,
-        row.title_preview, row.provider, row.model].join(' ').toLocaleLowerCase().includes(query));
+        row.title_preview, row.provider, row.model].join(' ').toLocaleLowerCase().includes(query);
+    });
     for (const row of visible) {
       const card = link('', nativeChatPath({sessionId: row.session_id}), 'native-session-card');
       const glyph = el('span', 'native-session-glyph'); glyph.append(uiIcon('code', {size: 18}));
@@ -48,7 +55,8 @@ export function mountSessions(target, {api, store, machine: initialMachine, iden
       const state = el('div', 'native-session-state');
       state.append(el('span', 'native-session-state-label', AGENT_LABELS[row.current_state] || '历史记录'));
       const canSend = sessionControls(row, store.getState().status?.features).appendUserTurn;
-      state.append(el('span', 'meta', canSend ? '继续对话' : '查看记录'), uiIcon('chevron-right', {size: 15}));
+      const controls = sessionControls(row, features);
+      state.append(el('span', 'meta', canSend ? '继续对话' : controls.canControl ? '阅读与控制' : '查看记录'), uiIcon('chevron-right', {size: 15}));
       card.append(glyph, text, state); list.append(card);
     }
     if (!visible.length) {
@@ -96,7 +104,7 @@ export function mountSessions(target, {api, store, machine: initialMachine, iden
     } catch (_) { /* Directory is independently available when telemetry fails. */ }
     load();
   }
-  machine.addEventListener('change', () => { rows = []; cursor = null; hasMore = false; more.hidden = true; load(); }); family.addEventListener('change', paint); search.addEventListener('input', paint);
+  machine.addEventListener('change', () => { rows = []; cursor = null; hasMore = false; more.hidden = true; load(); }); family.addEventListener('change', paint); capability.addEventListener('change', paint); search.addEventListener('input', paint);
   const focus = () => load(); window.addEventListener('focus', focus);
   const dispose = () => { if (disposed) return; disposed = true; generation++; controller?.abort(); window.removeEventListener('focus', focus); identitySignal?.removeEventListener('abort', dispose); };
   dispose.suspend = () => { suspended = true; generation++; controller?.abort(); };

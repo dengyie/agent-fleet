@@ -30,6 +30,25 @@ body[data-page=agent-chat] .page-heading, body[data-page=sessions] .page-heading
 .native-context-row>strong { font-weight: 500; }
 .native-context>.meta { margin: 18px 0; font-size: 11px; line-height: 1.9; }
 .native-context>.button-secondary { font-size: 11px; margin: 5px 6px 5px 0; }
+.native-operation-links, .native-operation-buttons, .native-target-shortcuts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.native-target-shortcuts { padding-top: 12px; border-top: 1px solid var(--border-subtle); }
+.native-operation-links .button-secondary, .native-operation-buttons .button-secondary, .native-target-shortcuts .button-secondary { font-size: 11px; }
+.native-operation-buttons button { display: inline-flex; align-items: center; gap: 5px; }
+.native-operation-section { padding: 20px 0; border-bottom: 1px solid var(--border-subtle); }
+.native-operation-section h3 { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
+.native-operation-section p, .native-operations>p { font-size: 11px; line-height: 1.8; overflow-wrap: anywhere; }
+.native-profile-field { display: grid; gap: 8px; margin: 14px 0; font-size: 11px; color: var(--text-2); }
+.native-profile-field select { min-width: 0; width: 100%; font-size: 12px; }
+.native-handoff.panel { padding: 0; margin: 0; border: 0; background: transparent; }
+.native-handoff h2 { font-size: 13px; margin-bottom: 10px; }
+.native-handoff h3 { font-size: 11px; margin: 14px 0 5px; }
+.native-handoff .meta { font-size: 11px; line-height: 1.8; margin: 10px 0; }
+.native-handoff details { padding: 10px 0; font-size: 12px; }
+.native-handoff pre { font: 11px/1.8 var(--font-mono, monospace); color: var(--text-2); }
+.native-handoff label { display: grid !important; gap: 8px; margin: 14px 0; font-size: 11px; }
+.native-handoff select, .native-handoff textarea { min-width: 0; width: 100%; font-size: 12px; }
+.native-handoff button { font-size: 11px; }
+.native-handoff a { display: inline-block; margin: 8px 0; font-size: 12px; overflow-wrap: anywhere; }
 .native-operation-detail { border-bottom: 1px solid var(--border-subtle); padding: 12px 0; font-size: 12px; overflow-wrap: anywhere; }
 .native-operation-detail summary { cursor: pointer; }
 .native-operation-detail p { margin-top: 8px; font-size: 11px; }

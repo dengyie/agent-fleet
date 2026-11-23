@@ -8,6 +8,7 @@ const [origin, scenario, sid] = process.argv.slice(2);
   try {
     for (const width of [1440,390]) {
       const page = await browser.newPage({viewport:{width,height:1000}});
+      if (['local-profile','control-confirmation'].includes(scenario)) await page.addInitScript(theme => localStorage.setItem('agent-fleet-theme',theme),width === 390 ? 'dark' : 'light');
       page.setDefaultTimeout(9000);
       const errors = []; page.on('pageerror', error => errors.push(error.message));
       let writes = 0;
@@ -40,20 +41,41 @@ const [origin, scenario, sid] = process.argv.slice(2);
         await page.getByLabel('筛选已载入会话').fill('no-match');
         await page.getByText('没有匹配的已载入会话', {exact:true}).waitFor();
         await page.getByLabel('筛选已载入会话').fill('codex');
+        await page.getByLabel('筛选会话能力').selectOption('read');
+        assert.equal(await page.locator('.native-session-card').count(),0);
+        await page.getByLabel('筛选会话能力').selectOption('message');
         await page.locator('.native-session-card').first().click();
         await page.locator('.native-chat-view').waitFor();
         await page.getByText('Native answer from persisted transcript', {exact:true}).waitFor();
-      } else if (['create', 'task-recovery', 'missing-targets', 'refresh-targets'].includes(scenario)) {
+      } else if (['create', 'task-recovery', 'missing-targets', 'refresh-targets', 'target-links', 'offline-target'].includes(scenario)) {
         let offline = true;
         if (scenario === 'missing-targets') await page.route('**/api/machines/*/task-targets', route =>
           route.fulfill({status:404,contentType:'application/json',body:JSON.stringify({error:'not_found'})}));
-        if (scenario === 'refresh-targets') await page.route('**/api/status', async route => {
+        if (scenario === 'refresh-targets' || scenario === 'offline-target') await page.route('**/api/status', async route => {
           const response = await route.fetch(), body = await response.json();
-          if (offline) for (const machine of body.machines) machine.online = false;
+          if (scenario === 'offline-target') body.machines.push({...body.machines[0],machine:'other-online',online:true});
+          if (offline) for (const machine of body.machines) if (machine.machine !== 'other-online') machine.online = false;
           await route.fulfill({response, json: body});
         });
-        await page.goto(origin + '/assistant?view=computer');
-        if (scenario === 'missing-targets') {
+        await page.goto(origin + '/assistant?view=computer' + (scenario === 'offline-target' ? '&machine=m1' : ''));
+        if (scenario === 'offline-target') {
+          await page.getByText('所选节点当前离线。仍可阅读已同步会话；恢复连接后刷新，或手动选择其它节点。',{exact:true}).waitFor();
+          assert.equal(await page.getByLabel('电脑节点',{exact:true}).inputValue(),'m1','an explicit offline target must never switch to another machine');
+          assert.equal(await page.getByRole('button',{name:'发送给电脑 Agent'}).isDisabled(),true);
+          offline = false;
+          await page.getByRole('button',{name:'刷新节点与目录',exact:true}).click();
+          await page.waitForFunction(() => !document.querySelector('[aria-label="发送给电脑 Agent"]').disabled);
+          assert.equal(await page.getByLabel('电脑节点',{exact:true}).inputValue(),'m1');
+          assert.equal(writes,0); assert.deepEqual(errors,[]); await page.close(); continue;
+        } else if (scenario === 'target-links') {
+          await page.getByLabel('项目',{exact:true}).selectOption('agent-fleet');
+          assert.match(await page.getByRole('link',{name:'查看此节点会话',exact:true}).getAttribute('href'), /machine=m1/);
+          assert.match(await page.getByRole('link',{name:'管理此节点',exact:true}).getAttribute('href'), /\/machine\/m1$/);
+          await page.getByRole('link',{name:'查看此节点会话',exact:true}).click();
+          await page.locator('.native-session-card').first().waitFor();
+          assert.equal(await page.getByLabel('筛选电脑').inputValue(),'m1');
+          assert.equal(writes,0); assert.deepEqual(errors,[]); await page.close(); continue;
+        } else if (scenario === 'missing-targets') {
           await page.getByText('当前服务尚未提供节点启动目录。已有会话仍可打开和阅读。',{exact:true}).waitFor();
           assert.equal(await page.getByRole('button',{name:'发送给电脑 Agent'}).isDisabled(),true);
           assert.equal(writes,0);
@@ -105,6 +127,15 @@ const [origin, scenario, sid] = process.argv.slice(2);
           await page.reload(); await page.locator('.native-chat-view').waitFor();
         }
       } else {
+        if (scenario === 'local-profile' || scenario === 'profile-revocation') await page.route('**/api/machines/m1', async route => {
+          const response = await route.fetch(), body = await response.json();
+          body.current.local_profiles = [
+            {profile_id:'local-a',family:'codex',label:'Primary provider',current:true},
+            {profile_id:'local-b',family:'codex',label:'Alternate provider',current:false},
+            {profile_id:'foreign',family:'claude_code',label:'Other Agent',current:false},
+          ];
+          await route.fulfill({response,json:body});
+        });
         const sourceResponse = scenario === 'source-record' ? page.waitForResponse(response =>
           response.url().includes('/api/sessions/' + sid + '/events') &&
           response.url().includes('include_source=0')) : null;
@@ -136,6 +167,68 @@ const [origin, scenario, sid] = process.argv.slice(2);
           assert.deepEqual(errors,[]); await page.close(); continue;
         }
         await page.getByText('Native answer from persisted transcript', {exact:true}).waitFor();
+        if (['local-profile','stale-authority','control-confirmation','profile-revocation'].includes(scenario)) {
+          if (scenario === 'stale-authority') await page.getByLabel('自定义回答').fill('preserve answer during reconnect');
+          if (width === 390) await page.getByRole('button',{name:'工作面板',exact:true}).click();
+          await page.getByRole('tab',{name:'操作',exact:true}).click();
+          if (scenario === 'local-profile' || scenario === 'profile-revocation') {
+            const picker = page.getByLabel('本机模型配置',{exact:true});
+            await picker.selectOption('local-b');
+            assert.equal(await picker.locator('option').count(),2,'profiles are scoped to the current Agent family');
+            await page.waitForTimeout(4500);
+            assert.equal(await picker.inputValue(),'local-b','read polling preserves unsent profile choice');
+            if (scenario === 'profile-revocation') {
+              await page.route('**/api/sessions/' + sid, async route => {
+                const response = await route.fetch(), body = await response.json();
+                body.session.adoption_status = 'revoked';
+                body.session.allowed_actions = []; body.session.control_capability = 'unavailable';
+                await route.fulfill({response,json:body});
+              });
+              await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+              await page.locator('.native-access').filter({hasText:'纳管已撤销'}).waitFor();
+              assert.equal(await picker.isVisible(),false);
+              assert.equal(await page.getByRole('button',{name:'暂停会话',exact:true}).count(),0);
+              assert.equal(writes,0); assert.deepEqual(errors,[]); await page.close(); continue;
+            }
+            const posted = page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/source/control'));
+            await page.getByRole('button',{name:'应用本机配置',exact:true}).click();
+            const request = await posted;
+            assert.deepEqual(request.postDataJSON(), {action:'apply_local_profile',reason_code:'operator_requested',payload:{profile_id:'local-b'}});
+            await page.locator('.native-operation-feedback').filter({hasText:'已入队'}).waitFor();
+            assert.equal(writes,1);
+          } else if (scenario === 'control-confirmation') {
+            await page.getByRole('button',{name:'终止会话',exact:true}).click();
+            const dialog = page.getByRole('dialog',{name:'确认会话控制',exact:true});
+            await dialog.getByRole('button',{name:'取消',exact:true}).click();
+            assert.equal(writes,0,'cancel does not enqueue control');
+            await page.getByRole('button',{name:'终止会话',exact:true}).click();
+            await page.keyboard.press('Escape');
+            assert.equal(await dialog.isVisible(),false,'Escape closes the confirmation only');
+            assert.equal(await page.locator('.assistant-inspector').isVisible(),true,'Escape must preserve the inspector');
+            assert.equal(writes,0);
+            await page.getByRole('button',{name:'终止会话',exact:true}).click();
+            const posted = page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/source/control'));
+            await dialog.getByRole('button',{name:'确认执行',exact:true}).click();
+            assert.deepEqual((await posted).postDataJSON(),{action:'terminate_session',reason_code:'operator_requested'});
+            await page.locator('.native-operation-feedback').filter({hasText:'已入队'}).waitFor();
+            assert.equal(writes,1);
+            assert.equal(await page.getByRole('button',{name:'终止会话',exact:true}).isDisabled(),true);
+          } else {
+            await page.getByRole('button',{name:'暂停会话',exact:true}).waitFor();
+            await page.route('**/api/sessions/' + sid, route => route.fulfill({status:503,json:{error:'temporarily_unavailable'}}));
+            await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+            await page.getByText('权限状态暂不可确认，请重新连接后再操作。',{exact:true}).waitFor();
+            assert.equal(await page.getByRole('button',{name:'暂停会话',exact:true}).isDisabled(),true);
+            if (width === 390) await page.getByRole('button',{name:'收起工作面板',exact:true}).click();
+            assert.equal(await page.getByRole('button',{name:'发送给电脑 Agent'}).isDisabled(),true);
+            assert.equal(await page.getByLabel('自定义回答').isDisabled(),true,'authority failure also disables question answers');
+            assert.equal(await page.getByLabel('自定义回答').inputValue(),'preserve answer during reconnect');
+            assert.equal(writes,0);
+          }
+          await page.screenshot({path:'/tmp/fleet-native-web/' + scenario + '-' + width + '.png',fullPage:true});
+          assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false,'no operation panel overflow');
+          assert.deepEqual(errors,[]); await page.close(); continue;
+        }
         if (scenario === 'long-message') {
           await page.getByText('查看完整原文',{exact:true}).click();
           const full = page.locator('.native-full-text');
