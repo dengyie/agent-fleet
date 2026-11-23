@@ -1,0 +1,144 @@
+/* Consistent page rhythm and responsive controls across the console. */
+:root {
+  --radius-lg: 8px;
+  --shadow-sm: 0 1px 2px rgb(24 32 24 / 5%);
+  --shadow-md: 0 8px 24px rgb(24 32 24 / 8%);
+}
+
+.console-content { padding-top: 28px; }
+.page-heading { align-items: flex-end; margin-bottom: 22px; }
+.page-heading h1 { font-size: 23px; line-height: 1.3; }
+.page-heading p:last-child { max-width: 680px; line-height: 1.65; }
+.page-heading > .button-primary { flex: none; }
+
+.console-nav { gap: 3px; }
+.console-nav a, .console-nodes a { min-height: 40px; }
+.console-nodes a[aria-current="page"] { color: var(--text); background: var(--panel-hover); }
+.sidebar-adjustable-lists { min-height: 0; }
+.conversation-history-entry > a { min-height: 38px; }
+
+.panel, .card, .monitoring-summary-item, .monitoring-service-row,
+.native-session-card, .plugin-card, .plugin-auth, .plugin-enrollment,
+.usage-table-wrap, .settings-records {
+  border-radius: 8px;
+  box-shadow: var(--shadow-sm);
+}
+.panel, .card { border-color: var(--border); }
+.panel > :first-child, .card > :first-child { min-width: 0; }
+
+:is(.button-primary, .button-secondary, .button-danger, .icon-button,
+  .monitoring-refresh, .plugin-toggle, .settings-content button):focus-visible {
+  outline-offset: 2px;
+}
+
+/* Overview surfaces the machine state first and keeps secondary signals quiet. */
+.fleet-summary { margin-bottom: 20px; }
+.fleet-section-heading { margin-top: 24px; }
+.fleet-machine-row { min-height: 60px; }
+.fleet-machine-description { line-height: 1.45; }
+.fleet-secondary-detail { margin-top: 8px; }
+.fleet-secondary-detail > summary { min-height: 42px; display: flex; align-items: center; }
+
+/* Assistant pages keep the conversation and its controls inside a stable canvas. */
+body[data-page="assistant"] .assistant-intro,
+body[data-page="agent-chat"] .assistant-intro { max-width: 700px; align-self: center; }
+body[data-page="assistant"] .assistant-intro h2,
+body[data-page="agent-chat"] .assistant-intro h2 { font-size: 25px; line-height: 1.4; }
+body[data-page="assistant"] .assistant-thread,
+body[data-page="agent-chat"] .assistant-thread { scrollbar-gutter: stable; }
+.composer-dock { max-width: 900px; }
+.assistant-composer { border-radius: 16px; }
+.assistant-controls select { min-height: 36px; }
+.assistant-inspector { scrollbar-gutter: stable; }
+
+/* Operational pages use compact, scannable rows with consistent controls. */
+.monitoring-view { max-width: 1240px; }
+.monitoring-grid { gap: 14px; }
+.monitoring-summary-item { min-height: 62px; }
+.monitoring-service-row { min-height: 56px; }
+.monitoring-actions { scroll-margin-top: 16px; }
+
+.usage-page { max-width: 1320px; margin-inline: auto; gap: 14px; }
+.usage-filters { padding: 18px; gap: 12px; box-shadow: var(--shadow-sm); }
+.usage-field { gap: 5px; }
+.usage-field input, .usage-field select { min-height: 40px; }
+.usage-filters > .button-primary { min-height: 40px; }
+.usage-summary { gap: 10px; }
+.usage-summary > .panel { min-height: 98px; padding: 16px; }
+.usage-summary strong { font-size: 22px; font-variant-numeric: tabular-nums; }
+.usage-table-wrap { padding: 16px; }
+.usage-table th { position: sticky; top: 0; background: var(--panel); }
+.usage-table tbody tr:nth-child(even) { background: color-mix(in srgb, var(--panel-hover) 35%, transparent); }
+
+.native-directory { max-width: 1240px; }
+.native-directory > .conversation-targets { margin-bottom: 18px; }
+.native-directory-heading { margin-bottom: 20px; }
+.native-directory-filters { padding: 12px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+.native-directory-filters :is(input, select, button, a) { min-height: 40px; }
+.native-session-list { gap: 0; border-top: 1px solid var(--border); }
+.native-session-card { min-height: 76px; padding: 14px 12px; border-width: 0 0 1px; border-radius: 0; box-shadow: none; }
+.native-session-card:hover { background: var(--panel-hover); }
+.native-directory-empty { min-height: 230px; padding: 44px 20px; }
+
+.plugin-message:not(:empty) { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+.plugin-catalog { grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px; }
+.plugin-card { align-items: flex-start; min-width: 0; gap: 14px; padding: 16px; }
+.plugin-card > div { min-width: 0; }
+.plugin-title { font-size: 15px; }
+.plugin-meta, .plugin-identity { font-size: 11px; }
+.plugin-toggle { flex: none; min-height: 38px; }
+.plugin-enrollment { padding: 14px; }
+.plugin-enrollment summary { min-height: 36px; display: flex; align-items: center; font-weight: 600; }
+
+.settings-dialog { border-radius: 16px; }
+.settings-panel h2 { font-size: 18px; }
+.settings-panel-icon { width: 38px; height: 38px; border-radius: 8px; }
+.settings-records { box-shadow: none; }
+.settings-record { min-height: 64px; }
+
+@media (max-width: 1023px) {
+  .console-content { padding: 24px 22px 36px; }
+  .monitoring-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 767px) {
+  .console-content { padding: 18px 14px 28px; }
+  .page-heading { align-items: flex-start; gap: 12px; margin-bottom: 18px; }
+  .page-heading h1 { font-size: 21px; }
+  .page-heading > .button-primary { min-height: 40px; }
+  .fleet-summary { margin-bottom: 16px; }
+  .fleet-section-heading { margin-top: 20px; }
+  .fleet-machine-row { padding-inline: 4px; }
+  .fleet-machine-meta { flex-wrap: wrap; gap: 4px 10px; }
+  .composer-dock { padding: 10px 12px 12px; }
+  .assistant-composer { padding: 12px; border-radius: 14px; }
+  .assistant-controls { gap: 3px; }
+  .assistant-controls select { max-width: min(42vw, 170px); min-height: 42px; }
+  .monitoring-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+  .monitoring-summary-item { min-height: 58px; padding: 9px; align-items: flex-start; flex-direction: column; gap: 5px; }
+  .monitoring-summary-item strong { font-size: 17px; }
+  .monitoring-detail-body { min-height: 110px; }
+  .usage-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 12px; gap: 10px; }
+  .usage-filters > .button-primary { grid-column: 1 / -1; }
+  .usage-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+  .usage-summary > .panel { min-height: 82px; padding: 10px; }
+  .usage-summary strong { margin-top: 5px; font-size: 16px; }
+  .usage-table-wrap { padding: 10px; }
+  .native-directory-filters { gap: 8px; }
+  .native-directory-filters :is(input, select) { min-height: 44px; }
+  .native-directory-filters button, .native-directory-filters a { min-height: 44px; justify-content: center; }
+  .native-session-card { min-height: 72px; padding-inline: 5px; }
+  .native-session-glyph { width: 32px; height: 32px; }
+  .native-session-state { max-width: 84px; }
+  .plugin-card { flex-direction: row; align-items: center; padding: 12px; }
+  .plugin-toggle { white-space: normal; }
+}
+
+@media (max-width: 420px) {
+  .monitoring-summary { grid-template-columns: 1fr; }
+  .monitoring-summary-item { flex-direction: row; align-items: center; }
+  .usage-filters, .usage-summary { grid-template-columns: minmax(0, 1fr); }
+  .usage-filters > .button-primary { grid-column: auto; }
+  .plugin-card { align-items: flex-start; flex-direction: column; }
+  .plugin-toggle { width: 100%; }
+}
