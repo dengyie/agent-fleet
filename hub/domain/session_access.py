@@ -13,8 +13,9 @@ from typing import Any
 from agent_profiles import PROFILES, canonical_family
 from session_schema import public_session_dto
 from hub.domain.agent_session import SESSION_CONTROL_ACTIONS
+from fleet_core.agent_evidence import project_agent_evidence
 
-_SESSION_ACTIONS = frozenset((*SESSION_CONTROL_ACTIONS, 'append_user_turn', 'configure_model'))
+_SESSION_ACTIONS = frozenset((*SESSION_CONTROL_ACTIONS, 'append_user_turn', 'configure_model', 'answer_native_request'))
 
 
 @dataclass(frozen=True)
@@ -48,7 +49,8 @@ def project_session_access(row: Mapping[str, Any], adoption: AdoptionAccess | No
     # ZCode/Hermes continuation is proven only for Runner-owned CLI
     # identities. Captured metadata and adoptions do not establish one.
     if (not profile or not profile.native_resume
-            or (profile.runner_resume_only and not owned_runner)):
+            or (profile.runner_resume_only and not owned_runner)
+            or (family == 'agy' and row.get('runtime_protocol') != 'acp')):
         delivery_reason = 'native_resume_unsupported'
     elif adoption is not None and not adoption.native_file_path:
         delivery_reason = 'native_session_unbound'
@@ -59,6 +61,11 @@ def project_session_access(row: Mapping[str, Any], adoption: AdoptionAccess | No
             delivery_reason = 'session_busy'
     if delivery_reason:
         allowed.discard('append_user_turn')
+    if (not owned_runner or family != 'agy' or row.get('runtime_protocol') != 'acp'
+            or 'interactive_questions' not in row.get('capabilities', [])
+            or row.get('status') in {'closed', 'failed'}
+            or row.get('current_state') in {'completed', 'failed', 'stopped'}):
+        allowed.discard('answer_native_request')
     if (not profile or profile.model_protocol is None or adoption is not None
             or not str(row['session_id']).startswith('runner_')
             or 'model_takeover' not in row.get('capabilities', [])
@@ -87,4 +94,5 @@ def project_session_access(row: Mapping[str, Any], adoption: AdoptionAccess | No
                           'provider_profile_changes_capture': False}
     dto['allowed_actions'] = sorted(allowed)
     dto['control_capability'] = 'available' if allowed else 'unavailable'
+    dto['agent_evidence'] = project_agent_evidence({**row, **dto})
     return dto

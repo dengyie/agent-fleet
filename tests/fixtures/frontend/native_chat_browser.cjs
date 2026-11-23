@@ -150,7 +150,7 @@ const [origin, scenario, sid, taskId] = process.argv.slice(2);
           if (width === 390) await page.getByRole('button',{name:'工作面板',exact:true}).click();
           await page.getByRole('tab',{name:'任务结果',exact:true}).click();
           await page.getByRole('button',{name:'查看原任务结果',exact:true}).click();
-          const status = page.locator('.native-results [role=status]');
+          const status = page.locator('.native-results > [role=status]');
           await status.filter({hasText:'原任务状态：已完成'}).waitFor();
           release();
           await page.getByText('Native answer from persisted transcript',{exact:true}).waitFor();
@@ -169,7 +169,9 @@ const [origin, scenario, sid, taskId] = process.argv.slice(2);
           await page.getByRole('heading',{name:'VM native title',exact:true}).waitFor();
           const context = page.locator('.native-context');
           const detail = await context.innerText();
-          for (const fact of ['client-1.2','provider-y','model-x','原生开始','持续时间']) {
+          for (const fact of ['client-1.2','provider-y','model-x','原生开始','持续时间',
+            '接入协议','已采集信息','历史完整度','会话正文','工具调用','工具结果',
+            '原生会话名','尚未确认','操作权限以当前授权为准']) {
             assert.ok(detail.includes(fact), 'missing session detail fact: ' + fact + '\n' + detail);
           }
           await page.getByText('会话信息更新 · model-x / provider-y',{exact:true}).waitFor();
@@ -246,6 +248,53 @@ const [origin, scenario, sid, taskId] = process.argv.slice(2);
           await page.screenshot({path:'/tmp/fleet-native-web/' + scenario + '-' + width + '.png',fullPage:true});
           assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false,'no operation panel overflow');
           assert.deepEqual(errors,[]); await page.close(); continue;
+        }
+        if (scenario === 'continuation-results') {
+          let turnReads = 0, patchReads = 0;
+          page.on('request', request => {
+            if (/\/results(?:\?|$)/.test(request.url())) turnReads++;
+            if (/\/results\/cmd_/.test(request.url())) patchReads++;
+          });
+          if (width < 1100) await page.getByRole('button',{name:'工作面板',exact:true}).click();
+          await page.getByRole('tab',{name:'任务结果',exact:true}).click();
+          assert.equal(turnReads,0, 'turn results remain on demand');
+          await page.getByRole('button',{name:'查看续聊成果',exact:true}).click();
+          const body = page.locator('.native-turn-result-body');
+          await body.locator(':scope > details').first().waitFor();
+          assert.equal(await body.locator(':scope > details').count(),20);
+          assert.equal(patchReads,0, 'directory never downloads patch bodies');
+          await page.getByRole('button',{name:'加载更早成果',exact:true}).click();
+          await page.waitForFunction(() => document.querySelectorAll('.native-turn-result-body > details').length === 23);
+          assert.equal(await page.getByRole('button',{name:'加载更早成果',exact:true}).isVisible(),false);
+          assert.equal(await body.getByText('cmd_turn_00',{exact:true}).count(),1);
+          const first = body.locator(':scope > details').first();
+          await first.locator(':scope > summary').click();
+          await first.getByRole('button',{name:'读取本轮详情',exact:true}).click();
+          await first.getByText('本轮 diff',{exact:true}).click();
+          assert.ok((await first.innerText()).includes('<img src=x onerror=alert(1)> TURN_DETAIL'));
+          assert.equal(await body.locator('img,script').count(),0);
+          assert.equal(patchReads,1);
+          await page.evaluate(async () => {
+            const {mountTurnResults} = await import('/assets/views/agent-chat/turn-results.js');
+            const host = document.createElement('div'); document.body.append(host);
+            const pending = [], settle = () => new Promise(resolve => setTimeout(resolve,0));
+            const row = {command_id:'cmd_fixture',execution_state:'succeeded',duration_s:1,finished_at:'2026-11-23T12:00:00Z'};
+            const ui = mountTurnResults(host,{
+              readContinuationResults:async () => ({results:[row],has_more:false,before_cursor:'1'}),
+              readContinuationResult:(_sid,_cid,signal) => new Promise(resolve => pending.push({signal,resolve})),
+            });
+            ui.update('s'); host.querySelector('button').click(); await settle();
+            const action = host.querySelector('.native-turn-result-body button');
+            action.click(); ui.suspend();
+            if (!pending[0].signal.aborted || action.disabled) throw new Error('turn detail not aborted and reenabled');
+            ui.resume(); action.click();
+            pending[0].resolve({collection_state:'complete',diff_patch:'STALE_TURN'}); await settle();
+            if (!action.disabled || host.textContent.includes('STALE_TURN')) throw new Error('old turn request altered resumed request');
+            pending[1].resolve({collection_state:'complete',diff_patch:'CURRENT_TURN'}); await settle();
+            if (action.disabled || !host.textContent.includes('CURRENT_TURN')) throw new Error('current turn request not published');
+            ui.dispose(); host.remove();
+          });
+          assert.equal(writes,0); assert.deepEqual(errors,[]); await page.close(); continue;
         }
         if (scenario === 'results' || scenario === 'result-file-concurrency') {
           let resultGets = 0;

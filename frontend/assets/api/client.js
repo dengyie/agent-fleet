@@ -37,6 +37,7 @@ import {
   parseTaskDiff,
   parseTaskTargets,
 } from './contracts.js';
+import {parseContinuationResults} from './continuation-results.js';
 
 /* 公开 API 路径的唯一来源；动态段由 encodeURIComponent 编码。
  * 保持字面量 "/status" "/machines/" "/tasks" "/events" 便于 source 契约校验。 */
@@ -441,6 +442,14 @@ export async function searchSessions(filters) {
 export async function getSession(sessionId, options) {
   return parseSession(await request(
     API.sessions + '/' + encodeURIComponent(sessionId), options));
+}
+
+export async function getContinuationResults(sessionId, {before, signal} = {}) {
+  return parseContinuationResults(await request(API.sessions + '/' + encodeURIComponent(sessionId) + '/results' + queryString({limit: 20, before}), {signal}));
+}
+
+export async function getContinuationResult(sessionId, commandId, {signal} = {}) {
+  return parseContinuationResults(await request(API.sessions + '/' + encodeURIComponent(sessionId) + '/results/' + encodeURIComponent(commandId), {signal}), {detail: true});
 }
 
 export async function getSessionEvents(sessionId, {limit = 100, afterCursor, beforeCursor, tail, atSequence, includeSource, signal} = {}) {

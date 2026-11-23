@@ -296,8 +296,21 @@ class NativeResumeMixin:
     def continuation_ready(self, session_id: str) -> bool:
         """True only when the retained identity can accept another turn safely."""
         m = self.get(session_id)
-        return (m.state == 'terminated' and m.reason == 'completed'
-                and self.continuation_retained(session_id))
+        if not (m.state == 'terminated' and m.reason == 'completed'
+                and self.continuation_retained(session_id)):
+            return False
+        entry = self._entries[session_id]
+        if m.agent == 'agy':
+            # Historical print identities remain recoverable but are not ACP
+            # launch recipes. Never advertise a turn the actual builder refuses.
+            ready = bool(entry.manifest.capability_manifest.get('resume')
+                         and build_resume_argv('agy', entry.exe_path, entry.resume_token,
+                                               'readiness', entry.resume_options))
+            if not ready and entry.manifest.capability_manifest.get('resume'):
+                entry.manifest.capability_manifest = {**entry.manifest.capability_manifest, 'resume': False}
+                self._persist(entry.manifest)
+            return ready
+        return True
 
     def continuation_retained(self, session_id: str) -> bool:
         """Keep the original worktree/identity even after degraded completion.
@@ -307,7 +320,8 @@ class NativeResumeMixin:
         self.get(session_id)
         entry = self._entries[session_id]
         return bool(self._continuations.restore(entry)
-                    and entry.manifest.capability_manifest.get('resume'))
+                    and (entry.manifest.capability_manifest.get('resume')
+                         or entry.manifest.agent == 'agy'))
 
     def _capture_native_identity(self, entry, line: str) -> None:
         if not entry.persist_continuation:
@@ -331,14 +345,22 @@ class NativeResumeMixin:
                 entry.native_output = ''
             else:
                 row = json.loads(line)
-            token = None
+            token, resume_supported = None, True
             if entry.manifest.agent == 'codex' and row.get('type') == 'thread.started':
                 token = row.get('thread_id')
             elif entry.manifest.agent == 'claude_code' and row.get('type') in {'system', 'result'}:
                 token = row.get('session_id')
             elif entry.manifest.agent == 'pi' and row.get('type') == 'session':
                 token = row.get('id')
+            elif family == 'agy' and row.get('type') == 'fleet_acp_session':
+                from tools.providers.agy_runtime import native_identity
+                token = native_identity(row.get('session_id'))
+                resume_supported = row.get('resume_supported') is True
+                if (not token or not isinstance(row.get('cwd'), str)
+                        or os.path.normcase(os.path.realpath(row['cwd'])) != os.path.normcase(os.path.realpath(entry.cwd))):
+                    return
             elif family == 'agy' and row.get('event') == 'init':
+                resume_supported = False
                 token = row.get('conversation_id')
                 details = row.get('init')
                 if (not isinstance(details, dict) or not isinstance(details.get('cwd'), str)
@@ -356,7 +378,7 @@ class NativeResumeMixin:
                 return
             entry.resume_token = token
             if self._continuations.save(entry):
-                entry.manifest.capability_manifest = {**entry.manifest.capability_manifest, 'resume': True}
+                entry.manifest.capability_manifest = {**entry.manifest.capability_manifest, 'resume': resume_supported}
                 self._persist(entry.manifest)
         except (OSError, ValueError, TypeError, AttributeError):
             return

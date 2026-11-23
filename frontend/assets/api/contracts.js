@@ -141,7 +141,7 @@ var CONTROL_ENQUEUE_FIELDS = ['ok', 'command_id', 'session_id', 'action',
 var SOURCE_CONTROL_ACTIONS = ['pause_session', 'resume_session',
                               'terminate_session', 'quarantine_session',
                               'cancel_attempt', 'append_user_turn',
-                              'apply_local_profile', 'configure_model'];
+                              'apply_local_profile', 'configure_model', 'answer_native_request'];
 var REJECTED_CONTROL_KEYS = ['pid', 'signal', 'shell', 'command'];
 
 // SSE summary 事件只携带这些公开字段（绝不透传 payload/transcript）。
@@ -1094,7 +1094,7 @@ function parseInteractionOptions(value) {
 
 function parseInteractionRequestPayload(payload) {
   var allowed = ['request_id', 'question_type', 'prompt', 'options',
-                 'allow_custom', 'tool_name'];
+                 'allow_custom', 'tool_name', 'delivery'];
   rejectUnknownPayloadKeys(payload, allowed);
   var requestId = boundOpaque(payload.request_id, 'request_id');
   if (!requestId) {
@@ -1132,6 +1132,12 @@ function parseInteractionRequestPayload(payload) {
                               'tool_name 必须是原始值');
     }
     out.tool_name = String(payload.tool_name).slice(0, 128);
+  }
+  if (payload.delivery !== undefined) {
+    out.delivery = strictEnum(payload.delivery, ['native_permission'], 'invalid_delivery', 'delivery');
+    if (!['single', 'confirm'].includes(out.question_type) || out.allow_custom || !out.options.length) {
+      throw new ContractError('invalid_delivery', '原生权限必须选择一个已有选项');
+    }
   }
   return out;
 }
@@ -1188,6 +1194,44 @@ function parseInteractionResponsePayload(payload) {
   return out;
 }
 
+const EVIDENCE_FEATURES = ['visible_text', 'text_deltas', 'message_identity', 'tool_calls',
+  'tool_results', 'interactive_questions', 'native_permissions', 'model', 'provider',
+  'native_title', 'client_version', 'native_started_at', 'resume_identity', 'usage', 'hidden_reasoning'];
+
+function parseAgentEvidence(value) {
+  requireObject(value, 'agent_evidence');
+  const enumValue = (item, values) => strictEnum(item, values, 'invalid_agent_evidence', 'agent_evidence');
+  requireObject(value.protocol, 'agent_evidence_protocol');
+  requireObject(value.capture, 'agent_evidence_capture');
+  requireObject(value.features, 'agent_evidence_features');
+  const features = {};
+  for (const name of EVIDENCE_FEATURES) {
+    const feature = value.features[name];
+    requireObject(feature, 'agent_evidence_feature');
+    features[name] = {
+      state: enumValue(feature.state, ['unknown', 'observed', 'unsupported']),
+      source: enumValue(feature.source, ['none', 'session_event', 'session_metadata',
+        'continuation_identity', 'public_contract']),
+    };
+  }
+  return {
+    family: enumValue(value.family, ['codex', 'claude_code', 'pi', 'zcode', 'hermes', 'agy', 'unknown']),
+    adapter_support: enumValue(value.adapter_support, ['supported', 'unknown']),
+    installation: enumValue(value.installation, ['unknown']),
+    protocol: {
+      name: enumValue(value.protocol.name, ['acp', 'cli_json', 'native_transcript', 'desktop_bridge', 'unknown']),
+      state: enumValue(value.protocol.state, ['unknown', 'observed']),
+      source: enumValue(value.protocol.source, ['none', 'session_metadata', 'capture_source']),
+    },
+    capture: {
+      source: enumValue(value.capture.source, ['structured_stream', 'native_transcript', 'hooks', 'hook', 'pty', 'metadata', 'desktop_bridge', 'unknown']),
+      quality: enumValue(value.capture.quality, ['exact', 'structured', 'best_effort']),
+      history: enumValue(value.capture.history, ['unknown', 'retained_source_from_checkpoint', 'gaps_observed']),
+    },
+    features,
+  };
+}
+
 function parseSessionRow(row) {
   requireObject(row, 'session');
   rejectInternalKey(row, 'session');
@@ -1216,6 +1260,10 @@ function parseSessionRow(row) {
   }
   // Additive public facts; missing fields remain compatible with older Hubs.
   // A delivery claim can narrow an action, never grant control authority.
+  if (row.agent_evidence !== undefined) {
+    out.agent_evidence = parseAgentEvidence(row.agent_evidence);
+    if (!managed) out.agent_evidence.capture.quality = 'best_effort';
+  }
   if (row.message_delivery !== undefined) {
     requireObject(row.message_delivery, 'message_delivery');
     rejectInternalKey(row.message_delivery, 'message_delivery');

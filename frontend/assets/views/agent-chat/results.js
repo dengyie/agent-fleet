@@ -1,6 +1,7 @@
 // Retained task snapshots through public HTTP only. No node filesystem access.
 import {pagePath} from '../../routes.js';
 import {el, button, link, errorText} from './dom.js';
+import {mountTurnResults} from './turn-results.js';
 
 export function mountNativeResults(root, service) {
   let identity = '', taskId = '', sessionId = '', controller = null;
@@ -11,7 +12,9 @@ export function mountNativeResults(root, service) {
   const load = button('查看原任务结果', () => refresh());
   const status = el('p', 'meta'); status.setAttribute('role', 'status');
   const body = el('div', 'native-result-body');
-  root.append(heading, note, load, status, body);
+  const turnRoot = el('section', 'native-turn-results');
+  root.append(heading, note, load, status, body, turnRoot);
+  const turns = mountTurnResults(turnRoot, service);
 
   function cancel() {
     version++; controller?.abort(); controller = null; load.disabled = false;
@@ -98,14 +101,15 @@ export function mountNativeResults(root, service) {
   }
   return {
     update(nextTaskId, nextSessionId) {
+      turns.update(nextSessionId);
       const next = JSON.stringify([nextTaskId || '', nextSessionId || '']);
       if (next === identity) return;
       identity = next; cancel(); taskId = nextTaskId || ''; sessionId = nextSessionId || '';
       loaded = false; body.replaceChildren(); load.textContent = '查看原任务结果'; load.hidden = !taskId;
       status.textContent = taskId ? '按需读取原启动任务快照。' : '当前记录尚未提供原任务关联。可加载更早记录；从原生客户端导入的会话可能没有启动任务。';
     },
-    suspend() { suspended = true; cancel(); if (!loaded && taskId) status.textContent = '读取已暂停，可重新查看原任务结果。'; },
-    resume() { suspended = false; },
-    dispose() { disposed = true; cancel(); body.replaceChildren(); },
+    suspend() { suspended = true; cancel(); turns.suspend(); if (!loaded && taskId) status.textContent = '读取已暂停，可重新查看原任务结果。'; },
+    resume() { suspended = false; turns.resume(); },
+    dispose() { disposed = true; cancel(); turns.dispose(); body.replaceChildren(); },
   };
 }

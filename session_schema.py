@@ -132,11 +132,11 @@ _FORBIDDEN_PAYLOAD_KEYS = frozenset({
 # ``process_group_id`` binding but never ``cmd``/``argv``/``env``/``cwd``/``pid``.
 _GENERIC_PAYLOAD_FIELDS: dict[str, tuple[str, ...]] = {
     'session_start': ('agent_family', 'adapter', 'cli_version', 'client_version',
-                      'model', 'provider', 'native_started_at', 'interactive_questions'),
+                      'model', 'provider', 'native_started_at', 'interactive_questions', 'runtime_protocol'),
     'session_metadata': ('agent_family', 'adapter', 'task_id', 'agent_ref',
                          'title', 'model', 'provider', 'client_version',
                          'native_started_at', 'interactive_questions', 'native_resume',
-                         'resumed', 'desktop_bridge', 'model_takeover'),
+                         'resumed', 'desktop_bridge', 'model_takeover', 'runtime_protocol'),
     'process_spawn': ('process_family', 'owner', 'group_binding',
                       'process_group_id'),
     'process_exit': ('exit_code', 'duration_s', 'reason'),
@@ -152,7 +152,7 @@ _AGENT_STATE_PAYLOAD_FIELDS = frozenset({
 })
 _INTERACTION_REQUEST_PAYLOAD_FIELDS = frozenset({
     'request_id', 'question_type', 'prompt', 'options', 'allow_custom',
-    'tool_name',
+    'tool_name', 'delivery',
 })
 _INTERACTION_RESPONSE_PAYLOAD_FIELDS = frozenset({
     'request_id', 'selected', 'text',
@@ -442,6 +442,10 @@ def _interaction_request_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         'options': _interaction_options(payload.get('options')),
         'allow_custom': allow_custom,
     }
+    if 'delivery' in payload:
+        clean['delivery'] = _enum_payload(payload['delivery'], ('native_permission',), 'delivery')
+        if question_type not in ('single', 'confirm') or allow_custom or not clean['options']:
+            raise SessionValidationError('invalid_payload_value', 'native permission requires one offered option')
     if len(prompt) + sum(len(option['label']) for option in clean['options']) > MAX_INTERACTION_PROMPT:
         raise SessionValidationError('payload_too_large', 'question text exceeds limit')
     if 'tool_name' in payload:
@@ -541,6 +545,9 @@ def _generic_payload(payload: Mapping[str, Any], kind: str) -> dict[str, Any]:
 def _session_metadata_payload(payload: Mapping[str, Any], kind: str) -> dict[str, Any]:
     """Keep bounded, explicitly observed session metadata only."""
     clean = _generic_payload(payload, kind)
+    if 'runtime_protocol' in payload:
+        clean['runtime_protocol'] = _enum_payload(payload['runtime_protocol'],
+            ('acp', 'cli_json', 'native_transcript', 'desktop_bridge', 'unknown'), 'runtime_protocol')
     for field, maximum in (('title', 160), ('model', 160), ('provider', 96),
                            ('client_version', 96), ('cli_version', 96),
                            ('adapter', 64), ('agent_family', 64),

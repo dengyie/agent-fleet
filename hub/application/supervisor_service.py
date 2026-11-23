@@ -60,7 +60,7 @@ _TERMINAL = frozenset({
 
 #: Actions that pre-empt a lower-precedence queued resume / follow-up.
 _HIGH_PRECEDENCE = frozenset({"terminate_session", "quarantine_session"})
-_LOW_PRECEDENCE = frozenset({"resume_session", "append_user_turn", "configure_model"})
+_LOW_PRECEDENCE = frozenset({"resume_session", "append_user_turn", "configure_model", "answer_native_request"})
 
 
 def _now_s() -> float:
@@ -205,10 +205,11 @@ class SupervisorService:
         """Public capability metadata; never expose keys to tool declarations."""
         if self.public_key() is None:
             return frozenset()
-        actions = set(CONTROL_ACTIONS) - {'append_user_turn', 'apply_local_profile', 'configure_model'}
+        actions = set(CONTROL_ACTIONS) - {'append_user_turn', 'apply_local_profile', 'configure_model', 'answer_native_request'}
         if self._append_user_turn_enabled:
             actions.add('append_user_turn')
             actions.add('configure_model')
+            actions.add('answer_native_request')
         if self._apply_local_profile_enabled:
             actions.add('apply_local_profile')
         return frozenset(actions)
@@ -275,7 +276,7 @@ class SupervisorService:
         if action not in CONTROL_ACTIONS:
             raise SupervisorServiceError("unsupported_action",
                                          "不支持的控制动作")
-        if action in {"append_user_turn", "configure_model"} and not self._append_user_turn_enabled:
+        if action in {"append_user_turn", "configure_model", "answer_native_request"} and not self._append_user_turn_enabled:
             raise SupervisorServiceError("feature_disabled",
                                          "append_user_turn 未启用", 403)
         if action == "apply_local_profile" and not self._apply_local_profile_enabled:
@@ -497,6 +498,7 @@ class SupervisorService:
     @staticmethod
     def _public_receipt(row):
         return {"command_id": row["command_id"], "action": row["action"],
+                "dispatched": row.get("dispatched_s", 0) > 0,
                 "status": row["receipt_status"] or row["status"],
                 "reason": row["receipt_reason"] or "", "issued_at": _iso(row["issued_s"]),
                 "expires_at": _iso(row["expires_s"]), "attempt_id": row["attempt_id"],

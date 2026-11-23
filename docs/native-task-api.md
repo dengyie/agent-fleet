@@ -121,17 +121,23 @@ contract above apply without a new HTTP surface. Example launch:
 {"machine":"my-mac","project":"agent-fleet","agent_type":"agy","instruction":"Inspect the failing test and propose a fix.","client_token":"agy-start-001"}
 ```
 
-The node uses `agy --output-format stream-json --print <instruction>`. Only a
-Runner-owned invocation whose `init.conversation_id` is a valid UUID and whose
-`init.cwd` matches its private worktree can retain continuation. Follow-ups use
-`--conversation <exact-id>`, never the latest-conversation selector. Native IDs,
-worktree paths, settings and credentials stay node-private. Explicit local
-model/project/agent/effort/mode/settings options survive continuation. Browser
-model-catalog takeover is not declared for agy.
+The node now uses an owned `agy acp` stdio worker, following the fixed-source
+T3 Code design in [the native runtime contract](native-provider-runtime.md).
+Instructions are sent as native `session/prompt` text, never interpolated into
+the vendor command. A Runner-owned session retains its private opaque native ID
+and exact worktree. Follow-ups require negotiated resume support and use
+`session/resume` for that ID/cwd; failure never creates a sibling or selects the
+latest conversation. Native IDs, worktree paths, settings and credentials stay
+node-private. Explicit trusted model/mode choices must be advertised by the
+native session and remain part of the continuation recipe. Browser model-catalog
+takeover is not declared for agy.
 
-Documented `step_update` agent-response deltas and tool parameters/results map
-onto existing bounded session DTOs. A final aggregate response is used only if
-no visible text delta was received. There is no inferred import of old agy or
-Antigravity desktop conversations. Discovery identifies the exact `agy` binary;
-installation, login and official vendor availability remain node prerequisites.
-The tested protocol reference is https://antigravity.google/docs/cli/headless .
+Visible text chunks, tool updates/results and native permission questions map to
+the existing bounded session DTOs and signed control pipeline. Legacy print
+records remain readable; old identity retention alone cannot grant ACP resume.
+There is no inferred import of old agy or Antigravity desktop conversations.
+Discovery identifies the exact `agy` binary; installation, login and official
+vendor availability remain node prerequisites. This change requires the new
+signed node client; a Hub-only deployment does not activate the ACP worker.
+Independent protocol fixtures are not real vendor/model acceptance. Details and
+tests are linked from [the testing entry point](testing/README.md).

@@ -6,6 +6,7 @@ import hashlib
 import multiprocessing
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import subprocess
 import sys
 from typing import Any
@@ -40,6 +41,41 @@ def private_directory(path: Path) -> Path:
 def private_root(tmp_path: Path) -> Path:
     assert os.name == "nt" and win.windows_supported()
     return private_directory(tmp_path / "private-inputs")
+
+
+def test_windows_shared_cache_keeps_results_private(tmp_path):
+    from test_continuation_results import result
+    from tools.supervisor.continuation_result_upload import ContinuationResultUpload
+    from tools.worktree import _source_file_windows, WorktreeError
+
+    assert os.name == "nt" and win.windows_supported()
+    cache = tmp_path / 'shared-cache'
+    cache.mkdir()
+    subprocess.run(['icacls', str(cache), '/grant', '*S-1-5-11:(OI)(CI)(M)'],
+                   check=True, capture_output=True, timeout=20)
+    before = subprocess.check_output(['icacls', str(cache)], timeout=20)
+    source = cache / 'source.txt'
+    source.write_bytes(b'not a private workspace')
+    with pytest.raises(WorktreeError, match='source_file_boundary_unavailable'):
+        _source_file_windows(cache, b'source.txt', 32)
+    sent = []
+    def post(_config, _path, body):
+        sent.append(body['command_id'])
+        return 200, {'command_id': body['command_id']}
+    uploader = ContinuationResultUpload(SimpleNamespace(cache_dir=cache), post)
+    uploader.save(result())
+    uploader.replay()
+    assert sent == ['cmd_turn_1']
+    receipt = uploader.root / 'acknowledged' / 'cmd_turn_1.json'
+    assert uploader._read(receipt) == {'command_id': 'cmd_turn_1', 'acknowledged': True}
+    assert subprocess.check_output(['icacls', str(cache)], timeout=20) == before
+    # An existing spool with broad write access must be refused and preserved.
+    subprocess.run(['icacls', str(uploader.root), '/grant', '*S-1-5-11:(W)'],
+                   check=True, capture_output=True, timeout=20)
+    with pytest.raises(ArtifactReceiveError, match='unsafe_input_path'):
+        uploader.save(result(command_id='cmd_unsafe'))
+    assert not (uploader.root / 'cmd_unsafe.json').exists()
+    assert receipt.is_file()
 
 
 def test_hub_download_capacity_uses_private_child_and_preserves_parent_acl(private_root: Path) -> None:

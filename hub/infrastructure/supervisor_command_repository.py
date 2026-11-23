@@ -8,6 +8,7 @@ receipt wins. Delivery uses a short lease so an interrupted poll can retry.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 from pathlib import Path
@@ -159,6 +160,7 @@ class SupervisorCommandRepository:
                          "issued_s,command_id)"
                          " WHERE session_projection_pending=1")
             self._migrate_session_message_operations(conn)
+            self._migrate_dispatch_evidence(conn)
             conn.commit()
         except (sqlite3.Error, OSError) as exc:
             if conn.in_transaction:
@@ -166,6 +168,35 @@ class SupervisorCommandRepository:
             raise SupervisorCommandRepositoryError("command_unavailable") from exc
         finally:
             conn.close()
+
+    @staticmethod
+    def _migrate_dispatch_evidence(conn: sqlite3.Connection) -> None:
+        """Retain first poll dispatch independently of mutable leases/receipts."""
+        stored = conn.execute("SELECT value FROM supervisor_meta WHERE key='dispatch_schema'").fetchone()
+        if stored is not None and stored['value'] != '1':
+            raise sqlite3.DatabaseError('unsupported dispatch schema')
+        columns = {row['name']: row for row in conn.execute('PRAGMA table_info(supervisor_commands)')}
+        if stored is not None and 'dispatched_s' not in columns:
+            raise sqlite3.DatabaseError('missing dispatch schema')
+        if 'dispatched_s' not in columns:
+            conn.execute('ALTER TABLE supervisor_commands ADD COLUMN dispatched_s REAL NOT NULL DEFAULT 0')
+        else:
+            info = columns['dispatched_s']
+            default = str(info['dflt_value']).strip().strip('()')
+            if (info['type'].upper() != 'REAL' or info['notnull'] != 1
+                    or info['pk'] != 0 or default not in {'0', '0.0'}):
+                raise sqlite3.DatabaseError('invalid dispatch schema')
+        if stored is None:
+            # A currently delivered command or confirmed node receipt is
+            # evidence. An old expired queued command has no such proof.
+            conn.execute("UPDATE supervisor_commands SET dispatched_s=MAX(issued_s,0.000001)"
+                         " WHERE dispatched_s=0 AND (status='delivered' OR receipt_status IN"
+                         " ('accepted','executing','succeeded','failed','already_finished'))")
+            conn.execute("INSERT INTO supervisor_meta(key,value) VALUES('dispatch_schema','1')")
+        if conn.execute("SELECT 1 FROM supervisor_commands WHERE "
+                        "typeof(dispatched_s) NOT IN ('integer','real') "
+                        "OR dispatched_s<0 OR dispatched_s>9007199254740992 LIMIT 1").fetchone():
+            raise sqlite3.DatabaseError('invalid dispatch value')
 
     @staticmethod
     def _migrate_session_message_operations(conn: sqlite3.Connection) -> None:
@@ -308,12 +339,17 @@ class SupervisorCommandRepository:
             raise SupervisorCommandRepositoryError("command_corrupt") from exc
         if not isinstance(wire, dict):
             raise SupervisorCommandRepositoryError("command_corrupt")
+        dispatched = row['dispatched_s']
+        if (type(dispatched) not in (int, float) or not 0 <= dispatched <= 2**53
+                or not math.isfinite(dispatched)):
+            raise SupervisorCommandRepositoryError('command_corrupt')
         return {
             "command_id": row["command_id"], "machine": row["machine_id"],
             "session_id": row["session_id"], "attempt_id": row["attempt_id"],
             "action": row["action"], "nonce": row["nonce"], "wire": wire,
             "issued_s": float(row["issued_s"]), "expires_s": float(row["expires_s"]),
             "status": row["status"], "lease_until_s": float(row["lease_until_s"]),
+            "dispatched_s": float(dispatched),
             "receipt_status": row["receipt_status"], "receipt_reason": row["receipt_reason"],
             "idempotency_key": row["idempotency_key"],
         }
@@ -437,7 +473,7 @@ class SupervisorCommandRepository:
                 (session_id, attempt_id, attempt_id),
             ).fetchone()
             if (target and target["action"] in ("terminate_session", "quarantine_session")
-                    and action in ("resume_session", "append_user_turn", "configure_model")):
+                    and action in ("resume_session", "append_user_turn", "configure_model", "answer_native_request")):
                 conn.rollback()
                 raise SupervisorCommandRepositoryError("resume_superseded")
             superseded_audit_rows = []
@@ -446,7 +482,7 @@ class SupervisorCommandRepository:
                     superseded_audit_rows = conn.execute(
                         "SELECT command_id, action FROM supervisor_commands WHERE session_id=? AND "
                         "((attempt_id IS NULL AND ? IS NULL) OR attempt_id=?) AND "
-                        "action IN ('resume_session','append_user_turn','configure_model') "
+                        "action IN ('resume_session','append_user_turn','configure_model','answer_native_request') "
                         "AND status IN ('queued','delivered') "
                         "ORDER BY issued_s DESC, command_id DESC LIMIT ?",
                         (session_id, attempt_id, attempt_id, self._AUDIT_CAP),
@@ -457,7 +493,7 @@ class SupervisorCommandRepository:
                     "receipt_status='expired', receipt_reason='superseded', lease_until_s=0 "
                     "WHERE session_id=? AND "
                     "((attempt_id IS NULL AND ? IS NULL) OR attempt_id=?) AND "
-                    "action IN ('resume_session','append_user_turn','configure_model') "
+                    "action IN ('resume_session','append_user_turn','configure_model','answer_native_request') "
                     "AND status IN ('queued','delivered')",
                     (session_id, attempt_id, attempt_id),
                 )
@@ -561,9 +597,10 @@ class SupervisorCommandRepository:
             ids = [row["command_id"] for row in rows]
             for command_id in ids:
                 conn.execute(
-                    "UPDATE supervisor_commands SET status='delivered',lease_until_s=? "
+                    "UPDATE supervisor_commands SET status='delivered',lease_until_s=?,"
+                    "dispatched_s=CASE WHEN dispatched_s=0 THEN MAX(?,0.000001) ELSE dispatched_s END "
                     "WHERE command_id=? AND status IN ('queued','delivered') AND lease_until_s<=?",
-                    (float(lease_until_s), command_id, float(now_s)))
+                    (float(lease_until_s), float(now_s), command_id, float(now_s)))
             claimed = [self._decode(conn.execute(
                 "SELECT * FROM supervisor_commands WHERE command_id=?", (command_id,)
             ).fetchone()) for command_id in ids]

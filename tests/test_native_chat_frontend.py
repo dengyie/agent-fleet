@@ -124,7 +124,7 @@ assert.equal(maximum, 1); assert.equal(reads, 2); assert.equal(publications, 1, 
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize('scenario', ['read-send', 'lost-response', 'reload-recovery', 'directory', 'directory-pagination', 'history-pagination', 'revoked', 'question-draft', 'missing-targets', 'create', 'task-recovery', 'long-message', 'snapshot-revision', 'receipt-failure', 'delivery-disclosure', 'refresh-targets', 'source-record', 'native-metadata', 'directory-metadata', 'local-profile', 'stale-authority', 'target-links', 'control-confirmation', 'profile-revocation', 'offline-target', 'results', 'result-file-concurrency', 'task-results-binding'])
+@pytest.mark.parametrize('scenario', ['read-send', 'lost-response', 'reload-recovery', 'directory', 'directory-pagination', 'history-pagination', 'revoked', 'question-draft', 'missing-targets', 'create', 'task-recovery', 'long-message', 'snapshot-revision', 'receipt-failure', 'delivery-disclosure', 'refresh-targets', 'source-record', 'native-metadata', 'directory-metadata', 'local-profile', 'stale-authority', 'target-links', 'control-confirmation', 'profile-revocation', 'offline-target', 'results', 'result-file-concurrency', 'task-results-binding', 'continuation-results'])
 def test_native_chat_browser(tmp_path, scenario):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE for native web acceptance')
@@ -138,7 +138,7 @@ def test_native_chat_browser(tmp_path, scenario):
     services = app.extensions['fleet']['services']
     services['observe'].ingest({'machine':'m1', 'reachable':True, 'agents':{'codex':{'installed':True}}})
     result_task = None
-    if scenario in {'results', 'result-file-concurrency', 'task-results-binding'}:
+    if scenario in {'results', 'result-file-concurrency', 'task-results-binding', 'continuation-results'}:
         services['tasks'].create({'machine':'m1', 'project':'agent-fleet', 'agent_type':'codex',
                                   'instruction':'retained result fixture'}, OWNER)
         result_task = services['runner'].poll('m1', 'results-fixture')['task']
@@ -162,6 +162,13 @@ def test_native_chat_browser(tmp_path, scenario):
             files=[{'path':'test.py', 'content':'print("<img src=x onerror=alert(1)>")\n'},
                    {'path':'other.py', 'content':'second retained snapshot\n'}],
             test_summary={'framework':'pytest','passed':12,'failed':0,'skipped':1,'errors':0,'duration_s':1.2})
+        if scenario == 'continuation-results':
+            from tests.test_continuation_results import result as turn_result
+            for n in range(23):
+                services['continuation_results'].repository.put('m1', turn_result(
+                    command_id=f'cmd_turn_{n:02}', session_id=row.session_id, task_id=result_task['task_id'],
+                    diff_patch='+<img src=x onerror=alert(1)> TURN_DETAIL\n',
+                    test_summary={'framework':'pytest', 'passed':n, 'failed':0}))
     if scenario in {'source-record', 'native-metadata', 'directory-metadata'}:
         kind = 'source_record' if scenario == 'source-record' else 'session_metadata'
         payload = {'text':'PRIVATE_REASONING_SENTINEL'} if scenario == 'source-record' else {

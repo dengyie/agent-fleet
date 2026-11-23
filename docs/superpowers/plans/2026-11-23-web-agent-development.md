@@ -1,5 +1,12 @@
 # Web Agent Development Implementation Plan
 
+> Historical implementation checkpoint for the earlier print-based release.
+> Agy execution and continuation are superseded by the
+> [native provider runtime plan](2026-11-23-native-provider-runtime.md) and
+> [ACP development contract](../../native-provider-runtime.md). The earlier
+> stdout reader remains for retained records; its launch syntax below is not the
+> current execution contract.
+
 **Goal:** Support Google Antigravity CLI (`agy`) through the existing native task pipeline, preserve detailed native transcripts, and expose retained task results beside web chat.
 
 **Architecture:** Reuse the Agent profile registry, Runner/Supervisor, normalized events, SQLite repositories and public HTTP APIs. Antigravity stream shaping belongs in a small node-only module. Browser result inspection reads existing task snapshots; it cannot execute commands or browse the VM filesystem.

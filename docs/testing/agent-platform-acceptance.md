@@ -8,7 +8,7 @@
 
 | Agent | macOS | Windows | 原生续聊 / 采集 | 平台目录模型接管 |
 |---|---|---|---|---|
-| Google Antigravity (`agy`) | 本机 CLI 1.5.14 | 未验证安装 | stream-json；Runner 首次运行 UUID/cwd 验证后使用同一 conversation ID 续聊 | 保留本机参数，不声明目录接管 |
+| Google Antigravity (`agy`) | 本机 CLI 1.5.14；新 ACP 真实模型待验收 | 未验证安装；ACP 独立 peer 进入 Windows gate | `agy acp`，原生精确 `session/resume`；消息增量、工具、原生权限、后台结算 | 仅使用原生协商的模型/模式；不声明第三方目录接管 |
 | Codex | 已安装 CLI | 已安装原生 exe | JSON stdout；同一 thread ID | 支持 Responses 兼容配置 |
 | Claude Code | 已安装 CLI | 已安装原生 exe | stream-json；同一 session ID | 支持 Anthropic 兼容配置 |
 | Pi | 已安装 CLI | 已安装 Node 包 | print/json；精确 session ID/path | 保留本机 provider/model，不声明目录接管 |
@@ -40,12 +40,20 @@ Windows 测试用短 `--basetemp`，避免未启用 Win32 长路径的系统将�
 
 ### agy 新增边界（2026-11-23）
 
-本机 `agy --version` / `--help` 和官方 headless 协议确认接口；自动测试使用官方
-NDJSON fixture、真实短进程、Supervisor 重建和 Hub/SQLite HTTP，不调用外部模型。
-可见 text_delta、工具参数/结果/错误和无增量时的 final response 已接入既有事件。
-未执行真实 agy 模型调用、Windows agy 安装、旧 Antigravity 桌面历史导入、交互审批
-回传和 usage/费用投影；这些属于后续迭代项，不能记为真实客户端验收通过。
+新开发依据固定 T3 Code commit 的 ACP 实现，默认 `agy acp`；使用独立字面协议
+peer、真实 worker/Supervisor、RunnerCapture、Hub HTTP/SQLite 和签名控制客户端
+验证完整权限回答。覆盖 Unicode/旧 stdio 编码、断线、认证/恢复失败、帧限制、
+stderr 饱和、取消、提前 prompt 结果和权限/ACK 并发。原生协商允许列表内的
+模型/模式可在 worker 发 prompt 前选择，且私有续聊记录保留该选择。
 
-后续网页开发迭代：各原生源的完整元数据回填、源端实际提供的更细流式活动、独立
-每轮工作产物/测试快照、按能力声明的模型选择、每会话 usage，以及 agy 历史/审批
-官方接口验证。浏览器可以替代操作界面，VM 仍需 Agent 引擎、登录状态和 Fleet 节点。
+Windows 结果文件读取复用已有 pinned NT handle reader，拒绝 reparse/ADS 和
+读取时替换；接受当前用户、SYSTEM 或 Administrators 为所有者的正常私有目录，并将
+OWNER RIGHTS ACE 仅映射到经验证的所有者；其它 SID 的危险写入权限仍拒绝。macOS/POSIX
+使用 no-follow 目录描述符。Windows 的 POSIX Hub command-store 回归清楚标记平台跳过，
+不以弱化运行时文件权限检查规避测试。新增专项进入三端 CI；CI 通过和真实安装/模型验收
+是不同证据，不能互相替代。
+
+尚未执行新 ACP 对真实 Agy 模型的调用、Windows Agy 安装、旧桌面历史导入和
+usage/费用投影。运行中 steering、跨空闲轮次的常驻 ACP host 尚未开放；当前
+连接保持到本轮原生请求/后台工具结算，后续轮次精确恢复同一 native session。
+浏览器可以替代操作界面，VM 仍需 Agent 引擎、登录状态和 Fleet 节点。

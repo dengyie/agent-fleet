@@ -31,12 +31,21 @@ def project(family='codex', *, adoption=None, actions=ACTIONS, **changes):
 def test_owned_runner_capabilities_are_registry_driven_but_not_inferred(family):
     profile = PROFILES.get(canonical_family(family))
     value = project(family)
-    assert ('append_user_turn' in value['allowed_actions']) == bool(profile and profile.native_resume)
+    resume_supported = bool(profile and profile.native_resume and family != 'agy')
+    assert ('append_user_turn' in value['allowed_actions']) == resume_supported
     assert ('configure_model' in value['allowed_actions']) == bool(profile and profile.model_protocol)
     assert 'arbitrary_shell' not in value['allowed_actions']
     assert 'append_user_turn' not in project(family, capabilities=[])['allowed_actions']
     assert project(family, actions=set())['allowed_actions'] == []
     assert project(family, managed=False)['allowed_actions'] == []
+
+
+def test_agy_resume_requires_observed_acp_protocol():
+    legacy = project('agy', capabilities=['native_resume'])
+    assert 'append_user_turn' not in legacy['allowed_actions']
+    assert legacy['message_delivery']['reason'] == 'native_resume_unsupported'
+    acp = project('agy', capabilities=['native_resume'], runtime_protocol='acp')
+    assert 'append_user_turn' in acp['allowed_actions']
 
 
 @pytest.mark.parametrize('state', ['running', 'thinking', 'tool_running'])
@@ -102,8 +111,9 @@ def test_resume_composition_preserves_node_script_options_and_prompt(family):
 
 def test_layer_modules_keep_io_and_orchestration_out_of_pure_rules():
     allowed = {
-        'hub/domain/session_access.py': {'__future__', 'collections.abc', 'dataclasses', 'typing', 'agent_profiles', 'session_schema', 'hub.domain.agent_session'},
+        'hub/domain/session_access.py': {'__future__', 'collections.abc', 'dataclasses', 'typing', 'agent_profiles', 'session_schema', 'hub.domain.agent_session', 'fleet_core.agent_evidence'},
         'hub/domain/session_ports.py': {'__future__', 'collections.abc', 'dataclasses', 'typing'},
+        'fleet_core/agent_evidence.py': {'__future__', 'collections.abc', 'agent_profiles'},
         'tools/adapters/native_resume.py': {'__future__'},
         'tools/session/normalization.py': {'__future__', 'hashlib', 'json', 'typing'},
     }

@@ -41,8 +41,9 @@ from session_schema import (
     normalize_managed,
 )
 from hub.infrastructure.sqlite import connect as sqlite_connect
+from fleet_core.agent_evidence import OBSERVED_FEATURES, RUNTIME_PROTOCOLS, observed_event_features
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _FAMILY_REJECT_MARKERS = ("/", "\\", "token", "key", "secret", "private", "password")
 
@@ -116,6 +117,20 @@ class SessionRepository:
         stream_columns = {row["name"] for row in conn.execute("PRAGMA table_info(stream_state)")}
         if "capability_sequence" not in stream_columns:
             conn.execute("ALTER TABLE stream_state ADD COLUMN capability_sequence INTEGER NOT NULL DEFAULT 0")
+
+    @staticmethod
+    def _migrate_v6(conn) -> None:
+        """Atomically add protocol provenance and bounded observed-event facts."""
+        columns = {row['name']: row for row in conn.execute('PRAGMA table_info(sessions)')}
+        additions = {'runtime_protocol': "TEXT NOT NULL DEFAULT 'unknown'",
+                     'runtime_protocol_cursor': 'INTEGER',
+                     'observed_features': "TEXT NOT NULL DEFAULT '[]'"}
+        for name, declaration in additions.items():
+            if name in columns:
+                if columns[name]['type'].upper() != declaration.split()[0]:
+                    raise sqlite3.DatabaseError('invalid session evidence schema')
+            else:
+                conn.execute(f'ALTER TABLE sessions ADD COLUMN {name} {declaration}')
 
     @staticmethod
     def _migrate_v4(conn) -> None:
@@ -235,6 +250,7 @@ class SessionRepository:
                 self._migrate_v3(conn)
                 self._migrate_v4(conn)
                 self._migrate_v5(conn)
+                self._migrate_v6(conn)
                 conn.execute("INSERT INTO meta (key,value) VALUES ('schema_version',?) "
                              "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                              (str(SCHEMA_VERSION),))
@@ -324,7 +340,51 @@ class SessionRepository:
             "client_version": str(row.get("client_version") or "")[:96],
             "adapter": str(row.get("adapter") or "")[:64],
             "native_started_at": row.get("native_started_at"),
+            "runtime_protocol": (row.get('runtime_protocol')
+                if row.get('runtime_protocol') in RUNTIME_PROTOCOLS else 'unknown'),
+            "observed_features": SessionRepository._decode_observed(row.get('observed_features')),
         }
+
+    @staticmethod
+    def _decode_observed(value):
+        if not isinstance(value, str) or len(value) > 512:
+            return []
+        try:
+            values = json.loads(value)
+        except (ValueError, RecursionError):
+            return []
+        if not isinstance(values, list) or len(values) > len(OBSERVED_FEATURES):
+            return []
+        return sorted({item for item in values if isinstance(item, str) and item in OBSERVED_FEATURES})
+
+    def observe_events(self, session_id: str, events) -> None:
+        """One finite union/transaction per persisted batch; no history scanning."""
+        self._validate_session_id(session_id)
+        if not isinstance(events, list) or len(events) > 100:
+            raise SessionError('invalid_session_evidence')
+        features = set()
+        for event in events:
+            if isinstance(event, Mapping):
+                features.update(observed_event_features(event.get('kind'), event.get('payload')))
+        if not features:
+            return
+        conn = self._connect()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT observed_features FROM sessions WHERE session_id=?',
+                               (session_id,)).fetchone()
+            if row is not None:
+                previous = self._decode_observed(row['observed_features'])
+                merged = sorted(set(previous) | features)
+                if merged != previous:
+                    conn.execute('UPDATE sessions SET observed_features=? WHERE session_id=?',
+                                 (json.dumps(merged, separators=(',', ':')), session_id))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     @staticmethod
     def _normalize_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
@@ -592,6 +652,8 @@ class SessionRepository:
             "client_version": (payload.get("client_version") or payload.get("cli_version"), 96),
             "adapter": (payload.get("adapter"), 64),
             "native_started_at": (payload.get("native_started_at"), 40),
+            "runtime_protocol": (payload.get('runtime_protocol')
+                if payload.get('runtime_protocol') in RUNTIME_PROTOCOLS else None, 32),
         }
         bounded = {}
         for field, (value, maximum) in values.items():

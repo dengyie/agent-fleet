@@ -56,6 +56,20 @@ export function mountNativeInspector(root, heading, {api, onControl, service}) {
       fact('模型', session?.model);
       fact('状态', session ? AGENT_LABELS[session.current_state] || session.current_state : task?.state || '等待发送');
       fact('采集质量', {exact: '精确记录', structured: '结构化记录', best_effort: '尽力采集'}[session?.capture_quality]);
+      const evidence = session?.agent_evidence;
+      if (evidence) {
+        fact('接入协议', {acp: 'ACP', cli_json: 'CLI JSON', native_transcript: '原生记录',
+          desktop_bridge: '桌面桥接', unknown: '尚未确认'}[evidence.protocol.name]);
+        const observed = Object.entries({visible_text: '会话正文', text_deltas: '流式文本',
+          message_identity: '消息标识', tool_calls: '工具调用', tool_results: '工具结果',
+          native_permissions: '原生审批', model: '模型', native_title: '原生会话名',
+          client_version: '客户端版本'}).filter(([name]) => evidence.features[name]?.state === 'observed')
+          .map(([, label]) => label);
+        fact('已采集信息', observed.join('、') || '尚未观察到');
+        fact('历史完整度', {unknown: '尚未确认', retained_source_from_checkpoint: '从保留检查点采集',
+          gaps_observed: '已观察到采集缺口'}[evidence.capture.history]);
+        context.append(el('p', 'meta', '以上仅表示本会话已观察到的信息；未观察到的能力尚未确认，操作权限以当前授权为准。'));
+      }
       const startedAt = session?.native_started_at || session?.started_at;
       fact(session?.native_started_at ? '原生开始' : '首次采集', formatDate(startedAt));
       fact('最后活动', formatDate(session?.updated_at));
