@@ -8,6 +8,7 @@
 
 | Agent | macOS | Windows | 原生续聊 / 采集 | 平台目录模型接管 |
 |---|---|---|---|---|
+| Google Antigravity (`agy`) | 本机 CLI 1.5.14 | 未验证安装 | stream-json；Runner 首次运行 UUID/cwd 验证后使用同一 conversation ID 续聊 | 保留本机参数，不声明目录接管 |
 | Codex | 已安装 CLI | 已安装原生 exe | JSON stdout；同一 thread ID | 支持 Responses 兼容配置 |
 | Claude Code | 已安装 CLI | 已安装原生 exe | stream-json；同一 session ID | 支持 Anthropic 兼容配置 |
 | Pi | 已安装 CLI | 已安装 Node 包 | print/json；精确 session ID/path | 保留本机 provider/model，不声明目录接管 |
@@ -32,6 +33,19 @@ Linux 完整发布门禁继续执行真实 HTTP/SQLite、浏览器与 journey �
 
 新增 `test_cross_platform_agents.py` 使用真实子进程、SQLite、加密 spool 与 Hub HTTP 接收链路，验证 Pi/ZCode/Hermes 工具事件唯一入库和原生身份恢复。其他回归覆盖 Windows argv、Unicode、进程发现、探测、配置、模型绑定和续聊竞争。
 
-真实模型验收使用唯一 FIRST/FOLLOW 标记：FIRST 必须实际读取 UTF-8 文件；新 Supervisor 从持久记录恢复后，FOLLOW 在相同 native ID 回忆原口令且不调用工具；文件字节不变。证据保存在节点私有 `~/.cache/agent-fleet/verification/cross-platform-agents-20261121`，不把凭据或私有配置提交到仓库。Mac Pi/ZCode/Hermes、Windows Pi/ZCode 已执行；最终生产验收以部署后的独立回执为准，单元测试不代填外部模型通过。
+真实模型验收使用唯一 FIRST/FOLLOW 标记：FIRST 必须实际读取 UTF-8 文件；新 Supervisor 从持久记录恢复后，FOLLOW 在相同 native ID 回忆原口令且不调用工具；文件字节不变。证据保存在节点私有 `~/.cache/agent-fleet/verification/cross-platform-agents-20261121`，不把凭据或私有配置提交到仓库。Mac Pi/ZCode/Hermes、Windows Pi/ZCode 已执行；agy 仅完成协议 fixture、Supervisor 与 Hub/SQLite 验收，尚未执行真实模型调用；最终生产验收以部署后的独立回执为准，单元测试不代填外部模型通过。
 
 Windows 测试用短 `--basetemp`，避免未启用 Win32 长路径的系统将测试临时目录的长文件名拒绝误归因于会话逻辑；不更改用户机器全局注册表。POSIX 权限位断言仅在 POSIX 执行，Windows 仍执行私有目录下的写入、恢复和身份验证。
+
+
+### agy 新增边界（2026-11-23）
+
+本机 `agy --version` / `--help` 和官方 headless 协议确认接口；自动测试使用官方
+NDJSON fixture、真实短进程、Supervisor 重建和 Hub/SQLite HTTP，不调用外部模型。
+可见 text_delta、工具参数/结果/错误和无增量时的 final response 已接入既有事件。
+未执行真实 agy 模型调用、Windows agy 安装、旧 Antigravity 桌面历史导入、交互审批
+回传和 usage/费用投影；这些属于后续迭代项，不能记为真实客户端验收通过。
+
+后续网页开发迭代：各原生源的完整元数据回填、源端实际提供的更细流式活动、独立
+每轮工作产物/测试快照、按能力声明的模型选择、每会话 usage，以及 agy 历史/审批
+官方接口验证。浏览器可以替代操作界面，VM 仍需 Agent 引擎、登录状态和 Fleet 节点。

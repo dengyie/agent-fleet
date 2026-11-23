@@ -6,6 +6,7 @@ HTTP path. Production routing stays exclusively with the backend workstream.
 import os
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
 from threading import Thread
 
 import pytest
@@ -23,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_native_chat_state_and_contracts():
     result = subprocess.run(['node', '--input-type=module'], cwd=ROOT, text=True, capture_output=True, input=r"""
 import assert from 'node:assert/strict';
-import {mergeNativeEvents, nativeMessages, sessionTitle, uncertainWrite, operationStatus} from './frontend/assets/views/agent-chat/state.js';
+import {mergeNativeEvents, nativeMessages, sessionTitle, agentName, uncertainWrite, operationStatus} from './frontend/assets/views/agent-chat/state.js';
 import {parseTaskTargets, parseSession} from './frontend/assets/api/contracts.js';
 import {createNativeReader} from './frontend/assets/views/agent-chat/live.js';
 import {createNativeChatService, createMessageJournal, createTaskJournal} from './frontend/assets/views/agent-chat/service.js';
@@ -56,6 +57,7 @@ const interactions = nativeMessages([
 assert.deepEqual(interactions.map(row => row.text), ['Agent 提问 · Choose a route','你的回答 · Safe route · Proceed carefully']);
 assert.equal(sessionTitle({native_title:'VM native title',title_preview:'fallback'}), 'VM native title');
 assert.equal(sessionTitle({title_preview:'first observed user turn'}), 'first observed user turn');
+assert.equal(agentName('agy'), 'Google Antigravity');
 const targets = parseTaskTargets({machine:'m1', projects:['fleet'], agents:{codex:{installed:null, credential:'hidden'}}, internal:'hidden'});
 assert.equal(targets.agents.codex.installed, null); assert.equal(targets.agents.codex.credential, undefined);
 assert.throws(() => parseTaskTargets({machine:'m1',projects:[],agents:{codex:{installed:'yes'}}}));
@@ -78,6 +80,21 @@ assert.equal((await service.readSession('s')).authorityVerified,true);
 const partial = await createNativeChatService({...api, getSession:async () => {throw new Error('authority unavailable');}}).readSession('s');
 assert.equal(partial.authorityVerified,false);
 assert.ok(partial.page,'transcript and authority failures remain independent');
+const aborter = new AbortController(), resultSignals = [];
+let binding = 's', resultReads = 0;
+const resultService = createNativeChatService({
+  getTask: async (id, options) => {resultSignals.push(options.signal);return {task:{task_id:id, session_id:binding,result:{has_diff_patch:true}}};},
+  getTaskDiff: async (id, options) => {resultReads++;resultSignals.push(options.signal);return {task_id:id,diff_patch:'<script>literal</script>'};},
+  listTaskFiles: async (id, options) => {resultReads++;resultSignals.push(options.signal);return {task_id:id,files:[]};},
+  getTaskFile: async (id, path, options) => {resultSignals.push(options.signal);return {path,content:'literal code'};},
+});
+assert.equal((await resultService.readResults('t','s',aborter.signal)).diff.diff_patch,'<script>literal</script>');
+assert.equal((await resultService.readResultFile('t','s','a.py',aborter.signal)).content,'literal code');
+assert.ok(resultSignals.every(signal => signal === aborter.signal));
+binding = 'other';
+await assert.rejects(resultService.readResults('t','s',aborter.signal),/不一致/);
+await assert.rejects(resultService.readResultFile('t','s','a.py',aborter.signal),/不一致/);
+assert.equal(resultReads,2,'mismatched session cannot read snapshots');
 const values = new Map();
 const journal = createMessageJournal({getItem:key => values.get(key) || null,
   setItem:(key,value) => values.set(key,value), removeItem:key => values.delete(key)}, 's');
@@ -107,7 +124,7 @@ assert.equal(maximum, 1); assert.equal(reads, 2); assert.equal(publications, 1, 
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize('scenario', ['read-send', 'lost-response', 'reload-recovery', 'directory', 'directory-pagination', 'history-pagination', 'revoked', 'question-draft', 'missing-targets', 'create', 'task-recovery', 'long-message', 'delivery-disclosure', 'refresh-targets', 'source-record', 'native-metadata', 'directory-metadata', 'local-profile', 'stale-authority', 'target-links', 'control-confirmation', 'profile-revocation', 'offline-target'])
+@pytest.mark.parametrize('scenario', ['read-send', 'lost-response', 'reload-recovery', 'directory', 'directory-pagination', 'history-pagination', 'revoked', 'question-draft', 'missing-targets', 'create', 'task-recovery', 'long-message', 'delivery-disclosure', 'refresh-targets', 'source-record', 'native-metadata', 'directory-metadata', 'local-profile', 'stale-authority', 'target-links', 'control-confirmation', 'profile-revocation', 'offline-target', 'results'])
 def test_native_chat_browser(tmp_path, scenario):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE for native web acceptance')
@@ -120,13 +137,30 @@ def test_native_chat_browser(tmp_path, scenario):
     row = adopted(app, captured=False)
     services = app.extensions['fleet']['services']
     services['observe'].ingest({'machine':'m1', 'reachable':True, 'agents':{'codex':{'installed':True}}})
+    result_task = None
+    if scenario == 'results':
+        services['tasks'].create({'machine':'m1', 'project':'agent-fleet', 'agent_type':'codex',
+                                  'instruction':'retained result fixture'}, OWNER)
+        result_task = services['runner'].poll('m1', 'results-fixture')['task']
+        row = SimpleNamespace(session_id='runner_results_fixture')
     for seq, kind, payload in [(1, 'session_start', {'agent_family':'codex','adapter':'hooks','interactive_questions':True}),
             (2, 'user_message', {'text':'Inspect native project', 'is_complete':True}),
             (3, 'assistant_message', {'text':'Native answer from persisted transcript', 'is_complete':True}),
             (4, 'tool_call', {'tool_name':'read_file','call_id':'call_1','arguments':'{"path":"README.md"}'}),
             (5, 'tool_result', {'tool_name':'read_file','call_id':'call_1','result':'README contents','status':'success'})]:
         item = event(seq, kind, payload); item['session_id'] = row.session_id
+        if result_task:
+            item['attempt_id'] = result_task['attempt_id']
         assert services['sessions'].ingest_events([item])['rejected'] == []
+    if result_task:
+        item = event(6, 'session_metadata', {'task_id':result_task['task_id']})
+        item.update(session_id=row.session_id, attempt_id=result_task['attempt_id'])
+        assert services['sessions'].ingest_events([item])['rejected'] == []
+        services['runner'].result('m1', result_task['attempt_id'], result_task['nonce'], 0,
+            log_summary='snapshot complete', diff_stat='1 file changed',
+            diff_patch='diff --git a/test.py b/test.py\n+print("<img src=x onerror=alert(1)>")\n',
+            files=[{'path':'test.py', 'content':'print("<img src=x onerror=alert(1)>")\n'}],
+            test_summary={'framework':'pytest','passed':12,'failed':0,'skipped':1,'errors':0,'duration_s':1.2})
     if scenario in {'source-record', 'native-metadata', 'directory-metadata'}:
         kind = 'source_record' if scenario == 'source-record' else 'session_metadata'
         payload = {'text':'PRIVATE_REASONING_SENTINEL'} if scenario == 'source-record' else {

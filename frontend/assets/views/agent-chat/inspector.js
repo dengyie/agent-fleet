@@ -1,33 +1,37 @@
 import {pagePath} from '../../routes.js';
 import {mountInspector} from '../assistant/workspace.js';
 import {el, button, link} from './dom.js';
-import {operationStatus, AGENT_LABELS, sessionTitle} from './state.js';
+import {operationStatus, AGENT_LABELS, agentName, sessionTitle} from './state.js';
 import {mountNativeOperations, CONTROL_LABELS} from './operations.js';
+import {mountNativeResults} from './results.js';
 import {mountHandoffPanel} from '../session-handoff.js';
 
-export function mountNativeInspector(root, heading, {api, onControl}) {
+export function mountNativeInspector(root, heading, {api, onControl, service}) {
   const inspector = el('dialog', 'assistant-inspector'); inspector.setAttribute('aria-label', '电脑会话工作面板');
   const context = el('section', 'native-context'), receipts = el('section', 'native-receipts');
   const operationsHost = el('section', 'native-operations'), handoffHost = el('section', 'native-handoff');
   const operationsPanel = mountNativeOperations(operationsHost, {api, onControl, dialogHost: root});
   let handoff, handoffId = '';
+  const results = el('section', 'native-results'), resultUI = mountNativeResults(results, service);
   root.append(inspector);
   const ui = mountInspector(root, heading, inspector, [
     {id: 'native-context', title: '会话', sections: [context]},
     {id: 'native-operations', title: '操作', sections: [operationsHost], onSelect: () => operationsPanel.activate()},
     {id: 'native-handoff', title: '接力', sections: [handoffHost], hidden: true},
     {id: 'native-receipts', title: '投递记录', sections: [receipts]},
+    {id: 'native-results', title: '任务结果', sections: [results]},
   ]);
   let contextKey = '', receiptKey = '';
   let durationTimer = null;
-  function update({session, task, selection, operations, authorityVerified, busy, features}) {
+  function update({session, task, resultTaskId, selection, operations, authorityVerified, busy, features}) {
+    resultUI.update(resultTaskId, session?.session_id);
     operationsPanel.update({session, authorityVerified, busy, features, operations});
     if (session && handoffId !== session.session_id) {
       handoff?.(); handoffId = session.session_id;
       handoff = mountHandoffPanel(handoffHost, {api, sessionId: handoffId});
       ui.setVisible('native-handoff', true);
     }
-    const next = JSON.stringify([session, task, selection]);
+    const next = JSON.stringify([session, task, resultTaskId, selection]);
     if (next !== contextKey) {
       contextKey = next; context.replaceChildren(el('h2', 'assistant-section-title', '运行上下文'));
       function fact(label, value) {
@@ -42,7 +46,7 @@ export function mountNativeInspector(root, heading, {api, onControl}) {
       }
       fact('电脑节点', session?.machine_id || task?.machine || selection?.machine);
       fact('会话名', session ? sessionTitle(session) : task?.agent_type || selection?.agent_type);
-      fact('客户端', [session?.agent_family || task?.agent_type || selection?.agent_type,
+      fact('客户端', [agentName(session?.agent_family || task?.agent_type || selection?.agent_type),
         session?.adapter].filter(Boolean).join(' · '));
       fact('客户端版本', session?.client_version);
       fact('项目', task?.project || selection?.project);
@@ -85,9 +89,9 @@ export function mountNativeInspector(root, heading, {api, onControl}) {
   }
   setDurationTimer();
   return {update,
-    suspend() { operationsPanel.suspend(); handoff?.suspend?.(); clearInterval(durationTimer); ui.suspend(); },
-    resume() { ui.resume(); operationsPanel.resume(); handoff?.resume?.(); setDurationTimer(); },
-    dispose() { operationsPanel.dispose(); handoff?.(); clearInterval(durationTimer); ui.dispose(); }};
+    suspend() { resultUI.suspend(); operationsPanel.suspend(); handoff?.suspend?.(); clearInterval(durationTimer); ui.suspend(); },
+    resume() { ui.resume(); resultUI.resume(); operationsPanel.resume(); handoff?.resume?.(); setDurationTimer(); },
+    dispose() { resultUI.dispose(); operationsPanel.dispose(); handoff?.(); clearInterval(durationTimer); ui.dispose(); }};
 }
 
 function formatDate(value) {

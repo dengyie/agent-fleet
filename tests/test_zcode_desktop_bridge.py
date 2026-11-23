@@ -8,12 +8,13 @@ import pytest
 from tools.zcode_desktop import BridgeError, ZCodeDesktopClient
 
 
+@pytest.mark.filterwarnings('error::pytest.PytestUnhandledThreadExceptionWarning')
 def test_desktop_bridge_contracts():
     node = shutil.which('node')
     assert node, 'Node is required for the ZCode desktop bridge contracts'
     result = subprocess.run([node, '--test', 'tests/fixtures/zcode_desktop_bridge.test.mjs'],
                             cwd=Path(__file__).resolve().parents[1], capture_output=True,
-                            text=True, timeout=45)
+                            text=True, encoding='utf-8', timeout=45)
     assert result.returncode == 0, result.stdout + result.stderr
 
 

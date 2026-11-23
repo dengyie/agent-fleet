@@ -229,6 +229,44 @@ const [origin, scenario, sid] = process.argv.slice(2);
           assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false,'no operation panel overflow');
           assert.deepEqual(errors,[]); await page.close(); continue;
         }
+        if (scenario === 'results') {
+          let resultGets = 0;
+          page.on('request', request => {if (/\/api\/tasks\/.+\/(files|diff)/.test(request.url())) resultGets++;});
+          if (width < 1100) await page.getByRole('button',{name:'工作面板',exact:true}).click();
+          await page.getByRole('tab',{name:'任务结果',exact:true}).click();
+          assert.equal(resultGets,0,'result snapshots are fetched only on request');
+          await page.getByRole('button',{name:'查看原任务结果',exact:true}).click();
+          await page.getByText('pytest · 通过 12 · 失败 0 · 跳过 1 · 错误 0 · 1.2 秒',{exact:true}).waitFor();
+          await page.getByText('保留的 diff',{exact:true}).click();
+          assert.ok((await page.locator('.native-result-body').innerText()).includes('<img src=x onerror=alert(1)>'));
+          assert.equal(await page.locator('.native-result-body img,.native-result-body script').count(),0);
+          const file = page.locator('.native-result-files details');
+          await file.locator('summary').click();
+          await file.getByRole('button',{name:'读取文件快照',exact:true}).click();
+          await file.locator('pre').waitFor();
+          assert.equal(await file.locator('pre').innerText(),'print("<img src=x onerror=alert(1)>")\n');
+          assert.equal(await page.locator('.native-result-body img,.native-result-body script').count(),0);
+          assert.equal(writes,0);
+          assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'result panel must fit narrow screens');
+          // Exercise lifecycle with an actual module and delayed service: abort
+          // plus generation guard must prevent a late result from painting.
+          await page.evaluate(async () => {
+            const {mountNativeResults} = await import('/assets/views/agent-chat/results.js');
+            const host = document.createElement('div'); document.body.append(host);
+            let release, signal;
+            const pending = new Promise(resolve => {release=resolve;});
+            const ui = mountNativeResults(host,{readResults:async (_id,_sid,s) => {signal=s;return pending;}});
+            ui.update('old','old-session'); host.querySelector('button').click();
+            ui.suspend(); if (!signal.aborted) throw new Error('suspend did not abort');
+            ui.resume(); ui.update('new','new-session');
+            release({task:{state:'succeeded',result:{log_summary:'STALE_RESULT'}},files:[]});
+            await new Promise(resolve => setTimeout(resolve,0));
+            if (host.textContent.includes('STALE_RESULT')) throw new Error('stale result painted');
+            ui.dispose(); host.remove();
+          });
+          await page.screenshot({path:'/tmp/fleet-native-web/results-' + width + '.png',fullPage:true});
+          assert.deepEqual(errors,[]); await page.close(); continue;
+        }
         if (scenario === 'long-message') {
           await page.getByText('查看完整原文',{exact:true}).click();
           const full = page.locator('.native-full-text');

@@ -343,7 +343,9 @@ var SOURCE_GATED_STATUS = 'adopted';
 
 /* agent 下拉的内置兜底清单：仅作 API 失败时的首屏回退，值必须 ⊆
  * agent_profiles.EXECUTABLE_AGENT_TYPES 注册表（后端以注册表为 SSOT 校验）。 */
-var FALLBACK_AGENT_TYPES = ['codex', 'claude_code', 'hermes', 'pi', 'zcode'];
+var FALLBACK_AGENT_TYPES = ['codex', 'claude_code', 'hermes', 'pi', 'zcode', 'agy'];
+var AGENT_DISPLAY_NAMES = {codex:'Codex', claude_code:'Claude Code', hermes:'Hermes',
+  pi:'Pi', zcode:'ZCode', agy:'Google Antigravity'};
 var PROMPT_CHIPS = [
   'echo hello',
   'pytest tests/',
@@ -370,7 +372,7 @@ function fillAgentSelect(select, values) {
   clean.forEach(function (value) {
     var option = document.createElement('option');
     option.setAttribute('value', value);
-    option.textContent = value;
+    option.textContent = AGENT_DISPLAY_NAMES[value] || value;
     select.appendChild(option);
   });
   return true;

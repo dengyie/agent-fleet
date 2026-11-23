@@ -1,6 +1,7 @@
 """Regressions from real production follow-up rejections on 2026-11-19."""
 from tools.supervisor.model import ManagedSessionManifest
 from agent_profiles import default_command
+import pytest
 
 
 def test_completed_reason_survives_cross_process_manifest_read():
@@ -55,7 +56,8 @@ def test_claude_stream_identity_persists_but_ephemeral_codex_does_not(tmp_path):
     assert not sv.continuation_ready(n.session_id)
 
 
-def test_followup_cross_instance_uses_original_stream_and_can_repeat(tmp_path, monkeypatch):
+@pytest.mark.parametrize('family', ['codex', 'agy'])
+def test_followup_cross_instance_uses_original_stream_and_can_repeat(tmp_path, monkeypatch, family):
     import json
     import sys
     import time
@@ -77,13 +79,16 @@ def test_followup_cross_instance_uses_original_stream_and_can_repeat(tmp_path, m
         return response.status_code, response.get_json()
     cfg = RunnerConfig(hub='https://localhost', machine='mac', credential='secret',
         runner_id='mac', projects={}, agents={}, cache_dir=tmp_path/'cache')
-    task = {'attempt_id':'turn1','task_id':'task1','agent_type':'codex','instruction':'first'}
+    task = {'attempt_id':'turn1','task_id':'task1','agent_type':family,'instruction':'first'}
     sv = Supervisor(tmp_path/'manifests', 'mac')
     from tools.session.runner_capture import session_prefix
     sid = session_prefix('mac') + 'turn1'
     script = tmp_path / 'native_fixture.py'
-    script.write_text('print(\'{"type":"thread.started","thread_id":"same-native-id"}\')', encoding='utf-8')
-    m = sv.launch(agent='codex', command=[sys.executable, str(script)],
+    native_id = '055a398f-db14-4c5f-abbb-1bf03f8120a7' if family == 'agy' else 'same-native-id'
+    initial = ({'event':'init','conversation_id':native_id,'init':{'cwd':str(tmp_path)}}
+               if family == 'agy' else {'type':'thread.started','thread_id':native_id})
+    script.write_text('import json; print(json.dumps(' + repr(initial) + '))', encoding='utf-8')
+    m = sv.launch(agent=family, command=[sys.executable, str(script)],
         cwd=str(tmp_path),env_allowlist={}, session_id=sid,attempt_id='turn1')
     cap = RunnerCapture(cfg, task, post, process_group_id=m.process_group_id)
     sv.wait_session(sid, timeout_s=5, on_line=cap.line)
@@ -93,7 +98,10 @@ def test_followup_cross_instance_uses_original_stream_and_can_repeat(tmp_path, m
     seen = []
     def argv(family, exe, token, text):
         seen.append(token)
-        return [sys.executable, '-c', 'import json; print(json.dumps({"type":"item.completed","item":{"type":"agent_message","text":'+repr('ACK '+text)+'}}))']
+        rows = ([initial, {'event':'step_update','step_update':{'conversation_id':token,
+            'step_index':1,'step_type':'agent_response','state':'DONE','text_delta':'ACK '+text}}]
+            if family == 'agy' else [{'type':'item.completed','item':{'type':'agent_message','text':'ACK '+text}}])
+        return [sys.executable, '-c', 'import json;[print(json.dumps(r)) for r in ' + repr(rows) + ']']
     monkeypatch.setattr(native_resume, '_native_resume_argv', argv)
     for text in ['followup one', 'followup two']:
         controller = Supervisor(tmp_path/'manifests', 'mac')
@@ -107,7 +115,10 @@ def test_followup_cross_instance_uses_original_stream_and_can_repeat(tmp_path, m
     events = client.get('/api/sessions/'+sid+'/events?limit=100').get_json()['events']
     messages = [e['payload']['text'] for e in events if e['kind'] in {'user_message','assistant_message'}]
     assert messages == ['first', 'followup one', 'ACK followup one', 'followup two', 'ACK followup two']
-    assert seen == ['same-native-id', 'same-native-id']
+    assert seen == [native_id, native_id]
+    answers = [e['payload'] for e in events if e['kind'] == 'assistant_message']
+    if family == 'agy':
+        assert len({p['message_id'] for p in answers}) == 2, 'step 1 in distinct invocations cannot overwrite prior turns'
     sequences = [e['sequence'] for e in events]
     assert len(sequences) == len(set(sequences))
     assert client.get('/api/sessions/'+sid).get_json()['session']['current_state']=='completed'

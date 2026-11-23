@@ -141,7 +141,7 @@ def test_non_agent_rows_are_filtered_out(monkeypatch):
 
 def test_family_classification_is_bounded_to_observable_types():
     assert set(discovery.OBSERVABLE_AGENT_TYPES) == {
-        "codex", "claude_code", "hermes", "pi", "zcode", "generic"}
+        "codex", "claude_code", "hermes", "pi", "zcode", "agy", "generic"}
     cases = {
         "/usr/local/bin/codex": "codex",
         "/opt/homebrew/bin/codex.js": "codex",

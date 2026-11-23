@@ -66,7 +66,7 @@ and `machine.renderSourceControl` entrypoints remain compatible with callers.
    by capture claims.
 3. `project_session_access()` intersects enabled Supervisor actions with these
    facts. Runner continuation requires retained native identity evidence; busy
-   sessions cannot receive another turn. Hermes/ZCode CLI continuation remains
+   sessions cannot receive another turn. Hermes/ZCode/agy CLI continuation remains
    limited to Runner-owned sessions. The ZCode desktop bridge is independent.
 4. Both HTTP and assistant operations use `SessionService.control()` and its
    current admission check. Rendering a DTO never grants authority; the node
@@ -158,3 +158,18 @@ python3 -m pytest tests/test_agent_capability_layers.py tests/test_agent_capabil
 Set `FLEET_PLAYWRIGHT_MODULE` to an existing Playwright installation to run the
 Chromium acceptance; it is a test tool, not a frontend runtime dependency.
 No database or signed command schema migration is introduced by this refactor.
+
+## Antigravity and retained result inspection
+
+`agy` follows the same declarative registration and Runner-owned admission as
+Hermes/ZCode CLI. `tools/session/agy.py` owns its bounded stateful NDJSON
+projection; it performs no vendor filesystem/process access. `init` establishes
+an invocation namespace, step indices identify visible message/tool updates,
+and aggregate final text is a fallback only. Supervisor separately verifies
+conversation UUID and cwd before saving private continuation identity.
+
+`agent-chat/results.js` owns result panel lifecycle and text rendering;
+`service.js` verifies task/session binding around existing HTTP snapshot reads.
+It adds no filesystem API, background snapshot polling, or Agent-specific browser
+policy. Snapshot data represents the original task result, not continued work.
+There is no new Hub database schema or migration in this iteration.

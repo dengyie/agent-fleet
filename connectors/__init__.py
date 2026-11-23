@@ -6,13 +6,14 @@ from .claude_code import ClaudeCodeConnector
 from .codex import CodexConnector
 from .pi import PiConnector
 from .zcode import ZcodeConnector
+from .agy import AgyConnector
 
 # 注册表：TYPE → Connector 类
 # 注意：文件里有实现但没进注册表的 connector 不会被调度（历史坑：claude_code）。
 _REGISTRY = {
     c.TYPE: c
     for c in (HermesConnector, ClaudeCodeConnector, CodexConnector,
-              PiConnector, ZcodeConnector)
+              PiConnector, ZcodeConnector, AgyConnector)
 }
 
 

@@ -338,6 +338,15 @@ class NativeResumeMixin:
                 token = row.get('session_id')
             elif entry.manifest.agent == 'pi' and row.get('type') == 'session':
                 token = row.get('id')
+            elif family == 'agy' and row.get('event') == 'init':
+                token = row.get('conversation_id')
+                details = row.get('init')
+                if (not isinstance(details, dict) or not isinstance(details.get('cwd'), str)
+                        or os.path.normcase(os.path.realpath(details['cwd']))
+                        != os.path.normcase(os.path.realpath(entry.cwd))
+                        or not isinstance(token, str)
+                        or not re.fullmatch(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}', token)):
+                    return
             elif family in {'zcode', 'hermes'}:
                 token = row.get('sessionId') if family == 'zcode' else row.get('session_id')
                 from tools.session.native_storage import database_path, verify_identity

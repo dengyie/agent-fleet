@@ -52,6 +52,13 @@ body[data-page=agent-chat] .page-heading, body[data-page=sessions] .page-heading
 .native-operation-detail { border-bottom: 1px solid var(--border-subtle); padding: 12px 0; font-size: 12px; overflow-wrap: anywhere; }
 .native-operation-detail summary { cursor: pointer; }
 .native-operation-detail p { margin-top: 8px; font-size: 11px; }
+.native-results { min-width: 0; overflow-wrap: anywhere; }
+.native-result-body { display: grid; gap: 14px; margin-top: 16px; min-width: 0; }
+.native-result-body h3 { font-size: 12px; margin: 8px 0; }
+.native-result-detail { min-width: 0; border-bottom: 1px solid var(--border-subtle); padding: 10px 0; font-size: 12px; }
+.native-result-detail summary { cursor: pointer; overflow-wrap: anywhere; }
+.native-result-detail pre { max-height: 420px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0; font-size: 11px; }
+.native-result-detail button { margin-top: 12px; }
 .native-notice { padding: 10px 14px; border-left: 2px solid var(--warn); background: var(--warn-bg); font-size: 12px; overflow-wrap: anywhere; }
 .native-activity { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: var(--text-2); font-size: 11px; padding: 3px 0; }
 .native-tool-event { min-width: 0; }

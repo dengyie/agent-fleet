@@ -23,6 +23,7 @@ Successful responses use `Cache-Control: no-store`.
     "claude_code": {"installed": null},
     "pi": {"installed": false},
     "zcode": {"installed": false},
+    "agy": {"installed": null},
     "hermes": {"installed": null}
   }
 }
@@ -110,3 +111,27 @@ a Hub change and does not require a signed client update. These tests do not
 claim vendor CLI or model acceptance. Ordinary session-message idempotency,
 reverse transcript pagination and model HTTP routes retain their separate
 contracts and implementation status.
+
+## Google Antigravity CLI (`agy`)
+
+`agy` is a registered executable family. The task/target APIs and idempotency
+contract above apply without a new HTTP surface. Example launch:
+
+```json
+{"machine":"my-mac","project":"agent-fleet","agent_type":"agy","instruction":"Inspect the failing test and propose a fix.","client_token":"agy-start-001"}
+```
+
+The node uses `agy --output-format stream-json --print <instruction>`. Only a
+Runner-owned invocation whose `init.conversation_id` is a valid UUID and whose
+`init.cwd` matches its private worktree can retain continuation. Follow-ups use
+`--conversation <exact-id>`, never the latest-conversation selector. Native IDs,
+worktree paths, settings and credentials stay node-private. Explicit local
+model/project/agent/effort/mode/settings options survive continuation. Browser
+model-catalog takeover is not declared for agy.
+
+Documented `step_update` agent-response deltas and tool parameters/results map
+onto existing bounded session DTOs. A final aggregate response is used only if
+no visible text delta was received. There is no inferred import of old agy or
+Antigravity desktop conversations. Discovery identifies the exact `agy` binary;
+installation, login and official vendor availability remain node prerequisites.
+The tested protocol reference is https://antigravity.google/docs/cli/headless .

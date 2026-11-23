@@ -1,6 +1,7 @@
 import {pagePath, uiIcon} from '../routes.js';
 import {nativeChatPath, nativeDirectoryPath} from './agent-chat/paths.js';
 import {el, button, link, errorText} from './agent-chat/dom.js';
+import {agentName} from './agent-chat/state.js';
 
 export function conversationTargets(active = 'assistant') {
   const nav = el('nav', 'conversation-targets'); nav.setAttribute('aria-label', '对话来源');
@@ -71,7 +72,7 @@ export function mountTargetPicker(host, {api, store, machine: initialMachine, on
       targets = result;
       for (const name of result.projects) option(project, name, name);
       for (const [family, state] of Object.entries(result.agents)) {
-        option(agent, family, family + (state.installed === false ? ' · 未安装' : state.installed === null ? ' · 安装状态待确认' : ''), state.installed === false);
+        option(agent, family, agentName(family) + (state.installed === false ? ' · 未安装' : state.installed === null ? ' · 安装状态待确认' : ''), state.installed === false);
       }
       agent.value = Object.keys(result.agents).find(name => result.agents[name].installed === true) ||
         Object.keys(result.agents).find(name => result.agents[name].installed !== false) || '';

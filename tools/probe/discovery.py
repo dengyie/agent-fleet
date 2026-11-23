@@ -9,7 +9,7 @@ or unclassified families.
 Guarantees used by the rest of the probe/hub pipeline:
 
 - family names come only from :data:`agent_profiles.OBSERVABLE_AGENT_TYPES`
-  (``codex`` | ``claude_code`` | ``hermes`` | ``pi`` | ``zcode`` |
+  (``codex`` | ``claude_code`` | ``hermes`` | ``pi`` | ``zcode`` | ``agy`` |
   ``generic``) — there is no free-form family string;
 - ``discover_instances()`` returns rows stably sorted by ``(pid, started_at)``;
 - ``ps`` is invoked as ``ps -eo user=,pid=,ppid=,pgid=,args=``.  ``comm`` is
@@ -218,9 +218,9 @@ $rows = @(
     Where-Object {
       $name = [string]$_.Name
       $cmd = [string]$_.CommandLine
-      $direct = $name -match '(?i)^(codex|codex-cli|claude|hermes|pi|zcode|opencode|aider|astrabot|openclaw)(\.exe)?$'
+      $direct = $name -match '(?i)^(codex|codex-cli|claude|hermes|pi|zcode|agy|opencode|aider|astrabot|openclaw)(\.exe)?$'
       $interpreter = $name -match '(?i)^(node|python|python3|bun|deno|npm|npx)(\.exe)?$'
-      $script_cli = $cmd -match '(?i)(^|[\\/ "])(codex|claude|zcode|hermes|opencode|aider|astrabot|openclaw)(\.c?js|\.py)?([ "]|$)'
+      $script_cli = $cmd -match '(?i)(^|[\\/ "])(codex|claude|zcode|hermes|agy|opencode|aider|astrabot|openclaw)(\.c?js|\.py)?([ "]|$)'
       $script_cli = $script_cli -or ($cmd -match '(?i)[\\/]node_modules[\\/]@(earendil-works|mariozechner)[\\/]pi-coding-agent[\\/]dist[\\/](bundle[\\/])?cli\.js([ "]|$)')
       # ZCode's desktop launcher and Electron children share ZCode.exe.  Only
       # keep its CLI forms, whose command line names the bundled zcode.cjs.

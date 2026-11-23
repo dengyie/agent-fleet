@@ -396,21 +396,21 @@ export async function rejectTask(taskId) {
     }));
 }
 
-export async function getTaskDiff(taskId) {
+export async function getTaskDiff(taskId, options = {}) {
   return parseTaskDiff(await request(
-    API.tasks + '/' + encodeURIComponent(taskId) + '/diff'));
+    API.tasks + '/' + encodeURIComponent(taskId) + '/diff', {signal: options.signal}));
 }
 
-export async function listTaskFiles(taskId) {
+export async function listTaskFiles(taskId, options = {}) {
   return parseTaskFileList(await request(
-    API.tasks + '/' + encodeURIComponent(taskId) + '/files'));
+    API.tasks + '/' + encodeURIComponent(taskId) + '/files', {signal: options.signal}));
 }
 
-export async function getTaskFile(taskId, relpath) {
+export async function getTaskFile(taskId, relpath, options = {}) {
   var parts = String(relpath || '').split('/');
   var encoded = parts.map(encodeURIComponent).join('/');
   return parseTaskFile(await request(
-    API.tasks + '/' + encodeURIComponent(taskId) + '/files/' + encoded));
+    API.tasks + '/' + encodeURIComponent(taskId) + '/files/' + encoded, {signal: options.signal}));
 }
 
 /**

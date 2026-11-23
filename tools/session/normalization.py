@@ -6,6 +6,7 @@ No system or reasoning records are projected as conversation content.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Mapping
 
@@ -85,7 +86,7 @@ def normalize_native_row(raw: Mapping) -> list[tuple[str, Mapping]]:
     if rtype in ("message", "message_end"):
         # pi transcript rows (role/message envelope) — see _shape_pi_row.
         return _prepend_metadata(metadata, _shape_pi_row(raw))
-    if rtype in ("session_meta", "session", "model_change", "custom-title", "summary", "system"):
+    if rtype in ("session_meta", "session", "session_info", "turn_context", "model_change", "custom-title", "summary", "system"):
         return _prepend_metadata(metadata, [])
     # Pi also emits tool_execution_end before message_end(toolResult).
     # Project only the complete transcript message, once.
@@ -100,50 +101,31 @@ def normalize_native_row(raw: Mapping) -> list[tuple[str, Mapping]]:
     # tool_use / tool_result blocks live in the content block list; a plain
     # string or text-only list is a message body.
     if isinstance(content, list):
-        pending_text: list[str] = []
-        for block in content:
+        for index, block in enumerate(content):
             if not isinstance(block, Mapping):
                 continue
             if block.get("type") == "tool_use":
-                if pending_text:
-                    shaped.append((kind, {"text": "\n".join(pending_text)
-                                          [:_MAX_TEXT], "is_complete": True,
-                                          "message_id": _message_id(raw, message),
-                                          "content_mode": "snapshot"}))
-                    pending_text = []
                 shaped.append(("tool_call", {
                     "tool_name": str(block.get("name") or "")[:128],
                     "call_id": str(block.get("id") or "")[:128],
                     "arguments": _bounded_json(block.get("input")),
-                    "result": "",
-                    "digest": "",
+                    "result": "", "digest": "",
                 }))
             elif block.get("type") == "tool_result":
-                if pending_text:
-                    shaped.append((kind, {"text": "\n".join(pending_text)
-                                          [:_MAX_TEXT], "is_complete": True,
-                                          "message_id": _message_id(raw, message),
-                                          "content_mode": "snapshot"}))
-                    pending_text = []
                 shaped.append(("tool_result", {
                     "tool_name": "",
                     "call_id": str(block.get("tool_use_id") or "")[:128],
                     "arguments": "",
-                    # Keep bounded TEXT only: a non-text block list (e.g.
-                    # image payloads) would otherwise dump base64 blobs into
-                    # the durable record — map it to "" instead (same
-                    # discipline as the pi toolResult mapper).
+                    # Non-text/image blocks never project base64 blobs.
                     "result": _native_message_text(block.get("content")),
                     "digest": "",
                 }))
             elif (block.get("type") == "text"
                     and isinstance(block.get("text"), str) and block["text"]):
-                pending_text.append(block["text"])
-        if pending_text:
-            shaped.append((kind, {"text": "\n".join(pending_text)[:_MAX_TEXT],
-                                  "is_complete": True,
-                                  "message_id": _message_id(raw, message),
-                                  "content_mode": "snapshot"}))
+                shaped.append((kind, {"text": block["text"][:_MAX_TEXT],
+                    "is_complete": True,
+                    "message_id": content_block_message_id(_message_id(raw, message), index),
+                    "content_mode": "snapshot"}))
         return _prepend_metadata(metadata, shaped)
     text = _native_message_text(content)
     if not text:
@@ -171,7 +153,7 @@ def _native_metadata(raw: Mapping) -> dict[str, str]:
     title = None
     if rtype == 'custom-title':
         title = raw.get('customTitle')
-    elif rtype in ('session_meta', 'session'):
+    elif rtype in ('session_meta', 'session', 'session_info'):
         title = (raw.get('title') or payload.get('title')
                  or raw.get('name') or payload.get('name'))
     if isinstance(title, str) and title.strip():
@@ -210,6 +192,19 @@ def _message_id(raw: Mapping, message: Mapping | None = None):
     if message is not None:
         value = message.get('id') or value
     return value if isinstance(value, str) and value else None
+
+
+def content_block_message_id(message_id, index):
+    """Same native block identity for streaming deltas and final snapshots.
+
+    Block zero keeps the existing single-block ID. Other blocks use a bounded
+    hash so each text block remains independent even across intervening tools.
+    """
+    if not isinstance(message_id, str) or not message_id:
+        return None
+    if index == 0:
+        return message_id
+    return 'block_' + hashlib.sha256(f'{message_id}:{index}'.encode()).hexdigest()[:32]
 
 
 def _shape_claude_stream(raw: Mapping):
@@ -313,40 +308,27 @@ def _shape_pi_row(raw: Mapping) -> list[tuple[str, Mapping]]:
     shaped: list[tuple[str, Mapping]] = []
     message_kind = "user_message" if role == "user" else "assistant_message"
     if isinstance(content, list):
-        pending_text: list[str] = []
-        for block in content:
-            if not (isinstance(block, Mapping)):
+        for index, block in enumerate(content):
+            if not isinstance(block, Mapping):
                 continue
             if (block.get("type") == "text" and isinstance(block.get("text"), str)
                     and block["text"]):
-                pending_text.append(block["text"])
-                continue
-            if block.get("type") == "toolCall":
-                if pending_text:
-                    text = "\n".join(pending_text)[:_MAX_TEXT]
-                    shaped.append((message_kind,
-                                   {"text": text, "is_complete": True,
-                                    "message_id": message.get("id") or raw.get("uuid"),
-                                    "content_mode": "snapshot"}))
-                    pending_text = []
+                shaped.append((message_kind, {
+                    "text": block["text"][:_MAX_TEXT], "is_complete": True,
+                    "message_id": content_block_message_id(_message_id(raw, message), index),
+                    "content_mode": "snapshot"}))
+            elif block.get("type") == "toolCall":
                 shaped.append(("tool_call", {
                     "tool_name": str(block.get("name") or "")[:128],
                     "call_id": str(block.get("id") or "")[:128],
                     "arguments": _bounded_json(block.get("arguments")),
-                    "result": "",
-                    "digest": "",
+                    "result": "", "digest": "",
                 }))
-        if pending_text:
-            shaped.append((message_kind,
-                           {"text": "\n".join(pending_text)[:_MAX_TEXT],
-                            "is_complete": True,
-                            "message_id": message.get("id") or raw.get("uuid"),
-                            "content_mode": "snapshot"}))
     else:
         text = _native_message_text(content)
         if text:
             shaped.append((message_kind, {"text": text, "is_complete": True,
-                "message_id": message.get("id") or raw.get("uuid"),
+                "message_id": _message_id(raw, message),
                 "content_mode": "snapshot"}))
     return shaped
 
