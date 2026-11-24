@@ -97,6 +97,22 @@ This is a focused follow-up, not a claim that every Runner, provider, deployment
 
 The next review boundary remains platform-specific Runner lifecycle and production backup/restore behavior on the separately installed receiver.
 
+### Continued review — Supervisor outbox deployment snapshot coverage
+
+The deployment transaction snapshots only SQLite paths listed in the root-owned receiver configuration. `SupervisorCommandRepository` defaults to `var/supervisor/commands.db`, but the checked-in `deploy/auto-deploy.example.json` listed only five other databases. This is a reachable configuration omission: if a future release migrates the outbox schema and then fails health verification, the receiver cannot compare or restore that database because it is absent from the configured path set. Existing deployment rollback tests exercise restoration only for configured database paths; the missing sample entry was reproduced by a regression that failed against the prior example.
+
+The example now includes the default Supervisor outbox path. Deployment documentation and the test entry require existing `/etc/agent-fleet-deploy.json` receiver configurations to be checked independently because application deploys do not update the separately installed receiver or its root configuration. The test asserts the checked-in template includes the path; the existing real SQLite deployment tests verify configured DDL changes are preserved aside and restored on rollback.
+
+This change cannot establish the contents of the production host's root-owned config or update it. The next production deployment must separately confirm `var/supervisor/commands.db` is listed and the installed receiver contains the DDL fingerprint/restore behavior before treating outbox rollback as protected.
+
+### Continued review — Windows orphaned process recovery
+
+Windows Supervisor starts children inside a Job Object configured to survive Supervisor death. After restart, however, the durable owner record contains only the root PID/start identity and the new Supervisor has no handle to the unnamed Job Object. When that root had exited, `_rebind_owner()` immediately returned `no_live_process`; the control client maps that result to `already_finished`, and Hub receipt projection closes the managed session. Windows descendants may outlive their root, so this could mark the session finished while an Agent child remains running and no longer controllable through the recovered session. A focused regression reproduced the incorrect `no_live_process` outcome with a dead owner and a live descendant in the Windows process table.
+
+Recovery now checks the Windows process tree when the root is gone. It returns `liveness_unknown` if descendants remain, a child liveness query is uncertain, or process enumeration fails. It returns `no_live_process` only when enumeration succeeds and no descendant is alive. This preserves the existing fail-closed receipt behavior without signaling a process whose original Job Object ownership cannot be re-established.
+
+The bounded fake-process regression covers live orphan, no remaining descendant, and failed enumeration on all CI hosts; the dedicated Windows CI remains the runtime authority for Win32 APIs. A safe cross-restart kill capability would require a durable/reopenable Job Object ownership design and is outside this bounded repair.
+
 ## Review boundary and follow-up
 
 This is a focused, evidence-based backend review, not a claim that every provider, platform adapter, workflow, or production integration was exhaustively audited. The broader service layering and message/event contracts have meaningful integration coverage; no speculative module-size-driven refactor was made. Continue deeper review by risk surface with concrete failing evidence, especially node/runner cross-platform lifecycle, workflow recovery and backup/restore interactions.

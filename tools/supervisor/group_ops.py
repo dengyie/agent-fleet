@@ -111,6 +111,10 @@ class GroupOps:
         """
         return None
 
+    def owner_descendants_alive(self, root_pid: int) -> bool | None:
+        """Whether a dead owned root still has live descendants; None = unknown."""
+        return None
+
     def close(self, handle) -> None:
         pass
 
@@ -801,6 +805,25 @@ class WindowsGroupOps(GroupOps):
     def _resume_tree(cls, root_pid: int | None) -> bool:
         pids = cls._tree_pids(root_pid)
         return bool(pids) and all(cls._suspend_process(pid, True) for pid in pids)
+
+    def owner_descendants_alive(self, root_pid: int) -> bool | None:
+        """Check orphan candidates after the owner process has exited.
+
+        ``None`` means process enumeration or liveness could not be proved;
+        callers must not treat it as an empty tree.
+        """
+        pids = self._tree_pids(root_pid)
+        if pids is None:
+            return None
+        for pid in pids:
+            if int(pid) == int(root_pid):
+                continue
+            alive = self._pid_alive(int(pid))
+            if alive is None:
+                return None
+            if alive:
+                return True
+        return False
 
     # ---- deadline-safe output reading -------------------------------------
 

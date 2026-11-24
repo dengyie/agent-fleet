@@ -18,6 +18,7 @@
     "var/platform/platform.db",
     "var/accounts/accounts.db",
     "var/sessions/meta.db",
-    "var/adoptions/meta.db"
+    "var/adoptions/meta.db",
+    "var/supervisor/commands.db"
   ]
 }

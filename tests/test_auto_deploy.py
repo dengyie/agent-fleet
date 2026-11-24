@@ -72,6 +72,12 @@ def backend(root, sha, run):
     (root / 'RELEASE_ORIGIN').write_text(f'commit: {sha}\nrun: {run}\nurl: https://example.test\n')
 
 
+def test_deployment_example_snapshots_the_supervisor_outbox():
+    example = Path(__file__).resolve().parents[1] / 'deploy' / 'auto-deploy.example.json'
+    config = json.loads(example.read_text(encoding='utf-8'))
+    assert 'var/supervisor/commands.db' in config['databases']
+
+
 @pytest.fixture
 def deployment(tmp_path):
     live, stage = tmp_path / 'live', tmp_path / 'stage'

@@ -14,7 +14,7 @@
 
 ## 宿主一次性配置
 
-宿主需要 Python 3.10+、systemd、Docker 和 Nginx；容器继续使用已验证的 canonical launcher。以 `auto-deploy.example.json` 为字段模板，在宿主创建 root:root、0600 的 `/etc/agent-fleet-deploy.json`；填写**当前环境已核实**的路径和容器用户，不能直接执行示例路径。
+宿主需要 Python 3.10+、systemd、Docker 和 Nginx；容器继续使用已验证的 canonical launcher。以 `auto-deploy.example.json` 为字段模板，在宿主创建 root:root、0600 的 `/etc/agent-fleet-deploy.json`；填写**当前环境已核实**的路径和容器用户，不能直接执行示例路径。`databases` 必须包含所有已启用的持久 SQLite 库；当前默认配置还包括 `var/supervisor/commands.db`（Hub 默认 outbox 路径），否则该 outbox 的 DDL/版本变更不参与发布快照和 schema rollback 检查。已有宿主配置需单独核对并更新，应用发布不会改写 receiver 的 root 配置。
 
 把以下四个已审查文件安装到 root:root、0755 目录 `/usr/local/lib/agent-fleet-deploy/`，文件权限 0644：
 
@@ -46,7 +46,7 @@ restrict,command="sudo -n /usr/local/sbin/agent-fleet-deploy \"$SSH_ORIGINAL_COM
 2. 使用 systemd 启动独立事务；SSH 断开不杀部署。事务保存 `pending.json`，防止进程异常中断后下一次发布覆盖现场。systemd 运行上限 600 秒，TERM 留 120 秒完成回滚。
 3. 检查原实例的唯一 Hub/guardian、活动 Run/任务、账号会话、readiness；在容器临时目录导入候选代码，并在候选运行时显式导入 Flask、PyYAML、cryptography、websocket-client 和 jsonschema。缺少生产依赖时在切换前失败。版本必须与后台 RELEASE_ORIGIN、前端 manifest 和同一个 run 完全一致。预检由宿主预安装的 receiver 执行；更新仓库文件或发布应用包不会自动更新该 receiver，应单独核对已安装版本。
 4. 保存旧代码和 Nginx，建立现有 launcher 的维护屏障；Nginx 临时返回 503，阻止公网新请求。再查活动任务；如果已有新任务，恢复访问并退出，不停止任务。
-5. 只停止 UID、cwd、脚本和进程启动时间均匹配的 guardian/Hub；停写后对配置中的每个 SQLite 数据库使用 backup API，并检查 integrity/FK。
+5. 只停止 UID、cwd、脚本和进程启动时间均匹配的 guardian/Hub；停写后对配置中的每个 SQLite 数据库使用 backup API，并检查 integrity/FK。清单应含任务、平台、账号、会话、接管及 Supervisor outbox 数据库；添加新的持久 SQLite repository 时，同步更新宿主配置和示例测试。
 6. 在原 LIVE 目录内更新有限的发布管理路径。**不覆盖** `fleet-gates.conf`、`hosts.yaml`、`.env`、`credentials/`、`state/`、`var/`，不改变 LIVE inode。前端部署到不可变的完整 SHA 目录。
 7. 使用原 launcher 恢复 Hub/guardian；检查版本、healthz、匿名401、账号登录/readiness、退出后旧 Cookie 401；切换 Nginx root 并检查公网 manifest SHA。Nginx reload 返回后新 worker 可能尚未接管，公网只读探针在统一 30 秒预算内等待维护503、旧版本或暂时网络失败消失；每次请求最多使用剩余预算，截止后返回成功也不得通过。
 8. 保存成功记录，清除 pending。成功记录提交中途失败时，回滚同时恢复旧成功指针；回滚记录写入失败仍保持维护屏障。重复部署同一成功 SHA 只核验，不再重启。失败记录保留原因类别，不输出凭据、Cookie 或原始应用响应。

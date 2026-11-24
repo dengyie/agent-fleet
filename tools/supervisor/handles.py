@@ -247,6 +247,18 @@ class HandlesMixin:
             entry.handle = handle
             return handle, ""
         if os.name == "nt":
+            # Windows children can outlive their root. The original Job Object
+            # handle is process-local and a restarted Supervisor cannot query
+            # it, so a dead owner PID alone is not evidence that its tree is
+            # gone. Enumerate the still-parented descendants; if any remain or
+            # enumeration/liveness is uncertain, never publish a terminal
+            # "already finished" receipt for the session.
+            try:
+                descendants_alive = self._ops.owner_descendants_alive(pid)
+            except Exception:
+                return None, "liveness_unknown"
+            if descendants_alive is not False:
+                return None, "liveness_unknown"
             return None, "no_live_process"
         # leader 已不在：组内仍有成员时无法证明 pgid 未被复用 → unknown。
         if posix_group_alive(pgid):

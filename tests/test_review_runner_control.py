@@ -10,9 +10,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import pytest
 from hub.application import control_router as router_mod
 from hub.application.control_router import ControlRouter
 from hub.application.supervisor_service import AuditStore
+from tools.supervisor import handles as handles_mod
 from tools.supervisor import control_client as cc
 from tools.supervisor import supervisor as sup_mod
 
@@ -36,6 +38,46 @@ def _wait_gone(pid: int, wait_s: float = 5.0) -> bool:
             return True
         time.sleep(0.05)
     return False
+
+
+def _recovered_windows_session(tmp_path):
+    sid = "sess_windows_orphan"
+    supervisor = sup_mod.Supervisor(
+        manifest_dir=tmp_path / "supervisor", machine_id="m1",
+        ops=sup_mod.WindowsGroupOps())
+    manifest = sup_mod.ManagedSessionManifest(
+        session_id=sid, machine_id="m1", process_group_id="grp_test",
+        platform="windows")
+    supervisor._persist(manifest)
+    supervisor.recover()
+    owner = supervisor._owner_path(sid)
+    owner.parent.mkdir(parents=True, exist_ok=True)
+    owner.write_text('{"pid": 4242, "pgid": 4242, "start": "win:old"}')
+    return supervisor, sid
+
+
+@pytest.mark.parametrize(
+    ("tree_pids", "child_alive", "expected"),
+    [([4242, 5000], True, "liveness_unknown"),
+     ([4242], False, "no_live_process"),
+     (None, False, "liveness_unknown")],
+)
+def test_windows_cross_instance_cancel_checks_orphan_liveness(
+        tmp_path, tree_pids, child_alive, expected):
+    supervisor, sid = _recovered_windows_session(tmp_path)
+    with mock.patch.object(handles_mod, "pid_alive", return_value=False), \
+            mock.patch.object(handles_mod.os, "name", "nt"), \
+            mock.patch.object(sup_mod.WindowsGroupOps, "_tree_pids",
+                              return_value=tree_pids), \
+            mock.patch.object(sup_mod.WindowsGroupOps, "_pid_alive",
+                              return_value=child_alive):
+        outcome = supervisor.cancel_attempt(sid)
+
+    assert outcome == expected
+    if expected == "no_live_process":
+        assert supervisor.get(sid).state in sup_mod.TERMINAL_STATES
+    else:
+        assert supervisor.get(sid).state not in sup_mod.TERMINAL_STATES
 
 
 @unittest.skipIf(os.name == "nt", "POSIX process groups")

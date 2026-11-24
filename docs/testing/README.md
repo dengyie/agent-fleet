@@ -1,5 +1,23 @@
 # 全流程测试与质量门禁
 
+自动部署发布事务、配置中的 SQLite 快照清单、schema rollback、receiver 与应用配置边界：
+
+```sh
+PYTHONPATH=. python3 -m pytest tests/test_auto_deploy.py \
+  tests/test_review_store_auto_release_rollback.py tests/test_release_layout.py -q
+```
+
+`auto-deploy.example.json` 的回归检查要求快照清单包含默认 Supervisor outbox `var/supervisor/commands.db`。已安装宿主 receiver 使用独立的 `/etc/agent-fleet-deploy.json`，需按同一清单单独核验；更新应用包不会更新此 root 配置。
+
+Supervisor Windows 进程树、跨实例取消与 leader 退出后的 orphan 存活判定：
+
+```sh
+PYTHONPATH=. python3 -m pytest tests/test_round5_windows_process.py \
+  tests/test_review_runner_control.py tests/test_supervisor_process.py -q
+```
+
+Windows Job Object 不随 Supervisor 句柄自动持久化。恢复时如果原 leader 已退出，必须检查仍挂在其 PID 下的后代；有存活后代或无法枚举时返回 `liveness_unknown`，不能把会话投影为已结束。以上测试用受控进程表覆盖该 Windows 分支；真实 NTFS/Win32 生命周期仍由 Windows CI 执行。
+
 电脑 Agent 的节点启动目录、原启动请求找回、请求字段绑定与并发/取消回归见[原生任务 HTTP 契约](../native-task-api.md)。目录、启动和主助手共用应用服务；新回归 `tests/test_native_task_api.py` 在 Linux、Windows、macOS CI 执行。
 
 原生会话的消息响应丢失恢复、事件 tail/before/after 游标、会话目录快照分页，以及原生名称、客户端/模型元数据、逐事件可见内容与 source-record 隔离见[原生会话 HTTP 契约](../native-session-api.md)。专项及相关现有 HTTP、SQLite、采集器、前端状态、交互回答和 Supervisor 回归：
