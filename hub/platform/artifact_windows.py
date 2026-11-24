@@ -186,10 +186,11 @@ class _Native:
             self.close(token.value)
 
     @contextmanager
-    def private_security(self) -> Iterator[int]:
+    def private_security(self, *, inherit: bool = False) -> Iterator[int]:
         user = self.current_user()
         descriptor, size = HANDLE(), U32()
-        sddl = f"O:{user}D:P(A;;FA;;;{user})(A;;FA;;;SY)(A;;FA;;;BA)"
+        flags = "OICI" if inherit else ""
+        sddl = f"O:{user}D:P(A;{flags};FA;;;{user})(A;{flags};FA;;;SY)(A;{flags};FA;;;BA)"
         self.checked(self.security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl, 1, C.byref(descriptor), C.byref(size)))
         try:
@@ -207,20 +208,26 @@ class _Native:
             raise C.WinError(error)
         try:
             user = self.current_user()
-            if not owner.value or self.sid(owner.value) != user or not acl.value:
+            # Elevated Windows processes commonly create objects owned by the
+            # Administrators group rather than the token's user SID. Both that
+            # group and SYSTEM already belong to the trusted writer boundary.
+            trusted = {user, "S-1-5-18", "S-1-5-32-544"}
+            owner_sid = self.sid(owner.value) if owner.value else None
+            if owner_sid not in trusted or not acl.value:
                 raise ArtifactReceiveError("unsafe_input_path")
             size = _ACLSize()
             self.checked(self.security.GetAclInformation(acl, C.byref(size), C.sizeof(size), 2))
             if size.AceCount > 256:
                 raise ArtifactReceiveError("unsafe_input_path")
-            trusted = {user, "S-1-5-18", "S-1-5-32-544"}
-            entries = [self._validate_ace(acl.value, index, trusted) for index in range(size.AceCount)]
+            # OWNER RIGHTS resolves to the verified owner, not to every user.
+            entries = [self._validate_ace(acl.value, index, trusted | {"S-1-3-4"})
+                       for index in range(size.AceCount)]
             control, revision = U16(), U32()
             self.checked(self.security.GetSecurityDescriptorControl(descriptor, C.byref(control), C.byref(revision)))
             acl_revision = C.cast(acl, C.POINTER(U8)).contents.value
-            encoded = json.dumps([control.value, revision.value, acl_revision, user, entries],
+            encoded = json.dumps([control.value, revision.value, acl_revision, owner_sid, entries],
                 separators=(",", ":"), ensure_ascii=True).encode("ascii")
-            return user, hashlib.sha256(encoded).hexdigest()
+            return owner_sid, hashlib.sha256(encoded).hexdigest()
         finally:
             self.kernel.LocalFree(descriptor)
 
@@ -264,7 +271,7 @@ class _Native:
         attributes = _Attributes(C.sizeof(_Attributes), parent, C.pointer(text), 0x1040, None, None)
         options = 0x20 | 0x200000 | 2 | (1 if directory else 0x40)
         handle, status = HANDLE(), _Status()
-        with self.private_security() if create else nullcontext(None) as security:
+        with self.private_security(inherit=directory) if create else nullcontext(None) as security:
             attributes.SecurityDescriptor = security if create else None
             self.status(self.nt.NtCreateFile(C.byref(handle), access | _SYNC | _CONTROL, C.byref(attributes),
                 C.byref(status), None, 0x80, 3 if share_write else 1,
@@ -312,6 +319,12 @@ def _descriptor(handle: int, *, writable: bool) -> int:
 
 @contextmanager
 def root_handle(root: Path, *, private_child: str | None = None) -> Iterator[int]:
+    """Pin every path component as a directory handle; never open by pathname.
+
+    ``private_child`` opens (or creates, Fleet-owned) one additional child
+    below the pinned root without rewriting the application ACL of any
+    existing component; slots use that private pinned child.
+    """
     path = validate_root(str(root))
     if not windows_supported():
         raise ArtifactReceiveError("capability_unavailable")

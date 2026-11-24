@@ -119,6 +119,29 @@ def test_hub_download_capacity_refuses_existing_untrusted_child(private_root: Pa
     assert marker.read_bytes() == b"existing evidence"
 
 
+def test_root_handle_create_private_makes_multi_level_private_tree(private_root: Path) -> None:
+    from tools.platform.artifact_windows import root_handle
+
+    # Multi-level creation: every missing component below the private root is
+    # created Fleet-owned, then reopened with identical file identity.
+    deep = private_root / "a" / "b" / "c"
+    with root_handle(deep, create_private=True) as descriptor:
+        identity = win.file_info(descriptor)
+    assert deep.is_dir()
+    with root_handle(deep) as reopened:
+        assert win.file_info(reopened) == identity
+    # A pre-existing private directory is opened unchanged: same identity, no
+    # ACL rewrite, and its parent stays trusted for ordinary artifact roots.
+    existing = private_directory(private_root / "existing")
+    with root_handle(existing) as descriptor:
+        original = win.file_info(descriptor)
+        assert original.directory
+    with root_handle(existing) as reopened:
+        assert win.file_info(reopened) == original
+    with root_handle(private_root) as descriptor:
+        assert win.file_info(descriptor).directory
+
+
 def test_native_pinned_file_identity_and_no_replace_publish(private_root: Path) -> None:
     with win.root_handle(private_root) as root:
         descriptor = win.open_child(root, ".stage.part", writable=True, create=True, exclusive=True)
