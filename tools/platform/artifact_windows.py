@@ -319,6 +319,13 @@ def _descriptor(handle: int, *, writable: bool) -> int:
 
 @contextmanager
 def root_handle(root: Path, *, create_private: bool = False) -> Iterator[int]:
+    """Pin every path component as a directory handle; never open by pathname.
+
+    With ``create_private=True`` every missing component is created as a
+    Fleet-owned directory (like ``mkdir -p``); existing components are opened
+    unchanged, so a pre-existing spool keeps its own ACL and is re-validated
+    by the closing ``validate_acl``.
+    """
     path = validate_root(str(root))
     if not windows_supported():
         raise ArtifactReceiveError("capability_unavailable")
@@ -334,9 +341,8 @@ def root_handle(root: Path, *, create_private: bool = False) -> Iterator[int]:
             if not native.info(handle).directory:
                 raise ArtifactReceiveError("unsafe_input_path")
             native.validate_volume(handle)
-            for index, part in enumerate(path.parts[1:], 1):
-                create = create_private and index == len(path.parts) - 1
-                handle = native.child(handle, part, access=0x81, directory=True, create=create)
+            for part in path.parts[1:]:
+                handle = native.child(handle, part, access=0x81, directory=True, create=create_private)
                 stack.callback(native.close, handle)
             native.validate_acl(handle)
             yield _borrowed_directory(handle, stack)
