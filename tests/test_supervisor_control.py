@@ -23,7 +23,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization as _ser
@@ -57,11 +57,11 @@ def _opaque(prefix: str) -> str:
 
 
 def _now_s() -> float:
-    return datetime.now(UTC).timestamp()
+    return datetime.now(timezone.utc).timestamp()  # noqa: UP017 - Python 3.10 compatibility
 
 
 def _rfc(ts: float) -> str:
-    return datetime.fromtimestamp(ts, UTC).isoformat().replace(
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat().replace(  # noqa: UP017 - Python 3.10 compatibility
         "+00:00", "Z")
 
 
