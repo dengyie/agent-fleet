@@ -69,10 +69,14 @@ Real SQLite and HTTP regressions force two identical requests to race through gr
 - Earlier count correction: the seven session/Supervisor suites on `e051940` report **284 passed, 7 subtests passed**, not 287.
 - Competing Supervisor terminal receipt regression: **1 passed**; full `tests/test_supervisor_control.py`: **98 passed**.
 - Approval/storage and service-action race/crash regressions passed, including both sides of the command/grant commit gap; six related suites: **135 passed**.
-- Seven session/Supervisor suites after the receipt regression: **285 passed, 7 subtests passed**.
-- The approval fix and new regressions are not yet merged or deployed; production remains main `e0519406cb17837ec1196c1da7fdcb44dd77b82e` until a later release is verified.
+- Seven session/Supervisor suites after the receipt regression: **477 passed, 29 skipped, 55 subtests passed** on the current test environment.
+- Workflow dispatch/coordinator/control, source-delivery recovery, coding delivery, review execution, and test execution regression suites: **263 passed**. These exercise durable dispatch leases, lost receipts, cancellation, uncertain external execution, task/Workflow split-commit recovery, and replay fencing; they do not establish that every workflow/provider path was exhaustively reviewed.
+- The initial PR CI caught a Python 3.10 compatibility regression in the new receipt test (`datetime.UTC`); it was replaced with `timezone.utc` and locally verified against the Python 3.10 suite.
+- PR [#124](https://github.com/dengyie/agent-fleet/pull/124) merged as `978a0a489913ee99cc9860d1cad2174633d14886`. Its Linux full suite reported **8854 passed, 2 warnings, 204 subtests**, 47/47 journeys and 2830 selectors; Windows reported **1020 passed, 44 skipped**; macOS reported **630 passed, 2 skipped, 103 subtests**.
+- Main run [45353378940](https://github.com/dengyie/agent-fleet/actions/runs/45353378940) completed Linux, Windows, macOS, package, and deploy successfully. Production returned `{"status":"ok"}` from `/healthz`; `/manifest.json` matched the full main SHA; the same-run frontend verifier checked **107 resources**. Receiver receipt was `deployed/succeeded`, rollback anchor `/var/lib/agent-fleet-deploy/45353378940-qwejodsk`. Evidence is retained in `/Users/mango/.cache/agent-fleet/verification/backend-approval-20261124/`.
+- No real Agent CLI or external model ran. No frontend product code, database schema, node client package, or deployment logic changed. External model/vendor acceptance remains unrun.
 
-The next review boundary remains platform-specific Runner lifecycle and workflow crash recovery. Those are distinct risk surfaces and need their own reproducible scenarios; this iteration does not imply a full repository audit.
+The next review boundary is platform-specific Runner lifecycle and deployment backup/restore interaction. This focused review does not claim exhaustive coverage of all providers, adapters, workflows, or production integrations.
 
 ## Review boundary and follow-up
 

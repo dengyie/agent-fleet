@@ -52,7 +52,8 @@
 - Update the canonical Obsidian `agent-fleet` deployment/review note in its `master` worktree with the corrected prior test count and this new result.
 
 - [x] Record the exact reproduction, transaction boundary fix, test command/results, and unchanged approval API/schema in the backend review.
-- [x] Final HTTP/service-action suites reported 135 passed; session/Supervisor suites reported 285 passed, 7 subtests; boundary separation reported 21 passed. Ruff, compileall, diff check, and UTF-8/no-BOM checks passed.
+- [x] Final approval/service-action suites reported 135 passed; session/Supervisor suites reported 477 passed, 29 skipped, 55 subtests; workflow recovery suites reported 263 passed; boundary separation reported 21 passed. Ruff, compileall, diff check, and UTF-8/no-BOM checks passed.
+- [x] PR #124 merged as `978a0a489913ee99cc9860d1cad2174633d14886`; main CI 45353378940 passed Linux, Windows, macOS, package and deploy. Production health, manifest SHA, and 107 same-run frontend resources verified.
 
 ## Acceptance
 

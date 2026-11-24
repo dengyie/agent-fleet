@@ -78,6 +78,17 @@ PYTHONPATH=. python3 -m pytest tests/test_approval_repository.py \
 
 `test_concurrent_http_approval_requests_replay_one_grant` 通过真实 HTTP 与 SQLite 同步两个相同请求，验证两个响应都恢复同一待审批 grant、只持久化一条记录；并发批准、consuming 无命令重启恢复、命令已写入但 grant 尚未消费的重启恢复也使用真实临时 SQLite 覆盖。相关根因和红绿证据见[后端深度 Review](../reviews/2026-11-24-backend-deep-review.md)。
 
+Workflow dispatch、lease fencing、源代码产物跨 Task/Workflow 双库提交恢复、review/test 回执丢失和取消/不确定执行恢复：
+
+```sh
+PYTHONPATH=. python3 -m pytest tests/test_workflow_dispatch.py \
+  tests/test_workflow_coordinator.py tests/test_workflow_control.py \
+  tests/test_workflow_task_recovery.py tests/test_workflow_coding_delivery.py \
+  tests/test_workflow_review_execution.py tests/test_workflow_test_execution.py -q
+```
+
+该组以真实临时 SQLite、受控执行端和故障注入验证持久意图、原执行绑定、迟到回执、崩溃与取消边界；不代表所有 Provider/Runner 与生产环境已完成外部验收。深审范围和具体边界见[后端深度 Review](../reviews/2026-11-24-backend-deep-review.md)。
+
 大文本回归覆盖三万 Unicode 字符的有界分片、工具字段预览的明确截断标记，
 以及完整可见工具输出经过真实 RunnerCapture、加密 spool、HTTP 和 SQLite 后
 可在 source archive 找回，而普通聊天读取继续排除这些归档行。旧 print 身份
