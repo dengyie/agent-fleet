@@ -69,10 +69,64 @@ Real SQLite and HTTP regressions force two identical requests to race through gr
 - Earlier count correction: the seven session/Supervisor suites on `e051940` report **284 passed, 7 subtests passed**, not 287.
 - Competing Supervisor terminal receipt regression: **1 passed**; full `tests/test_supervisor_control.py`: **98 passed**.
 - Approval/storage and service-action race/crash regressions passed, including both sides of the command/grant commit gap; six related suites: **135 passed**.
-- Seven session/Supervisor suites after the receipt regression: **285 passed, 7 subtests passed**.
-- The approval fix and new regressions are not yet merged or deployed; production remains main `e0519406cb17837ec1196c1da7fdcb44dd77b82e` until a later release is verified.
+- Seven session/Supervisor suites after the receipt regression: **477 passed, 29 skipped, 55 subtests passed** on the current test environment.
+- Workflow dispatch/coordinator/control, source-delivery recovery, coding delivery, review execution, and test execution regression suites: **263 passed**. These exercise durable dispatch leases, lost receipts, cancellation, uncertain external execution, task/Workflow split-commit recovery, and replay fencing; they do not establish that every workflow/provider path was exhaustively reviewed.
+- The initial PR CI caught a Python 3.10 compatibility regression in the new receipt test (`datetime.UTC`); it was replaced with `timezone.utc` and locally verified against the Python 3.10 suite.
+- PR [#124](https://github.com/dengyie/agent-fleet/pull/124) merged as `978a0a489913ee99cc9860d1cad2174633d14886`. Its Linux full suite reported **8854 passed, 2 warnings, 204 subtests**, 47/47 journeys and 2830 selectors; Windows reported **1020 passed, 44 skipped**; macOS reported **630 passed, 2 skipped, 103 subtests**.
+- Main run [45353378940](https://github.com/dengyie/agent-fleet/actions/runs/45353378940) completed Linux, Windows, macOS, package, and deploy successfully. Production returned `{"status":"ok"}` from `/healthz`; `/manifest.json` matched the full main SHA; the same-run frontend verifier checked **107 resources**. Receiver receipt was `deployed/succeeded`, rollback anchor `/var/lib/agent-fleet-deploy/45353378940-qwejodsk`. Evidence is retained in `/Users/mango/.cache/agent-fleet/verification/backend-approval-20261124/`.
+- No real Agent CLI or external model ran. No frontend product code, database schema, node client package, or deployment logic changed. External model/vendor acceptance remains unrun.
 
-The next review boundary remains platform-specific Runner lifecycle and workflow crash recovery. Those are distinct risk surfaces and need their own reproducible scenarios; this iteration does not imply a full repository audit.
+### Continued review — backup publication and SQLite rollback detection
+
+Review continued from public main `978a0a489913ee99cc9860d1cad2174633d14886` and narrowed to the platform backup publication helper and the deployment receiver's database rollback decision.
+
+Two reachable persistence ambiguities were reproduced with temporary filesystem/SQLite state:
+
+- **P2 — Backup publication error hid an already visible destination.** `_publish_new_directory()` performs an atomic no-replace rename and then flushes the destination's parent directory. If that final `fsync` failed, it returned the same `publish_failed` as a pre-rename failure. The destination actually existed and was complete, so an operator could treat the failure as unpublished, retry, and receive `destination_exists`. The helper now raises `publish_durability_unconfirmed` for this exact post-rename state. It retains the destination, exposes no path/OS error, and callers must inspect/validate the exact target before retrying. Pre-rename failure still leaves the destination absent.
+- **P2 — Deployment rollback missed SQLite DDL without a version bump.** `database_schema_fingerprint()` compared `user_version`, platform `meta.schema_version`, and workflow-domain version markers only. A failed release could add a column while leaving those markers unchanged; rollback restored old code but retained the incompatible live database. A real deployment fixture reproduced this: old code returned `rolled_back` with the added column still in the live database. The fingerprint now also compares persistent `sqlite_master` schema objects. When DDL differs, rollback moves the failed database and sidecars to `failed-databases/`, restores the pre-deploy snapshot, and records `restored_databases`; schema-stable data writes continue to remain online.
+
+These changes do not alter application API DTOs or application database schemas. Updating the repository receiver does not update the separately installed host receiver; that deployment boundary remains explicit in `deploy/auto-deploy.md` and must be checked independently before claiming the receiver change is live.
+
+Regression evidence:
+
+- Both new regressions failed before their fixes: the post-rename flush returned `publish_failed`; an unversioned DDL migration survived old-code rollback.
+- `PYTHONPATH=. python3 -m pytest tests/test_platform_backup.py tests/test_platform_backup_encrypted.py tests/test_review_store_backup_fsync.py tests/test_auto_deploy.py tests/test_review_rollback.py tests/test_deploy_pidfd.py tests/test_guardian_process_control.py tests/test_release_layout.py -q` — **129 passed, 3 skipped, 2 subtests passed**. The three skips are expected Darwin-only platform boundaries. Coverage includes plain/encrypted create and restore, post-rename flush fault injection, pre-rename failure, no-overwrite publication, DDL rollback with failed-database preservation, schema-stable data-write retention, deployment rollback, pidfd control, Guardian and release layout.
+- `ruff check --select E9,F63,F7,F82,F401 deploy/auto_release.py hub/infrastructure/platform_backup.py tests/test_auto_deploy.py tests/test_platform_backup.py tests/test_platform_backup_encrypted.py` — **passed**.
+
+This is a focused follow-up, not a claim that every Runner, provider, deployment host, or filesystem failure mode has been exhaustively audited. Production evidence for this candidate is pending its public CI and receiver-specific rollout; no real Agent CLI or external model was run.
+
+The next review boundary remains platform-specific Runner lifecycle and production backup/restore behavior on the separately installed receiver.
+
+### Continued review — Supervisor outbox deployment snapshot coverage
+
+The deployment transaction snapshots only SQLite paths listed in the root-owned receiver configuration. `SupervisorCommandRepository` defaults to `var/supervisor/commands.db`, but the checked-in `deploy/auto-deploy.example.json` listed only five other databases. This is a reachable configuration omission: if a future release migrates the outbox schema and then fails health verification, the receiver cannot compare or restore that database because it is absent from the configured path set. Existing deployment rollback tests exercise restoration only for configured database paths; the missing sample entry was reproduced by a regression that failed against the prior example.
+
+The example now includes the default Supervisor outbox path. Deployment documentation and the test entry require existing `/etc/agent-fleet-deploy.json` receiver configurations to be checked independently because application deploys do not update the separately installed receiver or its root configuration. The test asserts the checked-in template includes the path; the existing real SQLite deployment tests verify configured DDL changes are preserved aside and restored on rollback.
+
+This change cannot establish the contents of the production host's root-owned config or update it. The next production deployment must separately confirm `var/supervisor/commands.db` is listed and the installed receiver contains the DDL fingerprint/restore behavior before treating outbox rollback as protected.
+
+### Continued review — Windows orphaned process recovery
+
+Windows Supervisor starts children inside a Job Object configured to survive Supervisor death. After restart, however, the durable owner record contains only the root PID/start identity and the new Supervisor has no handle to the unnamed Job Object. When that root had exited, `_rebind_owner()` immediately returned `no_live_process`; the control client maps that result to `already_finished`, and Hub receipt projection closes the managed session. Windows descendants may outlive their root, so this could mark the session finished while an Agent child remains running and no longer controllable through the recovered session. A focused regression reproduced the incorrect `no_live_process` outcome with a dead owner and a live descendant in the Windows process table.
+
+Recovery now checks the Windows process tree when the root is gone. It returns `liveness_unknown` if descendants remain, a child liveness query is uncertain, or process enumeration fails. It returns `no_live_process` only when enumeration succeeds and no descendant is alive. This preserves the existing fail-closed receipt behavior without signaling a process whose original Job Object ownership cannot be re-established.
+
+The bounded fake-process regression covers live orphan, no remaining descendant, and failed enumeration on all CI hosts; the dedicated Windows CI remains the runtime authority for Win32 APIs. A safe cross-restart kill capability would require a durable/reopenable Job Object ownership design and is outside this bounded repair.
+
+### Continued review — concurrent Supervisor manifest persistence
+
+Runner and the standalone control client can each restore a Supervisor over the same `manifest_dir`. `_persist()` previously wrote every session to the fixed `<session_id>.json.tmp` path before `os.replace()`. Two concurrent state updates could truncate or replace that shared temporary file; a deterministic two-instance regression synchronized both replacements and reproduced one `manifest_write_failed` after one writer consumed the temp path. The adjacent `HandlesMixin._write_owner()` used the same fixed temporary name for the owner identity needed by cross-instance process rebinding; a second synchronized regression reproduced one lost `os.replace` after the shared temp was consumed.
+
+Manifest and owner persistence now share one private Supervisor file-writing helper. It exclusively creates a uniquely named temporary file beside the target, writes UTF-8, closes it, and atomically replaces the target. It best-effort removes a temporary file after write/replace failure; manifest writes still expose only the bounded `manifest_write_failed` error while owner writes remain best-effort. This protects atomic publication from filename collisions; it does not merge stale in-memory manifests, so last successful atomic replacement remains the winner if independent instances write different states concurrently.
+
+The restored simultaneous-replacement tests on Windows reproduced a second failure with different temporary files: `PermissionError`, native `winerror=5` (access denied). Windows can briefly deny delete access while another writer replaces the destination. The helper now retries only native Windows access/share/lock errors (5/32/33), using the same staged content for at most six replacement attempts and 150 ms of total requested backoff. Persistent denial still fails with the existing bounded manifest error; other native errors and POSIX permission/storage failures are not retried. No Agent execution or command dispatch is repeated by this retry.
+
+- Both concurrency regressions failed against their fixed-temp implementations (manifest: one `manifest_write_failed`; owner: one swallowed `FileNotFoundError`), then passed after the fix. A separate injected replace failure verifies the original manifest bytes remain intact and no temporary file leaks.
+- The three focused manifest/owner persistence regressions — **3 passed**.
+- `PYTHONPATH=. python3 -m pytest tests/test_review_runner_control.py tests/test_round5_windows_process.py tests/test_supervisor_process.py tests/test_supervisor_control.py tests/test_native_continuation.py tests/test_agy.py tests/test_agy_acp.py tests/test_acp_interactions.py tests/test_acp_lifecycle_races.py tests/test_control_client_cli.py -q` — **307 passed, 2 skipped, 2 subtests passed**.
+- The Windows native run [45397447488](https://github.com/dengyie/agent-fleet/actions/runs/45397447488) reproduced access-denied failures in both simultaneous manifest and owner replacements. The temporary serialized-test workaround has been removed. Tests synchronize only the first replacement per writer; retries run independently, and both writers must complete successful replacements.
+- Nine injected replacement-error cases first reported **6 failed, 3 passed** before the retry fix, then all passed. They cover transient recovery, bounded persistent denial with original bytes preserved and temp cleanup, and immediate rejection of other native/POSIX errors. These tests and the real simultaneous-replacement tests are explicitly listed in Windows/macOS CI.
+- Targeted Ruff, compileall, `git diff --check`, and UTF-8/no-BOM inspection — **passed**. The test uses controlled process data; no real Agent CLI or external model was run.
 
 ## Review boundary and follow-up
 

@@ -1,5 +1,27 @@
 # 全流程测试与质量门禁
 
+自动部署发布事务、配置中的 SQLite 快照清单、schema rollback、receiver 与应用配置边界：
+
+```sh
+PYTHONPATH=. python3 -m pytest tests/test_auto_deploy.py \
+  tests/test_review_store_auto_release_rollback.py tests/test_release_layout.py -q
+```
+
+`auto-deploy.example.json` 的回归检查要求快照清单包含默认 Supervisor outbox `var/supervisor/commands.db`。已安装宿主 receiver 使用独立的 `/etc/agent-fleet-deploy.json`，需按同一清单单独核验；更新应用包不会更新此 root 配置。
+
+Supervisor Windows 进程树、跨实例取消与 leader 退出后的 orphan 存活判定：
+
+```sh
+PYTHONPATH=. python3 -m pytest tests/test_round5_windows_process.py \
+  tests/test_review_runner_control.py tests/test_supervisor_process.py -q
+```
+
+Windows Job Object 不随 Supervisor 句柄自动持久化。恢复时如果原 leader 已退出，必须检查仍挂在其 PID 下的后代；有存活后代或无法枚举时返回 `liveness_unknown`，不能把会话投影为已结束。以上测试用受控进程表覆盖该 Windows 分支；真实 NTFS/Win32 生命周期仍由 Windows CI 执行。
+
+该组还通过两个共享同一 `manifest_dir` 的 Supervisor 实例并发替换同一会话清单和 owner 身份记录，确保各自使用唯一同目录临时文件；原子替换失败时清单保留原内容并尽力清理临时文件，外部错误仍为 `manifest_write_failed`。这些写入回归和 Windows orphan 存活回归也显式列入 Windows、macOS CI。
+
+Windows 同时替换目标的临时 access/share/lock 拒绝（原生错误 5/32/33）最多尝试六次，主动退避等待合计 150ms；持续拒绝仍失败，其他存储错误不重试。测试保留两个写入者真实同时替换，并覆盖短暂争用恢复、持续拒绝保留旧文件和其他错误立即失败；仅重试文件发布，不重跑 Agent 命令。
+
 电脑 Agent 的节点启动目录、原启动请求找回、请求字段绑定与并发/取消回归见[原生任务 HTTP 契约](../native-task-api.md)。目录、启动和主助手共用应用服务；新回归 `tests/test_native_task_api.py` 在 Linux、Windows、macOS CI 执行。
 
 原生会话的消息响应丢失恢复、事件 tail/before/after 游标、会话目录快照分页，以及原生名称、客户端/模型元数据、逐事件可见内容与 source-record 隔离见[原生会话 HTTP 契约](../native-session-api.md)。专项及相关现有 HTTP、SQLite、采集器、前端状态、交互回答和 Supervisor 回归：
@@ -77,6 +99,17 @@ PYTHONPATH=. python3 -m pytest tests/test_approval_repository.py \
 ```
 
 `test_concurrent_http_approval_requests_replay_one_grant` 通过真实 HTTP 与 SQLite 同步两个相同请求，验证两个响应都恢复同一待审批 grant、只持久化一条记录；并发批准、consuming 无命令重启恢复、命令已写入但 grant 尚未消费的重启恢复也使用真实临时 SQLite 覆盖。相关根因和红绿证据见[后端深度 Review](../reviews/2026-11-24-backend-deep-review.md)。
+
+Workflow dispatch、lease fencing、源代码产物跨 Task/Workflow 双库提交恢复、review/test 回执丢失和取消/不确定执行恢复：
+
+```sh
+PYTHONPATH=. python3 -m pytest tests/test_workflow_dispatch.py \
+  tests/test_workflow_coordinator.py tests/test_workflow_control.py \
+  tests/test_workflow_task_recovery.py tests/test_workflow_coding_delivery.py \
+  tests/test_workflow_review_execution.py tests/test_workflow_test_execution.py -q
+```
+
+该组以真实临时 SQLite、受控执行端和故障注入验证持久意图、原执行绑定、迟到回执、崩溃与取消边界；不代表所有 Provider/Runner 与生产环境已完成外部验收。深审范围和具体边界见[后端深度 Review](../reviews/2026-11-24-backend-deep-review.md)。
 
 大文本回归覆盖三万 Unicode 字符的有界分片、工具字段预览的明确截断标记，
 以及完整可见工具输出经过真实 RunnerCapture、加密 spool、HTTP 和 SQLite 后
@@ -246,6 +279,18 @@ CI 在打包前运行门禁，测试失败或不完整时 `package` 不执行。
 [UI 视觉证据](visual-evidence.md)；该页保留耐久 contact sheet 及逐字节核验的全分辨率原图，并标明来源 CI 与版本。
 
 main 的 `deploy` 依赖 `test`、`launch-policy-windows` 与 `package`，通过受限入口部署同一次 CI 的前后端产物；PR 无部署权限。`tests/test_auto_deploy.py` 验证文件/数据库保留、部分失败回滚、任务竞态、归档与 SSH 协议、Nginx 恢复和 workflow 边界，属于 RELEASE-01 必需集合。部署步骤和真实检查边界见[自动部署手册](../../deploy/auto-deploy.md)。
+
+备份 no-replace 发布、父目录 flush 不确定结果、明文/加密恢复和实际 SQLite DDL 回滚检测：
+
+```sh
+PYTHONPATH=. python3 -m pytest tests/test_platform_backup.py \
+  tests/test_platform_backup_encrypted.py tests/test_review_store_backup_fsync.py \
+  tests/test_auto_deploy.py tests/test_review_rollback.py \
+  tests/test_deploy_pidfd.py tests/test_guardian_process_control.py \
+  tests/test_release_layout.py -q
+```
+
+`publish_durability_unconfirmed` 表示目标已原子出现但父目录 `fsync` 失败；先 inspect 现有目标再决定后续动作。自动部署将数据库版本/领域标记与实际 `sqlite_master` 持久对象一并比较；检测到结构变化才把失败库保留到 `failed-databases/` 并恢复部署前快照。该回滚实现位于独立预装 receiver，应用包不会自动升级宿主 receiver。
 
 交付时按[证据核验步骤](test-chains.md#核验-ci-证据)对照最新提交、CI checkout revision、矩阵摘要和 JUnit；Linux CI 要求零跳过。macOS 的 `/proc`/stop-resume 平台跳过须记录原因，由 Linux CI 补齐，不能据此放宽其他用例。
 

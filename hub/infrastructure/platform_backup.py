@@ -666,7 +666,12 @@ def _fsync_tree(root: Path) -> None:
 
 
 def _publish_new_directory(stage: Path, target: Path) -> None:
-    """Publish a durable staged directory after an explicit no-overwrite check."""
+    """Publish a staged directory without overwriting an existing destination.
+
+    If the final parent-directory flush fails, the rename has already made the
+    complete destination visible. Report that state separately so callers
+    inspect it instead of treating the operation as unpublished and retrying.
+    """
     if os.path.lexists(target):
         _raise("destination_exists")
     try:
@@ -683,7 +688,7 @@ def _publish_new_directory(stage: Path, target: Path) -> None:
         # The rename itself lives in the parent directory entry.
         _fsync_path(target.parent)
     except OSError:
-        _raise("publish_failed")
+        _raise("publish_durability_unconfirmed")
 
 
 def _rename_directory_no_replace(stage: Path, target: Path) -> None:

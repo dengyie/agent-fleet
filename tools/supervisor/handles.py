@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -17,6 +19,54 @@ from typing import Any, Mapping
 from fleet_core.process.process_group import pid_alive, posix_group_alive, process_start_identity
 from tools.supervisor.model import (TERMINAL_STATES, ManagedSessionManifest,
                                     validate_opaque)
+
+
+def _atomic_replace_text(target: Path, content: str) -> None:
+    """Atomically publish UTF-8 text through a unique same-directory file."""
+    tmp: Path | None = None
+    descriptor: int | None = None
+    try:
+        for _ in range(10):
+            candidate = target.with_name(
+                f"supervisor-{uuid.uuid4().hex}.json.tmp")
+            try:
+                descriptor = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o666,
+                )
+            except FileExistsError:
+                continue
+            tmp = candidate
+            break
+        if descriptor is None or tmp is None:
+            raise FileExistsError("temporary supervisor file name unavailable")
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = None
+            stream.write(content)
+        for attempt in range(6):
+            try:
+                os.replace(str(tmp), str(target))
+                break
+            except OSError as exc:
+                # Independent Windows readers/replacers can briefly deny the
+                # destination's delete access (5/32/33). Keep this one staged
+                # file; persistent denial and all other I/O errors still fail.
+                if getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == 5:
+                    raise
+                time.sleep(0.01 * (attempt + 1))
+        tmp = None
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 class UnknownSessionError(KeyError):
@@ -168,9 +218,7 @@ class HandlesMixin:
         target = self._owner_path(session_id)
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(ident))
-            os.replace(str(tmp), str(target))
+            _atomic_replace_text(target, json.dumps(ident))
         except OSError:
             pass
 
@@ -247,6 +295,18 @@ class HandlesMixin:
             entry.handle = handle
             return handle, ""
         if os.name == "nt":
+            # Windows children can outlive their root. The original Job Object
+            # handle is process-local and a restarted Supervisor cannot query
+            # it, so a dead owner PID alone is not evidence that its tree is
+            # gone. Enumerate the still-parented descendants; if any remain or
+            # enumeration/liveness is uncertain, never publish a terminal
+            # "already finished" receipt for the session.
+            try:
+                descendants_alive = self._ops.owner_descendants_alive(pid)
+            except Exception:
+                return None, "liveness_unknown"
+            if descendants_alive is not False:
+                return None, "liveness_unknown"
             return None, "no_live_process"
         # leader 已不在：组内仍有成员时无法证明 pgid 未被复用 → unknown。
         if posix_group_alive(pgid):

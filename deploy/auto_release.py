@@ -171,9 +171,13 @@ def database_schema_fingerprint(path):
                 if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
                     rows = db.execute(f'SELECT singleton,schema_version,minimum_reader_version FROM {table} ORDER BY singleton LIMIT 2').fetchall()
                     domains.append((table, tuple(rows)))
-            return base, tuple(domains)
+            schema = db.execute(
+                "SELECT type,name,tbl_name,sql FROM sqlite_master "
+                "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name,tbl_name"
+            ).fetchall()
+            return base, tuple(domains), tuple(schema)
     except sqlite3.Error:
-        return ('unreadable', None)
+        return ('unreadable', None, None)
 
 
 def changed_schema_databases(live, saved, paths):

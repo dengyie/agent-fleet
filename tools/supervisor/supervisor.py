@@ -75,6 +75,7 @@ from tools.supervisor.handles import (  # noqa: F401
     _Bound,
     _ManagedEntry,
     _OwnerHandle,
+    _atomic_replace_text,
     _stamp_private_identity,
 )
 from tools.supervisor.native_resume import (  # noqa: F401
@@ -1196,12 +1197,10 @@ class Supervisor(HandlesMixin, NativeResumeMixin, NativeRequestMixin):
 
     def _persist(self, m: ManagedSessionManifest) -> None:
         target = self._manifest_dir / f"{m.session_id}{self.MANIFEST_SUFFIX}"
-        tmp = target.with_suffix(".json.tmp")
         try:
-            tmp.write_text(m.to_json())
-            os.replace(str(tmp), str(target))
+            _atomic_replace_text(target, m.to_json())
         except OSError:
-            raise GroupError("manifest_write_failed")
+            raise GroupError("manifest_write_failed") from None
 
     # ---- status / DTO --------------------------------------------------------- #
 

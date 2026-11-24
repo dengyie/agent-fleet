@@ -153,6 +153,29 @@ def test_group_kill_without_job_kills_orphans_of_an_exited_root(monkeypatch):
     assert ops.group_alive(handle) is False
 
 
+def test_owner_descendant_liveness_requires_complete_proof(monkeypatch):
+    ops = WindowsGroupOps()
+    monkeypatch.setattr(WindowsGroupOps, "_tree_pids",
+                        staticmethod(lambda _root: [4242, 5000]))
+    monkeypatch.setattr(WindowsGroupOps, "_pid_alive",
+                        staticmethod(lambda _pid: True))
+    assert ops.owner_descendants_alive(4242) is True
+
+    monkeypatch.setattr(WindowsGroupOps, "_tree_pids",
+                        staticmethod(lambda _root: [4242]))
+    assert ops.owner_descendants_alive(4242) is False
+
+    monkeypatch.setattr(WindowsGroupOps, "_tree_pids",
+                        staticmethod(lambda _root: None))
+    assert ops.owner_descendants_alive(4242) is None
+
+    monkeypatch.setattr(WindowsGroupOps, "_tree_pids",
+                        staticmethod(lambda _root: [4242, 5000]))
+    monkeypatch.setattr(WindowsGroupOps, "_pid_alive",
+                        staticmethod(lambda _pid: None))
+    assert ops.owner_descendants_alive(4242) is None
+
+
 def test_group_kill_without_job_kills_live_root_and_descendants(monkeypatch):
     ops = WindowsGroupOps()
     tree = _Tree(monkeypatch, [4242, 5000])

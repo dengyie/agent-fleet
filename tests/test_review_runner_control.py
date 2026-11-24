@@ -1,18 +1,23 @@
 """Review regressions: cross-instance cancel, hub cancel routing, pruning, dead code
 (findings 6, 7, 10, 11)."""
 import ast
+import errno
+import json
 import os
 import signal
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import pytest
 from hub.application import control_router as router_mod
 from hub.application.control_router import ControlRouter
 from hub.application.supervisor_service import AuditStore
+from tools.supervisor import handles as handles_mod
 from tools.supervisor import control_client as cc
 from tools.supervisor import supervisor as sup_mod
 
@@ -36,6 +41,272 @@ def _wait_gone(pid: int, wait_s: float = 5.0) -> bool:
             return True
         time.sleep(0.05)
     return False
+
+
+def _recovered_windows_session(tmp_path):
+    sid = "sess_windows_orphan"
+    supervisor = sup_mod.Supervisor(
+        manifest_dir=tmp_path / "supervisor", machine_id="m1",
+        ops=sup_mod.WindowsGroupOps())
+    manifest = sup_mod.ManagedSessionManifest(
+        session_id=sid, machine_id="m1", process_group_id="grp_test",
+        platform="windows")
+    supervisor._persist(manifest)
+    supervisor.recover()
+    owner = supervisor._owner_path(sid)
+    owner.parent.mkdir(parents=True, exist_ok=True)
+    owner.write_text('{"pid": 4242, "pgid": 4242, "start": "win:old"}')
+    return supervisor, sid
+
+
+@pytest.mark.parametrize(
+    ("tree_pids", "child_alive", "expected"),
+    [([4242, 5000], True, "liveness_unknown"),
+     ([4242], False, "no_live_process"),
+     (None, False, "liveness_unknown")],
+)
+def test_windows_cross_instance_cancel_checks_orphan_liveness(
+        tmp_path, tree_pids, child_alive, expected):
+    supervisor, sid = _recovered_windows_session(tmp_path)
+    with mock.patch.object(handles_mod, "pid_alive", return_value=False), \
+            mock.patch.object(handles_mod.os, "name", "nt"), \
+            mock.patch.object(sup_mod.WindowsGroupOps, "_tree_pids",
+                              return_value=tree_pids), \
+            mock.patch.object(sup_mod.WindowsGroupOps, "_pid_alive",
+                              return_value=child_alive):
+        outcome = supervisor.cancel_attempt(sid)
+
+    assert outcome == expected
+    if expected == "no_live_process":
+        assert supervisor.get(sid).state in sup_mod.TERMINAL_STATES
+    else:
+        assert supervisor.get(sid).state not in sup_mod.TERMINAL_STATES
+
+
+def test_concurrent_supervisors_persist_one_manifest_without_temp_collision(
+        tmp_path, monkeypatch):
+    manifest_dir = tmp_path / "shared-supervisor"
+    first = sup_mod.Supervisor(manifest_dir=manifest_dir, machine_id="m1")
+    second = sup_mod.Supervisor(manifest_dir=manifest_dir, machine_id="m1")
+    first_manifest = sup_mod.ManagedSessionManifest(
+        session_id="sess_concurrent", machine_id="m1",
+        process_group_id="grp_first", reason="paused")
+    second_manifest = sup_mod.ManagedSessionManifest(
+        session_id="sess_concurrent", machine_id="m1",
+        process_group_id="grp_second", reason="terminated")
+    target = manifest_dir / "sess_concurrent.json"
+    barrier = threading.Barrier(2)
+    replace_thread = threading.local()
+    replace_sources = []
+    replace_completed = []
+    original_replace = os.replace
+
+    def concurrent_replace(source, destination):
+        if Path(destination) == target:
+            if not getattr(replace_thread, "started", False):
+                replace_thread.started = True
+                replace_sources.append(Path(source))
+                barrier.wait(timeout=5)
+        result = original_replace(source, destination)
+        if Path(destination) == target:
+            replace_completed.append(Path(source))
+        return result
+
+    monkeypatch.setattr(sup_mod.os, "replace", concurrent_replace)
+    errors = []
+
+    def persist(supervisor, manifest):
+        try:
+            supervisor._persist(manifest)
+        except Exception as exc:
+            errors.append((repr(exc), repr(exc.__context__)))
+
+    threads = [
+        threading.Thread(target=persist, args=(first, first_manifest)),
+        threading.Thread(target=persist, args=(second, second_manifest)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    persisted = sup_mod.ManagedSessionManifest.from_json(
+        (manifest_dir / "sess_concurrent.json").read_text(encoding="utf-8"))
+    assert (persisted.process_group_id, persisted.reason) in {
+        ("grp_first", "paused"), ("grp_second", "terminated")}
+    assert len(set(replace_sources)) == 2
+    assert len(replace_completed) == 2
+    assert list(manifest_dir.glob("*.json")) == [manifest_dir / "sess_concurrent.json"]
+    assert list(manifest_dir.glob("*.json.tmp")) == []
+
+
+def test_manifest_persist_failure_removes_unique_temporary_file(
+        tmp_path, monkeypatch):
+    manifest_dir = tmp_path / "supervisor"
+    supervisor = sup_mod.Supervisor(manifest_dir=manifest_dir, machine_id="m1")
+    manifest = sup_mod.ManagedSessionManifest(
+        session_id="sess_failed_write", machine_id="m1",
+        process_group_id="grp_failed", reason="paused")
+    supervisor._persist(manifest)
+    target = manifest_dir / "sess_failed_write.json"
+    previous = target.read_bytes()
+    manifest.reason = "terminated"
+
+    def fail_replace(source, destination):
+        raise OSError("private path must not escape")
+
+    monkeypatch.setattr(sup_mod.os, "replace", fail_replace)
+    with pytest.raises(sup_mod.GroupError, match="^manifest_write_failed$"):
+        supervisor._persist(manifest)
+
+    assert target.read_bytes() == previous
+    assert list(manifest_dir.glob("*.json.tmp")) == []
+
+
+def test_concurrent_supervisors_persist_owner_without_temp_collision(
+        tmp_path, monkeypatch):
+    manifest_dir = tmp_path / "shared-supervisor"
+    first = sup_mod.Supervisor(manifest_dir=manifest_dir, machine_id="m1")
+    second = sup_mod.Supervisor(manifest_dir=manifest_dir, machine_id="m1")
+    first_identity = {"pid": 101, "pgid": 101, "start": "test:first"}
+    second_identity = {"pid": 202, "pgid": 202, "start": "test:second"}
+    first._ops.owner_identity = lambda handle: handle
+    second._ops.owner_identity = lambda handle: handle
+    target = manifest_dir / "owners" / "sess_owner_race.json"
+    barrier = threading.Barrier(2)
+    replace_thread = threading.local()
+    replace_sources = []
+    replace_completed = []
+    original_replace = os.replace
+    replace_errors = []
+
+    def concurrent_replace(source, destination):
+        if Path(destination) == target:
+            if not getattr(replace_thread, "started", False):
+                replace_thread.started = True
+                replace_sources.append(Path(source))
+                barrier.wait(timeout=5)
+        try:
+            result = original_replace(source, destination)
+            if Path(destination) == target:
+                replace_completed.append(Path(source))
+            return result
+        except OSError as exc:
+            replace_errors.append((exc.errno, getattr(exc, "winerror", None)))
+            raise
+
+    monkeypatch.setattr(sup_mod.os, "replace", concurrent_replace)
+    threads = [
+        threading.Thread(
+            target=first._write_owner,
+            args=("sess_owner_race", first_identity)),
+        threading.Thread(
+            target=second._write_owner,
+            args=("sess_owner_race", second_identity)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(replace_completed) == 2, replace_errors
+    assert len(set(replace_sources)) == 2
+    assert json.loads(target.read_text(encoding="utf-8")) in [
+        first_identity, second_identity]
+    assert list(target.parent.glob("*.json.tmp")) == []
+
+
+@pytest.mark.parametrize("winerror", [5, 32, 33])
+def test_supervisor_file_replace_recovers_windows_contention(
+        tmp_path, monkeypatch, winerror):
+    target = tmp_path / "manifest.json"
+    target.write_text("previous", encoding="utf-8")
+    original_replace = os.replace
+    attempts = []
+    pauses = []
+
+    def contended_replace(source, destination):
+        attempts.append(Path(source))
+        if len(attempts) < 3:
+            error = PermissionError(errno.EACCES, "fixture file contention")
+            error.winerror = winerror
+            raise error
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(handles_mod.os, "replace", contended_replace)
+    monkeypatch.setattr(time, "sleep", pauses.append)
+    handles_mod._atomic_replace_text(target, "用户会话")
+
+    assert target.read_text(encoding="utf-8") == "用户会话"
+    assert len(attempts) == 3
+    assert len(set(attempts)) == 1
+    assert len(pauses) == 2
+    assert 0 < sum(pauses) <= 0.25
+    assert list(tmp_path.glob("*.json.tmp")) == []
+
+
+@pytest.mark.parametrize("winerror", [5, 32, 33])
+def test_supervisor_file_replace_bounds_windows_contention(
+        tmp_path, monkeypatch, winerror):
+    supervisor = sup_mod.Supervisor(manifest_dir=tmp_path, machine_id="m1")
+    manifest = sup_mod.ManagedSessionManifest(
+        session_id="sess_contended", machine_id="m1",
+        process_group_id="grp_contended", reason="paused")
+    supervisor._persist(manifest)
+    target = tmp_path / "sess_contended.json"
+    previous = target.read_bytes()
+    attempts = []
+    pauses = []
+
+    def denied_replace(source, destination):
+        attempts.append(Path(source))
+        error = PermissionError(errno.EACCES, "private fixture error")
+        error.winerror = winerror
+        raise error
+
+    monkeypatch.setattr(handles_mod.os, "replace", denied_replace)
+    monkeypatch.setattr(time, "sleep", pauses.append)
+    manifest.reason = "terminated"
+    with pytest.raises(sup_mod.GroupError, match="^manifest_write_failed$"):
+        supervisor._persist(manifest)
+
+    assert 2 <= len(attempts) <= 8
+    assert len(pauses) == len(attempts) - 1
+    assert 0 < sum(pauses) <= 0.25
+    assert target.read_bytes() == previous
+    assert list(tmp_path.glob("*.json.tmp")) == []
+
+
+@pytest.mark.parametrize(
+    ("winerror", "error_number"),
+    [(None, errno.EACCES), (87, errno.EINVAL), (112, errno.ENOSPC)],
+)
+def test_supervisor_file_replace_rejects_other_storage_errors(
+        tmp_path, monkeypatch, winerror, error_number):
+    target = tmp_path / "manifest.json"
+    target.write_bytes(b"previous")
+    attempts = []
+    pauses = []
+
+    def fail_replace(source, destination):
+        attempts.append(Path(source))
+        error = OSError(error_number, "fixture storage error")
+        if winerror is not None:
+            error.winerror = winerror
+        raise error
+
+    monkeypatch.setattr(handles_mod.os, "replace", fail_replace)
+    monkeypatch.setattr(time, "sleep", pauses.append)
+    with pytest.raises(OSError):
+        handles_mod._atomic_replace_text(target, "updated")
+
+    assert len(attempts) == 1
+    assert pauses == []
+    assert target.read_bytes() == b"previous"
+    assert list(tmp_path.glob("*.json.tmp")) == []
 
 
 @unittest.skipIf(os.name == "nt", "POSIX process groups")

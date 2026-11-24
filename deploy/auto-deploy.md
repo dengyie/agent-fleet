@@ -14,7 +14,7 @@
 
 ## 宿主一次性配置
 
-宿主需要 Python 3.10+、systemd、Docker 和 Nginx；容器继续使用已验证的 canonical launcher。以 `auto-deploy.example.json` 为字段模板，在宿主创建 root:root、0600 的 `/etc/agent-fleet-deploy.json`；填写**当前环境已核实**的路径和容器用户，不能直接执行示例路径。
+宿主需要 Python 3.10+、systemd、Docker 和 Nginx；容器继续使用已验证的 canonical launcher。以 `auto-deploy.example.json` 为字段模板，在宿主创建 root:root、0600 的 `/etc/agent-fleet-deploy.json`；填写**当前环境已核实**的路径和容器用户，不能直接执行示例路径。`databases` 必须包含所有已启用的持久 SQLite 库；当前默认配置还包括 `var/supervisor/commands.db`（Hub 默认 outbox 路径），否则该 outbox 的 DDL/版本变更不参与发布快照和 schema rollback 检查。已有宿主配置需单独核对并更新，应用发布不会改写 receiver 的 root 配置。
 
 把以下四个已审查文件安装到 root:root、0755 目录 `/usr/local/lib/agent-fleet-deploy/`，文件权限 0644：
 
@@ -46,7 +46,7 @@ restrict,command="sudo -n /usr/local/sbin/agent-fleet-deploy \"$SSH_ORIGINAL_COM
 2. 使用 systemd 启动独立事务；SSH 断开不杀部署。事务保存 `pending.json`，防止进程异常中断后下一次发布覆盖现场。systemd 运行上限 600 秒，TERM 留 120 秒完成回滚。
 3. 检查原实例的唯一 Hub/guardian、活动 Run/任务、账号会话、readiness；在容器临时目录导入候选代码，并在候选运行时显式导入 Flask、PyYAML、cryptography、websocket-client 和 jsonschema。缺少生产依赖时在切换前失败。版本必须与后台 RELEASE_ORIGIN、前端 manifest 和同一个 run 完全一致。预检由宿主预安装的 receiver 执行；更新仓库文件或发布应用包不会自动更新该 receiver，应单独核对已安装版本。
 4. 保存旧代码和 Nginx，建立现有 launcher 的维护屏障；Nginx 临时返回 503，阻止公网新请求。再查活动任务；如果已有新任务，恢复访问并退出，不停止任务。
-5. 只停止 UID、cwd、脚本和进程启动时间均匹配的 guardian/Hub；停写后对配置中的每个 SQLite 数据库使用 backup API，并检查 integrity/FK。
+5. 只停止 UID、cwd、脚本和进程启动时间均匹配的 guardian/Hub；停写后对配置中的每个 SQLite 数据库使用 backup API，并检查 integrity/FK。清单应含任务、平台、账号、会话、接管及 Supervisor outbox 数据库；添加新的持久 SQLite repository 时，同步更新宿主配置和示例测试。
 6. 在原 LIVE 目录内更新有限的发布管理路径。**不覆盖** `fleet-gates.conf`、`hosts.yaml`、`.env`、`credentials/`、`state/`、`var/`，不改变 LIVE inode。前端部署到不可变的完整 SHA 目录。
 7. 使用原 launcher 恢复 Hub/guardian；检查版本、healthz、匿名401、账号登录/readiness、退出后旧 Cookie 401；切换 Nginx root 并检查公网 manifest SHA。Nginx reload 返回后新 worker 可能尚未接管，公网只读探针在统一 30 秒预算内等待维护503、旧版本或暂时网络失败消失；每次请求最多使用剩余预算，截止后返回成功也不得通过。
 8. 保存成功记录，清除 pending。成功记录提交中途失败时，回滚同时恢复旧成功指针；回滚记录写入失败仍保持维护屏障。重复部署同一成功 SHA 只核验，不再重启。失败记录保留原因类别，不输出凭据、Cookie 或原始应用响应。
@@ -79,6 +79,7 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/test_auto_deploy.py tests/test_rel
 - `rolled_back`：旧代码和 Nginx 已恢复，旧应用的账号/健康探针通过；CI 仍失败，不能记作新版本发布成功。
 - `rollback_failed` / `unfinished_deployment_requires_recovery`：保留 `pending.json`、维护屏障及备份目录，阻断下一次自动部署。若新版本已有活动任务，停止会被拒绝，需等待其终态后按环境运维手册恢复。
 - `unconfirmed`：SSH/systemd 未返回完整结果；先查询 `systemctl status agent-fleet-deploy-*` 和 state 下对应 job/result/pending，**不要自动重发**。
-- 备份目录包含旧代码、Nginx 和停写时数据库快照。当前仓库的 receiver 在 schema 标记不变时保留新版写入；若 `meta.schema_version`（不存在该项时使用 `PRAGMA user_version`）发生变化，会把失败版本数据库及其 sidecar 移到备份目录的 `failed-databases/`，再恢复部署前快照，并在结果中记录 `restored_databases`。因此回滚后的在线数据可能不含失败版本的新写入，需要从保留数据库中人工核对、恢复；不能将 `rolled_back` 当成所有写入都仍在线。该检查只比较版本标记，不判断任意表结构或 Workflow reader 的兼容性。宿主预装 receiver 可能仍是旧版，部署前须单独核对其实现；不能以仓库当前行为推断线上已具备此能力。人工恢复其他数据库仍需独立确认数据影响。
+- 备份目录包含旧代码、Nginx 和停写时数据库快照。当前仓库的 receiver 在持久 schema 和版本标记都不变时保留新版写入；指纹包括 `meta.schema_version`（不存在该项时使用 `PRAGMA user_version`）、已知领域 schema/reader 标记以及规范排序的 `sqlite_master` 表、索引、视图、触发器定义。即使迁移遗漏版本递增，实际 DDL 变化仍会把失败版本数据库及其 sidecar 移到备份目录的 `failed-databases/`，再恢复部署前快照，并在结果中记录 `restored_databases`。因此回滚后的在线数据可能不含失败版本的新写入，需要从保留数据库中人工核对、恢复；不能将 `rolled_back` 当成所有写入都仍在线。该检查只保守检测持久结构与版本变化，不推断任意 DDL 的向后兼容性。宿主预装 receiver 可能仍是旧版，部署前须单独核对其实现；不能以仓库当前行为推断线上已具备此能力。人工恢复其他数据库仍需独立确认数据影响。
+- 平台明文/加密备份工具的 `publish_durability_unconfirmed` 表示完整目标已通过 no-overwrite rename 出现，但父目录 `fsync` 失败，崩溃持久性未确认。保留目标，先使用对应 `inspect_backup` / `inspect_encrypted_backup` 校验；不要把该结果当成目标不存在并直接重试。rename 前的 `publish_failed` 仍表示目标未发布。
 - GitHub 保存 `agent-fleet-deployment` 结果 14 天；宿主保留结果与备份，上传/解包临时文件在 job 完成后清理。代码、数据库和前端历史版本不自动删除，定期按保留策略清理；磁盘不足时拒绝发布以保护当前服务。
 - 禁用自动部署可移除 environment 的 SSH key secret，并删除宿主对应 authorized_keys 行；不要撤销其他运维 key。已有 systemd 事务应先查状态，不能通过删除 key 来推断已停止。

@@ -265,3 +265,38 @@ def test_encrypted_restore_invalid_tag_branch_removes_publish_stage(tmp_path, mo
         service.restore_encrypted_backup(encrypted, restore_parent / "restored", KEY_V1)
     assert failed.value.code == "encryption_invalid"
     assert list(restore_parent.iterdir()) == []
+
+
+@pytest.mark.parametrize("operation", ["encrypted_backup", "encrypted_restore"])
+def test_encrypted_backup_and_restore_keep_destination_after_parent_flush_failure(
+        tmp_path, monkeypatch, operation):
+    import hub.infrastructure.platform_backup as platform_backup
+
+    db_path, artifact_root, _artifact = _source_pair(tmp_path)
+    service = PlatformBackupService()
+    if operation == "encrypted_backup":
+        target = tmp_path / "encrypted"
+        callback = lambda: service.create_encrypted_backup(
+            db_path, artifact_root, target, KEY_V1, "key-v1")
+        inspect = lambda: service.inspect_encrypted_backup(target, key=KEY_V1)
+    else:
+        encrypted = tmp_path / "encrypted"
+        service.create_encrypted_backup(db_path, artifact_root, encrypted, KEY_V1, "key-v1")
+        target = tmp_path / "restored"
+        callback = lambda: service.restore_encrypted_backup(encrypted, target, KEY_V1)
+        inspect = lambda: service.inspect_backup(target)
+    original_fsync_path = platform_backup._fsync_path
+
+    def fail_parent_flush(path):
+        if Path(path) == target.parent:
+            raise OSError("injected parent durability failure")
+        return original_fsync_path(path)
+
+    monkeypatch.setattr(platform_backup, "_fsync_path", fail_parent_flush)
+    with pytest.raises(BackupError, match="publish_durability_unconfirmed"):
+        callback()
+
+    checked = inspect()
+    assert checked["artifact_count"] == 1
+    if operation == "encrypted_backup":
+        assert checked["verified"] is True
