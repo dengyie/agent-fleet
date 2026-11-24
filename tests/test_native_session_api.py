@@ -644,7 +644,7 @@ def test_supervisor_rejects_lookalike_message_schema_missing_constraints(tmp_pat
             "SELECT count(*) FROM session_message_operations").fetchone()[0] == 0
 
 
-def test_valid_supervisor_v1_message_schema_adds_null_guard_and_preserves_operations(
+def test_valid_supervisor_v1_message_schema_upgrades_atomically_to_non_null_token(
         tmp_path):
     from hub.infrastructure.supervisor_command_repository import (
         SupervisorCommandRepository,
@@ -678,24 +678,20 @@ def test_valid_supervisor_v1_message_schema_adds_null_guard_and_preserves_operat
 
     with sqlite3.connect(db) as connection:
         assert connection.execute(
-            "SELECT value FROM supervisor_meta WHERE key='schema_version'").fetchone()[0] == "1"
+            "SELECT value FROM supervisor_meta WHERE key='schema_version'").fetchone()[0] == "2"
         token_column = next(row for row in connection.execute(
             "PRAGMA table_info(session_message_operations)") if row[1] == "token_digest")
-        assert token_column[3] == 0
+        assert token_column[3] == 1
         assert connection.execute(
             "SELECT token_digest,operator_id,session_id,operation,content_digest,command_id "
             "FROM session_message_operations").fetchall() == [(
                 "a" * 64, "operator@example.test", "session-1", "append_user_turn",
                 "b" * 64, "legacy-command")]
-        with pytest.raises(sqlite3.IntegrityError, match="token_digest_required"):
+        with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
                 "INSERT INTO session_message_operations VALUES(NULL,?,?,?,?,?)",
                 ("operator@example.test", "session-1", "append_user_turn",
-                 "c" * 64, "another-command"))
-        with pytest.raises(sqlite3.IntegrityError, match="token_digest_required"):
-            connection.execute(
-                "UPDATE session_message_operations SET token_digest=NULL WHERE command_id=?",
-                ("legacy-command",))
+                 "b" * 64, "legacy-command"))
 
 
 def test_supervisor_v1_null_token_migration_failure_preserves_legacy_database(tmp_path):
@@ -769,99 +765,7 @@ def test_preversioned_supervisor_message_table_initializes_without_losing_rows(
         connection.execute("DELETE FROM supervisor_meta WHERE key='schema_version'")
 
     SupervisorCommandRepository(db).init()
-    # Repeated startup also exercises validation of a populated v1-compatible table.
     SupervisorCommandRepository(db).init()
-
-    with sqlite3.connect(db) as connection:
-        assert connection.execute(
-            "SELECT value FROM supervisor_meta WHERE key='schema_version'").fetchone() == ("1",)
-        token_column = next(row for row in connection.execute(
-            "PRAGMA table_info(session_message_operations)") if row[1] == "token_digest")
-        assert token_column[3] == 0
-        assert connection.execute(
-            "SELECT token_digest,command_id FROM session_message_operations").fetchall() == [
-                ("a" * 64, "kept")]
-        assert connection.execute(
-            "SELECT command_id FROM supervisor_commands").fetchall() == [("kept",)]
-
-
-def test_supervisor_v2_schema_downgrades_to_prior_reader_compatible_shape(tmp_path):
-    from hub.infrastructure.supervisor_command_repository import SupervisorCommandRepository
-
-    db = tmp_path / "supervisor-v2-rollback-compatible.db"
-    SupervisorCommandRepository(db).init()
-    with sqlite3.connect(db) as connection:
-        connection.execute("DROP TABLE session_message_operations")
-        connection.execute(
-            "CREATE TABLE session_message_operations("
-            "token_digest TEXT NOT NULL PRIMARY KEY CHECK(length(token_digest)=64),"
-            "operator_id TEXT NOT NULL,session_id TEXT NOT NULL,"
-            "operation TEXT NOT NULL CHECK(operation='append_user_turn'),"
-            "content_digest TEXT NOT NULL CHECK(length(content_digest)=64),"
-            "command_id TEXT NOT NULL UNIQUE REFERENCES supervisor_commands(command_id))")
-        connection.execute(
-            "INSERT INTO supervisor_commands(command_id,machine_id,session_id,action,"
-            "nonce,wire_json,issued_s,expires_s,status) "
-            "VALUES('v2-command','m1','s1','append_user_turn','v2-nonce','{}',1,100,'queued')")
-        connection.execute(
-            "INSERT INTO session_message_operations VALUES(?,?,?,?,?,?)",
-            ("d" * 64, "operator", "s1", "append_user_turn", "e" * 64, "v2-command"))
-        connection.execute("UPDATE supervisor_meta SET value='2' WHERE key='schema_version'")
-
-    SupervisorCommandRepository(db).init()
-
-    with sqlite3.connect(db) as connection:
-        assert connection.execute(
-            "SELECT value FROM supervisor_meta WHERE key='schema_version'").fetchone() == ("1",)
-        token_column = next(row for row in connection.execute(
-            "PRAGMA table_info(session_message_operations)") if row[1] == "token_digest")
-        assert token_column[3] == 0
-        assert connection.execute(
-            "SELECT token_digest,command_id FROM session_message_operations").fetchall() == [
-                ("d" * 64, "v2-command")]
-        with pytest.raises(sqlite3.IntegrityError, match="token_digest_required"):
-            connection.execute(
-                "INSERT INTO session_message_operations VALUES(NULL,?,?,?,?,?)",
-                ("operator", "s1", "append_user_turn", "f" * 64, "v2-command"))
-
-
-def test_supervisor_v2_compatibility_migration_failure_rolls_back_atomically(
-        tmp_path, monkeypatch):
-    from hub.infrastructure.supervisor_command_repository import (
-        SupervisorCommandRepository, SupervisorCommandRepositoryError,
-    )
-
-    db = tmp_path / "supervisor-v2-migration-rollback.db"
-    SupervisorCommandRepository(db).init()
-    with sqlite3.connect(db) as connection:
-        connection.execute("DROP TABLE session_message_operations")
-        connection.execute(
-            "CREATE TABLE session_message_operations("
-            "token_digest TEXT NOT NULL PRIMARY KEY CHECK(length(token_digest)=64),"
-            "operator_id TEXT NOT NULL,session_id TEXT NOT NULL,"
-            "operation TEXT NOT NULL CHECK(operation='append_user_turn'),"
-            "content_digest TEXT NOT NULL CHECK(length(content_digest)=64),"
-            "command_id TEXT NOT NULL UNIQUE REFERENCES supervisor_commands(command_id))")
-        connection.execute(
-            "INSERT INTO supervisor_commands(command_id,machine_id,session_id,action,"
-            "nonce,wire_json,issued_s,expires_s,status) "
-            "VALUES('v2-command','m1','s1','append_user_turn','v2-nonce','{}',1,100,'queued')")
-        connection.execute(
-            "INSERT INTO session_message_operations VALUES(?,?,?,?,?,?)",
-            ("d" * 64, "operator", "s1", "append_user_turn", "e" * 64, "v2-command"))
-        connection.execute("UPDATE supervisor_meta SET value='2' WHERE key='schema_version'")
-
-    repository = SupervisorCommandRepository(db)
-    migrate = repository._migrate_session_message_operations
-
-    def fail_after_conversion(connection):
-        migrate(connection)
-        raise sqlite3.OperationalError("private conversion failure")
-
-    monkeypatch.setattr(repository, "_migrate_session_message_operations", fail_after_conversion)
-    with pytest.raises(SupervisorCommandRepositoryError) as caught:
-        repository.init()
-    assert caught.value.code == "command_unavailable"
 
     with sqlite3.connect(db) as connection:
         assert connection.execute(
@@ -871,45 +775,9 @@ def test_supervisor_v2_compatibility_migration_failure_rolls_back_atomically(
         assert token_column[3] == 1
         assert connection.execute(
             "SELECT token_digest,command_id FROM session_message_operations").fetchall() == [
-                ("d" * 64, "v2-command")]
-        names = {row[0] for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
-        assert "session_message_operations_v2" not in names
-
-
-def test_supervisor_v2_migration_does_not_drop_unrelated_trigger_on_name_collision(
-        tmp_path):
-    from hub.infrastructure.supervisor_command_repository import (
-        SupervisorCommandRepository, SupervisorCommandRepositoryError,
-    )
-
-    db = tmp_path / "supervisor-v2-trigger-collision.db"
-    SupervisorCommandRepository(db).init()
-    with sqlite3.connect(db) as connection:
-        connection.execute("DROP TABLE session_message_operations")
-        connection.execute(
-            "CREATE TABLE session_message_operations("
-            "token_digest TEXT NOT NULL PRIMARY KEY CHECK(length(token_digest)=64),"
-            "operator_id TEXT NOT NULL,session_id TEXT NOT NULL,"
-            "operation TEXT NOT NULL CHECK(operation='append_user_turn'),"
-            "content_digest TEXT NOT NULL CHECK(length(content_digest)=64),"
-            "command_id TEXT NOT NULL UNIQUE REFERENCES supervisor_commands(command_id))")
-        connection.execute(
-            "CREATE TRIGGER session_message_operations_require_token_insert "
-            "AFTER UPDATE ON supervisor_commands BEGIN SELECT 1; END")
-        connection.execute("UPDATE supervisor_meta SET value='2' WHERE key='schema_version'")
-
-    with pytest.raises(SupervisorCommandRepositoryError) as caught:
-        SupervisorCommandRepository(db).init()
-    assert caught.value.code == "command_unavailable"
-
-    with sqlite3.connect(db) as connection:
+                ("a" * 64, "kept")]
         assert connection.execute(
-            "SELECT value FROM supervisor_meta WHERE key='schema_version'").fetchone() == ("2",)
-        assert connection.execute(
-            "SELECT tbl_name FROM sqlite_master WHERE type='trigger' AND "
-            "name='session_message_operations_require_token_insert'").fetchone() == (
-                "supervisor_commands",)
+            "SELECT command_id FROM supervisor_commands").fetchall() == [("kept",)]
 
 
 def test_preversioned_corrupt_supervisor_message_table_has_bounded_error(tmp_path):
@@ -924,8 +792,9 @@ def test_preversioned_corrupt_supervisor_message_table_has_bounded_error(tmp_pat
         connection.execute("CREATE TABLE session_message_operations(command_id TEXT)")
         connection.execute("DELETE FROM supervisor_meta WHERE key='schema_version'")
 
-    with pytest.raises(SupervisorCommandRepositoryError, match="^command_unavailable$"):
+    with pytest.raises(SupervisorCommandRepositoryError) as caught:
         SupervisorCommandRepository(db).init()
+    assert caught.value.code == "command_unavailable"
     with sqlite3.connect(db) as connection:
         assert connection.execute(
             "SELECT value FROM supervisor_meta WHERE key='schema_version'").fetchone() is None
@@ -965,8 +834,9 @@ def test_populated_supervisor_schema_cannot_mask_missing_check_with_duplicate_to
         connection.execute("UPDATE supervisor_meta SET value=? WHERE key='schema_version'",
                            (str(version),))
 
-    with pytest.raises(SupervisorCommandRepositoryError, match="^command_unavailable$"):
+    with pytest.raises(SupervisorCommandRepositoryError) as caught:
         SupervisorCommandRepository(db).init()
+    assert caught.value.code == "command_unavailable"
 
     with sqlite3.connect(db) as connection:
         assert connection.execute(

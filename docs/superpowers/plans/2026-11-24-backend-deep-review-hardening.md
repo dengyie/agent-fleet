@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task, inline. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Close the confirmed nullable-token and migration-validation defects in the Supervisor ordinary-session-message idempotency store while preserving both prior-reader startup and receiver rollback contracts.
+**Goal:** Close the confirmed nullable-token and migration-validation defects in the Supervisor ordinary-session-message idempotency store and record the backend review evidence.
 
-**Architecture:** Preserve the existing `hub -> application/domain/repository` dependency direction and the Supervisor repository's atomic `BEGIN IMMEDIATE` migration. Enforce non-null token identity with SQLite triggers while retaining the nullable-primary-key DDL and v1 marker accepted by the pre-v2 reader. Validate the persisted schema at the repository boundary so malformed legacy databases fail closed before command admission or receipt recovery.
+**Architecture:** Preserve the existing `hub -> application/domain/repository` dependency direction and the Supervisor repository's atomic `BEGIN IMMEDIATE` migration. Validate the persisted schema at the repository boundary so malformed legacy databases fail closed before command admission or receipt recovery.
 
 **Tech Stack:** Python 3.10+, SQLite, Flask HTTP integration tests, pytest.
 
@@ -31,7 +31,7 @@ The reviewed production path is ordinary operator session-message recovery throu
 **Interfaces:**
 - Keep `SupervisorCommandRepository.init()` as the sole migration entry point.
 - Preserve `SupervisorCommandRepositoryError("command_unavailable")` as the bounded failure contract.
-- The initial v1-to-v2 change was merged in PR #122. The follow-up converts the current v2 shape back to v1 atomically; preserve valid operations and reject malformed rows without data loss.
+- Upgrade the independent operation schema from version 1 to version 2 atomically; preserve valid version-1 rows and reject malformed rows without data loss.
 
 - [x] **Step 1: Add regressions for the nullable key and a lookalike corrupt version-1 table.**
 
@@ -83,21 +83,22 @@ Run the scoped test command from Task 1, `git diff --check`, and a Python script
 ## Acceptance
 
 - A corrupt version-1 lookalike operation table is rejected during `init()` with the existing bounded repository error.
-- Valid v1 and previously shipped v2 operation tables migrate atomically to the previous-reader-compatible v1 shape and preserve existing operations and commands; older pre-feature databases still initialize atomically.
-- Insert/update triggers reject a NULL idempotency digest at SQLite level while the column declaration remains readable to the previous release.
+- A valid version-1 operation table upgrades atomically to version 2 and preserves existing operations and commands; older pre-feature databases still initialize atomically.
+- The version-2 table rejects a NULL idempotency digest at SQLite level.
 - Migration validation leaves no probe command or message-operation rows after success or failure.
 - Existing ordinary-message idempotency, interactive-answer protocol, and authorization behavior remain unchanged.
 - The focused backend test suites pass and the diff contains no frontend product files.
 
 ## Follow-up: Legacy Migration and Constraint Probe Boundaries
 
-The post-merge review found that the pre-versioned-table branch calls `.get()`
-on `sqlite3.Row`, and that fixed probe digests can collide with a valid persisted
-binding. Keep the public contract; close these startup and rollback-compatibility
-gaps in the existing repository rather than introducing another layer.
+The post-merge review found that the pre-versioned-table branch called `.get()`
+on `sqlite3.Row`, and that fixed probe digests could collide with a valid
+persisted binding. Keep the deployed v2 schema and public contracts; close these
+startup validation gaps in the existing repository rather than adding another
+layer.
 
-- [x] Reproduce pre-versioned v1/v2 table startup, including missing-column corruption.
-- [x] Reproduce populated lookalike schemas with individually missing operation/content checks.
-- [x] Use row indexing and a positive, fresh-identity savepoint probe; verify probes leave no rows.
-- [x] Run focused migration tests and inspect rollback compatibility separately; seven relevant backend suites passed, and the PR CI remains the full-suite gate.
-- [ ] Record exact full test and release evidence; rebase latest main before merge and verify production.
+- [x] Reproduce pre-versioned nullable/strict table startup, including missing-column corruption.
+- [x] Reproduce populated lookalike schemas with missing operation/content checks.
+- [x] Use row indexing and positive, fresh-identity savepoint probes; verify probes leave no rows.
+- [x] Run session/Supervisor regression suites and check previous-reader schema compatibility.
+- [ ] Complete PR CI, merge, and verify the next main deployment.

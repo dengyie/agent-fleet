@@ -16,8 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from hub.infrastructure.sqlite import connect as sqlite_connect
 
-_SESSION_MESSAGE_SCHEMA_VERSION = 1
-_SESSION_MESSAGE_MAX_READER_SCHEMA_VERSION = 2
+_SESSION_MESSAGE_SCHEMA_VERSION = 2
 
 
 class SupervisorCommandRepositoryError(RuntimeError):
@@ -203,25 +202,15 @@ class SupervisorCommandRepository:
     @staticmethod
     def _create_session_message_operations(conn: sqlite3.Connection) -> None:
         conn.execute("CREATE TABLE session_message_operations ("
-                     "token_digest TEXT PRIMARY KEY CHECK(length(token_digest)=64),"
+                     "token_digest TEXT NOT NULL PRIMARY KEY CHECK(length(token_digest)=64),"
                      "operator_id TEXT NOT NULL,session_id TEXT NOT NULL,"
                      "operation TEXT NOT NULL CHECK(operation='append_user_turn'),"
                      "content_digest TEXT NOT NULL CHECK(length(content_digest)=64),"
                      "command_id TEXT NOT NULL UNIQUE REFERENCES supervisor_commands(command_id))")
-        conn.execute(
-            "CREATE TRIGGER session_message_operations_require_token_insert "
-            "BEFORE INSERT ON session_message_operations WHEN NEW.token_digest IS NULL "
-            "BEGIN SELECT RAISE(ABORT,'token_digest_required'); END")
-        conn.execute(
-            "CREATE TRIGGER session_message_operations_require_token_update "
-            "BEFORE UPDATE OF token_digest ON session_message_operations "
-            "WHEN NEW.token_digest IS NULL "
-            "BEGIN SELECT RAISE(ABORT,'token_digest_required'); END")
 
     @staticmethod
     def _validate_session_message_operations(
-            conn: sqlite3.Connection, *, token_digest_not_null: bool,
-            require_null_guard: bool = True) -> None:
+            conn: sqlite3.Connection, *, token_digest_not_null: bool) -> None:
         """Validate declarations, indexes, foreign keys, and SQL CHECK behavior."""
         columns = {row["name"]: row for row in conn.execute(
             "PRAGMA table_info(session_message_operations)")}
@@ -299,16 +288,6 @@ class SupervisorCommandRepository:
                     "INSERT INTO session_message_operations(token_digest,operator_id,"
                     "session_id,operation,content_digest,command_id) VALUES(?,?,?,?,?,?)",
                     valid_row)
-                if require_null_guard:
-                    try:
-                        conn.execute(
-                            "UPDATE session_message_operations SET token_digest=NULL "
-                            "WHERE command_id=?", (probe_command,))
-                    except sqlite3.IntegrityError:
-                        pass
-                    else:
-                        raise sqlite3.DatabaseError(
-                            "session message token update accepts null")
             except sqlite3.IntegrityError as exc:
                 raise sqlite3.DatabaseError(
                     "session message operation schema rejects valid row") from exc
@@ -329,7 +308,7 @@ class SupervisorCommandRepository:
             null_key_rejected = rejected((None, "schema-probe", "schema-probe",
                                           "append_user_turn", secrets.token_hex(32),
                                           probe_command))
-            if require_null_guard and not null_key_rejected:
+            if null_key_rejected != token_digest_not_null:
                 raise sqlite3.DatabaseError("invalid session message token nullability")
         finally:
             conn.execute(f"ROLLBACK TO {savepoint}")
@@ -337,7 +316,7 @@ class SupervisorCommandRepository:
 
     @classmethod
     def _migrate_session_message_operations(cls, conn: sqlite3.Connection) -> None:
-        """Keep token storage strict while retaining the previous reader contract."""
+        """Atomically upgrade ordinary-message operation bindings to v2."""
         tables = {row["name"] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         version = 0
@@ -355,71 +334,45 @@ class SupervisorCommandRepository:
                         or not raw_version.isdecimal()):
                     raise sqlite3.DatabaseError("invalid supervisor schema version")
                 version = int(raw_version)
-                if version > _SESSION_MESSAGE_MAX_READER_SCHEMA_VERSION:
+                if version > _SESSION_MESSAGE_SCHEMA_VERSION:
                     raise sqlite3.DatabaseError("unsupported supervisor schema version")
 
         operation_table_exists = "session_message_operations" in tables
-        if version in {1, 2} and not operation_table_exists:
+        if version == _SESSION_MESSAGE_SCHEMA_VERSION and not operation_table_exists:
+            raise sqlite3.DatabaseError("missing session message operation table")
+        if version == 1 and not operation_table_exists:
             raise sqlite3.DatabaseError("missing legacy session message operation table")
 
         conn.execute("CREATE TABLE IF NOT EXISTS supervisor_meta ("
                      "key TEXT PRIMARY KEY,value TEXT NOT NULL)")
         if not operation_table_exists:
             cls._create_session_message_operations(conn)
-        else:
-            columns = {row["name"]: row for row in conn.execute(
-                "PRAGMA table_info(session_message_operations)")}
+
+        columns = {row["name"]: row for row in conn.execute(
+            "PRAGMA table_info(session_message_operations)")}
+        migrate_v1 = version == 1
+        if version == 0 and operation_table_exists:
+            # A pre-versioned database from the first implementation is v1;
+            # a stricter table is already compatible with v2.
             token_column = columns.get("token_digest")
             if token_column is None:
                 raise sqlite3.DatabaseError("missing session message token column")
+            migrate_v1 = token_column["notnull"] == 0
 
-            # Validate the known prior v2 form before converting it back to the
-            # v1 reader contract. Unversioned strict tables use the same path.
-            source_v2 = version == 2 or (version == 0 and token_column["notnull"] == 1)
-            cls._validate_session_message_operations(
-                conn, token_digest_not_null=source_v2,
-                require_null_guard=not (version == 1 or
-                                        (version == 0 and not source_v2)))
-            if conn.execute(
-                    "SELECT 1 FROM session_message_operations WHERE token_digest IS NULL "
-                    "LIMIT 1").fetchone():
-                raise sqlite3.DatabaseError("null session message token in stored data")
+        if migrate_v1:
+            # Version 1 used a nullable TEXT PRIMARY KEY. Its other declarations
+            # and constraints must match before any rows are copied.
+            cls._validate_session_message_operations(conn, token_digest_not_null=False)
+            conn.execute("ALTER TABLE session_message_operations "
+                         "RENAME TO session_message_operations_v1")
+            cls._create_session_message_operations(conn)
+            conn.execute(
+                "INSERT INTO session_message_operations(token_digest,operator_id,session_id,"
+                "operation,content_digest,command_id) SELECT token_digest,operator_id,session_id,"
+                "operation,content_digest,command_id FROM session_message_operations_v1")
+            conn.execute("DROP TABLE session_message_operations_v1")
 
-            if source_v2:
-                conn.execute("ALTER TABLE session_message_operations "
-                             "RENAME TO session_message_operations_v2")
-                for trigger_name in (
-                        "session_message_operations_require_token_insert",
-                        "session_message_operations_require_token_update"):
-                    trigger = conn.execute(
-                        "SELECT tbl_name FROM sqlite_master "
-                        "WHERE type='trigger' AND name=?", (trigger_name,)).fetchone()
-                    if trigger is not None:
-                        if trigger["tbl_name"] != "session_message_operations_v2":
-                            raise sqlite3.DatabaseError("session message trigger name collision")
-                        conn.execute(f"DROP TRIGGER {trigger_name}")
-                cls._create_session_message_operations(conn)
-                conn.execute(
-                    "INSERT INTO session_message_operations(token_digest,operator_id,session_id,"
-                    "operation,content_digest,command_id) SELECT token_digest,operator_id,"
-                    "session_id,operation,content_digest,command_id "
-                    "FROM session_message_operations_v2")
-                conn.execute("DROP TABLE session_message_operations_v2")
-            else:
-                # The old reader accepts this nullable declaration, so a pair
-                # of SQL triggers enforces the invariant without a version bump.
-                conn.execute(
-                    "CREATE TRIGGER IF NOT EXISTS session_message_operations_require_token_insert "
-                    "BEFORE INSERT ON session_message_operations WHEN NEW.token_digest IS NULL "
-                    "BEGIN SELECT RAISE(ABORT,'token_digest_required'); END")
-                conn.execute(
-                    "CREATE TRIGGER IF NOT EXISTS session_message_operations_require_token_update "
-                    "BEFORE UPDATE OF token_digest ON session_message_operations "
-                    "WHEN NEW.token_digest IS NULL "
-                    "BEGIN SELECT RAISE(ABORT,'token_digest_required'); END")
-
-        cls._validate_session_message_operations(
-            conn, token_digest_not_null=False, require_null_guard=True)
+        cls._validate_session_message_operations(conn, token_digest_not_null=True)
         conn.execute(
             "INSERT INTO supervisor_meta(key,value) VALUES('schema_version',?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
