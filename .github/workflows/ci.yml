@@ -149,6 +149,7 @@ jobs:
           tests/test_agent_capability_layers.py
           tests/test_native_continuation.py tests/test_runner_config.py
           tests/test_session_bridge.py tests/test_agy.py tests/test_native_transcript_detail.py
+          tests/test_native_metadata_recovery.py
           tests/test_agy_acp.py tests/test_acp_transport_bounds.py tests/test_acp_lifecycle_races.py
           tests/test_acp_interactions.py tests/test_agent_evidence.py
           tests/test_continuation_results.py
@@ -197,6 +198,7 @@ jobs:
           tests/test_native_tail_drain.py tests/test_dispatch_capture_reliability.py
           tests/test_native_model_config.py tests/test_native_task_api.py
           tests/test_agy.py tests/test_native_transcript_detail.py
+          tests/test_native_metadata_recovery.py
           tests/test_agy_acp.py tests/test_acp_transport_bounds.py tests/test_acp_lifecycle_races.py
           tests/test_acp_interactions.py tests/test_agent_evidence.py
           tests/test_continuation_results.py -q --junitxml=macos-agent-results.xml

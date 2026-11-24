@@ -184,6 +184,48 @@ and chat heading prefer `native_title`, then `title_preview`, then a neutral
 Agent/session identifier. Provider, model, adapter, version, and timestamps are
 included only when explicitly observed. Unsupported fields are omitted.
 
+### Bounded recovery for retained native sessions
+
+New node releases also reconcile display metadata for already-retained native
+session identities. They read only source-declared title, model, provider,
+client version and start-time fields. This read-only pass reuses the retained
+session's machine, family, exact native identity and original working
+directory; ambiguous matches, mismatched identity/workspace, changed or unsafe
+files and unknown native-store schemas produce no metadata. It runs locally
+through the encrypted session spool and existing runner upload, not through a
+new browser API or CLI/version probe.
+
+JSONL metadata recovery reads at most a 256 KiB prefix and 2 MiB tail, parsing
+up to 4096 complete rows from each. It never rewinds the conversation cursor,
+re-emits messages, stores raw metadata payloads in the recovery checkpoint or
+opens a vendor store for writing. Codex v5, ZCode and Hermes metadata is read from the
+single exact session row in their existing read-only SQLite connection. The
+ZCode `time_created` integer is milliseconds since Unix epoch; Hermes
+`started_at` is Unix seconds. Only finite, valid timestamps become
+`native_started_at`. Codex v5 `threads.name` (when explicitly set) takes
+precedence over its `title`; its thread ID, cwd and rollout path must all
+match. Unknown `state_*.sqlite` versions are not guessed or scanned.
+
+When a bounded prefix has an explicitly observed fact that is absent from the
+current tail, the persisted `session_metadata` event carries
+`fill_missing:true`. The Hub uses this only to fill an empty metadata column;
+it cannot replace a value already projected from newer events. Current tail
+facts use the ordinary per-field ingestion cursor, so a later model/title
+change still takes effect. The checkpoint is written only after metadata has
+entered the durable local spool. A lost HTTP response retries those same
+spooled event IDs. If publishing succeeded but the separate metadata
+checkpoint write failed, the next pass may append a new metadata observation;
+field projection is idempotent and conversation messages are not repeated.
+Metadata text equality is never used as event identity. An old capture index without this
+checkpoint is supported; malformed or future checkpoint versions fail closed
+and retry safely. There is no session-database migration.
+
+Some clients do not record an explicit session name, provider, model or
+client version. Pi's numeric session `version` is a transcript-format number,
+not an Agent client version, and is intentionally omitted. A bounded prefix or
+tail cannot promise discovery of records outside those windows. Existing
+historical conversation text is never rewritten to manufacture missing facts.
+
 `native_started_at` is populated only from an explicit native session header.
 If a client does not provide one, `started_at` is the Hub's first observation
 time and the UI labels it accordingly. Duration runs from the native start when

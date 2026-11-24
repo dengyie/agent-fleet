@@ -676,10 +676,13 @@ class SessionRepository:
                     "native_started_at": "native_started_cursor",
                 }.get(field, field + "_cursor")
                 comparison = ">" if field == "native_started_at" else "<"
+                condition = (f'({field} IS NULL OR {field}=\'\')' if payload.get('fill_missing') is True
+                             else f'({cursor_field} IS NULL OR {cursor_field}{comparison}?)')
+                parameters = ((value, cursor, session_id) if payload.get('fill_missing') is True
+                              else (value, cursor, session_id, cursor))
                 conn.execute(
                     f"UPDATE sessions SET {field}=?,{cursor_field}=? "
-                    f"WHERE session_id=? AND ({cursor_field} IS NULL OR {cursor_field}{comparison}?)",
-                    (value, cursor, session_id, cursor),
+                    f"WHERE session_id=? AND {condition}", parameters,
                 )
             conn.commit()
         except BaseException:

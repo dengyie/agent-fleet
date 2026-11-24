@@ -64,6 +64,8 @@ class RunnerCapture:
         self.failed_lines = 0
         self.stopping = threading.Event()
         self.worker = None
+        if replay and process_group_id is None:
+            process_group_id = self._replay_group(task)
         self.bridge = SessionBridge({'agent': task['agent_type'], 'structured_stream': True}, {
             'session_id': self.session_id, 'machine_id': cfg.machine,
             'attempt_id': task['attempt_id'], 'agent_family': task['agent_type'],
@@ -86,7 +88,7 @@ class RunnerCapture:
                 self.bridge.ingest_one({'kind': 'session_metadata', 'payload': {'task_id': task['task_id']}})
                 if 'instruction' in task:
                     self.bridge.record_user_turn(task['instruction'])
-            elif replay and process_group_id is None:
+            elif replay:
                 # Upgrade retained idle conversations without replaying a prompt.
                 # The spool writer lock above excludes running captures.
                 from fleet_core.session_models import AGENT_PROTOCOLS
@@ -106,6 +108,22 @@ class RunnerCapture:
         except Exception:
             self.bridge.close()
             raise
+
+    def _replay_group(self, task):
+        """Retain the original managed envelope, without adopting a process."""
+        from tools.supervisor.model import ManagedSessionManifest
+        root = self.cfg.supervisor_manifest_dir
+        if root is None:
+            return None
+        try:
+            manifest = ManagedSessionManifest.from_json(
+                (Path(root) / (self.session_id + '.json')).read_text(encoding='utf-8'))
+            if (manifest.session_id == self.session_id and manifest.machine_id == self.cfg.machine
+                    and manifest.attempt_id == task['attempt_id'] and manifest.agent == task['agent_type']):
+                return manifest.process_group_id
+        except (OSError, ValueError, TypeError):
+            pass
+        return None
 
     def _failed_native_completion(self):
         from tools.supervisor.model import ManagedSessionManifest
@@ -188,8 +206,54 @@ class RunnerCapture:
                 'native_resume': True, 'resumed': True}})
             self.bridge.record_user_turn(text)
 
+    def refresh_metadata(self, *, native_path=None, family=None, force=False, strict=False):
+        """Recover display facts without touching a content cursor or Agent.
+
+        The bridge owns the spool writer lock. Publication precedes the atomic
+        digest checkpoint, so a failed checkpoint/upload remains recoverable.
+        This side channel never changes execution/resume capabilities.
+        """
+        from tools.session.native_metadata import read_jsonl_metadata, read_retained_metadata
+        from tools.runner_source import atomic_private_json
+        try:
+            with self.lock:
+                data = json.loads(self.record.read_text(encoding='utf-8'))
+                state = data.get('native_metadata')
+                if state is not None and (not isinstance(state, dict) or state.get('version') != 1
+                        or any(not isinstance(state.get(key), str) or len(state[key]) != 64
+                            or any(char not in '0123456789abcdef' for char in state[key])
+                            for key in ('fingerprint', 'digest'))):
+                    raise ValueError('native_metadata_checkpoint')
+                if native_path is not None:
+                    snapshot = read_jsonl_metadata(family or data['agent_type'], native_path)
+                elif data['attempt_id'].startswith(NATIVE_PREFIX):
+                    return False  # archive source discovery owns these paths
+                else:
+                    snapshot = read_retained_metadata(self.cfg, self.session_id, data['agent_type'])
+                if snapshot is None:
+                    return False
+                fingerprint, payloads = snapshot
+                digest = hashlib.sha256(json.dumps(payloads, ensure_ascii=False, sort_keys=True,
+                    separators=(',', ':')).encode('utf-8')).hexdigest()
+                if not force and state and state['fingerprint'] == fingerprint and state['digest'] == digest:
+                    return False
+                if force or not state or state['digest'] != digest:
+                    for payload in payloads:
+                        if not self.bridge.ingest_one({'kind': 'session_metadata',
+                                'payload': payload}):
+                            raise RuntimeError('native_metadata_pending')
+                data['native_metadata'] = {'version': 1, 'fingerprint': fingerprint, 'digest': digest}
+                atomic_private_json(self.record, data)
+                return True
+        except Exception:
+            log.warning('Native metadata recovery pending: session=%s', self.session_id)
+            if strict:
+                raise RuntimeError('native_metadata_pending') from None
+            return False
+
     def finish(self, exit_code, *, resumable=False):
         self.stop_upload()
+        self.refresh_metadata()
         with self.lock:
             try:
                 from fleet_core.session_models import AGENT_PROTOCOLS
@@ -305,6 +369,7 @@ def replay_pending(cfg, post, *, should_stop=lambda: False):
             if _expire_tombstone(record, data):
                 continue
             capture = RunnerCapture(cfg, data, post, replay=True)
+            capture.refresh_metadata()
             capture.flush()
         except SpoolBusy:
             # A live runner/sync process owns this spool; it uploads itself.
