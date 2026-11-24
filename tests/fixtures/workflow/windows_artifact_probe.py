@@ -120,25 +120,26 @@ def test_hub_download_capacity_refuses_existing_untrusted_child(private_root: Pa
 
 
 def test_root_handle_create_private_makes_multi_level_private_tree(private_root: Path) -> None:
-    from hub.infrastructure.artifact_capacity import capacity_directory
-    from tools.supervisor.continuation_result_upload import _directory as upload_directory
+    from tools.platform.artifact_windows import root_handle
 
     # Multi-level creation: every missing component below the private root is
-    # created Fleet-owned, then reopened with identical security identity.
+    # created Fleet-owned, then reopened with identical file identity.
     deep = private_root / "a" / "b" / "c"
-    with upload_directory(deep) as descriptor:
+    with root_handle(deep, create_private=True) as descriptor:
         identity = win.file_info(descriptor)
-        with upload_directory(deep) as reopened:
-            assert win.file_info(reopened) == identity
+    assert deep.is_dir()
+    with root_handle(deep) as reopened:
+        assert win.file_info(reopened) == identity
     # A pre-existing private directory is opened unchanged: same identity, no
-    # ACL rewrite, and the parent keeps its own application ACL.
+    # ACL rewrite, and its parent stays trusted for ordinary artifact roots.
     existing = private_directory(private_root / "existing")
-    with upload_directory(existing) as descriptor:
+    with root_handle(existing) as descriptor:
         original = win.file_info(descriptor)
-        with upload_directory(existing) as reopened:
-            assert win.file_info(reopened) == original
-    with capacity_directory(private_root) as descriptor:
-        assert win.file_info(descriptor).directory
+        assert original.directory
+    with root_handle(existing) as reopened:
+        assert win.file_info(reopened) == original
+    with root_handle(private_root):
+        pytest.fail("create_private must not rewrite a trusted parent's application ACL")
 
 
 def test_native_pinned_file_identity_and_no_replace_publish(private_root: Path) -> None:
