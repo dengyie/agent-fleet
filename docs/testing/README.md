@@ -258,6 +258,18 @@ CI 在打包前运行门禁，测试失败或不完整时 `package` 不执行。
 
 main 的 `deploy` 依赖 `test`、`launch-policy-windows` 与 `package`，通过受限入口部署同一次 CI 的前后端产物；PR 无部署权限。`tests/test_auto_deploy.py` 验证文件/数据库保留、部分失败回滚、任务竞态、归档与 SSH 协议、Nginx 恢复和 workflow 边界，属于 RELEASE-01 必需集合。部署步骤和真实检查边界见[自动部署手册](../../deploy/auto-deploy.md)。
 
+备份 no-replace 发布、父目录 flush 不确定结果、明文/加密恢复和实际 SQLite DDL 回滚检测：
+
+```sh
+PYTHONPATH=. python3 -m pytest tests/test_platform_backup.py \
+  tests/test_platform_backup_encrypted.py tests/test_review_store_backup_fsync.py \
+  tests/test_auto_deploy.py tests/test_review_rollback.py \
+  tests/test_deploy_pidfd.py tests/test_guardian_process_control.py \
+  tests/test_release_layout.py -q
+```
+
+`publish_durability_unconfirmed` 表示目标已原子出现但父目录 `fsync` 失败；先 inspect 现有目标再决定后续动作。自动部署将数据库版本/领域标记与实际 `sqlite_master` 持久对象一并比较；检测到结构变化才把失败库保留到 `failed-databases/` 并恢复部署前快照。该回滚实现位于独立预装 receiver，应用包不会自动升级宿主 receiver。
+
 交付时按[证据核验步骤](test-chains.md#核验-ci-证据)对照最新提交、CI checkout revision、矩阵摘要和 JUnit；Linux CI 要求零跳过。macOS 的 `/proc`/stop-resume 平台跳过须记录原因，由 Linux CI 补齐，不能据此放宽其他用例。
 
 ## 故障定位与修复要求

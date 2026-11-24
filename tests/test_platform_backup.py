@@ -160,6 +160,58 @@ def test_publish_flush_failure_keeps_stage_and_target_absent(tmp_path, monkeypat
     assert (stage / "payload").read_bytes() == b"preserve staged evidence"
 
 
+def test_publish_parent_flush_failure_reports_published_destination(tmp_path, monkeypatch):
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (stage / "payload").write_text("complete backup", encoding="utf-8")
+    target = tmp_path / "backup"
+    original_fsync_path = _fsync_path
+
+    def fail_parent_flush(path):
+        if Path(path) == target.parent:
+            raise OSError("injected parent durability failure")
+        return original_fsync_path(path)
+
+    monkeypatch.setattr("hub.infrastructure.platform_backup._fsync_path", fail_parent_flush)
+    with pytest.raises(BackupError, match="publish_durability_unconfirmed") as failure:
+        _publish_new_directory(stage, target)
+
+    assert str(failure.value) == "publish_durability_unconfirmed"
+    assert str(target) not in str(failure.value)
+    assert target.is_dir()
+    assert (target / "payload").read_text(encoding="utf-8") == "complete backup"
+    assert not stage.exists()
+
+
+@pytest.mark.parametrize("operation", ["backup", "restore"])
+def test_plain_backup_and_restore_keep_destination_after_parent_flush_failure(
+        tmp_path, monkeypatch, operation):
+    db_path, artifact_root, _artifact = _source_pair(tmp_path)
+    service = PlatformBackupService()
+    if operation == "backup":
+        target = tmp_path / "backup"
+        callback = lambda: service.create_backup(db_path, artifact_root, target)
+        inspect = service.inspect_backup
+    else:
+        backup = tmp_path / "backup"
+        service.create_backup(db_path, artifact_root, backup)
+        target = tmp_path / "restored"
+        callback = lambda: service.restore_backup(backup, target)
+        inspect = service.inspect_backup
+    original_fsync_path = _fsync_path
+
+    def fail_parent_flush(path):
+        if Path(path) == target.parent:
+            raise OSError("injected parent durability failure")
+        return original_fsync_path(path)
+
+    monkeypatch.setattr("hub.infrastructure.platform_backup._fsync_path", fail_parent_flush)
+    with pytest.raises(BackupError, match="publish_durability_unconfirmed"):
+        callback()
+
+    assert inspect(target)["artifact_count"] == 1
+
+
 def test_publish_does_not_replace_empty_target_created_after_check(
         tmp_path, monkeypatch):
     stage = tmp_path / "stage"

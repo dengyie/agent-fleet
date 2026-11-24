@@ -79,6 +79,7 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/test_auto_deploy.py tests/test_rel
 - `rolled_back`：旧代码和 Nginx 已恢复，旧应用的账号/健康探针通过；CI 仍失败，不能记作新版本发布成功。
 - `rollback_failed` / `unfinished_deployment_requires_recovery`：保留 `pending.json`、维护屏障及备份目录，阻断下一次自动部署。若新版本已有活动任务，停止会被拒绝，需等待其终态后按环境运维手册恢复。
 - `unconfirmed`：SSH/systemd 未返回完整结果；先查询 `systemctl status agent-fleet-deploy-*` 和 state 下对应 job/result/pending，**不要自动重发**。
-- 备份目录包含旧代码、Nginx 和停写时数据库快照。当前仓库的 receiver 在 schema 标记不变时保留新版写入；若 `meta.schema_version`（不存在该项时使用 `PRAGMA user_version`）发生变化，会把失败版本数据库及其 sidecar 移到备份目录的 `failed-databases/`，再恢复部署前快照，并在结果中记录 `restored_databases`。因此回滚后的在线数据可能不含失败版本的新写入，需要从保留数据库中人工核对、恢复；不能将 `rolled_back` 当成所有写入都仍在线。该检查只比较版本标记，不判断任意表结构或 Workflow reader 的兼容性。宿主预装 receiver 可能仍是旧版，部署前须单独核对其实现；不能以仓库当前行为推断线上已具备此能力。人工恢复其他数据库仍需独立确认数据影响。
+- 备份目录包含旧代码、Nginx 和停写时数据库快照。当前仓库的 receiver 在持久 schema 和版本标记都不变时保留新版写入；指纹包括 `meta.schema_version`（不存在该项时使用 `PRAGMA user_version`）、已知领域 schema/reader 标记以及规范排序的 `sqlite_master` 表、索引、视图、触发器定义。即使迁移遗漏版本递增，实际 DDL 变化仍会把失败版本数据库及其 sidecar 移到备份目录的 `failed-databases/`，再恢复部署前快照，并在结果中记录 `restored_databases`。因此回滚后的在线数据可能不含失败版本的新写入，需要从保留数据库中人工核对、恢复；不能将 `rolled_back` 当成所有写入都仍在线。该检查只保守检测持久结构与版本变化，不推断任意 DDL 的向后兼容性。宿主预装 receiver 可能仍是旧版，部署前须单独核对其实现；不能以仓库当前行为推断线上已具备此能力。人工恢复其他数据库仍需独立确认数据影响。
+- 平台明文/加密备份工具的 `publish_durability_unconfirmed` 表示完整目标已通过 no-overwrite rename 出现，但父目录 `fsync` 失败，崩溃持久性未确认。保留目标，先使用对应 `inspect_backup` / `inspect_encrypted_backup` 校验；不要把该结果当成目标不存在并直接重试。rename 前的 `publish_failed` 仍表示目标未发布。
 - GitHub 保存 `agent-fleet-deployment` 结果 14 天；宿主保留结果与备份，上传/解包临时文件在 job 完成后清理。代码、数据库和前端历史版本不自动删除，定期按保留策略清理；磁盘不足时拒绝发布以保护当前服务。
 - 禁用自动部署可移除 environment 的 SSH key secret，并删除宿主对应 authorized_keys 行；不要撤销其他运维 key。已有 systemd 事务应先查状态，不能通过删除 key 来推断已停止。

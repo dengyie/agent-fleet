@@ -51,7 +51,7 @@ class Hooks:
         if (sha == NEW and self.fail_new) or (sha == OLD and self.fail_old):
             # A failed new app may already have committed legitimate user data.
             with sqlite3.connect(self.live / 'var/data.db') as db:
-                db.execute('INSERT INTO records VALUES (?)', ('after-start',))
+                db.execute('INSERT INTO records(value) VALUES (?)', ('after-start',))
             raise RuntimeError('health_failed')
 
     def publish(self, path):
@@ -139,6 +139,35 @@ def test_failed_health_rolls_back_code_but_never_restores_old_database(deploymen
         assert db.execute('SELECT value FROM records').fetchall() == [('before',), ('after-start',)]
     assert hooks.calls[-1] == 'publish:old'
     assert not (manager.state / 'pending.json').exists()
+
+
+def test_schema_change_without_version_bump_restores_backup_and_preserves_failed_copy(deployment):
+    manager, stage, hooks = deployment
+    original_start = hooks.start
+
+    def start_with_unversioned_migration():
+        original_start()
+        if NEW in (manager.live / 'RELEASE_ORIGIN').read_text():
+            with sqlite3.connect(manager.live / 'var/data.db') as db:
+                db.execute('ALTER TABLE records ADD COLUMN added TEXT')
+                db.execute("INSERT INTO records(value, added) VALUES ('after-start', 'migrated')")
+
+    hooks.start = start_with_unversioned_migration
+    hooks.fail_new = True
+    with pytest.raises(release.DeployError, match='rolled_back'):
+        manager.apply(stage, NEW, '100')
+
+    with sqlite3.connect(manager.live / 'var/data.db') as db:
+        assert db.execute('PRAGMA table_info(records)').fetchall() == [
+            (0, 'value', 'TEXT', 0, None, 0)]
+        assert db.execute('SELECT value FROM records').fetchall() == [('before',)]
+    saved_roots = list(manager.state.glob('100-*'))
+    assert len(saved_roots) == 1
+    saved = saved_roots[0]
+    with sqlite3.connect(saved / 'failed-databases/var/data.db') as db:
+        assert db.execute('SELECT value, added FROM records').fetchall() == [
+            ('before', None), ('after-start', 'migrated'), ('after-start', None)]
+    assert json.loads((saved / 'result.json').read_text())['restored_databases'] == ['var/data.db']
 
 
 def test_partial_copy_is_rolled_back(deployment, monkeypatch):

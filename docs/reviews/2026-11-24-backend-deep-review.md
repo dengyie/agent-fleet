@@ -76,7 +76,26 @@ Real SQLite and HTTP regressions force two identical requests to race through gr
 - Main run [45353378940](https://github.com/dengyie/agent-fleet/actions/runs/45353378940) completed Linux, Windows, macOS, package, and deploy successfully. Production returned `{"status":"ok"}` from `/healthz`; `/manifest.json` matched the full main SHA; the same-run frontend verifier checked **107 resources**. Receiver receipt was `deployed/succeeded`, rollback anchor `/var/lib/agent-fleet-deploy/45353378940-qwejodsk`. Evidence is retained in `/Users/mango/.cache/agent-fleet/verification/backend-approval-20261124/`.
 - No real Agent CLI or external model ran. No frontend product code, database schema, node client package, or deployment logic changed. External model/vendor acceptance remains unrun.
 
-The next review boundary is platform-specific Runner lifecycle and deployment backup/restore interaction. This focused review does not claim exhaustive coverage of all providers, adapters, workflows, or production integrations.
+### Continued review — backup publication and SQLite rollback detection
+
+Review continued from public main `978a0a489913ee99cc9860d1cad2174633d14886` and narrowed to the platform backup publication helper and the deployment receiver's database rollback decision.
+
+Two reachable persistence ambiguities were reproduced with temporary filesystem/SQLite state:
+
+- **P2 — Backup publication error hid an already visible destination.** `_publish_new_directory()` performs an atomic no-replace rename and then flushes the destination's parent directory. If that final `fsync` failed, it returned the same `publish_failed` as a pre-rename failure. The destination actually existed and was complete, so an operator could treat the failure as unpublished, retry, and receive `destination_exists`. The helper now raises `publish_durability_unconfirmed` for this exact post-rename state. It retains the destination, exposes no path/OS error, and callers must inspect/validate the exact target before retrying. Pre-rename failure still leaves the destination absent.
+- **P2 — Deployment rollback missed SQLite DDL without a version bump.** `database_schema_fingerprint()` compared `user_version`, platform `meta.schema_version`, and workflow-domain version markers only. A failed release could add a column while leaving those markers unchanged; rollback restored old code but retained the incompatible live database. A real deployment fixture reproduced this: old code returned `rolled_back` with the added column still in the live database. The fingerprint now also compares persistent `sqlite_master` schema objects. When DDL differs, rollback moves the failed database and sidecars to `failed-databases/`, restores the pre-deploy snapshot, and records `restored_databases`; schema-stable data writes continue to remain online.
+
+These changes do not alter application API DTOs or application database schemas. Updating the repository receiver does not update the separately installed host receiver; that deployment boundary remains explicit in `deploy/auto-deploy.md` and must be checked independently before claiming the receiver change is live.
+
+Regression evidence:
+
+- Both new regressions failed before their fixes: the post-rename flush returned `publish_failed`; an unversioned DDL migration survived old-code rollback.
+- `PYTHONPATH=. python3 -m pytest tests/test_platform_backup.py tests/test_platform_backup_encrypted.py tests/test_review_store_backup_fsync.py tests/test_auto_deploy.py tests/test_review_rollback.py tests/test_deploy_pidfd.py tests/test_guardian_process_control.py tests/test_release_layout.py -q` — **129 passed, 3 skipped, 2 subtests passed**. The three skips are expected Darwin-only platform boundaries. Coverage includes plain/encrypted create and restore, post-rename flush fault injection, pre-rename failure, no-overwrite publication, DDL rollback with failed-database preservation, schema-stable data-write retention, deployment rollback, pidfd control, Guardian and release layout.
+- `ruff check --select E9,F63,F7,F82,F401 deploy/auto_release.py hub/infrastructure/platform_backup.py tests/test_auto_deploy.py tests/test_platform_backup.py tests/test_platform_backup_encrypted.py` — **passed**.
+
+This is a focused follow-up, not a claim that every Runner, provider, deployment host, or filesystem failure mode has been exhaustively audited. Production evidence for this candidate is pending its public CI and receiver-specific rollout; no real Agent CLI or external model was run.
+
+The next review boundary remains platform-specific Runner lifecycle and production backup/restore behavior on the separately installed receiver.
 
 ## Review boundary and follow-up
 
