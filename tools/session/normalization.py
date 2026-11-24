@@ -176,6 +176,12 @@ def _native_metadata(raw: Mapping) -> dict[str, str]:
     version = payload.get('cli_version') or raw.get('cli_version')
     if rtype == 'session':
         version = raw.get('version') or version
+    elif (rtype in ('user', 'assistant')
+            and isinstance(raw.get('sessionId'), str) and raw['sessionId']):
+        # Claude native transcript envelopes carry the CLI version on each
+        # turn. Do not generalize ``version`` to other vendor row types: Pi's
+        # numeric session version, for example, is a storage format version.
+        version = raw.get('version') or version
     if isinstance(version, str) and version.strip():
         result['client_version'] = version.strip()[:96]
 

@@ -133,6 +133,16 @@ class NativeArchiveSync:
                 native_id = path.stem.removeprefix('model-io-')
                 bound = family == 'zcode' and native_id in bindings
                 fingerprint = (stat.st_ino, stat.st_size, stat.st_mtime_ns, bound)
+                from tools.session.native_metadata import metadata_store_path
+                metadata_store = metadata_store_path(family, path)
+                if metadata_store is not None:
+                    # Titles may change in SQLite without touching model I/O.
+                    for database in (metadata_store, Path(str(metadata_store) + '-wal')):
+                        try:
+                            info = database.stat()
+                            fingerprint += (info.st_size, info.st_mtime_ns)
+                        except FileNotFoundError:
+                            fingerprint += (None, None)
                 if self.completed.get((family, path)) == fingerprint:
                     continue
                 identity = native_identity(family, path)
@@ -284,6 +294,9 @@ def sync_file(cfg, family, path, send=post, *, desktop_group=None):
         # 尾部被跳过的空行/坏行也一并确认
         reader.offset = end
         reader.checkpoint_to(str(checkpoint))
+        # The current native store/tail must project after any older rows
+        # imported in this pass; an old title/model cannot overwrite it.
+        capture.refresh_metadata(native_path=path, family=family, force=bool(entries), strict=True)
         capture.flush()
         status = capture.bridge.spool.status()
         if (capture.bridge.uploader.last_error

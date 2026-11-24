@@ -7,7 +7,9 @@ out of the capture stream.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import sqlite3
@@ -47,6 +49,79 @@ def verify_identity(family, path, token, cwd):
         return bool(row and row[0] and os.path.normcase(os.path.realpath(row[0])) == os.path.normcase(os.path.realpath(cwd)))
     except (OSError, ValueError, sqlite3.Error, TypeError):
         return False
+
+
+def read_metadata(family, path, token, *, cwd=None, source_path=None):
+    """Read one exact native session's optional display fields, never content.
+
+    Older stores may lack display columns. A missing/ambiguous identity or a
+    different cwd produces no facts. The query-only connection and bounded
+    column reads keep system prompts, model config and credentials out.
+    """
+    if family not in {'codex', 'zcode', 'hermes'}:
+        raise ValueError('native_family_invalid')
+    if not isinstance(token, str) or not token or len(token) > 256:
+        return {}
+    table, directory = ({'codex': ('threads', 'cwd'), 'zcode': ('session', 'directory'),
+                         'hermes': ('sessions', 'cwd')})[family]
+    fields = {
+        'codex': {'title': ('title', 160), 'name': ('title', 160), 'model': ('model', 160),
+                  'model_provider': ('provider', 96), 'cli_version': ('client_version', 96)},
+        'zcode': {'title': ('title', 160), 'version': ('client_version', 96)},
+        'hermes': {'title': ('title', 160), 'model': ('model', 160)},
+    }[family]
+    time_field = {'codex': 'created_at_ms', 'zcode': 'time_created', 'hermes': 'started_at'}[family]
+    with _database(path) as db:
+        columns = set()
+        for index, row in enumerate(db.execute(f'PRAGMA table_info({table})')):
+            if index >= 128:
+                raise ValueError('native_metadata_schema')
+            columns.add(row[1])
+        if not {'id', directory} <= columns:
+            return {}
+        if family == 'codex' and (source_path is None or 'rollout_path' not in columns):
+            return {}
+        if family == 'codex' and time_field not in columns:
+            time_field = 'created_at'
+        selected = [column for column in fields if column in columns]
+        # Preserve SQLite value types: numeric storage versions must never
+        # become a string client_version merely through CAST.
+        expressions = [f'substr({directory},1,32769)'] + [
+            f'CASE WHEN typeof({column})=\'text\' THEN substr({column},1,{fields[column][1] + 1}) END'
+            for column in selected]
+        if time_field in columns:
+            expressions.append(f'CASE WHEN typeof({time_field}) IN (\'integer\',\'real\') THEN {time_field} END')
+        if family == 'codex':
+            expressions.append('substr(rollout_path,1,32769)')
+        rows = db.execute(f'SELECT {",".join(expressions)} FROM {table} WHERE id=? LIMIT 2',
+                          (token,)).fetchall()
+    if len(rows) != 1:
+        return {}
+    row = rows[0]
+    if family == 'codex':
+        if (not isinstance(row[-1], str) or len(row[-1]) > 32768
+                or os.path.normcase(os.path.realpath(row[-1])) != os.path.normcase(os.path.realpath(source_path))):
+            return {}
+        row = row[:-1]
+    if (cwd is not None and (not isinstance(row[0], str) or len(row[0]) > 32768
+            or os.path.normcase(os.path.realpath(row[0])) != os.path.normcase(os.path.realpath(cwd)))):
+        return {}
+    result = {}
+    for column, value in zip(selected, row[1:]):
+        target, maximum = fields[column]
+        if (isinstance(value, str) and value.strip()
+                and not any(ord(char) < 32 or ord(char) == 127 for char in value)):
+            result[target] = value.strip()[:maximum]
+    if time_field in columns:
+        value = row[-1]
+        if type(value) in (int, float) and math.isfinite(value) and value >= 0:
+            try:
+                seconds = value / 1000 if time_field in {'time_created', 'created_at_ms'} else value
+                result['native_started_at'] = datetime.fromtimestamp(seconds, timezone.utc).isoformat(
+                    timespec='milliseconds').replace('+00:00', 'Z')
+            except (ValueError, OverflowError, OSError):
+                pass
+    return result
 
 
 def _json(text, default=None):

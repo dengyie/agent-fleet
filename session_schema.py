@@ -136,7 +136,7 @@ _GENERIC_PAYLOAD_FIELDS: dict[str, tuple[str, ...]] = {
     'session_metadata': ('agent_family', 'adapter', 'task_id', 'agent_ref',
                          'title', 'model', 'provider', 'client_version',
                          'native_started_at', 'interactive_questions', 'native_resume',
-                         'resumed', 'desktop_bridge', 'model_takeover', 'runtime_protocol'),
+                         'resumed', 'desktop_bridge', 'model_takeover', 'runtime_protocol', 'fill_missing'),
     'process_spawn': ('process_family', 'owner', 'group_binding',
                       'process_group_id'),
     'process_exit': ('exit_code', 'duration_s', 'reason'),
@@ -530,9 +530,9 @@ def _generic_payload(payload: Mapping[str, Any], kind: str) -> dict[str, Any]:
             continue
         if field in payload:
             value = payload[field]
-            if field in {'interactive_questions', 'native_resume', 'resumed', 'desktop_bridge'}:
+            if field in {'interactive_questions', 'native_resume', 'resumed', 'desktop_bridge', 'fill_missing'}:
                 if not isinstance(value, bool):
-                    raise SessionValidationError('invalid_payload_type', 'capability must be boolean')
+                    raise SessionValidationError('invalid_payload_type', 'metadata flag must be boolean')
                 clean[field] = value
                 continue
             if isinstance(value, (bool, int, float)):

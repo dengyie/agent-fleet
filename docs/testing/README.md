@@ -24,11 +24,14 @@ Windows 同时替换目标的临时 access/share/lock 拒绝（原生错误 5/32
 
 电脑 Agent 的节点启动目录、原启动请求找回、请求字段绑定与并发/取消回归见[原生任务 HTTP 契约](../native-task-api.md)。目录、启动和主助手共用应用服务；新回归 `tests/test_native_task_api.py` 在 Linux、Windows、macOS CI 执行。
 
-原生会话的消息响应丢失恢复、事件 tail/before/after 游标、会话目录快照分页，以及原生名称、客户端/模型元数据、逐事件可见内容与 source-record 隔离见[原生会话 HTTP 契约](../native-session-api.md)。专项及相关现有 HTTP、SQLite、采集器、前端状态、交互回答和 Supervisor 回归：
+原生会话的消息响应丢失恢复、事件 tail/before/after 游标、会话目录快照分页，以及原生名称、客户端/模型元数据、逐事件可见内容与 source-record 隔离见[原生会话 HTTP 契约](../native-session-api.md)。元数据专项验证两台平台实际 Agent 记录形状、Claude 版本映射、Pi 格式版本排除、ZCode/Hermes 只读 store 提取、保留会话有限 head/tail 回补、稳定事件 ID 丢响应恢复、损坏 checkpoint fail-closed、SQLite/HTTP 投影填空而不覆盖新值及内容游标不变。专项及相关现有 HTTP、SQLite、采集器、前端状态、交互回答和 Supervisor 回归：
+
+元数据的来源、实际复现、分层实现和覆盖边界见[元数据恢复 Review](../reviews/2026-11-25-native-session-metadata.md)及[实施计划](../superpowers/plans/2026-11-25-native-session-metadata-recovery.md)。Codex v5 的 thread-store 名称需同时核对线程 ID、cwd 和 rollout 路径；不猜测其他 `state_*.sqlite` 版本。
 
 ```sh
 PYTHONPATH=. python3 -m pytest tests/test_session_schema.py \
   tests/test_session_bridge.py tests/test_native_chat_frontend.py \
+  tests/test_native_metadata_recovery.py \
   tests/test_native_session_api.py tests/test_session_query_api.py \
   tests/test_agent_lifecycle.py \
   tests/test_session_repository.py tests/test_transcript_repository.py \

@@ -899,7 +899,7 @@ class SessionBridge:
                        "title", "model", "provider", "client_version",
                        "native_started_at", "interactive_questions", "runtime_protocol",
                        "native_resume", "resumed", "desktop_bridge",
-                       "model_takeover")
+                       "model_takeover", "fill_missing")
             ev["payload"] = {key: raw[key] for key in allowed if key in raw}
             if rtype == "session_start":
                 ev["payload"].setdefault("agent_family", self._agent_family)

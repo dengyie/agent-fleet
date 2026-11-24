@@ -74,6 +74,17 @@ means it occurred, not that every historical row remains retained. A newly
 encountered gap also remains visible. Metadata continues to use per-field Hub
 cursor fencing; replaying an older protocol update cannot replace newer data.
 
+Retained-session recovery reads at most 256 KiB from the source prefix and 2 MiB
+from its tail (4096 complete rows per region), or one exact row from the
+read-only Codex v5/ZCode/Hermes SQLite store. Historical prefix facts use
+`fill_missing:true`, which can fill a blank projection but cannot overwrite a
+fact already stored from later ingestion. Current tail facts use normal Hub
+cursor fencing. The recovery checkpoint contains only a version and
+fingerprints/digests; malformed or future versions fail closed. It does not
+scan full transcripts, issue an Agent/version command, alter vendor storage,
+replay conversation messages or migrate the session database. Fields absent
+from the bounded source remain unknown.
+
 Ingestion and evidence projection use the existing durable transcript plus
 recoverable application projection, not a new cross-store transaction. If the
 transcript commits and the evidence write fails, the request returns bounded
