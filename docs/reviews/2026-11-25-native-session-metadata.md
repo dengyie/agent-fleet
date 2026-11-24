@@ -100,6 +100,45 @@ UTF-8/no-BOM checks passed. Windows/macOS CI selectors now explicitly include
 the new suite; production publication still requires the unchanged release
 workflow's complete gates.
 
+## Merge, production release, and client acceptance
+
+PR [#127](https://github.com/dengyie/agent-fleet/pull/127) was merged as
+`0fce3293dc27a56f86321365400b0f94775f8f79`. Main CI
+[45468876082](https://github.com/dengyie/agent-fleet/actions/runs/45468876082)
+completed successfully: Linux `8906 passed, 2 warnings, 204 subtests`,
+47/47 journeys and 2830 selectors; Windows `1065 passed, 44 skipped`; macOS
+`673 passed, 2 skipped, 103 subtests`. Package and deploy jobs succeeded.
+
+The receiver reported `deployed/succeeded`; the rollback anchor is
+`/var/lib/agent-fleet-deploy/45468876082-xj1kegr0`. The production release
+matched all 1350 backend files and 107 public resources to that CI run. All six
+live SQLite databases and their deployment snapshots passed integrity and
+foreign-key checks. The operator authorization probe returned 401 for
+anonymous, Runner, and Supervisor session reads, 200 for the operator, and 401
+for a revoked cookie.
+
+Both signed clients reached `0fce3293dc27-s33` (sequence 33), with all 200
+release files verified and the runner/control-client active; sequence 32 was
+retained. On the nine fixed Mac/Windows histories, operator HTTP verification
+read 1162 events and confirmed prior event identities and hashes were
+preserved. Four sessions exposed a native title, seven a model, four a
+provider, six a client version, and seven an explicit native start time. No
+conversation message or tool event was replayed; the check recorded zero
+business writes and zero Agent invocations. Fields absent from a particular
+native source remain unknown.
+
+Chrome production checks at 1440px and 390px verified the native title, client
+version, model and start-time metadata in the session view. The continuation
+results API was requested exactly once and returned the expected
+“尚未上报续聊成果” state for these older sessions. Both layouts had zero page
+errors, asset failures, and business API writes. The broad recent-25 directory
+sample still had zero native titles; this fixed-history acceptance therefore
+does not imply fleet-wide metadata completeness. No real Agent CLI or external
+model was run.
+
+The private, sanitized acceptance evidence is retained at
+`/Users/mango/.cache/agent-fleet/verification/native-session-metadata-20261125/`.
+
 ## Boundaries
 
 The JSONL pass reads at most 256 KiB of prefix and 2 MiB of tail and parses at
@@ -111,5 +150,6 @@ into this report or metadata checkpoints. Internal reasoning, system prompts,
 usage/cost and raw database information remain outside the public conversation
 contract. No real Agent execution is claimed for this iteration.
 
-Publication and actual production/client verification are recorded after the
-release in the canonical operational runbook and retained private evidence.
+The canonical operational runbook records the release and field coverage;
+private acceptance evidence remains outside the repository and contains no
+native titles or raw conversation text in the report summary.
