@@ -2,16 +2,16 @@
 from __future__ import annotations
 
 import json
+import math
 import secrets
 import sqlite3
 import time
 from collections.abc import Mapping
-import math
 from pathlib import Path
 from typing import Any
 
-from platform_schema import validate_id, validate_owner_id
 from hub.infrastructure.sqlite import connect as sqlite_connect
+from platform_schema import validate_id, validate_owner_id
 
 MAX_JSON_BYTES = 16 * 1024
 GRANT_STATES = frozenset({"pending", "approved", "rejected", "consuming", "consumed", "expired"})
@@ -91,7 +91,8 @@ class ApprovalRepository:
             "remaining_uses": int(row["remaining_uses"]), "revoked_at": row["revoked_at"],
             "command_id": row["command_id"], "created_at": row["created_at"],
             "updated_at": row["updated_at"],
-            "idempotency_key": row["idempotency_key"] if "idempotency_key" in row.keys() else None,
+            # sqlite3.Row membership checks values; keys() checks for a column.
+            "idempotency_key": row["idempotency_key"] if "idempotency_key" in row.keys() else None,  # noqa: SIM118
         }
 
     @staticmethod
@@ -129,18 +130,31 @@ class ApprovalRepository:
         conn = None
         try:
             conn = self._connect()
+            conn.execute("BEGIN IMMEDIATE")
             if idempotency_key:
                 prior = conn.execute("SELECT * FROM platform_approval_grants WHERE owner_id=? AND idempotency_key=?", (owner_id, idempotency_key)).fetchone()
                 if prior:
                     if prior["service_id"] != service["service_id"] or prior["action"] != action or prior["args_hash"] != args_hash:
                         raise ApprovalRepositoryError("idempotency_conflict")
+                    conn.execute("COMMIT")
                     return self._row(prior)
             conn.execute("INSERT INTO platform_approval_grants(grant_id,owner_id,actor,service_id,service_version,node_id,adapter,target_alias,action,arguments,args_hash,policy_version,state,expires_at,remaining_uses,created_at,updated_at,idempotency_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (grant_id, owner_id, actor, service["service_id"], version, service["node_id"], service["adapter"], service["target_alias"], action, encoded, args_hash, policy_version, "pending", expires, 1, now, now, idempotency_key))
             row = conn.execute("SELECT * FROM platform_approval_grants WHERE grant_id=?", (grant_id,)).fetchone()
+            conn.execute("COMMIT")
             return self._row(row)
         except ApprovalRepositoryError:
+            if conn is not None:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
             raise
         except (sqlite3.Error, OSError):
+            if conn is not None:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
             raise ApprovalRepositoryError("approval_store") from None
         finally:
             if conn is not None:
@@ -176,6 +190,9 @@ class ApprovalRepository:
                 conn.execute("UPDATE platform_approval_grants SET state='expired',updated_at=? WHERE grant_id=?", (now, grant_id))
                 conn.execute("COMMIT")
                 raise ApprovalRepositoryError("approval_expired")
+            if approve and row["state"] in {"approved", "consuming", "consumed"}:
+                conn.execute("COMMIT")
+                return self._row(row)
             if row["state"] != "pending":
                 conn.execute("ROLLBACK")
                 raise ApprovalRepositoryError("grant_not_pending")
@@ -211,6 +228,10 @@ class ApprovalRepository:
                 conn.execute("ROLLBACK")
                 raise ApprovalRepositoryError("grant_not_found")
             if row["state"] in {"consuming", "consumed"} and row["command_id"] == command_id:
+                if row["state"] == "consuming" and float(row["expires_at"]) <= now:
+                    conn.execute("UPDATE platform_approval_grants SET state='expired',remaining_uses=0,updated_at=? WHERE grant_id=?", (now, grant_id))
+                    conn.execute("COMMIT")
+                    raise ApprovalRepositoryError("approval_expired")
                 conn.execute("COMMIT")
                 return self._row(row)
             if row["state"] != "approved" or int(row["remaining_uses"]) < 1:
@@ -256,6 +277,12 @@ class ApprovalRepository:
             if existing["state"] == "consumed" and existing["command_id"] == command_id and success:
                 conn.execute("COMMIT")
                 return self._row(existing)
+            if existing["state"] == "consuming" and existing["command_id"] == command_id and not success:
+                # Keep the deterministic command fence. A concurrent handler may
+                # already be persisting the same command/outbox; returning to
+                # approved here could contradict that commit or admit a second path.
+                conn.execute("COMMIT")
+                return self._row(existing)
             state = "consumed" if success else "approved"
             uses = 0 if success else 1
             cur = conn.execute("UPDATE platform_approval_grants SET state=?,remaining_uses=?,updated_at=? WHERE owner_id=? AND grant_id=? AND state='consuming' AND command_id=?", (state, uses, now, owner_id, grant_id, command_id))
@@ -280,4 +307,4 @@ class ApprovalRepository:
                 conn.close()
 
 
-__all__ = ["ApprovalRepository", "ApprovalRepositoryError", "GRANT_STATES"]
+__all__ = ["GRANT_STATES", "ApprovalRepository", "ApprovalRepositoryError"]

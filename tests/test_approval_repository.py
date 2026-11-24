@@ -1,9 +1,15 @@
 """Owner-scoped, single-use approval grant lifecycle."""
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
-from hub.infrastructure.approval_repository import ApprovalRepository, ApprovalRepositoryError
+from hub.infrastructure.approval_repository import (
+    ApprovalRepository,
+    ApprovalRepositoryError,
+)
 
 OWNER = "alice@example.com"
 SERVICE = {"service_id": "svc-1", "version": 3, "node_id": "node-a",
@@ -29,8 +35,15 @@ def repo(tmp_path):
 
 
 def _create(repository, **overrides):
-    kwargs = dict(actor="alice", service=SERVICE, action="restart", arguments={"why": "deploy"},
-                  args_hash=HASH, policy_version="p1", expires_at=1600.0)
+    kwargs = {
+        "actor": "alice",
+        "service": SERVICE,
+        "action": "restart",
+        "arguments": {"why": "deploy"},
+        "args_hash": HASH,
+        "policy_version": "p1",
+        "expires_at": 1600.0,
+    }
     kwargs.update(overrides)
     return repository.create(OWNER, **kwargs)
 
@@ -47,7 +60,7 @@ def test_grant_lifecycle_approve_consume_once(repo):
     assert grant["state"] == "pending" and grant["remaining_uses"] == 1
     assert grant["arguments"] == {"why": "deploy"}
     assert repository.decide(OWNER, grant["grant_id"], approve=True)["state"] == "approved"
-    assert _code(repository.decide, OWNER, grant["grant_id"], approve=True) == "grant_not_pending"
+    assert repository.decide(OWNER, grant["grant_id"], approve=True)["state"] == "approved"
 
     consuming = repository.begin_consume(OWNER, grant["grant_id"], command_id="cmd-1")
     assert consuming["state"] == "consuming" and consuming["command_id"] == "cmd-1"
@@ -61,15 +74,32 @@ def test_grant_lifecycle_approve_consume_once(repo):
     assert _code(repository.begin_consume, OWNER, grant["grant_id"], command_id="cmd-3") == "grant_not_usable"
 
 
-def test_failed_consume_returns_grant_to_approved(repo):
+def test_failed_consume_preserves_command_fence_for_recovery(repo):
     repository, _ = repo
     grant = _create(repository)
     repository.decide(OWNER, grant["grant_id"], approve=True)
     repository.begin_consume(OWNER, grant["grant_id"], command_id="cmd-1")
     assert _code(repository.finish_consume, OWNER, grant["grant_id"], command_id="other", success=False) == "grant_state_conflict"
     back = repository.finish_consume(OWNER, grant["grant_id"], command_id="cmd-1", success=False)
-    assert back["state"] == "approved" and back["remaining_uses"] == 1
+    assert back["state"] == "consuming" and back["remaining_uses"] == 1
+    assert back["command_id"] == "cmd-1"
+    assert repository.begin_consume(OWNER, grant["grant_id"], command_id="cmd-1")["state"] == "consuming"
+    assert _code(repository.begin_consume, OWNER, grant["grant_id"], command_id="cmd-2") == "grant_not_usable"
     assert _code(repository.finish_consume, OWNER, grant["grant_id"], command_id="", success=True) == "invalid_command"
+
+
+def test_expired_consuming_grant_cannot_resume_command_admission(repo):
+    repository, clock = repo
+    grant = _create(repository)
+    repository.decide(OWNER, grant["grant_id"], approve=True)
+    repository.begin_consume(OWNER, grant["grant_id"], command_id="cmd-expiring")
+
+    clock.now = 1600.0
+    assert _code(repository.begin_consume, OWNER, grant["grant_id"],
+                 command_id="cmd-expiring") == "approval_expired"
+    expired = repository.get(OWNER, grant["grant_id"])
+    assert expired["state"] == "expired"
+    assert expired["remaining_uses"] == 0
 
 
 def test_rejected_grant_is_not_usable(repo):
@@ -111,6 +141,47 @@ def test_idempotency_key_returns_prior_grant_or_conflicts(repo):
                               arguments={}, args_hash=HASH, policy_version="p1", expires_at=1600.0,
                               idempotency_key="req-1")
     assert other["grant_id"] != first["grant_id"]
+
+
+def test_concurrent_idempotent_grant_creation_recovers_existing(repo, monkeypatch):
+    repository, _ = repo
+    both_looked_up = threading.Barrier(2)
+    connect = repository._connect
+
+    class RacingConnection:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, sql, *args):
+            cursor = self.connection.execute(sql, *args)
+            if sql.startswith("SELECT * FROM platform_approval_grants WHERE owner_id=? AND idempotency_key=?"):
+                try:
+                    both_looked_up.wait(timeout=0.5)
+                except threading.BrokenBarrierError:
+                    pass
+            return cursor
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+    monkeypatch.setattr(repository, "_connect", lambda: RacingConnection(connect()))
+
+    def request(_):
+        try:
+            return _create(repository, idempotency_key="race-1")
+        except ApprovalRepositoryError as exc:
+            return {"error": exc.code}
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        results = list(workers.map(request, range(2)))
+    assert all("error" not in result for result in results), results
+    assert results[0]["grant_id"] == results[1]["grant_id"]
+    connection = connect()
+    try:
+        count = connection.execute("SELECT COUNT(*) FROM platform_approval_grants").fetchone()[0]
+    finally:
+        connection.close()
+    assert count == 1
 
 
 @pytest.mark.parametrize(("overrides", "code"), [

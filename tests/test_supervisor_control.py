@@ -20,22 +20,23 @@ import base64
 import json
 import secrets
 import tempfile
-import time
+import threading
 import unittest
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization as _ser
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from support.hub_env import HubStores
 
+from fleet_core import control as ctrl
 from hub.application.supervisor_service import (
     SupervisorService,
     SupervisorServiceError,
 )
 from hub.bootstrap import create_app
-from fleet_core import control as ctrl
 from hub.domain import supervisor as sup_dom
-from support.hub_env import HubStores
 
 # --------------------------------------------------------------------------- #
 # crypto / ids / helpers
@@ -56,11 +57,11 @@ def _opaque(prefix: str) -> str:
 
 
 def _now_s() -> float:
-    return datetime.now(timezone.utc).timestamp()
+    return datetime.now(UTC).timestamp()
 
 
 def _rfc(ts: float) -> str:
-    return datetime.fromtimestamp(ts, timezone.utc).isoformat().replace(
+    return datetime.fromtimestamp(ts, UTC).isoformat().replace(
         "+00:00", "Z")
 
 
@@ -697,6 +698,44 @@ def test_durable_audit_failure_rolls_back_receipt_state(tmp_path):
     assert error.exception.status == 503
     assert service.command_status(command["command_id"]) == "queued"
     assert [row["event"] for row in service.audit_recent()] == ["enqueue"]
+
+
+def test_competing_terminal_receipts_are_first_write_wins(tmp_path, monkeypatch):
+    from hub.infrastructure.supervisor_command_repository import (
+        SupervisorCommandRepository,
+    )
+
+    private_key, _ = _keypair()
+    repository = SupervisorCommandRepository(tmp_path / "commands.db")
+    service = SupervisorService(signing_key=private_key, command_repository=repository)
+    command = service.enqueue("machine-a", "session-a", None,
+                              "pause_session", "operator_requested")
+
+    both_read_queued = threading.Barrier(2)
+    find_command = repository.find_command
+
+    def read_before_race(command_id):
+        row = find_command(command_id)
+        both_read_queued.wait(timeout=5)
+        return row
+
+    monkeypatch.setattr(repository, "find_command", read_before_race)
+    attempts = (("succeeded", "completed"), ("failed", "execution_failed"))
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        results = list(workers.map(
+            lambda receipt: service.receipt(command["command_id"], *receipt), attempts))
+
+    winner = next(result for result in results if result["first"])
+    assert sum(result["first"] for result in results) == 1
+    assert all((result["status"], result["reason"]) ==
+               (winner["status"], winner["reason"]) for result in results)
+    monkeypatch.setattr(repository, "find_command", find_command)
+    persisted = service.receipt_status(command["command_id"])
+    assert (persisted["status"], persisted["reason"]) == (
+        winner["status"], winner["reason"])
+    terminal_audits = [row for row in service.audit_recent()
+                       if row["event"] in {"receipt:succeeded", "receipt:failed"}]
+    assert len(terminal_audits) == 1
 
 
 def test_durable_idempotent_enqueue_does_not_duplicate_audit_event(tmp_path):
