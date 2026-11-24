@@ -117,6 +117,7 @@ jobs:
           tests/test_main_review_regressions.py tests/test_round5_windows_process.py
           tests/test_review_runner_control.py::test_windows_cross_instance_cancel_checks_orphan_liveness
           tests/test_review_runner_control.py::test_concurrent_supervisors_persist_one_manifest_without_temp_collision
+          tests/test_review_runner_control.py::test_concurrent_supervisors_persist_owner_without_temp_collision
           tests/test_review_runner_control.py::test_manifest_persist_failure_removes_unique_temporary_file
           tests/test_workflow_shared_node_startup.py tests/test_workflow_startup.py
           tests/test_workflow_setup.py
@@ -184,6 +185,7 @@ jobs:
           tests/test_supervisor_process.py tests/test_discovery.py
           tests/test_review_runner_control.py::test_windows_cross_instance_cancel_checks_orphan_liveness
           tests/test_review_runner_control.py::test_concurrent_supervisors_persist_one_manifest_without_temp_collision
+          tests/test_review_runner_control.py::test_concurrent_supervisors_persist_owner_without_temp_collision
           tests/test_review_runner_control.py::test_manifest_persist_failure_removes_unique_temporary_file
           tests/test_zcode_desktop_bridge.py tests/test_zcode_session_binding.py
           tests/test_native_tail_drain.py tests/test_dispatch_capture_reliability.py

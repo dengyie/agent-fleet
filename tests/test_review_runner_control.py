@@ -1,6 +1,7 @@
 """Review regressions: cross-instance cancel, hub cancel routing, pruning, dead code
 (findings 6, 7, 10, 11)."""
 import ast
+import json
 import os
 import signal
 import sys
@@ -94,11 +95,16 @@ def test_concurrent_supervisors_persist_one_manifest_without_temp_collision(
         process_group_id="grp_second", reason="terminated")
     target = manifest_dir / "sess_concurrent.json"
     barrier = threading.Barrier(2)
+    replace_lock = threading.Lock()
+    replace_sources = []
     original_replace = os.replace
 
     def concurrent_replace(source, destination):
         if Path(destination) == target:
             barrier.wait(timeout=5)
+            with replace_lock:
+                replace_sources.append(Path(source))
+                return original_replace(source, destination)
         return original_replace(source, destination)
 
     monkeypatch.setattr(sup_mod.os, "replace", concurrent_replace)
@@ -125,6 +131,7 @@ def test_concurrent_supervisors_persist_one_manifest_without_temp_collision(
         (manifest_dir / "sess_concurrent.json").read_text(encoding="utf-8"))
     assert (persisted.process_group_id, persisted.reason) in {
         ("grp_first", "paused"), ("grp_second", "terminated")}
+    assert len(set(replace_sources)) == 2
     assert list(manifest_dir.glob("*.json")) == [manifest_dir / "sess_concurrent.json"]
     assert list(manifest_dir.glob("*.json.tmp")) == []
 
@@ -150,6 +157,56 @@ def test_manifest_persist_failure_removes_unique_temporary_file(
 
     assert target.read_bytes() == previous
     assert list(manifest_dir.glob("*.json.tmp")) == []
+
+
+def test_concurrent_supervisors_persist_owner_without_temp_collision(
+        tmp_path, monkeypatch):
+    manifest_dir = tmp_path / "shared-supervisor"
+    first = sup_mod.Supervisor(manifest_dir=manifest_dir, machine_id="m1")
+    second = sup_mod.Supervisor(manifest_dir=manifest_dir, machine_id="m1")
+    first_identity = {"pid": 101, "pgid": 101, "start": "test:first"}
+    second_identity = {"pid": 202, "pgid": 202, "start": "test:second"}
+    first._ops.owner_identity = lambda handle: handle
+    second._ops.owner_identity = lambda handle: handle
+    target = manifest_dir / "owners" / "sess_owner_race.json"
+    barrier = threading.Barrier(2)
+    replace_lock = threading.Lock()
+    replace_sources = []
+    original_replace = os.replace
+    replace_errors = []
+
+    def concurrent_replace(source, destination):
+        if Path(destination) == target:
+            barrier.wait(timeout=5)
+            with replace_lock:
+                replace_sources.append(Path(source))
+                try:
+                    return original_replace(source, destination)
+                except OSError as exc:
+                    replace_errors.append(exc)
+                    raise
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(sup_mod.os, "replace", concurrent_replace)
+    threads = [
+        threading.Thread(
+            target=first._write_owner,
+            args=("sess_owner_race", first_identity)),
+        threading.Thread(
+            target=second._write_owner,
+            args=("sess_owner_race", second_identity)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert replace_errors == []
+    assert len(set(replace_sources)) == 2
+    assert json.loads(target.read_text(encoding="utf-8")) in [
+        first_identity, second_identity]
+    assert list(target.parent.glob("*.json.tmp")) == []
 
 
 @unittest.skipIf(os.name == "nt", "POSIX process groups")
