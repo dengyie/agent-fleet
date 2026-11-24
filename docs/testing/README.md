@@ -20,6 +20,8 @@ Windows Job Object 不随 Supervisor 句柄自动持久化。恢复时如果原 
 
 该组还通过两个共享同一 `manifest_dir` 的 Supervisor 实例并发替换同一会话清单和 owner 身份记录，确保各自使用唯一同目录临时文件；原子替换失败时清单保留原内容并尽力清理临时文件，外部错误仍为 `manifest_write_failed`。这些写入回归和 Windows orphan 存活回归也显式列入 Windows、macOS CI。
 
+Windows 同时替换目标的临时 access/share/lock 拒绝（原生错误 5/32/33）最多尝试六次，主动退避等待合计 150ms；持续拒绝仍失败，其他存储错误不重试。测试保留两个写入者真实同时替换，并覆盖短暂争用恢复、持续拒绝保留旧文件和其他错误立即失败；仅重试文件发布，不重跑 Agent 命令。
+
 电脑 Agent 的节点启动目录、原启动请求找回、请求字段绑定与并发/取消回归见[原生任务 HTTP 契约](../native-task-api.md)。目录、启动和主助手共用应用服务；新回归 `tests/test_native_task_api.py` 在 Linux、Windows、macOS CI 执行。
 
 原生会话的消息响应丢失恢复、事件 tail/before/after 游标、会话目录快照分页，以及原生名称、客户端/模型元数据、逐事件可见内容与 source-record 隔离见[原生会话 HTTP 契约](../native-session-api.md)。专项及相关现有 HTTP、SQLite、采集器、前端状态、交互回答和 Supervisor 回归：

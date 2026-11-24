@@ -1,6 +1,7 @@
 """Review regressions: cross-instance cancel, hub cancel routing, pruning, dead code
 (findings 6, 7, 10, 11)."""
 import ast
+import errno
 import json
 import os
 import signal
@@ -216,6 +217,96 @@ def test_concurrent_supervisors_persist_owner_without_temp_collision(
     assert json.loads(target.read_text(encoding="utf-8")) in [
         first_identity, second_identity]
     assert list(target.parent.glob("*.json.tmp")) == []
+
+
+@pytest.mark.parametrize("winerror", [5, 32, 33])
+def test_supervisor_file_replace_recovers_windows_contention(
+        tmp_path, monkeypatch, winerror):
+    target = tmp_path / "manifest.json"
+    target.write_text("previous", encoding="utf-8")
+    original_replace = os.replace
+    attempts = []
+    pauses = []
+
+    def contended_replace(source, destination):
+        attempts.append(Path(source))
+        if len(attempts) < 3:
+            error = PermissionError(errno.EACCES, "fixture file contention")
+            error.winerror = winerror
+            raise error
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(handles_mod.os, "replace", contended_replace)
+    monkeypatch.setattr(time, "sleep", pauses.append)
+    handles_mod._atomic_replace_text(target, "用户会话")
+
+    assert target.read_text(encoding="utf-8") == "用户会话"
+    assert len(attempts) == 3
+    assert len(set(attempts)) == 1
+    assert len(pauses) == 2
+    assert 0 < sum(pauses) <= 0.25
+    assert list(tmp_path.glob("*.json.tmp")) == []
+
+
+@pytest.mark.parametrize("winerror", [5, 32, 33])
+def test_supervisor_file_replace_bounds_windows_contention(
+        tmp_path, monkeypatch, winerror):
+    supervisor = sup_mod.Supervisor(manifest_dir=tmp_path, machine_id="m1")
+    manifest = sup_mod.ManagedSessionManifest(
+        session_id="sess_contended", machine_id="m1",
+        process_group_id="grp_contended", reason="paused")
+    supervisor._persist(manifest)
+    target = tmp_path / "sess_contended.json"
+    previous = target.read_bytes()
+    attempts = []
+    pauses = []
+
+    def denied_replace(source, destination):
+        attempts.append(Path(source))
+        error = PermissionError(errno.EACCES, "private fixture error")
+        error.winerror = winerror
+        raise error
+
+    monkeypatch.setattr(handles_mod.os, "replace", denied_replace)
+    monkeypatch.setattr(time, "sleep", pauses.append)
+    manifest.reason = "terminated"
+    with pytest.raises(sup_mod.GroupError, match="^manifest_write_failed$"):
+        supervisor._persist(manifest)
+
+    assert 2 <= len(attempts) <= 8
+    assert len(pauses) == len(attempts) - 1
+    assert 0 < sum(pauses) <= 0.25
+    assert target.read_bytes() == previous
+    assert list(tmp_path.glob("*.json.tmp")) == []
+
+
+@pytest.mark.parametrize(
+    ("winerror", "error_number"),
+    [(None, errno.EACCES), (87, errno.EINVAL), (112, errno.ENOSPC)],
+)
+def test_supervisor_file_replace_rejects_other_storage_errors(
+        tmp_path, monkeypatch, winerror, error_number):
+    target = tmp_path / "manifest.json"
+    target.write_bytes(b"previous")
+    attempts = []
+    pauses = []
+
+    def fail_replace(source, destination):
+        attempts.append(Path(source))
+        error = OSError(error_number, "fixture storage error")
+        if winerror is not None:
+            error.winerror = winerror
+        raise error
+
+    monkeypatch.setattr(handles_mod.os, "replace", fail_replace)
+    monkeypatch.setattr(time, "sleep", pauses.append)
+    with pytest.raises(OSError):
+        handles_mod._atomic_replace_text(target, "updated")
+
+    assert len(attempts) == 1
+    assert pauses == []
+    assert target.read_bytes() == b"previous"
+    assert list(tmp_path.glob("*.json.tmp")) == []
 
 
 @unittest.skipIf(os.name == "nt", "POSIX process groups")

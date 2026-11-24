@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,7 +44,17 @@ def _atomic_replace_text(target: Path, content: str) -> None:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             descriptor = None
             stream.write(content)
-        os.replace(str(tmp), str(target))
+        for attempt in range(6):
+            try:
+                os.replace(str(tmp), str(target))
+                break
+            except OSError as exc:
+                # Independent Windows readers/replacers can briefly deny the
+                # destination's delete access (5/32/33). Keep this one staged
+                # file; persistent denial and all other I/O errors still fail.
+                if getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == 5:
+                    raise
+                time.sleep(0.01 * (attempt + 1))
         tmp = None
     finally:
         if descriptor is not None:
