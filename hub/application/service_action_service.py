@@ -6,9 +6,12 @@ import secrets
 import time
 from collections.abc import Mapping
 
-from hub.application.task_service import ApplicationError
 from fleet_core.platform_command import PlatformCommand, args_hash
-from hub.infrastructure.approval_repository import ApprovalRepository, ApprovalRepositoryError
+from hub.application.task_service import ApplicationError
+from hub.infrastructure.approval_repository import (
+    ApprovalRepository,
+    ApprovalRepositoryError,
+)
 from hub.infrastructure.command_repository import CommandRepositoryError
 from hub.infrastructure.service_repository import ServiceRepositoryError
 from platform_schema import validate_id, validate_owner_id
@@ -201,11 +204,14 @@ class ServiceActionService:
             if grant["state"] in {"consuming", "consumed"}:
                 existing = self.command_repository.get(command_id)
                 if existing is not None and existing.get("owner_id") == owner_id and existing.get("grant_id") == grant_id:
+                    if grant["state"] == "consuming":
+                        grant = self.approval_repository.finish_consume(
+                            owner_id, grant_id, command_id=command_id, success=True)
                     return {"ok": True, "grant": self._public_grant(grant),
                             "command": self._command_public(existing)}
                 if grant["state"] == "consumed":
                     raise ApprovalRepositoryError("grant_not_usable")
-            if grant["state"] not in {"pending", "approved"}:
+            if grant["state"] not in {"pending", "approved", "consuming"}:
                 raise ApprovalRepositoryError("grant_not_pending")
             service = self._service(owner_id, grant["service_id"])
             if int(service["version"]) != int(grant["service_version"]):
@@ -229,7 +235,7 @@ class ServiceActionService:
                         owner_id, grant_id, command_id=command_id, success=True)
                 return {"ok": True, "grant": self._public_grant(grant),
                         "command": self._command_public(existing)}
-            consuming = self.approval_repository.begin_consume(
+            self.approval_repository.begin_consume(
                 owner_id, grant_id, command_id=command_id)
             command = PlatformCommand.create(
                 command_id=command_id, target_node=service["node_id"],

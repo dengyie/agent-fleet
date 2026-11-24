@@ -17,7 +17,7 @@ PYTHONPATH=. python3 -m pytest tests/test_session_schema.py \
   tests/test_review_node_sync.py -q
 ```
 
-此专项还覆盖 Supervisor 消息操作 schema v1→v2 的原子升级、预版本化库初始化、损坏同名表拒绝、NULL token digest 存储约束、已填充表中约束探测的唯一键碰撞，以及既有消息/命令保留；审查发现、根因和边界见[后端深度 Review](../reviews/2026-11-24-backend-deep-review.md)。
+此专项还覆盖 Supervisor 消息操作 schema v1→v2 的原子升级、预版本化库初始化、损坏同名表拒绝、NULL token digest 存储约束、已填充表中约束探测的唯一键碰撞，以及既有消息/命令保留；`tests/test_supervisor_control.py` 另通过真实 SQLite 并发让两个不同终态回执竞争，验证只有首个提交被持久化并写入一条终态审计。审查发现、根因和边界见[后端深度 Review](../reviews/2026-11-24-backend-deep-review.md)。
 
 受管续聊的逐轮快照、Windows NTFS ACL 所有者边界、Git 安全读取、SQLite 幂等/迁移、丢包恢复、HTTP 鉴权和原任务结果隔离：
 
@@ -66,6 +66,17 @@ ACP 响应写出，再验证成功回执、单条回答事件和恢复运行态�
 未协商或非受管来源不能取得审批能力、owner 进程身份不符拒绝、迟到 ACK 不能
 声明成功、功能门禁、权限及 SQLite 失败脱敏。以上是本地严格对端证据，不代表
 真实供应商 CLI、外部模型或 Windows/macOS 实机验收。
+
+服务动作授权与重放恢复、SQLite owner/idempotency grant 的并发 HTTP 竞争、版本 fencing 和审批消费：
+
+```sh
+PYTHONPATH=. python3 -m pytest tests/test_approval_repository.py \
+  tests/test_platform_service_actions.py tests/test_platform_service_action_runtime.py \
+  tests/test_platform_submit_approvals.py tests/test_platform_submit_http.py \
+  tests/test_platform_submit_e2e.py -q
+```
+
+`test_concurrent_http_approval_requests_replay_one_grant` 通过真实 HTTP 与 SQLite 同步两个相同请求，验证两个响应都恢复同一待审批 grant、只持久化一条记录；并发批准、consuming 无命令重启恢复、命令已写入但 grant 尚未消费的重启恢复也使用真实临时 SQLite 覆盖。相关根因和红绿证据见[后端深度 Review](../reviews/2026-11-24-backend-deep-review.md)。
 
 大文本回归覆盖三万 Unicode 字符的有界分片、工具字段预览的明确截断标记，
 以及完整可见工具输出经过真实 RunnerCapture、加密 spool、HTTP 和 SQLite 后

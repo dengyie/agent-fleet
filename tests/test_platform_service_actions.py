@@ -1,3 +1,6 @@
+import hashlib
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -5,7 +8,9 @@ import pytest
 from hub.bootstrap import create_app
 from hub.config import FleetConfig
 from tools.platform.services.actions import (
-    ServiceActionError, action_argv_from_command, execute_service_action,
+    ServiceActionError,
+    action_argv_from_command,
+    execute_service_action,
 )
 
 
@@ -36,6 +41,7 @@ def test_actions_gate_is_closed_by_default(tmp_path):
 @pytest.mark.parametrize('action', ['inspect', 'restart'])
 def test_generated_service_action_identifiers_always_pass_their_own_validation(tmp_path, monkeypatch, action):
     import secrets
+
     from platform_schema import validate_id
 
     app = _app(tmp_path, actions=True)
@@ -70,6 +76,211 @@ def test_restart_requires_approval_and_is_one_time(tmp_path):
     same = client.post("/api/platform/v1/services/api/actions", json={"action": "restart", "idempotency_key": "restart-1"}, headers=headers)
     assert again.status_code == same.status_code == 200
     assert again.get_json()["grant"]["grant_id"] == same.get_json()["grant"]["grant_id"]
+
+
+def test_concurrent_http_approval_requests_replay_one_grant(tmp_path, monkeypatch):
+    app = _app(tmp_path, actions=True)
+    _service(app, allowed=("restart",))
+    repository = app.extensions["fleet"]["services"]["service_actions"].approval_repository
+    both_looked_up = threading.Barrier(2)
+    connect = repository._connect
+
+    class RacingConnection:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, sql, *args):
+            cursor = self.connection.execute(sql, *args)
+            if sql.startswith("SELECT * FROM platform_approval_grants WHERE owner_id=? AND idempotency_key=?"):
+                try:
+                    both_looked_up.wait(timeout=0.5)
+                except threading.BrokenBarrierError:
+                    pass
+            return cursor
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+    monkeypatch.setattr(repository, "_connect", lambda: RacingConnection(connect()))
+
+    def submit(_):
+        response = app.test_client().post(
+            "/api/platform/v1/services/api/actions",
+            json={"action": "restart", "idempotency_key": "parallel-approval"})
+        return response.status_code, response.get_json()
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        responses = list(workers.map(submit, range(2)))
+
+    assert [status for status, _ in responses] == [200, 200]
+    grants = [body["grant"] for _, body in responses]
+    assert grants[0]["grant_id"] == grants[1]["grant_id"]
+    assert grants[0]["state"] == grants[1]["state"] == "pending"
+    connection = connect()
+    try:
+        count = connection.execute("SELECT COUNT(*) FROM platform_approval_grants").fetchone()[0]
+    finally:
+        connection.close()
+    assert count == 1
+
+
+def test_concurrent_approval_decisions_recover_the_same_command(tmp_path, monkeypatch):
+    app = _app(tmp_path, actions=True)
+    _service(app, allowed=("restart",))
+    client = app.test_client()
+    requested = client.post("/api/platform/v1/services/api/actions", json={"action": "restart"})
+    assert requested.status_code == 200
+    grant_id = requested.get_json()["grant"]["grant_id"]
+    service = app.extensions["fleet"]["services"]["service_actions"]
+    repository = service.approval_repository
+    both_read_pending = threading.Barrier(2)
+    get_grant = repository.get
+
+    def synchronized_get(owner_id, selected_grant_id):
+        row = get_grant(owner_id, selected_grant_id)
+        if row is not None and row["state"] == "pending":
+            both_read_pending.wait(timeout=5)
+        return row
+
+    monkeypatch.setattr(repository, "get", synchronized_get)
+
+    def approve(_):
+        response = app.test_client().post(
+            f"/api/platform/v1/approvals/{grant_id}/decisions",
+            json={"decision": "approve"})
+        return response.status_code, response.get_json()
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        responses = list(workers.map(approve, range(2)))
+
+    assert [status for status, _ in responses] == [200, 200], responses
+    commands = [body["command"]["command_id"] for _, body in responses]
+    assert commands[0] == commands[1]
+    assert commands[0] == "cmd_" + hashlib.sha256(grant_id.encode()).hexdigest()[:48]
+    assert repository.get("owner-a@example.test", grant_id)["state"] == "consumed"
+    connection = service.command_repository._connect()
+    try:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM platform_commands WHERE grant_id=?", (grant_id,)).fetchone()[0]
+        outbox_count = connection.execute(
+            "SELECT COUNT(*) FROM platform_command_outbox WHERE command_id=?",
+            (commands[0],)).fetchone()[0]
+    finally:
+        connection.close()
+    assert count == outbox_count == 1
+
+
+def test_consuming_approval_without_command_recovers_after_app_restart(tmp_path):
+    app = _app(tmp_path, actions=True)
+    _service(app, allowed=("restart",))
+    client = app.test_client()
+    requested = client.post("/api/platform/v1/services/api/actions", json={"action": "restart"})
+    grant_id = requested.get_json()["grant"]["grant_id"]
+    service = app.extensions["fleet"]["services"]["service_actions"]
+    command_id = "cmd_" + hashlib.sha256(grant_id.encode()).hexdigest()[:48]
+
+    service.approval_repository.decide("owner-a@example.test", grant_id, approve=True)
+    service.approval_repository.begin_consume(
+        "owner-a@example.test", grant_id, command_id=command_id)
+    assert service.command_repository.get(command_id) is None
+
+    restarted = _app(tmp_path, actions=True)
+    response = restarted.test_client().post(
+        f"/api/platform/v1/approvals/{grant_id}/decisions",
+        json={"decision": "approve"})
+
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()["command"]["command_id"] == command_id
+    assert response.get_json()["grant"]["state"] == "consumed"
+    assert restarted.extensions["fleet"]["platform_commands"].get(command_id)["grant_id"] == grant_id
+
+
+def test_persisted_approval_command_finishes_consumption_after_restart(tmp_path, monkeypatch):
+    app = _app(tmp_path, actions=True)
+    _service(app, allowed=("restart",))
+    client = app.test_client()
+    requested = client.post("/api/platform/v1/services/api/actions", json={"action": "restart"})
+    grant_id = requested.get_json()["grant"]["grant_id"]
+    service = app.extensions["fleet"]["services"]["service_actions"]
+    original_finish = service.approval_repository.finish_consume
+
+    def fail_after_command_persist(owner_id, selected_grant_id, *, command_id, success):
+        if success:
+            raise RuntimeError("simulated Hub interruption after command commit")
+        return original_finish(owner_id, selected_grant_id,
+                               command_id=command_id, success=success)
+
+    monkeypatch.setattr(service.approval_repository, "finish_consume",
+                        fail_after_command_persist)
+    failed = client.post(
+        f"/api/platform/v1/approvals/{grant_id}/decisions",
+        json={"decision": "approve"})
+    assert failed.status_code == 500
+    command_id = "cmd_" + hashlib.sha256(grant_id.encode()).hexdigest()[:48]
+    assert service.approval_repository.get("owner-a@example.test", grant_id)["state"] == "consuming"
+    assert service.command_repository.get(command_id)["grant_id"] == grant_id
+
+    restarted = _app(tmp_path, actions=True)
+    recovered = restarted.test_client().post(
+        f"/api/platform/v1/approvals/{grant_id}/decisions",
+        json={"decision": "approve"})
+
+    assert recovered.status_code == 200
+    assert recovered.get_json()["grant"]["state"] == "consumed"
+    assert recovered.get_json()["command"]["command_id"] == command_id
+    connection = restarted.extensions["fleet"]["platform_commands"]._connect()
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM platform_command_outbox WHERE command_id=?",
+            (command_id,)).fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
+def test_failed_concurrent_enqueue_does_not_reset_another_approval_consumer(tmp_path, monkeypatch):
+    from hub.application.errors import ApplicationError
+
+    app = _app(tmp_path, actions=True)
+    _service(app, allowed=("restart",))
+    service = app.extensions["fleet"]["services"]["service_actions"]
+    grant_id = service.request("owner-a@example.test", "api", "restart")["grant"]["grant_id"]
+    service.approval_repository.decide("owner-a@example.test", grant_id, approve=True)
+    both_consuming = threading.Barrier(2)
+    failure_returned = threading.Event()
+    enqueue = service.delivery.enqueue
+
+    def racing_enqueue(command, **kwargs):
+        both_consuming.wait(timeout=5)
+        if threading.current_thread().name.endswith("_0"):
+            raise ApplicationError("command_store", "command store unavailable", 503)
+        assert failure_returned.wait(timeout=5)
+        return enqueue(command, **kwargs)
+
+    monkeypatch.setattr(service.delivery, "enqueue", racing_enqueue)
+
+    def approve(_):
+        response = app.test_client().post(
+            f"/api/platform/v1/approvals/{grant_id}/decisions",
+            json={"decision": "approve"})
+        if threading.current_thread().name.endswith("_0"):
+            failure_returned.set()
+        return response.status_code, response.get_json()
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        responses = list(workers.map(approve, range(2)))
+
+    assert sorted(status for status, _ in responses) == [200, 503], responses
+    assert service.approval_repository.get("owner-a@example.test", grant_id)["state"] == "consumed"
+    monkeypatch.setattr(service.delivery, "enqueue", enqueue)
+    replay = app.test_client().post(
+        f"/api/platform/v1/approvals/{grant_id}/decisions", json={"decision": "approve"})
+    assert replay.status_code == 200
+    connection = service.command_repository._connect()
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM platform_commands WHERE grant_id=?", (grant_id,)).fetchone()[0] == 1
+    finally:
+        connection.close()
 
 
 def test_version_fence_and_owner_scope(tmp_path):
