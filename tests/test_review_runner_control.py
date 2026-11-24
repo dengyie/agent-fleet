@@ -95,17 +95,21 @@ def test_concurrent_supervisors_persist_one_manifest_without_temp_collision(
         process_group_id="grp_second", reason="terminated")
     target = manifest_dir / "sess_concurrent.json"
     barrier = threading.Barrier(2)
-    replace_lock = threading.Lock()
+    replace_thread = threading.local()
     replace_sources = []
+    replace_completed = []
     original_replace = os.replace
 
     def concurrent_replace(source, destination):
         if Path(destination) == target:
-            barrier.wait(timeout=5)
-            with replace_lock:
+            if not getattr(replace_thread, "started", False):
+                replace_thread.started = True
                 replace_sources.append(Path(source))
-                return original_replace(source, destination)
-        return original_replace(source, destination)
+                barrier.wait(timeout=5)
+        result = original_replace(source, destination)
+        if Path(destination) == target:
+            replace_completed.append(Path(source))
+        return result
 
     monkeypatch.setattr(sup_mod.os, "replace", concurrent_replace)
     errors = []
@@ -114,7 +118,7 @@ def test_concurrent_supervisors_persist_one_manifest_without_temp_collision(
         try:
             supervisor._persist(manifest)
         except Exception as exc:
-            errors.append(exc)
+            errors.append((repr(exc), repr(exc.__context__)))
 
     threads = [
         threading.Thread(target=persist, args=(first, first_manifest)),
@@ -132,6 +136,7 @@ def test_concurrent_supervisors_persist_one_manifest_without_temp_collision(
     assert (persisted.process_group_id, persisted.reason) in {
         ("grp_first", "paused"), ("grp_second", "terminated")}
     assert len(set(replace_sources)) == 2
+    assert len(replace_completed) == 2
     assert list(manifest_dir.glob("*.json")) == [manifest_dir / "sess_concurrent.json"]
     assert list(manifest_dir.glob("*.json.tmp")) == []
 
@@ -170,22 +175,26 @@ def test_concurrent_supervisors_persist_owner_without_temp_collision(
     second._ops.owner_identity = lambda handle: handle
     target = manifest_dir / "owners" / "sess_owner_race.json"
     barrier = threading.Barrier(2)
-    replace_lock = threading.Lock()
+    replace_thread = threading.local()
     replace_sources = []
+    replace_completed = []
     original_replace = os.replace
     replace_errors = []
 
     def concurrent_replace(source, destination):
         if Path(destination) == target:
-            barrier.wait(timeout=5)
-            with replace_lock:
+            if not getattr(replace_thread, "started", False):
+                replace_thread.started = True
                 replace_sources.append(Path(source))
-                try:
-                    return original_replace(source, destination)
-                except OSError as exc:
-                    replace_errors.append(exc)
-                    raise
-        return original_replace(source, destination)
+                barrier.wait(timeout=5)
+        try:
+            result = original_replace(source, destination)
+            if Path(destination) == target:
+                replace_completed.append(Path(source))
+            return result
+        except OSError as exc:
+            replace_errors.append((exc.errno, getattr(exc, "winerror", None)))
+            raise
 
     monkeypatch.setattr(sup_mod.os, "replace", concurrent_replace)
     threads = [
@@ -202,7 +211,7 @@ def test_concurrent_supervisors_persist_owner_without_temp_collision(
         thread.join(timeout=10)
 
     assert all(not thread.is_alive() for thread in threads)
-    assert replace_errors == []
+    assert len(replace_completed) == 2, replace_errors
     assert len(set(replace_sources)) == 2
     assert json.loads(target.read_text(encoding="utf-8")) in [
         first_identity, second_identity]
