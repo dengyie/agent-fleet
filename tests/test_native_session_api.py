@@ -736,3 +736,113 @@ def test_supervisor_v1_null_token_migration_failure_preserves_legacy_database(tm
         assert connection.execute(
             "SELECT command_id FROM supervisor_commands").fetchall() == [
                 ("legacy-null-command",)]
+
+
+@pytest.mark.parametrize("not_null", [False, True])
+def test_preversioned_supervisor_message_table_initializes_without_losing_rows(
+        tmp_path, not_null):
+    from hub.infrastructure.supervisor_command_repository import SupervisorCommandRepository
+
+    db = tmp_path / "supervisor-preversioned.db"
+    SupervisorCommandRepository(db).init()
+    with sqlite3.connect(db) as connection:
+        connection.execute("DROP TABLE session_message_operations")
+        connection.execute(
+            "CREATE TABLE session_message_operations("
+            f"token_digest TEXT {'NOT NULL ' if not_null else ''}PRIMARY KEY "
+            "CHECK(length(token_digest)=64),operator_id TEXT NOT NULL,"
+            "session_id TEXT NOT NULL,operation TEXT NOT NULL "
+            "CHECK(operation='append_user_turn'),content_digest TEXT NOT NULL "
+            "CHECK(length(content_digest)=64),command_id TEXT NOT NULL UNIQUE "
+            "REFERENCES supervisor_commands(command_id))")
+        connection.execute(
+            "INSERT INTO supervisor_commands(command_id,machine_id,session_id,action,"
+            "nonce,wire_json,issued_s,expires_s,status) "
+            "VALUES('kept','m1','s1','append_user_turn','kept-nonce','{}',1,100,'queued')")
+        connection.execute(
+            "INSERT INTO session_message_operations VALUES(?,?,?,?,?,?)",
+            ("a" * 64, "operator", "s1", "append_user_turn", "b" * 64, "kept"))
+        connection.execute("DELETE FROM supervisor_meta WHERE key='schema_version'")
+
+    SupervisorCommandRepository(db).init()
+    SupervisorCommandRepository(db).init()
+
+    with sqlite3.connect(db) as connection:
+        assert connection.execute(
+            "SELECT value FROM supervisor_meta WHERE key='schema_version'").fetchone() == ("2",)
+        token_column = next(row for row in connection.execute(
+            "PRAGMA table_info(session_message_operations)") if row[1] == "token_digest")
+        assert token_column[3] == 1
+        assert connection.execute(
+            "SELECT token_digest,command_id FROM session_message_operations").fetchall() == [
+                ("a" * 64, "kept")]
+        assert connection.execute(
+            "SELECT command_id FROM supervisor_commands").fetchall() == [("kept",)]
+
+
+def test_preversioned_corrupt_supervisor_message_table_has_bounded_error(tmp_path):
+    from hub.infrastructure.supervisor_command_repository import (
+        SupervisorCommandRepository, SupervisorCommandRepositoryError,
+    )
+
+    db = tmp_path / "supervisor-preversioned-corrupt.db"
+    SupervisorCommandRepository(db).init()
+    with sqlite3.connect(db) as connection:
+        connection.execute("DROP TABLE session_message_operations")
+        connection.execute("CREATE TABLE session_message_operations(command_id TEXT)")
+        connection.execute("DELETE FROM supervisor_meta WHERE key='schema_version'")
+
+    with pytest.raises(SupervisorCommandRepositoryError) as caught:
+        SupervisorCommandRepository(db).init()
+    assert caught.value.code == "command_unavailable"
+    with sqlite3.connect(db) as connection:
+        assert connection.execute(
+            "SELECT value FROM supervisor_meta WHERE key='schema_version'").fetchone() is None
+        assert [row[1] for row in connection.execute(
+            "PRAGMA table_info(session_message_operations)")] == ["command_id"]
+
+
+@pytest.mark.parametrize("missing_check", ["operation", "content_digest"])
+@pytest.mark.parametrize("version", [1, 2])
+def test_populated_supervisor_schema_cannot_mask_missing_check_with_duplicate_token(
+        tmp_path, missing_check, version):
+    from hub.infrastructure.supervisor_command_repository import (
+        SupervisorCommandRepository, SupervisorCommandRepositoryError,
+    )
+
+    db = tmp_path / "supervisor-populated-lookalike.db"
+    SupervisorCommandRepository(db).init()
+    with sqlite3.connect(db) as connection:
+        connection.execute("DROP TABLE session_message_operations")
+        operation_check = "" if missing_check == "operation" else " CHECK(operation='append_user_turn')"
+        content_check = "" if missing_check == "content_digest" else " CHECK(length(content_digest)=64)"
+        probe_operation = "invalid_operation" if missing_check == "operation" else "append_user_turn"
+        probe_content_digest = "short" if missing_check == "content_digest" else "b" * 64
+        connection.execute(
+            "CREATE TABLE session_message_operations("
+            f"token_digest TEXT {'NOT NULL ' if version == 2 else ''}PRIMARY KEY "
+            "CHECK(length(token_digest)=64),operator_id TEXT NOT NULL,session_id TEXT NOT NULL,"
+            f"operation TEXT NOT NULL{operation_check},content_digest TEXT NOT NULL{content_check},"
+            "command_id TEXT NOT NULL UNIQUE REFERENCES supervisor_commands(command_id))")
+        connection.execute(
+            "INSERT INTO supervisor_commands(command_id,machine_id,session_id,action,"
+            "nonce,wire_json,issued_s,expires_s,status) "
+            "VALUES('kept','m1','s1','append_user_turn','kept-nonce','{}',1,100,'queued')")
+        connection.execute(
+            "INSERT INTO session_message_operations VALUES(?,?,?,?,?,?)",
+            ("a" * 64, "operator", "s1", probe_operation, probe_content_digest, "kept"))
+        connection.execute("UPDATE supervisor_meta SET value=? WHERE key='schema_version'",
+                           (str(version),))
+
+    with pytest.raises(SupervisorCommandRepositoryError) as caught:
+        SupervisorCommandRepository(db).init()
+    assert caught.value.code == "command_unavailable"
+
+    with sqlite3.connect(db) as connection:
+        assert connection.execute(
+            "SELECT value FROM supervisor_meta WHERE key='schema_version'").fetchone() == (str(version),)
+        assert connection.execute(
+            "SELECT token_digest,command_id FROM session_message_operations").fetchall() == [
+                ("a" * 64, "kept")]
+        assert connection.execute(
+            "SELECT command_id FROM supervisor_commands").fetchall() == [("kept",)]

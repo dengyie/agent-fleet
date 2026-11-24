@@ -44,6 +44,18 @@ The focused regression first failed against the baseline because the lookalike s
 
 Local verification covers SQLite semantics, HTTP contracts and schema migration on this host. It does not by itself prove all production OS or filesystem behavior.
 
+### Follow-up migration edge cases
+
+Review of the merged startup path found an unversioned legacy branch calling `.get()` on `sqlite3.Row`, which has no such method. A valid unversioned table could therefore prevent the Supervisor repository from starting. The migration now indexes the row and rejects a missing token column using the existing bounded repository error. Regression cases exercise nullable v1 and already-strict pre-versioned tables, repeat initialization against persisted rows, and ensure malformed pre-versioned tables are left unchanged.
+
+The SQL CHECK probes previously used constant digest values. In a populated table, a duplicate-value constraint could reject a probe even when the intended CHECK was absent, hiding a malformed schema. Validation now first inserts a valid row inside a savepoint and uses fresh random digests for each invalid probe. Tests populate v1/v2 lookalike schemas with invalid existing values to prove absent operation/content checks are detected without rewriting rows. Probes roll back before startup completes.
+
+Deployment compatibility was checked against the immediate rollback reader (the PR #122 code on current main): this follow-up keeps the deployed v2 marker and strict column contract, so the previous reader continues to open the database. The separate Supervisor outbox is not among the receiver's default five snapshots, so automatic database rollback is not established for a future incompatible outbox migration. This change leaves the on-disk v2 schema unchanged for databases already migrated by PR #122; future incompatible outbox changes must extend the installed receiver's snapshot/fingerprint/restore handling before release.
+
+- Follow-up pre-versioned-schema and collision-resistant constraint-probe regressions — **7 passed** after first reproducing 6 failures (two unversioned table starts raised `AttributeError`; four populated missing-CHECK schemas were incorrectly accepted).
+- Re-run of the seven session/Supervisor suites after follow-up — **287 passed, 7 subtests passed**.
+- Main run [45306957639](https://github.com/dengyie/agent-fleet/actions/runs/45306957639) for PR #122 completed Linux, Windows, macOS, package and deploy jobs successfully. `/healthz` returned `{"status":"ok"}` and `/manifest.json` reported `bcea9c37e1998c2cf073dfae8055d0da77c745d3`.
+
 ## Review boundary and follow-up
 
 This is a focused, evidence-based backend review, not a claim that every provider, platform adapter, workflow, or production integration was exhaustively audited. The broader service layering and message/event contracts have meaningful integration coverage; no speculative module-size-driven refactor was made. Continue deeper review by risk surface with concrete failing evidence, especially node/runner cross-platform lifecycle, workflow recovery and backup/restore interactions.

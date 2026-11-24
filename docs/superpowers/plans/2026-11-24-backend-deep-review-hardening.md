@@ -88,3 +88,17 @@ Run the scoped test command from Task 1, `git diff --check`, and a Python script
 - Migration validation leaves no probe command or message-operation rows after success or failure.
 - Existing ordinary-message idempotency, interactive-answer protocol, and authorization behavior remain unchanged.
 - The focused backend test suites pass and the diff contains no frontend product files.
+
+## Follow-up: Legacy Migration and Constraint Probe Boundaries
+
+The post-merge review found that the pre-versioned-table branch called `.get()`
+on `sqlite3.Row`, and that fixed probe digests could collide with a valid
+persisted binding. Keep the deployed v2 schema and public contracts; close these
+startup validation gaps in the existing repository rather than adding another
+layer.
+
+- [x] Reproduce pre-versioned nullable/strict table startup, including missing-column corruption.
+- [x] Reproduce populated lookalike schemas with missing operation/content checks.
+- [x] Use row indexing and positive, fresh-identity savepoint probes; verify probes leave no rows.
+- [x] Run session/Supervisor regression suites and check previous-reader schema compatibility.
+- [ ] Complete PR CI, merge, and verify the next main deployment.

@@ -17,7 +17,7 @@ PYTHONPATH=. python3 -m pytest tests/test_session_schema.py \
   tests/test_review_node_sync.py -q
 ```
 
-此专项还覆盖 Supervisor 消息操作 schema v1→v2 的原子升级、损坏同名表拒绝、NULL token digest 存储约束，以及既有消息/命令保留；审查发现、根因和边界见[后端深度 Review](../reviews/2026-11-24-backend-deep-review.md)。
+此专项还覆盖 Supervisor 消息操作 schema v1→v2 的原子升级、预版本化库初始化、损坏同名表拒绝、NULL token digest 存储约束、已填充表中约束探测的唯一键碰撞，以及既有消息/命令保留；审查发现、根因和边界见[后端深度 Review](../reviews/2026-11-24-backend-deep-review.md)。
 
 受管续聊的逐轮快照、Windows NTFS ACL 所有者边界、Git 安全读取、SQLite 幂等/迁移、丢包恢复、HTTP 鉴权和原任务结果隔离：
 

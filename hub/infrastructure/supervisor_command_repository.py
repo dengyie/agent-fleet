@@ -279,20 +279,35 @@ class SupervisorCommandRepository:
                     conn.execute(f"RELEASE {nested}")
                 return False
 
-            valid_token = "a" * 64
-            valid_digest = "b" * 64
+            valid_row = (secrets.token_hex(32), "schema-probe", "schema-probe",
+                         "append_user_turn", secrets.token_hex(32), probe_command)
+            nested = "session_message_valid_constraint_probe"
+            conn.execute(f"SAVEPOINT {nested}")
+            try:
+                conn.execute(
+                    "INSERT INTO session_message_operations(token_digest,operator_id,"
+                    "session_id,operation,content_digest,command_id) VALUES(?,?,?,?,?,?)",
+                    valid_row)
+            except sqlite3.IntegrityError as exc:
+                raise sqlite3.DatabaseError(
+                    "session message operation schema rejects valid row") from exc
+            finally:
+                conn.execute(f"ROLLBACK TO {nested}")
+                conn.execute(f"RELEASE {nested}")
+
             invalid_rows = (
                 ("short", "schema-probe", "schema-probe", "append_user_turn",
-                 valid_digest, probe_command),
-                (valid_token, "schema-probe", "schema-probe", "invalid_operation",
-                 valid_digest, probe_command),
-                (valid_token, "schema-probe", "schema-probe", "append_user_turn",
+                 secrets.token_hex(32), probe_command),
+                (secrets.token_hex(32), "schema-probe", "schema-probe", "invalid_operation",
+                 secrets.token_hex(32), probe_command),
+                (secrets.token_hex(32), "schema-probe", "schema-probe", "append_user_turn",
                  "short", probe_command),
             )
             if not all(rejected(row) for row in invalid_rows):
                 raise sqlite3.DatabaseError("invalid session message operation checks")
             null_key_rejected = rejected((None, "schema-probe", "schema-probe",
-                                          "append_user_turn", valid_digest, probe_command))
+                                          "append_user_turn", secrets.token_hex(32),
+                                          probe_command))
             if null_key_rejected != token_digest_not_null:
                 raise sqlite3.DatabaseError("invalid session message token nullability")
         finally:
@@ -339,7 +354,10 @@ class SupervisorCommandRepository:
         if version == 0 and operation_table_exists:
             # A pre-versioned database from the first implementation is v1;
             # a stricter table is already compatible with v2.
-            migrate_v1 = columns.get("token_digest", {}).get("notnull") == 0
+            token_column = columns.get("token_digest")
+            if token_column is None:
+                raise sqlite3.DatabaseError("missing session message token column")
+            migrate_v1 = token_column["notnull"] == 0
 
         if migrate_v1:
             # Version 1 used a nullable TEXT PRIMARY KEY. Its other declarations
