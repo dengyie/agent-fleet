@@ -10,12 +10,13 @@ from __future__ import annotations
 import json
 import math
 import os
+import secrets
 import sqlite3
 from pathlib import Path
 from typing import Any, Mapping
 from hub.infrastructure.sqlite import connect as sqlite_connect
 
-_SESSION_MESSAGE_SCHEMA_VERSION = 1
+_SESSION_MESSAGE_SCHEMA_VERSION = 2
 
 
 class SupervisorCommandRepositoryError(RuntimeError):
@@ -199,8 +200,108 @@ class SupervisorCommandRepository:
             raise sqlite3.DatabaseError('invalid dispatch value')
 
     @staticmethod
-    def _migrate_session_message_operations(conn: sqlite3.Connection) -> None:
-        """Atomically add the ordinary-message operation binding table."""
+    def _create_session_message_operations(conn: sqlite3.Connection) -> None:
+        conn.execute("CREATE TABLE session_message_operations ("
+                     "token_digest TEXT NOT NULL PRIMARY KEY CHECK(length(token_digest)=64),"
+                     "operator_id TEXT NOT NULL,session_id TEXT NOT NULL,"
+                     "operation TEXT NOT NULL CHECK(operation='append_user_turn'),"
+                     "content_digest TEXT NOT NULL CHECK(length(content_digest)=64),"
+                     "command_id TEXT NOT NULL UNIQUE REFERENCES supervisor_commands(command_id))")
+
+    @staticmethod
+    def _validate_session_message_operations(
+            conn: sqlite3.Connection, *, token_digest_not_null: bool) -> None:
+        """Validate declarations, indexes, foreign keys, and SQL CHECK behavior."""
+        columns = {row["name"]: row for row in conn.execute(
+            "PRAGMA table_info(session_message_operations)")}
+        expected = {"token_digest", "operator_id", "session_id", "operation",
+                    "content_digest", "command_id"}
+        if set(columns) != expected:
+            raise sqlite3.DatabaseError("invalid session message operation columns")
+        for name, column in columns.items():
+            expected_not_null = int(name != "token_digest" or token_digest_not_null)
+            expected_pk = int(name == "token_digest")
+            if (column["type"].upper() != "TEXT"
+                    or column["notnull"] != expected_not_null
+                    or column["pk"] != expected_pk
+                    or column["dflt_value"] is not None):
+                raise sqlite3.DatabaseError("invalid session message operation column")
+
+        unique_command_id = False
+        for index in conn.execute("PRAGMA index_list(session_message_operations)"):
+            if not index["unique"] or index["partial"]:
+                continue
+            indexed_columns = [row["name"] for row in conn.execute(
+                f"PRAGMA index_info('{index['name']}')")]
+            if indexed_columns == ["command_id"]:
+                unique_command_id = True
+                break
+        if not unique_command_id:
+            raise sqlite3.DatabaseError("invalid session message operation indexes")
+
+        foreign_keys = [dict(row) for row in conn.execute(
+            "PRAGMA foreign_key_list(session_message_operations)")]
+        if (len(foreign_keys) != 1
+                or foreign_keys[0]["table"] != "supervisor_commands"
+                or foreign_keys[0]["from"] != "command_id"
+                or foreign_keys[0]["to"] != "command_id"
+                or foreign_keys[0]["on_update"].upper() != "NO ACTION"
+                or foreign_keys[0]["on_delete"].upper() != "NO ACTION"
+                or foreign_keys[0]["match"].upper() != "NONE"):
+            raise sqlite3.DatabaseError("invalid session message operation foreign key")
+
+        # SQLite CHECK expressions accept NULL, so a schema-text comparison
+        # would miss the nullable TEXT PRIMARY KEY defect. Exercise each
+        # invariant inside savepoints and roll every probe back before startup.
+        savepoint = "session_message_schema_probe"
+        probe_command = "schema-probe-" + secrets.token_hex(12)
+        conn.execute(f"SAVEPOINT {savepoint}")
+        try:
+            conn.execute(
+                "INSERT INTO supervisor_commands(command_id,machine_id,session_id,attempt_id,"
+                "action,nonce,idempotency_key,wire_json,issued_s,expires_s,status) "
+                "VALUES(?, 'schema-probe', 'schema-probe', NULL, 'pause_session', ?, NULL,"
+                "'{}', 0, 1, 'queued')",
+                (probe_command, secrets.token_hex(16)))
+
+            def rejected(values: tuple[object, ...]) -> bool:
+                nested = "session_message_constraint_probe"
+                conn.execute(f"SAVEPOINT {nested}")
+                try:
+                    conn.execute(
+                        "INSERT INTO session_message_operations(token_digest,operator_id,"
+                        "session_id,operation,content_digest,command_id) VALUES(?,?,?,?,?,?)",
+                        values)
+                except sqlite3.IntegrityError:
+                    return True
+                finally:
+                    conn.execute(f"ROLLBACK TO {nested}")
+                    conn.execute(f"RELEASE {nested}")
+                return False
+
+            valid_token = "a" * 64
+            valid_digest = "b" * 64
+            invalid_rows = (
+                ("short", "schema-probe", "schema-probe", "append_user_turn",
+                 valid_digest, probe_command),
+                (valid_token, "schema-probe", "schema-probe", "invalid_operation",
+                 valid_digest, probe_command),
+                (valid_token, "schema-probe", "schema-probe", "append_user_turn",
+                 "short", probe_command),
+            )
+            if not all(rejected(row) for row in invalid_rows):
+                raise sqlite3.DatabaseError("invalid session message operation checks")
+            null_key_rejected = rejected((None, "schema-probe", "schema-probe",
+                                          "append_user_turn", valid_digest, probe_command))
+            if null_key_rejected != token_digest_not_null:
+                raise sqlite3.DatabaseError("invalid session message token nullability")
+        finally:
+            conn.execute(f"ROLLBACK TO {savepoint}")
+            conn.execute(f"RELEASE {savepoint}")
+
+    @classmethod
+    def _migrate_session_message_operations(cls, conn: sqlite3.Connection) -> None:
+        """Atomically upgrade ordinary-message operation bindings to v2."""
         tables = {row["name"] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         version = 0
@@ -224,39 +325,40 @@ class SupervisorCommandRepository:
         operation_table_exists = "session_message_operations" in tables
         if version == _SESSION_MESSAGE_SCHEMA_VERSION and not operation_table_exists:
             raise sqlite3.DatabaseError("missing session message operation table")
+        if version == 1 and not operation_table_exists:
+            raise sqlite3.DatabaseError("missing legacy session message operation table")
 
         conn.execute("CREATE TABLE IF NOT EXISTS supervisor_meta ("
                      "key TEXT PRIMARY KEY,value TEXT NOT NULL)")
-        conn.execute("CREATE TABLE IF NOT EXISTS session_message_operations ("
-                     "token_digest TEXT PRIMARY KEY CHECK(length(token_digest)=64),"
-                     "operator_id TEXT NOT NULL,session_id TEXT NOT NULL,"
-                     "operation TEXT NOT NULL CHECK(operation='append_user_turn'),"
-                     "content_digest TEXT NOT NULL CHECK(length(content_digest)=64),"
-                     "command_id TEXT NOT NULL UNIQUE REFERENCES supervisor_commands(command_id))")
+        if not operation_table_exists:
+            cls._create_session_message_operations(conn)
 
         columns = {row["name"]: row for row in conn.execute(
             "PRAGMA table_info(session_message_operations)")}
-        expected = {"token_digest", "operator_id", "session_id", "operation",
-                    "content_digest", "command_id"}
-        if set(columns) != expected or columns["token_digest"]["pk"] != 1:
-            raise sqlite3.DatabaseError("invalid session message operation schema")
-        unique_command_id = False
-        for index in conn.execute("PRAGMA index_list(session_message_operations)"):
-            if not index["unique"]:
-                continue
-            indexed_columns = [row["name"] for row in conn.execute(
-                f"PRAGMA index_info('{index['name']}')")]
-            if indexed_columns == ["command_id"]:
-                unique_command_id = True
-                break
-        if not unique_command_id:
-            raise sqlite3.DatabaseError("invalid session message operation indexes")
+        migrate_v1 = version == 1
+        if version == 0 and operation_table_exists:
+            # A pre-versioned database from the first implementation is v1;
+            # a stricter table is already compatible with v2.
+            migrate_v1 = columns.get("token_digest", {}).get("notnull") == 0
 
-        if version == 0:
+        if migrate_v1:
+            # Version 1 used a nullable TEXT PRIMARY KEY. Its other declarations
+            # and constraints must match before any rows are copied.
+            cls._validate_session_message_operations(conn, token_digest_not_null=False)
+            conn.execute("ALTER TABLE session_message_operations "
+                         "RENAME TO session_message_operations_v1")
+            cls._create_session_message_operations(conn)
             conn.execute(
-                "INSERT INTO supervisor_meta(key,value) VALUES('schema_version',?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (str(_SESSION_MESSAGE_SCHEMA_VERSION),))
+                "INSERT INTO session_message_operations(token_digest,operator_id,session_id,"
+                "operation,content_digest,command_id) SELECT token_digest,operator_id,session_id,"
+                "operation,content_digest,command_id FROM session_message_operations_v1")
+            conn.execute("DROP TABLE session_message_operations_v1")
+
+        cls._validate_session_message_operations(conn, token_digest_not_null=True)
+        conn.execute(
+            "INSERT INTO supervisor_meta(key,value) VALUES('schema_version',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(_SESSION_MESSAGE_SCHEMA_VERSION),))
 
     @classmethod
     def _append_audit_rows(cls, conn: sqlite3.Connection,
