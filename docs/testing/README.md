@@ -18,6 +18,8 @@ PYTHONPATH=. python3 -m pytest tests/test_round5_windows_process.py \
 
 Windows Job Object 不随 Supervisor 句柄自动持久化。恢复时如果原 leader 已退出，必须检查仍挂在其 PID 下的后代；有存活后代或无法枚举时返回 `liveness_unknown`，不能把会话投影为已结束。以上测试用受控进程表覆盖该 Windows 分支；真实 NTFS/Win32 生命周期仍由 Windows CI 执行。
 
+该组还通过两个共享同一 `manifest_dir` 的 Supervisor 实例并发替换同一会话清单，确保各自使用唯一同目录临时文件，不因 `.tmp` 文件名碰撞丢失回执；原子替换失败时保留原清单、尽力清理临时文件，外部错误仍为 `manifest_write_failed`。这两条写入回归和 Windows orphan 存活回归也显式列入 Windows、macOS CI。
+
 电脑 Agent 的节点启动目录、原启动请求找回、请求字段绑定与并发/取消回归见[原生任务 HTTP 契约](../native-task-api.md)。目录、启动和主助手共用应用服务；新回归 `tests/test_native_task_api.py` 在 Linux、Windows、macOS CI 执行。
 
 原生会话的消息响应丢失恢复、事件 tail/before/after 游标、会话目录快照分页，以及原生名称、客户端/模型元数据、逐事件可见内容与 source-record 隔离见[原生会话 HTTP 契约](../native-session-api.md)。专项及相关现有 HTTP、SQLite、采集器、前端状态、交互回答和 Supervisor 回归：

@@ -5,6 +5,7 @@ import os
 import signal
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -78,6 +79,77 @@ def test_windows_cross_instance_cancel_checks_orphan_liveness(
         assert supervisor.get(sid).state in sup_mod.TERMINAL_STATES
     else:
         assert supervisor.get(sid).state not in sup_mod.TERMINAL_STATES
+
+
+def test_concurrent_supervisors_persist_one_manifest_without_temp_collision(
+        tmp_path, monkeypatch):
+    manifest_dir = tmp_path / "shared-supervisor"
+    first = sup_mod.Supervisor(manifest_dir=manifest_dir, machine_id="m1")
+    second = sup_mod.Supervisor(manifest_dir=manifest_dir, machine_id="m1")
+    first_manifest = sup_mod.ManagedSessionManifest(
+        session_id="sess_concurrent", machine_id="m1",
+        process_group_id="grp_first", reason="paused")
+    second_manifest = sup_mod.ManagedSessionManifest(
+        session_id="sess_concurrent", machine_id="m1",
+        process_group_id="grp_second", reason="terminated")
+    target = manifest_dir / "sess_concurrent.json"
+    barrier = threading.Barrier(2)
+    original_replace = os.replace
+
+    def concurrent_replace(source, destination):
+        if Path(destination) == target:
+            barrier.wait(timeout=5)
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(sup_mod.os, "replace", concurrent_replace)
+    errors = []
+
+    def persist(supervisor, manifest):
+        try:
+            supervisor._persist(manifest)
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=persist, args=(first, first_manifest)),
+        threading.Thread(target=persist, args=(second, second_manifest)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    persisted = sup_mod.ManagedSessionManifest.from_json(
+        (manifest_dir / "sess_concurrent.json").read_text(encoding="utf-8"))
+    assert (persisted.process_group_id, persisted.reason) in {
+        ("grp_first", "paused"), ("grp_second", "terminated")}
+    assert list(manifest_dir.glob("*.json")) == [manifest_dir / "sess_concurrent.json"]
+    assert list(manifest_dir.glob("*.json.tmp")) == []
+
+
+def test_manifest_persist_failure_removes_unique_temporary_file(
+        tmp_path, monkeypatch):
+    manifest_dir = tmp_path / "supervisor"
+    supervisor = sup_mod.Supervisor(manifest_dir=manifest_dir, machine_id="m1")
+    manifest = sup_mod.ManagedSessionManifest(
+        session_id="sess_failed_write", machine_id="m1",
+        process_group_id="grp_failed", reason="paused")
+    supervisor._persist(manifest)
+    target = manifest_dir / "sess_failed_write.json"
+    previous = target.read_bytes()
+    manifest.reason = "terminated"
+
+    def fail_replace(source, destination):
+        raise OSError("private path must not escape")
+
+    monkeypatch.setattr(sup_mod.os, "replace", fail_replace)
+    with pytest.raises(sup_mod.GroupError, match="^manifest_write_failed$"):
+        supervisor._persist(manifest)
+
+    assert target.read_bytes() == previous
+    assert list(manifest_dir.glob("*.json.tmp")) == []
 
 
 @unittest.skipIf(os.name == "nt", "POSIX process groups")

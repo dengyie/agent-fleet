@@ -28,6 +28,7 @@ import platform as _platform_mod
 # tests patch ``subprocess.Popen/run`` through this module's attribute.
 import subprocess  # noqa: F401
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -1196,12 +1197,42 @@ class Supervisor(HandlesMixin, NativeResumeMixin, NativeRequestMixin):
 
     def _persist(self, m: ManagedSessionManifest) -> None:
         target = self._manifest_dir / f"{m.session_id}{self.MANIFEST_SUFFIX}"
-        tmp = target.with_suffix(".json.tmp")
+        tmp: Path | None = None
+        descriptor: int | None = None
         try:
-            tmp.write_text(m.to_json())
+            for _ in range(10):
+                candidate = target.with_name(
+                    f"{target.stem}.{uuid.uuid4().hex}.json.tmp")
+                try:
+                    descriptor = os.open(
+                        candidate,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o666,
+                    )
+                except FileExistsError:
+                    continue
+                tmp = candidate
+                break
+            if descriptor is None or tmp is None:
+                raise FileExistsError("temporary manifest name unavailable")
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                descriptor = None
+                stream.write(m.to_json())
             os.replace(str(tmp), str(target))
+            tmp = None
         except OSError:
-            raise GroupError("manifest_write_failed")
+            raise GroupError("manifest_write_failed") from None
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            if tmp is not None:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
 
     # ---- status / DTO --------------------------------------------------------- #
 

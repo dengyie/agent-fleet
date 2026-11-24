@@ -113,6 +113,19 @@ Recovery now checks the Windows process tree when the root is gone. It returns `
 
 The bounded fake-process regression covers live orphan, no remaining descendant, and failed enumeration on all CI hosts; the dedicated Windows CI remains the runtime authority for Win32 APIs. A safe cross-restart kill capability would require a durable/reopenable Job Object ownership design and is outside this bounded repair.
 
+### Continued review — concurrent Supervisor manifest persistence
+
+Runner and the standalone control client can each restore a Supervisor over the same `manifest_dir`. `_persist()` previously wrote every session to the fixed `<session_id>.json.tmp` path before `os.replace()`. Two concurrent state updates could truncate or replace that shared temporary file; a deterministic two-instance regression synchronized both replacements and reproduced one `manifest_write_failed` after one writer consumed the temp path.
+
+Manifest persistence now creates a uniquely named, exclusively opened temporary file in the manifest directory, writes UTF-8, closes it, and atomically replaces the target. It best-effort removes a temporary file after write/replace failure and still exposes only the bounded `manifest_write_failed` error. This protects atomic publication from filename collisions; it does not merge stale in-memory manifests, so last successful atomic replacement remains the winner if independent instances write different states concurrently.
+
+- The concurrency regression failed against the fixed-temp implementation with one `manifest_write_failed`, then passed after the fix; a separate injected replace failure verifies the original manifest bytes remain intact and no temporary file leaks.
+- `PYTHONPATH=. python3 -m pytest tests/test_review_runner_control.py::test_concurrent_supervisors_persist_one_manifest_without_temp_collision tests/test_review_runner_control.py::test_manifest_persist_failure_removes_unique_temporary_file -q` — **2 passed**.
+- `PYTHONPATH=. python3 -m pytest tests/test_review_runner_control.py tests/test_round5_windows_process.py tests/test_supervisor_process.py -q` — **105 passed, 2 skipped, 2 subtests passed**.
+- `PYTHONPATH=. python3 -m pytest tests/test_supervisor_control.py tests/test_native_continuation.py tests/test_agy.py tests/test_acp_lifecycle_races.py -q` — **123 passed**.
+- Both persistence regressions and the Windows orphan-liveness regression are explicitly listed in the Windows/macOS CI jobs in addition to the Linux full suite.
+- Targeted Ruff, compileall, `git diff --check`, and UTF-8/no-BOM inspection — **passed**. The test uses controlled process data; no real Agent CLI or external model was run.
+
 ## Review boundary and follow-up
 
 This is a focused, evidence-based backend review, not a claim that every provider, platform adapter, workflow, or production integration was exhaustively audited. The broader service layering and message/event contracts have meaningful integration coverage; no speculative module-size-driven refactor was made. Continue deeper review by risk surface with concrete failing evidence, especially node/runner cross-platform lifecycle, workflow recovery and backup/restore interactions.
