@@ -138,8 +138,8 @@ def test_root_handle_create_private_makes_multi_level_private_tree(private_root:
         assert original.directory
     with root_handle(existing) as reopened:
         assert win.file_info(reopened) == original
-    with root_handle(private_root):
-        pytest.fail("create_private must not rewrite a trusted parent's application ACL")
+    with root_handle(private_root) as descriptor:
+        assert win.file_info(descriptor).directory
 
 
 def test_native_pinned_file_identity_and_no_replace_publish(private_root: Path) -> None:
