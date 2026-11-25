@@ -239,7 +239,8 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
              platform_memory_enabled=None,
              platform_memory_context_enabled=None,
              history_retention_days=None,
-             state_dir=None, event_log=None, task_db=None, publisher=None):
+             state_dir=None, event_log=None, task_db=None, publisher=None,
+             session_encryption_raw=None, session_encryption_key_src=None):
     """Compatibility wrapper around ``hub.bootstrap.create_app``.
 
     ``state_dir`` / ``event_log`` / ``task_db`` select the observation,
@@ -262,6 +263,12 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         raise RuntimeError(
             "AGENT_FLEET_INGEST_TOKEN or credentials/ingest-token is required"
         )
+    # The production CLI uses this wrapper. Keep key loading explicit and reuse
+    # the session AEAD configuration; never derive it from signing credentials.
+    if session_encryption_raw is None and session_encryption_key_src is None:
+        encoded_key = os.environ.get('AGENT_FLEET_SESSION_ENCRYPTION_KEY_B64')
+        if encoded_key is not None:
+            session_encryption_key_src = {'b64': encoded_key}
     session_on = _feature_on(
         session_repositories_enabled, env=_SESSION_ENABLE_ENV)
     session_search_on = _feature_on(
@@ -387,6 +394,8 @@ def make_app(ingest_token=None, require_token=True, dev_operator=None,
         frontend_dir=frontend_dir,
         session_repositories_enabled=session_on,
         session_search_enabled=session_search_on,
+        session_encryption_raw=session_encryption_raw,
+        session_encryption_key_src=session_encryption_key_src,
         supervisor_enabled=supervisor_on,
         adoption_repositories_enabled=adoption_on,
         append_user_turn_enabled=append_turn_on,

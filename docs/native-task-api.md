@@ -114,6 +114,12 @@ contracts and implementation status.
 
 ## Google Antigravity CLI (`agy`)
 
+Multiple Google personal accounts use the
+[provider-account API](native-provider-accounts.md). An AGY task may specify
+`provider_account_id`; owner, machine and readiness are checked, and the original
+account remains fixed through retry and native continuation. The field is part
+of submission idempotency. Omission preserves default-account behavior.
+
 `agy` is a registered executable family. The task/target APIs and idempotency
 contract above apply without a new HTTP surface. Example launch:
 

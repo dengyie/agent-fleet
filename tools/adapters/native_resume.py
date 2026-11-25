@@ -18,7 +18,8 @@ def continuation_options(family: str, command: list[str]) -> list[str]:
             and command[1].replace('\\', '/').endswith('/providers/agy_worker.py')):
         result = [command[1]]
         valued = {'--vendor-command', '--control-dir', '--request-timeout', '--settle-gap',
-                  '--requested-model', '--requested-mode'}
+                  '--requested-model', '--requested-mode', '--account-root',
+                  '--account-id', '--account-owner'}
         args = iter(command[2:])
         for arg in args:
             if arg in valued:

@@ -107,6 +107,7 @@ CONTROL_ACTIONS = frozenset({
     "apply_local_profile",
     "configure_model",
     "answer_native_request",
+    "manage_provider_account",
 })
 
 # Bounded outcome codes for every control action.  Every persisted
@@ -552,6 +553,49 @@ class Supervisor(HandlesMixin, NativeResumeMixin, NativeRequestMixin):
         if entry is None:
             raise UnknownSessionError(session_id)
         return entry.manifest
+
+    def stop_provider_account(self, account_id: str) -> bool:
+        """Stop only this AGY account's managed workers, including runner peers.
+
+        Account admission is fenced by the caller first. The per-account native
+        lock then proves no worker can still change credentials during logout.
+        Failed process identity/liveness checks never count as completed stop.
+        """
+        from fleet_core.provider_accounts import account_id as validate_account_id
+        from itertools import islice
+        validate_account_id(account_id)
+        paths = list(islice(self._manifest_dir.glob('*' + self.MANIFEST_SUFFIX), 10001))
+        if len(paths) > 10000:
+            return False
+        identifiers = set(self._entries)
+        for path in paths:
+            try:
+                manifest = ManagedSessionManifest.from_json(path.read_text(encoding='utf-8'))
+            except (OSError, ValueError, TypeError):
+                # An unidentifiable manifest could own the selected account.
+                return False
+            if manifest.machine_id == self._machine_id:
+                identifiers.add(manifest.session_id)
+        stopped = True
+        for session_id in identifiers:
+            try:
+                manifest = self.get(session_id)
+                if (manifest.agent != 'agy' or manifest.machine_id != self._machine_id
+                        or manifest.capability_manifest.get('provider_account_id') != account_id):
+                    continue
+                entry = self._entries[session_id]
+                with entry.control_lock:
+                    # Cancel a reserved continuation even when the old turn is idle.
+                    entry.control_epoch += 1
+                    if manifest.state in TERMINAL_STATES and entry.resume_pending is None:
+                        continue
+                    result = self._terminate_session_locked(session_id, .5, entry)
+                    if result not in {'terminated', 'terminated_forced', 'already_finished',
+                                      'no_live_process'}:
+                        stopped = False
+            except (KeyError, OSError, ValueError):
+                stopped = False
+        return stopped
 
     # ---- controls ---------------------------------------------------------- #
 

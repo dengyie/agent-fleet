@@ -4,6 +4,11 @@
 
 ## 页面与职责
 
+AGY 多 Google 账号的后端入口见[账号 API](native-provider-accounts.md)。本次未修改
+`frontend/` 产品代码；前端可据此接入账号目录、浏览器授权码提交、状态轮询及
+`POST /api/tasks` 的 `provider_account_id`。现有未指定账号的请求保持兼容，
+不能据后端已提供接口推定页面已经具备账号选择或登录管理功能。
+
 | 入口 | 行为 |
 |---|---|
 | `/assistant` | 保留主助手；空白页可切换电脑 Agent / 已有会话 |

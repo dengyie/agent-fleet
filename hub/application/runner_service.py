@@ -68,15 +68,19 @@ class RunnerService:
                 503,
             ) from None
 
-    def poll(self, machine: str, runner_id: str) -> dict:
+    def poll(self, machine: str, runner_id: str, *, provider_accounts_schema=None) -> dict:
         """Lease the next queued task for ``machine`` and announce it.
 
         ``machine`` is the authenticated machine from the HTTP adapter; the
         repository only leases tasks whose machine matches it.
         """
         runner_id = str(runner_id or machine)[:64]
+        if (provider_accounts_schema is not None
+                and (type(provider_accounts_schema) is not int or provider_accounts_schema != 1)):
+            raise ApplicationError('invalid_runner_capability', '', 400)
+        options = {'allow_provider_accounts': True} if provider_accounts_schema == 1 else {}
         task = self._task_op(
-            self.repo.lease_task, machine=machine, runner_id=runner_id)
+            self.repo.lease_task, machine=machine, runner_id=runner_id, **options)
         if task:
             if task.get("source_capture"):
                 if self.workflow_delivery is None:

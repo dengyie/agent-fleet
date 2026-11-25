@@ -133,7 +133,7 @@ _FORBIDDEN_PAYLOAD_KEYS = frozenset({
 _GENERIC_PAYLOAD_FIELDS: dict[str, tuple[str, ...]] = {
     'session_start': ('agent_family', 'adapter', 'cli_version', 'client_version',
                       'model', 'provider', 'native_started_at', 'interactive_questions', 'runtime_protocol'),
-    'session_metadata': ('agent_family', 'adapter', 'task_id', 'agent_ref',
+    'session_metadata': ('agent_family', 'adapter', 'task_id', 'agent_ref', 'provider_account_id',
                          'title', 'model', 'provider', 'client_version',
                          'native_started_at', 'interactive_questions', 'native_resume',
                          'resumed', 'desktop_bridge', 'model_takeover', 'runtime_protocol', 'fill_missing'),
@@ -545,6 +545,10 @@ def _generic_payload(payload: Mapping[str, Any], kind: str) -> dict[str, Any]:
 def _session_metadata_payload(payload: Mapping[str, Any], kind: str) -> dict[str, Any]:
     """Keep bounded, explicitly observed session metadata only."""
     clean = _generic_payload(payload, kind)
+    if 'provider_account_id' in clean:
+        value = clean['provider_account_id']
+        if not isinstance(value, str) or not re.fullmatch(r'pa_[a-f0-9]{32}', value):
+            clean.pop('provider_account_id', None)
     if 'runtime_protocol' in payload:
         clean['runtime_protocol'] = _enum_payload(payload['runtime_protocol'],
             ('acp', 'cli_json', 'native_transcript', 'desktop_bridge', 'unknown'), 'runtime_protocol')

@@ -121,7 +121,7 @@ class RunnerConfigTests(unittest.TestCase):
         cred = cred_dir / "runner-credential"
         cred.write_text("tilde-secret\n")
         path = self._write(credential_file="~/.config/agent-fleet/runner-credential")
-        with mock.patch.dict(os.environ, {"HOME": str(fake_home)}):
+        with mock.patch.dict(os.environ, {"HOME": str(fake_home), "USERPROFILE": str(fake_home)}):
             with mock.patch.object(Path, "home", return_value=fake_home):
                 cfg = runner_config.load_config(path)
         self.assertEqual(cfg.credential, "tilde-secret")
@@ -132,7 +132,7 @@ class RunnerConfigTests(unittest.TestCase):
         proj = fake_home / "work" / "proj"
         proj.mkdir(parents=True)
         path = self._write(projects={"p": {"path": "~/work/proj"}})
-        with mock.patch.dict(os.environ, {"HOME": str(fake_home)}):
+        with mock.patch.dict(os.environ, {"HOME": str(fake_home), "USERPROFILE": str(fake_home)}):
             with mock.patch.object(Path, "home", return_value=fake_home):
                 cfg = runner_config.load_config(path)
         self.assertEqual(cfg.projects["p"], proj)
@@ -143,7 +143,7 @@ class RunnerConfigTests(unittest.TestCase):
         cache = fake_home / ".cache" / "agent-fleet"
         cache.mkdir(parents=True)
         path = self._write(cache_dir="~/.cache/agent-fleet")
-        with mock.patch.dict(os.environ, {"HOME": str(fake_home)}):
+        with mock.patch.dict(os.environ, {"HOME": str(fake_home), "USERPROFILE": str(fake_home)}):
             with mock.patch.object(Path, "home", return_value=fake_home):
                 cfg = runner_config.load_config(path)
         self.assertEqual(cfg.cache_dir, cache)
@@ -1209,6 +1209,8 @@ class EndToEndRunnerTests(unittest.TestCase):
         app = hub.make_app(
             ingest_token="it", dev_operator="op@example.com",
             runner_credentials={"mac-local": "rs"},
+            session_repositories_enabled=False, supervisor_enabled=False,
+            adoption_repositories_enabled=False, platform_enabled=False,
             project_whitelist={"mac-local": ["proj"]})
         server = make_server("127.0.0.1", 0, app)
         port = server.server_address[1]

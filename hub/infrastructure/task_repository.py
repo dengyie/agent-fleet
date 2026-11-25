@@ -6,6 +6,7 @@ result persistence semantics. It does not depend on Flask or module globals.
 
 
 import contextlib
+import hashlib
 import json
 import logging
 import math
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Any
 from hub.domain.task import (
     LEASE_HOLDING_STATES, TASK_STATES, DomainError, TaskStopObservation, can_cancel, can_continue, can_pause, can_retry,
-    holds_lease, validate_task_replay, TaskSubmissionConflict,
+    holds_lease, validate_task_replay, validate_provider_account_binding, TaskSubmissionConflict,
 )
 from hub.infrastructure.sqlite import connect as sqlite_connect
 from fleet_core.task_result import (
@@ -229,6 +230,9 @@ class SqliteTaskRepository:
         ``paused`` so pause/continue can persist. New result columns are
         nullable; column inspection runs under the same writer transaction.
         """
+        # Inspect the additive account column before older state-check table
+        # replacement can hide a malformed declaration or lose bindings.
+        self._validate_account_schema(conn, allow_missing=True)
         cols = {
             row[1] for row in conn.execute("PRAGMA table_info(results)").fetchall()
         }
@@ -250,6 +254,9 @@ class SqliteTaskRepository:
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
         ).fetchone()
         if sql and sql[0] and "'paused'" not in sql[0]:
+            account_column = ("provider_account_id" if any(
+                row[1] == "provider_account_id" for row in conn.execute("PRAGMA table_info(tasks)"))
+                else "NULL")
             conn.execute(
                 "CREATE TABLE tasks_v4 ("
                 " task_id TEXT PRIMARY KEY,"
@@ -262,19 +269,24 @@ class SqliteTaskRepository:
                 " state TEXT NOT NULL CHECK(state IN " + _TASK_STATES_SQL + "),"
                 " attempt_id TEXT NOT NULL,"
                 " created_at TEXT NOT NULL,"
-                " expires_at TEXT NOT NULL)"
+                " expires_at TEXT NOT NULL,"
+                " provider_account_id TEXT)"
             )
             conn.execute(
                 "INSERT INTO tasks_v4 (task_id, client_token, machine, agent_type,"
                 " project, instruction, requested_by, state, attempt_id,"
-                " created_at, expires_at) SELECT task_id, client_token, machine,"
+                " created_at, expires_at, provider_account_id) SELECT task_id, client_token, machine,"
                 " agent_type, project, instruction, requested_by, state,"
-                " attempt_id, created_at, expires_at FROM tasks"
+                " attempt_id, created_at, expires_at, "
+                + account_column
+                + " FROM tasks"
             )
             conn.execute("DROP TABLE tasks")
             conn.execute("ALTER TABLE tasks_v4 RENAME TO tasks")
             if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
                 raise sqlite3.IntegrityError("task schema migration violates foreign keys")
+
+        self._migrate_account_schema(conn)
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_attempt ON tasks(attempt_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_live_lease ON tasks(state,attempt_id) WHERE state IN ('leased','running')")
@@ -291,6 +303,42 @@ class SqliteTaskRepository:
             "CREATE INDEX IF NOT EXISTS idx_audit_task ON audit(task_id, ts)",
         ):
             conn.execute(ddl)
+
+    @staticmethod
+    def _validate_account_schema(conn, *, allow_missing=False):
+        columns = {row[1]: row for row in conn.execute("PRAGMA table_info(tasks)")}
+        column = columns.get("provider_account_id")
+        stored = None
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_repository_meta'").fetchone():
+            stored = conn.execute("SELECT value FROM task_repository_meta WHERE key='provider_account_schema'").fetchone()
+        if stored is not None and stored[0] != "1":
+            raise sqlite3.DatabaseError("unsupported task account schema")
+        if column is None:
+            if allow_missing and stored is None:
+                return
+            raise sqlite3.DatabaseError("missing task account binding")
+        if (column[2].upper() != "TEXT" or column[3] != 0 or column[4] is not None
+                or column[5] != 0):
+            raise sqlite3.DatabaseError("invalid task account binding")
+        for row in conn.execute("SELECT agent_type,provider_account_id FROM tasks WHERE provider_account_id IS NOT NULL"):
+            try:
+                validate_provider_account_binding(row[0], row[1])
+            except DomainError:
+                raise sqlite3.DatabaseError("invalid stored task account binding") from None
+
+    @classmethod
+    def _migrate_account_schema(cls, conn):
+        conn.execute("CREATE TABLE IF NOT EXISTS task_repository_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+        stored = conn.execute("SELECT value FROM task_repository_meta WHERE key='provider_account_schema'").fetchone()
+        if stored is not None and stored[0] != "1":
+            raise sqlite3.DatabaseError("unsupported task account schema")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+        if "provider_account_id" not in columns:
+            if stored is not None:
+                raise sqlite3.DatabaseError("missing task account schema")
+            conn.execute("ALTER TABLE tasks ADD COLUMN provider_account_id TEXT")
+        cls._validate_account_schema(conn)
+        conn.execute("INSERT OR IGNORE INTO task_repository_meta(key,value) VALUES('provider_account_schema','1')")
 
     @staticmethod
     def _find_task_submission(conn, request, *, handoff=None, legacy_origin=None):
@@ -330,7 +378,7 @@ class SqliteTaskRepository:
 
     def find_task_submission(self, *, machine, agent_type, project, instruction,
                              requested_by, client_token, confirm=False,
-                             handoff=None, legacy_origin=None):
+                             handoff=None, legacy_origin=None, provider_account_id=None):
         """Read-only recovery before new-task admission; never queues an attempt.
 
         Read all immutable fields, original gate and internal origin bindings
@@ -339,7 +387,8 @@ class SqliteTaskRepository:
         """
         request = {"machine": machine, "agent_type": agent_type, "project": project,
                    "instruction": instruction[:2000], "requested_by": requested_by,
-                   "client_token": client_token, "confirm": confirm}
+                   "client_token": client_token, "confirm": confirm,
+                   "provider_account_id": validate_provider_account_binding(agent_type, provider_account_id)}
         with contextlib.closing(self._connect()) as conn:
             conn.execute("BEGIN")
             return self._find_task_submission(
@@ -347,12 +396,13 @@ class SqliteTaskRepository:
 
     def create_task(self, *, machine, agent_type, project, instruction, requested_by,
                     client_token=None, ttl_s=TASK_TTL_S, now=None, confirm=False,
-                    handoff=None, legacy_origin=None):
+                    handoff=None, legacy_origin=None, provider_account_id=None):
         """创建任务；相同 token 和完整请求幂等返回已有任务，否则拒绝。
 
         超长 instruction 服务端截断至 2000 字符后再 INSERT（不依赖 SQLite CHECK
         抛错），符合全局约束「超限服务端截断」。
         """
+        provider_account_id = validate_provider_account_binding(agent_type, provider_account_id)
         instruction = instruction[:2000]
         now = time.time() if now is None else now
         task_id = "t-" + uuid.uuid4().hex[:12]
@@ -363,16 +413,17 @@ class SqliteTaskRepository:
                     "machine": machine, "agent_type": agent_type, "project": project,
                     "instruction": instruction, "requested_by": requested_by,
                     "client_token": client_token, "confirm": confirm,
+                    "provider_account_id": provider_account_id,
                 }, handoff=handoff, legacy_origin=legacy_origin)
                 if existing is not None:
                     return existing, False
                 attempt_id = uuid.uuid4().hex
                 conn.execute(
                     "INSERT INTO tasks (task_id, client_token, machine, agent_type, project,"
-                    " instruction, requested_by, state, attempt_id, created_at, expires_at)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    " instruction, requested_by, state, attempt_id, created_at, expires_at,provider_account_id)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (task_id, client_token, machine, agent_type, project, instruction,
-                     requested_by, "queued", attempt_id, _iso(now), _iso(now + ttl_s)))
+                     requested_by, "queued", attempt_id, _iso(now), _iso(now + ttl_s),provider_account_id))
                 if handoff is not None:
                     conn.execute(
                         "INSERT INTO handoff_receipts (client_token, request_digest, source_session_id,"
@@ -490,7 +541,8 @@ class SqliteTaskRepository:
         finally:
             conn.close()
 
-    def lease_task(self, *, machine, runner_id, lease_ttl_s=LEASE_TTL_S, now=None):
+    def lease_task(self, *, machine, runner_id, lease_ttl_s=LEASE_TTL_S, now=None,
+                   allow_provider_accounts=False):
         """原子领取：BEGIN IMMEDIATE 内 选任务→改状态→作废旧 lease→写新 lease。"""
         now = time.time() if now is None else now
         now_iso = _iso(now)
@@ -505,6 +557,7 @@ class SqliteTaskRepository:
                     # idx_tasks_machine_state_created (machine, state) in created_at order.
                     " WHERE t.machine=? AND t.state='queued' AND +t.expires_at>?"
                     " AND (g.task_id IS NULL OR g.state='confirmed')"
+                    + ("" if allow_provider_accounts is True else " AND t.provider_account_id IS NULL") +
                     " ORDER BY t.created_at LIMIT 1", (machine, now_iso)).fetchone()
                 if row is None:
                     return None
@@ -521,7 +574,7 @@ class SqliteTaskRepository:
                     (attempt_id, row["task_id"], runner_id, nonce, now_iso, expires))
                 _audit(conn, runner_id, "lease_task", row["task_id"],
                        {"attempt_id": attempt_id}, now)
-            return {
+            leased = {
                 "task_id": row["task_id"], "machine": row["machine"],
                 "agent_type": row["agent_type"], "project": row["project"],
                 "instruction": row["instruction"], "attempt_id": attempt_id,
@@ -529,6 +582,10 @@ class SqliteTaskRepository:
                 "source_capture": row["source_repository_id"] is not None,
                 "source_repository_id": row["source_repository_id"],
             }
+            if row["provider_account_id"] is not None:
+                leased["provider_account_id"] = row["provider_account_id"]
+                leased["provider_account_owner"] = hashlib.sha256(row["requested_by"].encode("utf-8")).hexdigest()
+            return leased
         finally:
             conn.close()
 

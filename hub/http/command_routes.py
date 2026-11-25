@@ -61,7 +61,9 @@ def poll():
     if err:
         return err
     try:
-        result = _commands().poll(g.runner_machine, data.get("runner_id"))
+        options = ({'provider_accounts_schema': data['provider_accounts_schema']}
+                   if 'provider_accounts_schema' in data else {})
+        result = _commands().poll(g.runner_machine, data.get("runner_id"), **options)
     except ApplicationError as exc:
         return _error(exc)
     return jsonify(result)

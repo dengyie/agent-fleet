@@ -152,9 +152,16 @@ jobs:
           tests/test_native_metadata_recovery.py
           tests/test_agy_acp.py tests/test_acp_transport_bounds.py tests/test_acp_lifecycle_races.py
           tests/test_acp_interactions.py tests/test_agent_evidence.py
+          tests/test_agy_accounts.py tests/test_provider_accounts.py
+          tests/test_provider_account_binding.py tests/test_provider_account_control.py
+          tests/test_provider_account_e2e.py
           tests/test_continuation_results.py
           --basetemp="$env:RUNNER_TEMP/fleet-tests"
           --junitxml=windows-results.xml
+      - name: Verify AGY credential DACL inheritance
+        env:
+          PYTHONPATH: .
+        run: python tests/fixtures/providers/windows_agy_accounts_probe.py
       - name: Preserve Windows test evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -201,6 +208,9 @@ jobs:
           tests/test_native_metadata_recovery.py
           tests/test_agy_acp.py tests/test_acp_transport_bounds.py tests/test_acp_lifecycle_races.py
           tests/test_acp_interactions.py tests/test_agent_evidence.py
+          tests/test_agy_accounts.py tests/test_provider_accounts.py
+          tests/test_provider_account_binding.py tests/test_provider_account_control.py
+          tests/test_provider_account_e2e.py
           tests/test_continuation_results.py -q --junitxml=macos-agent-results.xml
       - name: Preserve macOS Agent test evidence
         if: always()

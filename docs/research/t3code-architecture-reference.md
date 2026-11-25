@@ -16,6 +16,15 @@ agent-fleet 原生电脑 Agent 工作区做具体对照，记录值得复用的�
 
 ## 两个产品的基本拓扑
 
+2026-11-25 多账号补充固定到上游
+[`b042e4ee757947ca1cd47bb217c94296f9c695cf`](https://github.com/pingdotgg/t3code/commit/b042e4ee757947ca1cd47bb217c94296f9c695cf)：
+核对 Antigravity provider guide、认证实现与 driver，确认多 provider instance、
+SHA256 profile、`GEMINI_HOME`、SSH 文件存储 gate、禁自动更新、清理 ambient
+Google 环境、原生 `--login`/ACP logout、原 callback state 绑定。Fleet 的
+[账号 API](../native-provider-accounts.md)将其映射到 operator 所有权、签名出站队列
+和节点私有 profile；没有搬入上游 RPC/前端框架、其他认证方式或自动账号轮换。
+只下载小文本源码，未克隆大仓库或运行上游软件。
+
 | 关注点 | T3 Code | agent-fleet | 结论 |
 |---|---|---|---|
 | 执行归属 | Provider 进程、工作区、Git、terminal、checkpoint 在拥有工作区的 T3 server 环境。Web、Desktop、Mobile 是连到该环境的客户端。 | Hub 负责授权、目录、排队与持久回执；VM/电脑节点主动 poll 已签名命令，启动本机 Agent 并把脱敏的事件与结果回传。浏览器只用公开 HTTP。 | 两边都坚持执行环境拥有文件和凭据；Fleet 由节点出站拉取命令、回传数据的拓扑是安全边界，不能替换成 Hub 直接 SSH/远程文件访问。 |

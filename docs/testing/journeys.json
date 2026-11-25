@@ -3252,6 +3252,20 @@
         "tests/test_workspace_node_setup.py::test_node_serialization_exact_byte_boundary",
         "tests/test_workspace_node_setup.py::test_node_config_size_rejection_creates_no_partial_credentials"
       ]
+    },
+    {
+      "id": "AGY-ACCOUNTS-01",
+      "title": "AGY 多 Google 账号与任务隔离",
+      "layer": "integration",
+      "acceptance": "签名远程登录可恢复；任务固定原账号；停用和原生退出只影响所选账号并保留历史",
+      "boundary": "real HTTP/SQLite/signed queue and independent local OAuth/ACP peer; no Google/vendor/model",
+      "tests": [
+        "tests/test_provider_account_e2e.py::test_two_accounts_signed_login_bound_tasks_disable_and_native_logout",
+        "tests/test_provider_account_e2e.py::test_old_runner_cannot_claim_bound_task_after_observation_or_client_rollback",
+        "tests/test_provider_account_control.py::test_actual_workers_hold_account_leases_and_observe_only_their_generation",
+        "tests/test_provider_accounts.py::test_concurrent_same_token_creates_one_account_operation_command",
+        "tests/test_provider_accounts.py::test_revoked_operator_cannot_resolve_queued_response_or_confirm_ready"
+      ]
     }
   ],
   "external_checks": [

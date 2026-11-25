@@ -76,6 +76,8 @@ def collect_all(machine, agent_types=None):
                 continue
             state = connector.collect(ctx)
             state = state or {"installed": False, "note": "no local state"}
+            if agent_type == 'agy' and state.get('installed') is True:
+                state = {**state, 'provider_accounts': {'schema_version': 1}}
             out[agent_type] = sanitize_agent_state(agent_type, state)
         except Exception as exc:
             out[agent_type] = {"error": type(exc).__name__}

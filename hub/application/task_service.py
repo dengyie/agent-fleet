@@ -97,6 +97,7 @@ class TaskService:
     #: behaviour byte-identical to the pre-Task-10 surface; wired additively in
     #: bootstrap only when supervisor/session control is enabled.
     cancel_router = None
+    provider_accounts = None
 
     def __init__(self, task_repo, observation_repo, event_publisher,
                  host_policy: TaskHostPolicy, session_repo=None) -> None:
@@ -198,10 +199,25 @@ class TaskService:
         if not self.hosts.project_allowed(machine, project):
             raise ApplicationError(
                 "project_not_allowed", f"{machine} 未注册项目 {project}")
+        self._assert_provider_account(submission, actor)
         task, created = self._task_op(self.task_repo.create_task, **submission)
         if created:
             self._emit("task_queued", task["machine"], task["task_id"], "queued")
         return {"ok": True, "created": created, "task": self._public_task(task)}
+
+    def _assert_provider_account(self, task, actor):
+        if not task.get("provider_account_id"):
+            return
+        if task.get("requested_by") != actor:
+            raise ApplicationError("forbidden", "", 403)
+        if self.provider_accounts is None:
+            raise ApplicationError("provider_accounts_unavailable", "", 409)
+        self.provider_accounts.assert_ready(task["provider_account_id"], task["machine"], actor)
+
+    def _assert_existing_provider_account(self, task_id, actor):
+        task = self._task_op(self.task_repo.get_task, task_id)
+        if task is not None:
+            self._assert_provider_account(task, actor)
 
     # -- read use cases ------------------------------------------------------
 
@@ -338,6 +354,7 @@ class TaskService:
 
     def retry(self, task_id: str, actor: str) -> dict:
         """Requeue a terminal task; emit ``task_queued``."""
+        self._assert_existing_provider_account(task_id, actor)
         row, changed = self._task_op(self.task_repo.retry_task, task_id, actor)
         if row is None:
             raise ApplicationError("not_found", "任务不存在", 404)
@@ -356,6 +373,7 @@ class TaskService:
         return {"ok": True, "changed": changed, "task": self._public_task(row)}
 
     def continue_task(self, task_id: str, actor: str) -> dict:
+        self._assert_existing_provider_account(task_id, actor)
         row, changed = self._task_op(self.task_repo.continue_task, task_id, actor)
         if row is None:
             raise ApplicationError("not_found", "任务不存在", 404)
@@ -365,6 +383,7 @@ class TaskService:
         return {"ok": True, "changed": True, "task": self._public_task(row)}
 
     def confirm(self, task_id: str, actor: str) -> dict:
+        self._assert_existing_provider_account(task_id, actor)
         row, changed = self._task_op(self.task_repo.confirm_task, task_id, actor)
         if row is None:
             raise ApplicationError("not_found", "任务不存在", 404)

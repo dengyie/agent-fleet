@@ -32,6 +32,25 @@ def register_fleet_extension(app, config, repositories, core, platform, sessions
     repos = fleet["repositories"]
     services = fleet["services"]
     p = platform
+    if config.supervisor_enabled:
+        from fleet_core.session.crypto import load_encryption_key
+        from hub.application.provider_account_service import ProviderAccountService
+        from hub.infrastructure.provider_account_repository import (
+            ProviderAccountRepository, ProviderAccountStoreError)
+        account_repo = ProviderAccountRepository(
+            config.supervisor_command_db or config.root / 'var' / 'supervisor' / 'commands.db',
+            key=load_encryption_key(config))
+        try:
+            account_repo.init()
+        except ProviderAccountStoreError:
+            # Optional damaged/future schemas fail closed at this API boundary;
+            # existing observation, tasks and session ingestion remain available.
+            pass
+        else:
+            services['provider_accounts'] = ProviderAccountService(
+                account_repo, control.supervisor_service, core.observation_repository)
+            repos['provider_accounts'] = account_repo
+            core.task_service.provider_accounts = services['provider_accounts']
     from hub.application.runtime_settings import RuntimeSettings
     services["runtime_settings"] = RuntimeSettings(config, app.config)
     if p.platform_repository is not None:

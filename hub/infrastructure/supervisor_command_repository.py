@@ -525,8 +525,8 @@ class SupervisorCommandRepository:
         finally:
             conn.close()
 
-    def nonce_exists(self, nonce: str) -> bool:
-        conn = self._connect()
+    def nonce_exists(self, nonce: str, *, connection=None) -> bool:
+        conn = connection if connection is not None else self._connect()
         try:
             try:
                 return conn.execute(
@@ -535,10 +535,11 @@ class SupervisorCommandRepository:
             except (sqlite3.Error, OSError) as exc:
                 raise SupervisorCommandRepositoryError("command_unavailable") from exc
         finally:
-            conn.close()
+            if connection is None:
+                conn.close()
 
-    def target_owner(self, session_id: str, attempt_id: str | None) -> dict[str, Any] | None:
-        conn = self._connect()
+    def target_owner(self, session_id: str, attempt_id: str | None, *, connection=None) -> dict[str, Any] | None:
+        conn = connection if connection is not None else self._connect()
         try:
             try:
                 row = conn.execute(
@@ -551,18 +552,37 @@ class SupervisorCommandRepository:
             except (sqlite3.Error, OSError) as exc:
                 raise SupervisorCommandRepositoryError("command_unavailable") from exc
         finally:
-            conn.close()
+            if connection is None:
+                conn.close()
 
     def insert(self, *, command_id: str, machine: str, session_id: str,
                attempt_id: str | None, action: str, nonce: str,
                idempotency_key: str | None, wire: Mapping[str, Any],
                issued_s: float, expires_s: float,
                audit_row: Mapping[str, Any] | None = None,
-               message_binding: Mapping[str, str] | None = None) -> dict[str, Any]:
-        conn = self._connect()
+               message_binding: Mapping[str, str] | None = None,
+               connection: sqlite3.Connection | None = None) -> dict[str, Any]:
+        # Provider management shares its operation and command commit. A foreign
+        # or autocommit connection can never smuggle a partially persisted job.
+        if connection is not None:
+            database = connection.execute('PRAGMA database_list').fetchone()[2]
+            if not connection.in_transaction or Path(database).resolve() != self.db_path.resolve():
+                raise SupervisorCommandRepositoryError('command_transaction_required')
+        conn = connection if connection is not None else self._connect()
+        def commit():
+            if connection is None:
+                conn.commit()
+            else:
+                conn.execute('RELEASE provider_account_command')
+        def rollback():
+            if connection is None:
+                conn.rollback()
+            else:
+                conn.execute('ROLLBACK TO provider_account_command')
+                conn.execute('RELEASE provider_account_command')
         binding = None
         try:
-            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("BEGIN IMMEDIATE" if connection is None else "SAVEPOINT provider_account_command")
             if message_binding is not None:
                 binding = self._validate_message_binding(message_binding, action, idempotency_key)
                 existing_operation = conn.execute(
@@ -572,9 +592,9 @@ class SupervisorCommandRepository:
                     (binding["token_digest"],)).fetchone()
                 if existing_operation is not None:
                     if self._same_message_binding(existing_operation, binding):
-                        conn.commit()
+                        commit()
                         return self._decode(existing_operation)  # type: ignore[return-value]
-                    conn.rollback()
+                    rollback()
                     raise SupervisorCommandRepositoryError("idempotency_conflict")
             if idempotency_key:
                 existing = conn.execute(
@@ -582,9 +602,9 @@ class SupervisorCommandRepository:
                     (idempotency_key,)).fetchone()
                 if existing is not None:
                     if message_binding is not None:
-                        conn.rollback()
+                        rollback()
                         raise SupervisorCommandRepositoryError("idempotency_conflict")
-                    conn.commit()
+                    commit()
                     return self._decode(existing)  # type: ignore[return-value]
             target = conn.execute(
                 "SELECT action FROM supervisor_commands WHERE session_id=? AND "
@@ -594,7 +614,7 @@ class SupervisorCommandRepository:
             ).fetchone()
             if (target and target["action"] in ("terminate_session", "quarantine_session")
                     and action in ("resume_session", "append_user_turn", "configure_model", "answer_native_request")):
-                conn.rollback()
+                rollback()
                 raise SupervisorCommandRepositoryError("resume_superseded")
             superseded_audit_rows = []
             if action in ("terminate_session", "quarantine_session"):
@@ -642,10 +662,10 @@ class SupervisorCommandRepository:
                 ]
                 audit_rows.append(dict(audit_row))
                 self._append_audit_rows(conn, audit_rows)
-            conn.commit()
+            commit()
             return self._decode(row)  # type: ignore[return-value]
         except sqlite3.IntegrityError as exc:
-            conn.rollback()
+            rollback()
             if message_binding is not None:
                 existing_operation = conn.execute(
                     "SELECT o.operator_id,o.session_id,o.operation,o.content_digest,c.* "
@@ -670,10 +690,11 @@ class SupervisorCommandRepository:
                     return self._decode(existing)  # type: ignore[return-value]
             raise SupervisorCommandRepositoryError("command_conflict") from exc
         except (sqlite3.Error, OSError) as exc:
-            conn.rollback()
+            rollback()
             raise SupervisorCommandRepositoryError("command_unavailable") from exc
         finally:
-            conn.close()
+            if connection is None:
+                conn.close()
 
     @staticmethod
     def _validate_message_binding(binding, action, idempotency_key):

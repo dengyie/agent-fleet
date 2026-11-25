@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import json
 import os
 import signal
@@ -34,6 +35,9 @@ def main(argv=None):
     parser.add_argument('--settle-gap', type=float, default=.5)
     parser.add_argument('--requested-model')
     parser.add_argument('--requested-mode')
+    parser.add_argument('--account-root')
+    parser.add_argument('--account-id')
+    parser.add_argument('--account-owner')
     args = parser.parse_args(argv)
     try: command = json.loads(args.vendor_command)
     except (ValueError, RecursionError): return 64
@@ -50,14 +54,28 @@ def main(argv=None):
             sys.stdout.flush()
     root, status = None, 125
     process = None
+    accounts = None
+    lease = None
+    owned = ExitStack()
     try:
+        environment = dict(os.environ)
+        if any((args.account_root, args.account_id, args.account_owner)):
+            if not all((args.account_root, args.account_id, args.account_owner)):
+                raise ValueError('invalid_provider_account')
+            from tools.providers.agy_accounts import AgyAccounts
+            accounts = AgyAccounts(Path(args.account_root))
+            lease = owned.enter_context(accounts.runtime(args.account_id, owner_digest=args.account_owner))
+            environment = accounts.environment(args.account_id, environment)
+            if lease.cancelled():
+                raise ValueError('provider_account_unavailable')
         if args.control_dir:
             root = AcpMailbox.begin(args.control_dir, session_id=Path(args.control_dir).name)
-        process = popen_local(command, cwd=os.getcwd(), env=dict(os.environ),
+        process = popen_local(command, cwd=os.getcwd(), env=environment,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             bufsize=0, close_fds=True)
         runtime = AgyRuntime(process, cwd=os.getcwd(), emit=emit,
-            control_dir=root, should_abort=lambda: stop.is_set() or bool(root and AcpMailbox.cancelled(root)),
+            control_dir=root, should_abort=lambda: stop.is_set()
+                or bool(root and AcpMailbox.cancelled(root)) or bool(lease and lease.cancelled()),
             request_timeout=max(.05, min(90, args.request_timeout)),
             settle_gap=max(.05, min(2, args.settle_gap)))
         status = runtime.run(args.instruction, args.resume_session,
@@ -90,6 +108,7 @@ def main(argv=None):
             except (OSError, ValueError, subprocess.TimeoutExpired):
                 emit({'type': 'fleet_acp_error', 'code': 'provider_cleanup_failed'})
                 status = 125
+        owned.close()
     return status
 
 
