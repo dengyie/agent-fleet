@@ -22,7 +22,7 @@ OWNER = hashlib.sha256(b'operator@example.test').hexdigest()
 
 
 def test_profiles_never_share_or_inherit_google_credentials(tmp_path):
-    accounts = AgyAccounts(tmp_path)
+    accounts = AgyAccounts(tmp_path / 'accounts')
     source = {'HOME': str(tmp_path), 'PATH': '/bin', 'GEMINI_HOME': '/ambient',
               'GOOGLE_API_KEY': 'ambient', 'google_api_key': 'ambient',
               'GOOGLE_APPLICATION_CREDENTIALS': '/private.json', 'GEMINI_API_KEY': 'ambient',
@@ -61,7 +61,7 @@ def test_state_publish_retries_transient_windows_read_sharing(tmp_path, monkeypa
 
 
 def test_runtime_requires_ready_bound_owner_and_generation_fences(tmp_path):
-    accounts = AgyAccounts(tmp_path)
+    accounts = AgyAccounts(tmp_path / 'accounts')
     with pytest.raises(ValueError, match='provider_account_unavailable'):
         with accounts.runtime(A):
             pass
@@ -87,7 +87,7 @@ def test_runtime_requires_ready_bound_owner_and_generation_fences(tmp_path):
 
 
 def test_account_mutation_is_isolated_and_disable_preserves_profile(tmp_path):
-    accounts = AgyAccounts(tmp_path)
+    accounts = AgyAccounts(tmp_path / 'accounts')
     for identifier in (A, B):
         accounts.apply(identifier, 'create', 1, owner_digest=OWNER)
         accounts.apply(identifier, 'login', 2, owner_digest=OWNER)
@@ -104,7 +104,7 @@ def test_account_mutation_is_isolated_and_disable_preserves_profile(tmp_path):
 
 
 def test_invalid_and_corrupt_state_fail_closed(tmp_path):
-    accounts = AgyAccounts(tmp_path)
+    accounts = AgyAccounts(tmp_path / 'accounts')
     for value in ('../escape', '', 'pa_' + 'A' * 32, None):
         with pytest.raises(ValueError):
             accounts.profile(value)

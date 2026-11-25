@@ -1,6 +1,7 @@
 """Explicit Windows CI evidence for private AGY profile credential inheritance."""
 from pathlib import Path
 import ctypes as C
+import subprocess
 import sys
 import tempfile
 
@@ -14,6 +15,16 @@ def main():
     if sys.platform != 'win32':
         raise SystemExit('This probe requires real Windows NTFS')
     with tempfile.TemporaryDirectory(prefix='fleet-agy-private-') as folder:
+        unsafe = Path(folder) / 'broad-existing'
+        unsafe.mkdir()
+        subprocess.run(['icacls', str(unsafe), '/grant', '*S-1-1-0:(OI)(CI)M'],
+                       check=True, capture_output=True)
+        try:
+            AgyAccounts(unsafe)
+        except ValueError as exc:
+            assert str(exc) == 'provider_account_store'
+        else:
+            raise AssertionError('Broad existing credential root was accepted')
         accounts = AgyAccounts(Path(folder)/'accounts')
         profile = accounts.profile('pa_'+'a'*32)
         token = profile/'fixture-token.json'
@@ -46,7 +57,7 @@ def main():
                 native.kernel.LocalFree(descriptor)
         finally:
             native.close(handle)
-    print('AGY inherited private NTFS DACL: passed')
+    print('AGY broad root rejection and inherited private NTFS DACL: passed')
 
 
 if __name__ == '__main__':
