@@ -25,7 +25,17 @@ def _atomic(path, value):
         with os.fdopen(fd, 'wb') as stream:
             stream.write(raw)
             stream.flush(); os.fsync(stream.fileno())
-        os.replace(tmp, path)
+        for attempt in range(6):
+            try:
+                os.replace(tmp, path)
+                break
+            except OSError as exc:
+                # Concurrent Windows readers can briefly deny delete access
+                # to the destination. Keep the staged file and retry only
+                # those transient sharing/permission errors.
+                if getattr(exc, 'winerror', None) not in {5, 32, 33} or attempt == 5:
+                    raise
+                time.sleep(0.01 * (attempt + 1))
     finally:
         try: tmp.unlink()
         except OSError: pass

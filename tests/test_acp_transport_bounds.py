@@ -1,4 +1,5 @@
 """Private ACP framing/mailbox limits; no vendor executable or model."""
+import errno
 import io
 import json
 import os
@@ -8,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tools.providers import acp_mailbox as acp_mailbox_mod
 from tools.providers.acp_mailbox import AcpMailbox, _atomic
 from tools.providers.acp_transport import AcpTransport, AcpTransportError
 
@@ -61,6 +63,86 @@ def test_mailbox_ack_is_bound_to_dispatch_and_incarnation(tmp_path):
     writer.join(3)
     assert result == ['answered']
     assert AcpMailbox.wait(root, 'current', timeout=.01) is None
+
+
+@pytest.mark.parametrize('winerror', [5, 32, 33])
+def test_mailbox_atomic_replace_recovers_windows_contention(
+        tmp_path, monkeypatch, winerror):
+    target = tmp_path / 'pending.json'
+    target.write_text('{"state":"previous"}', encoding='utf-8')
+    original_replace = os.replace
+    attempts = []
+    pauses = []
+
+    def contended_replace(source, destination):
+        attempts.append(os.fspath(source))
+        if len(attempts) < 3:
+            error = PermissionError(errno.EACCES, 'fixture file contention')
+            error.winerror = winerror
+            raise error
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(acp_mailbox_mod.os, 'replace', contended_replace)
+    monkeypatch.setattr(acp_mailbox_mod.time, 'sleep', pauses.append)
+    _atomic(target, {'state': 'delivered'})
+
+    assert json.loads(target.read_text(encoding='utf-8')) == {'state': 'delivered'}
+    assert len(attempts) == 3
+    assert len(set(attempts)) == 1
+    assert len(pauses) == 2
+    assert 0 < sum(pauses) <= 0.25
+    assert list(tmp_path.glob('.pending.json.*.tmp')) == []
+
+
+@pytest.mark.parametrize('winerror', [5, 32, 33])
+def test_mailbox_atomic_replace_bounds_windows_contention(
+        tmp_path, monkeypatch, winerror):
+    target = tmp_path / 'pending.json'
+    target.write_text('{"state":"previous"}', encoding='utf-8')
+    previous = target.read_bytes()
+    attempts = []
+    pauses = []
+
+    def denied_replace(source, destination):
+        attempts.append(os.fspath(source))
+        error = PermissionError(errno.EACCES, 'fixture file contention')
+        error.winerror = winerror
+        raise error
+
+    monkeypatch.setattr(acp_mailbox_mod.os, 'replace', denied_replace)
+    monkeypatch.setattr(acp_mailbox_mod.time, 'sleep', pauses.append)
+    with pytest.raises(PermissionError):
+        _atomic(target, {'state': 'delivered'})
+
+    assert 2 <= len(attempts) <= 6
+    assert len(set(attempts)) == 1
+    assert len(pauses) == len(attempts) - 1
+    assert 0 < sum(pauses) <= 0.25
+    assert target.read_bytes() == previous
+    assert list(tmp_path.glob('.pending.json.*.tmp')) == []
+
+
+def test_mailbox_atomic_replace_does_not_retry_other_storage_errors(
+        tmp_path, monkeypatch):
+    target = tmp_path / 'pending.json'
+    target.write_bytes(b'{"state":"previous"}')
+    previous = target.read_bytes()
+    attempts = []
+    pauses = []
+
+    def fail_replace(source, destination):
+        attempts.append(os.fspath(source))
+        raise OSError(errno.ENOSPC, 'fixture storage error')
+
+    monkeypatch.setattr(acp_mailbox_mod.os, 'replace', fail_replace)
+    monkeypatch.setattr(acp_mailbox_mod.time, 'sleep', pauses.append)
+    with pytest.raises(OSError):
+        _atomic(target, {'state': 'delivered'})
+
+    assert len(attempts) == 1
+    assert pauses == []
+    assert target.read_bytes() == previous
+    assert list(tmp_path.glob('.pending.json.*.tmp')) == []
 
 
 def test_mailbox_parallel_publish_has_one_current_question(tmp_path):
