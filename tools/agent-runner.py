@@ -797,7 +797,10 @@ def poll_once(cfg):
     由 main() 转为指数退避——这是全局 5s→60s 退避约束的实现点。
     """
     flush_pending(cfg)
-    status, data = post_json(cfg, "/api/commands/poll", {"runner_id": cfg.runner_id})
+    request = {"runner_id": cfg.runner_id}
+    if getattr(cfg, 'managed_enabled', False):
+        request['provider_accounts_schema'] = 1
+    status, data = post_json(cfg, "/api/commands/poll", request)
     if status == 0:
         raise RunnerPollError(str(data.get("error", "网络不可达")))
     if status != 200 or not data.get("ok"):

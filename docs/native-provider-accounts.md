@@ -22,6 +22,14 @@ explicit account selection never falls back to the default login. Upgrade the
 signed probe, runner and control client together. Hub deployment does not
 upgrade nodes. Capability advertisement is not Google authorization.
 
+At delivery, account-capable managed runners also send
+`{"runner_id":"...","provider_accounts_schema":1}` to the existing private
+`POST /api/commands/poll`. The SQLite lease transaction excludes bound tasks
+unless this capability is declared in that request. Legacy/unmanaged runners
+can still lease unbound work without consuming, blocking or changing bound
+tasks. This second check protects stale observations and client rollback.
+Unsupported capability values return bounded 400 `invalid_runner_capability`.
+
 ## Directory and creation
 
 `GET /api/machines/<machine>/provider-accounts` returns

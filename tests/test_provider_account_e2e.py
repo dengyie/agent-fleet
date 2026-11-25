@@ -165,3 +165,30 @@ def test_disable_before_create_delivery_and_retry_after_missing_profile_can_reco
     assert result['state'] == 'waiting', result
     submit(chain, identifier, 'cancel_login', 'cancel-late-node', login_command_id=flow['command_id'])
     assert account(chain, identifier)['state'] == 'signed_out'
+
+
+def test_old_runner_cannot_claim_bound_task_after_observation_or_client_rollback(chain):
+    identifier = login(chain, 'poll-binding')
+    request = {'machine': 'fixture', 'agent_type': 'agy', 'project': 'fleet',
+        'instruction': 'Fixture only', 'client_token': 'bound-poll',
+        'provider_account_id': identifier}
+    bound = chain[0].post('/api/tasks', json=request)
+    assert bound.status_code == 201, bound.json
+    headers = {'X-Runner-Credential': 'fixture:runner'}
+    old = chain[0].post('/api/commands/poll', json={'runner_id': 'old-runner'}, headers=headers)
+    assert old.status_code == 200 and old.json['task'] is None, old.json
+    assert chain[0].get('/api/tasks/' + bound.json['task']['task_id']).json['task']['state'] == 'queued'
+    for invalid in (0, 2, True, '1', {}, []):
+        rejected = chain[0].post('/api/commands/poll', json={
+            'runner_id': 'invalid-runner', 'provider_accounts_schema': invalid}, headers=headers)
+        assert rejected.status_code == 400 and rejected.json['error'] == 'invalid_runner_capability'
+        assert bound.json['task']['task_id'] not in rejected.get_data(as_text=True)
+    legacy = chain[0].post('/api/tasks', json={k: v for k, v in {
+        **request, 'client_token': 'unbound-poll'}.items() if k != 'provider_account_id'})
+    assert legacy.status_code == 201, legacy.json
+    old = chain[0].post('/api/commands/poll', json={'runner_id': 'old-runner'}, headers=headers)
+    assert old.status_code == 200 and old.json['task']['task_id'] == legacy.json['task']['task_id']
+    current = chain[0].post('/api/commands/poll', json={
+        'runner_id': 'account-runner', 'provider_accounts_schema': 1}, headers=headers)
+    assert current.status_code == 200 and current.json['task']['task_id'] == bound.json['task']['task_id']
+    assert current.json['task']['provider_account_id'] == identifier

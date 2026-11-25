@@ -541,7 +541,8 @@ class SqliteTaskRepository:
         finally:
             conn.close()
 
-    def lease_task(self, *, machine, runner_id, lease_ttl_s=LEASE_TTL_S, now=None):
+    def lease_task(self, *, machine, runner_id, lease_ttl_s=LEASE_TTL_S, now=None,
+                   allow_provider_accounts=False):
         """原子领取：BEGIN IMMEDIATE 内 选任务→改状态→作废旧 lease→写新 lease。"""
         now = time.time() if now is None else now
         now_iso = _iso(now)
@@ -556,6 +557,7 @@ class SqliteTaskRepository:
                     # idx_tasks_machine_state_created (machine, state) in created_at order.
                     " WHERE t.machine=? AND t.state='queued' AND +t.expires_at>?"
                     " AND (g.task_id IS NULL OR g.state='confirmed')"
+                    + ("" if allow_provider_accounts is True else " AND t.provider_account_id IS NULL") +
                     " ORDER BY t.created_at LIMIT 1", (machine, now_iso)).fetchone()
                 if row is None:
                     return None

@@ -67,7 +67,7 @@ def test_same_token_replays_account_and_rejects_changed_binding(tmp_path):
         with pytest.raises(DomainError) as error:
             create(repo, provider_account_id=changed)
         assert error.value.code == 'idempotency_conflict'
-    leased = repo.lease_task(machine='mac-local', runner_id='fixture')
+    leased = repo.lease_task(machine='mac-local', runner_id='fixture', allow_provider_accounts=True)
     assert leased['provider_account_id'] == ACCOUNT
     assert leased['provider_account_owner'] == OWNER_DIGEST
     assert OWNER not in json.dumps(leased)
@@ -248,6 +248,20 @@ def load_runner():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.parametrize('managed', [True, False])
+def test_only_managed_runner_declares_account_lease_capability(monkeypatch, managed):
+    runner = load_runner()
+    sent = []
+    monkeypatch.setattr(runner, 'flush_pending', lambda cfg: None)
+    def post(cfg, path, body):
+        sent.append((path, body))
+        return 200, {'ok': True, 'task': None}
+    monkeypatch.setattr(runner, 'post_json', post)
+    assert not runner.poll_once(SimpleNamespace(runner_id='fixture', managed_enabled=managed))
+    assert sent == [('/api/commands/poll', {'runner_id': 'fixture', **(
+        {'provider_accounts_schema': 1} if managed else {})})]
 
 
 def test_unmanaged_runner_rejects_account_before_capture_worktree_or_spawn(tmp_path, monkeypatch):
