@@ -9,6 +9,12 @@ def register_http(app, config, platform, sessions, control):
     """Wire accounts, then every gated blueprint, then hooks/error handlers."""
     from hub.accounts.http import init_accounts
     init_accounts(app, config)
+    provider_accounts = app.extensions['fleet']['services'].get('provider_accounts')
+    accounts = app.extensions.get('accounts')
+    if provider_accounts is not None and accounts is not None:
+        # Machine resolution must recheck the browser owner's current grant;
+        # an accepted queue entry does not survive administrator revocation.
+        provider_accounts.authorize = accounts.is_active_admin
 
     _register_blueprints(app, config, platform, sessions, control)
 
@@ -63,6 +69,8 @@ def _register_blueprints(app, config, platform, sessions, control):
         from hub.http.supervisor_routes import bp as supervisor_bp
 
         app.register_blueprint(supervisor_bp)
+        from hub.http.provider_account_routes import bp as provider_accounts_bp
+        app.register_blueprint(provider_accounts_bp)
 
     # Task 6: adoption 蓝图仅在显式启用时注册（无 503/404 歧义，旧 surface 不变）。
     # ``adoption_service`` is None unless ``adoption_repositories_enabled`` so a

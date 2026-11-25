@@ -49,6 +49,7 @@ CONTROL_ACTIONS = frozenset({
     "apply_local_profile",
     "configure_model",
     "answer_native_request",
+    "manage_provider_account",
 })
 
 #: Operator source-control tokens that require a bounded signed payload.
@@ -57,6 +58,7 @@ PAYLOAD_ACTIONS = frozenset({
     "apply_local_profile",
     "configure_model",
     "answer_native_request",
+    "manage_provider_account",
 })
 
 _MAX_TURN_TEXT = 2000
@@ -312,6 +314,9 @@ def validated_control_payload(action: str, payload: Any) -> dict:
     if not isinstance(payload, Mapping):
         raise ValueError("invalid_payload")
     keys = set(payload)
+    if action == 'manage_provider_account':
+        from fleet_core.provider_accounts import control_payload
+        return control_payload(payload)
     if action == 'answer_native_request':
         if keys != {'request_id', 'selected'}:
             raise ValueError('invalid_payload')

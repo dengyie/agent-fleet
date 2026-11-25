@@ -8,6 +8,11 @@ Implementation progress and executed evidence live in
 
 ## Product outcome and topology
 
+Machine-local Google personal accounts, signed remote login/logout, credential
+isolation and immutable task binding are defined in the
+[provider-account contract](native-provider-accounts.md). This is an additive
+account dimension over the existing ACP runtime, with no automatic rotation.
+
 The public workspace must expose an accurate native conversation, observable
 provider capabilities, native questions/permissions and the results of each
 managed continuation. The browser communicates only with authenticated Hub HTTP.

@@ -133,6 +133,10 @@ def validate_task_input(
         "project": project,
         "instruction": instruction,
     }
+    provider_account_id = validate_provider_account_binding(
+        agent_type, data.get("provider_account_id"))
+    if provider_account_id is not None:
+        result["provider_account_id"] = provider_account_id
     if raw_token is not None:
         result["client_token"] = raw_token
     confirm = data.get("confirm")
@@ -143,6 +147,19 @@ def validate_task_input(
     else:
         raise _invalid("invalid_confirm", "confirm 必须是布尔值")
     return result
+
+
+def validate_provider_account_binding(agent_type, value):
+    """An explicit account is AGY-only; absent bindings preserve legacy tasks."""
+    if value is None:
+        return None
+    from fleet_core.provider_accounts import account_id
+    try:
+        if agent_type != "agy":
+            raise ValueError("invalid_provider_account")
+        return account_id(value)
+    except (ValueError, TypeError):
+        raise _invalid("invalid_provider_account", "提供商账号绑定无效") from None
 
 
 def validate_task_replay(
@@ -156,6 +173,7 @@ def validate_task_replay(
     """
     fields = ("requested_by", "machine", "agent_type", "project", "instruction")
     if (any(task[key] != request[key] for key in fields)
+            or dict(task).get("provider_account_id") != request.get("provider_account_id")
             or original_confirm != bool(request.get("confirm"))):
         raise TaskSubmissionConflict()
 
@@ -205,6 +223,9 @@ def public_task(task: Mapping[str, Any], with_result: bool = False) -> dict[str,
     if not isinstance(task, Mapping):
         return {}
     out = {key: task[key] for key in TASK_FIELDS if key in task}
+    account = task.get("provider_account_id")
+    if isinstance(account, str) and re.fullmatch(r"pa_[a-f0-9]{32}", account):
+        out["provider_account_id"] = account
     session_id = task.get("session_id")
     if isinstance(session_id, str) and is_valid_session_id(session_id):
         out["session_id"] = session_id

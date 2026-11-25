@@ -99,6 +99,11 @@ def sanitize_agent_state(agent_type, state):
         projects = state.get("projects")
         if isinstance(projects, list):
             clean["project_count"] = len(projects)
+    if agent_type == 'agy':
+        accounts = state.get('provider_accounts')
+        if (isinstance(accounts, dict) and type(accounts.get('schema_version')) is int
+                and accounts['schema_version'] == 1):
+            clean['provider_accounts'] = {'schema_version': 1}
     return clean
 
 

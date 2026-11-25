@@ -206,9 +206,15 @@ def _build_client(cfg, *, ingest_token: str, spool_key: bytes,
 
     from tools.supervisor.continuation_capture import ContinuationCapture
     from tools.supervisor.desktop_control import DesktopControl
+    from tools.providers.agy_auth import AgyAccountControl
+    try:
+        provider_accounts = AgyAccountControl(cfg, supervisor=supervisor)
+    except (OSError, ValueError):
+        provider_accounts = None
     return ControlClient(
         continuation=ContinuationCapture(cfg, supervisor),
         desktop=DesktopControl(cfg),
+        provider_accounts=provider_accounts,
         hub_url=cfg.hub,
         machine_id=cfg.machine,
         credential=cfg.supervisor_credential,

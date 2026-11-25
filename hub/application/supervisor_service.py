@@ -250,7 +250,8 @@ class SupervisorService:
                 candidate: Mapping | None = None,
                 payload: Mapping | None = None,
                 idempotency_key: str | None = None,
-                message_binding: Mapping[str, str] | None = None) -> dict:
+                message_binding: Mapping[str, str] | None = None,
+                connection: sqlite3.Connection | None = None) -> dict:
         """Create a signed control command for one machine/session/attempt.
 
         Returns the full signed envelope (with ``signature``).  Raises
@@ -292,7 +293,7 @@ class SupervisorService:
             raise SupervisorServiceError("invalid_payload", "", 400)
         action_nonce = nonce or secrets.token_hex(16)
         try:
-            if self._command_repository.nonce_exists(action_nonce):
+            if self._command_repository.nonce_exists(action_nonce, **({"connection": connection} if connection is not None else {})):
                 raise SupervisorServiceError("duplicate_nonce", "")
         except SupervisorCommandRepositoryError as exc:
             raise SupervisorServiceError(exc.code, "", 503) from exc
@@ -325,7 +326,7 @@ class SupervisorService:
         # higher-precedence command (terminate/quarantine) for the same target
         # rejects a later resume / follow-up outright.
         try:
-            existing = self._command_repository.target_owner(session_id, attempt_id)
+            existing = self._command_repository.target_owner(session_id, attempt_id, **({"connection": connection} if connection is not None else {}))
         except SupervisorCommandRepositoryError as exc:
             raise SupervisorServiceError(exc.code, "", 503) from exc
         existing_action = existing.get("action") if existing else None
@@ -346,6 +347,7 @@ class SupervisorService:
                 idempotency_key=idempotency_key, wire=body,
                 issued_s=now, expires_s=expires_at_s,
                 message_binding=message_binding,
+                **({"connection": connection} if connection is not None else {}),
                 audit_row=_bound_row({
                     "event": "enqueue", "ts": _iso(now),
                     "command_id": command_id, "machine": machine,

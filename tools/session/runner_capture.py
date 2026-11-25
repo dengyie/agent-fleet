@@ -85,7 +85,10 @@ class RunnerCapture:
                     ('attempt_id', 'agent_type', 'task_id', 'project') if k in task},
                     ensure_ascii=False), encoding='utf-8')
                 self.bridge.start()
-                self.bridge.ingest_one({'kind': 'session_metadata', 'payload': {'task_id': task['task_id']}})
+                metadata = {'task_id': task['task_id']}
+                if task.get('agent_type') == 'agy' and task.get('provider_account_id'):
+                    metadata['provider_account_id'] = task['provider_account_id']
+                self.bridge.ingest_one({'kind': 'session_metadata', 'payload': metadata})
                 if 'instruction' in task:
                     self.bridge.record_user_turn(task['instruction'])
             elif replay:

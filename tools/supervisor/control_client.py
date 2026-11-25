@@ -332,6 +332,7 @@ class ControlClient:
         post_json: Callable[[dict], Any] | None = None,
         continuation=None,
         desktop=None,
+        provider_accounts=None,
     ):
         if not isinstance(machine_id, str) or not machine_id:
             raise ValueError("machine_id required")
@@ -361,6 +362,7 @@ class ControlClient:
         self._post_json = post_json
         self.continuation = continuation
         self.desktop = desktop
+        self.provider_accounts = provider_accounts
         self._adoption_recovery_after: str | None = "" if bridge_factory is not None else None
         # nonce/回执目录的周期清理（限频，首次 poll 即执行一次）
         self._last_prune = 0.0
@@ -376,6 +378,13 @@ class ControlClient:
         what the caller logs/backs off on.
         """
         self._maybe_prune_nonces()
+        if self.provider_accounts is not None:
+            try:
+                self.provider_accounts.tick(self._transport, self._headers())
+            except Exception:
+                # Account storage fails closed in its executor. A broken report
+                # must not prevent unrelated terminate/pause commands polling.
+                pass
         replay_results = getattr(self.continuation, 'replay_results', None)
         if callable(replay_results):
             replay_results()
@@ -459,7 +468,7 @@ class ControlClient:
         # and every other action still require a live session and a missing one
         # yields the bounded ``unknown_session`` receipt.
         state = None
-        if action == "adopt":
+        if action in {"adopt", "manage_provider_account"}:
             if not (isinstance(session_id, str) and session_id):
                 self._receipt(cid, "rejected", "scope_mismatch")
                 return
@@ -532,7 +541,7 @@ class ControlClient:
 
         # 4. local conflict/state gate (a stale resume never resurrects a
         # quarantined/terminated session).
-        is_desktop = bool(getattr(manifest, 'capability_manifest', {}).get('desktop_bridge')) if action != 'adopt' else False
+        is_desktop = bool(getattr(manifest, 'capability_manifest', {}).get('desktop_bridge')) if action not in {'adopt', 'manage_provider_account'} else False
         if is_desktop and action != 'append_user_turn':
             self._receipt(cid, 'rejected', 'unsupported_action')
             return
@@ -553,7 +562,16 @@ class ControlClient:
         # into an attach + (on success) ONE managed native bridge.  Phase 4/5
         # actions carry a bounded ``payload`` already verified by
         # ``validate_command``; they never write the live process stdin.
-        if action == "adopt":
+        if action == "manage_provider_account":
+            if self.provider_accounts is None:
+                status, reason = 'rejected', 'provider_accounts_unavailable'
+            else:
+                try:
+                    status, reason = self.provider_accounts.execute(
+                        command, self._transport, self._headers())
+                except Exception:
+                    status, reason = 'failed', 'provider_account_failed'
+        elif action == "adopt":
             status, reason = self._execute_adopt(command, cid, session_id)
         elif action in _PAYLOAD_ACTIONS:
             status, reason = self._execute_payload(action, cid, session_id,

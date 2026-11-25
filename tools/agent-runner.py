@@ -554,8 +554,14 @@ def run_task_managed(cfg, task, supervisor):
 
         # 与 legacy 路径同一套 argv/env 策略：'-' 开头的 instruction 插 '--' 或拒绝，
         # Windows .cmd/.bat 不接受不可信参数，子进程只拿 allow-list 环境变量。
-        env = adapter.execution_env(wt)
         try:
+            account_id = task.get('provider_account_id')
+            if account_id is not None:
+                if task.get('agent_type') != 'agy' or cfg.supervisor_manifest_dir is None:
+                    raise UnsafeInstruction('invalid_provider_account')
+                adapter.bind_account(Path(cfg.supervisor_manifest_dir) / 'provider-accounts',
+                                     account_id, task.get('provider_account_owner'))
+            env = adapter.execution_env(wt)
             argv = adapter.build_argv(str(task["instruction"]))
             refuse_windows_batch(argv, str(task["instruction"]), env)
         except UnsafeInstruction as exc:
@@ -575,6 +581,8 @@ def run_task_managed(cfg, task, supervisor):
             env_allowlist=env,
             session_id=session_id,
             attempt_id=task["attempt_id"],
+            capability_manifest=({'provider_account_id': account_id}
+                                 if account_id is not None else None),
         )
         capture = _start_capture(cfg, task, process_group_id=manifest.process_group_id)
         result = supervisor.wait_session(
@@ -660,6 +668,12 @@ def run_task(cfg, task):
     attempt_id = task["attempt_id"]
     nonce = task["nonce"]
     started = time.monotonic()
+
+    if task.get('provider_account_id') is not None:
+        result = adapters.AdapterResult(
+            exit_code=126, log_tail='provider_accounts_require_managed_runner')
+        _submit_result(cfg, attempt_id, nonce, result, '', 0.0)
+        return {'exit_code': 126}
 
     project = cfg.projects.get(task["project"])
     if project is None:

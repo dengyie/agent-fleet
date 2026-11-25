@@ -1,5 +1,24 @@
 # 全流程测试与质量门禁
 
+AGY 多 Google 账号、临时 OAuth 密文、签名控制、不可变任务账号、节点私有 profile、
+重启恢复及账号隔离见[账号 API](../native-provider-accounts.md)与
+[实施计划](../superpowers/plans/2026-11-25-agy-multi-account.md)：
+
+```sh
+python3 -m pytest tests/test_agy_accounts.py tests/test_provider_accounts.py \
+  tests/test_provider_account_binding.py tests/test_provider_account_control.py \
+  tests/test_provider_account_e2e.py -q
+```
+
+整链用独立本地子进程实现登录/ACP 对端，实际经过 Flask、SQLite、签名队列、
+ControlClient、两个受管 worker，验证登录无 prompt、重试找回、账号 A 停用/退出
+不影响 B、凭据清除而历史保留；不运行真实 AGY、Google 或模型。专项列入
+Windows/macOS CI；真实供应商登录和前端账号管理 UI 仍需单独验收。
+
+Hub 的 signed-command SQLite 权限守卫使用 POSIX owner，因此 Windows 对完整
+Hub/签名存储用例按平台跳过；实际节点登录/NTFS ACL/worker lease/generation
+取消测试仍在 Windows 执行，完整 HTTP→签名队列→节点链路在 Linux/macOS 执行。
+
 自动部署发布事务、配置中的 SQLite 快照清单、schema rollback、receiver 与应用配置边界：
 
 ```sh
