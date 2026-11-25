@@ -102,6 +102,14 @@ uses AEAD with command ID associated data, never signed payloads/public DTOs or
 logs. Terminal reports, command completion and expiry clear the secret on the
 next repository access. Long-lived Google credentials remain on the node.
 
+For the production `hub/web.py` entrypoint, explicitly configure
+`AGENT_FLEET_SESSION_ENCRYPTION_KEY_B64` as base64 of 32 independently generated
+random bytes in the existing private runtime environment file. Keep this key
+stable across restarts; do not reuse the supervisor signing key. Embedded callers
+may pass `session_encryption_raw` or `session_encryption_key_src` to `make_app`;
+either explicit argument takes precedence over the environment. Missing or
+malformed key material keeps login unavailable without a plaintext fallback.
+
 ## States, receipts and retries
 
 | State | Meaning |

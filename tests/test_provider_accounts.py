@@ -423,3 +423,42 @@ def test_revoked_operator_cannot_resolve_queued_response_or_confirm_ready(hub):
     with pytest.raises(ApplicationError) as error:
         hub[3].assert_ready(identifier, 'mac-local', ACTOR)
     assert error.value.code == 'forbidden'
+
+
+@pytest.mark.parametrize('configured', ['valid', 'invalid', 'absent', 'explicit'])
+def test_web_entrypoint_explicit_encryption_configuration_enables_login(hub, monkeypatch, configured):
+    import base64
+    from hub import auth, web
+    stores = hub[0]
+    private, _ = generate_ed25519_keypair()
+    monkeypatch.setattr(web, 'FLEET_HOME', stores.root)
+    monkeypatch.setattr(web, 'HOSTS_FILE', stores.root / 'hosts.yaml')
+    monkeypatch.setattr(auth, 'load_supervisor_signing_key', lambda: private)
+    variable = 'AGENT_FLEET_SESSION_ENCRYPTION_KEY_B64'
+    monkeypatch.delenv(variable, raising=False)
+    if configured in {'valid', 'explicit'}:
+        monkeypatch.setenv(variable, base64.b64encode(b'e' * 32).decode('ascii'))
+    elif configured == 'invalid':
+        monkeypatch.setenv(variable, 'invalid-private-value')
+    options = {'session_encryption_raw': b'x' * 32} if configured == 'explicit' else {}
+    app = stores.make_app(require_token=False, dev_operator=ACTOR,
+        serve_frontend=False, supervisor_enabled=True, **options)
+    client = app.test_client()
+    created = client.post('/api/machines/mac-local/provider-accounts', json={
+        'name': 'entrypoint', 'client_token': 'entrypoint-create'})
+    assert created.status_code == 201, created.json
+    identifier = created.json['account']['account_id']
+    repo = app.extensions['fleet']['services']['provider_accounts'].repository
+    with closing(repo._connect()) as conn:
+        conn.execute("UPDATE provider_accounts SET state='signed_out' WHERE account_id=?", (identifier,))
+    response = client.post('/api/provider-accounts/' + identifier + '/operations', json={
+        'operation': 'login', 'client_token': 'entrypoint-login'})
+    assert response.status_code == (202 if configured in {'valid', 'explicit'} else 503), response.json
+    if response.status_code == 503:
+        assert response.json['error'] == 'provider_login_encryption_unavailable'
+        assert 'invalid-private-value' not in response.get_data(as_text=True)
+    else:
+        box = repo.box
+        expected = b'x' * 32 if configured == 'explicit' else b'e' * 32
+        from fleet_core.session.crypto import AeadBox
+        assert AeadBox(expected).decrypt(box.encrypt(b'fixture', b'command'), b'command') == b'fixture'
