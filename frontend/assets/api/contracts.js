@@ -33,7 +33,7 @@ ContractError.prototype.constructor = ContractError;
 // hub/domain/task.py TASK_FIELDS / RESULT_FIELDS
 var TASK_FIELDS = ['task_id', 'machine', 'agent_type', 'project', 'state',
                    'requested_by', 'created_at', 'expires_at', 'instruction',
-                   'session_id'];
+                   'session_id', 'provider_account_id'];
 var RESULT_FIELDS = ['exit_code', 'log_summary', 'diff_stat', 'duration_s',
                      'finished_at', 'test_summary', 'has_diff_patch',
                      'diff_patch_bytes'];
@@ -112,7 +112,7 @@ var EVENT_PAYLOAD_FIELDS = ['text', 'is_complete', 'message_id', 'content_mode',
                             'old_quality', 'new_quality',
                             'agent_family', 'adapter', 'task_id', 'agent_ref',
                             'title', 'model', 'provider', 'client_version',
-                            'cli_version', 'native_started_at',
+                            'cli_version', 'native_started_at', 'provider_account_id',
                             'process_family', 'owner', 'group_binding',
                             'process_group_id', 'exit_code', 'duration_s',
                             'step_id', 'step_name', 'severity', 'policy',

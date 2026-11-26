@@ -92,6 +92,9 @@ class ReleaseLayoutTests(unittest.TestCase):
         allowed.update({'assets/api/integrations.js', 'assets/api/integration-identities.js',
                         'assets/views/account/integrations.js', 'assets/views/account/identities.js'})
         allowed.add('assets/views/account/mcp-registration.js')
+        allowed.update({'assets/api/provider-account-contracts.js',
+                        'assets/views/agent-chat/account-picker.js',
+                        'assets/views/settings/provider-accounts.js'})
         allowed.update({'assets/api/settings.js', 'assets/views/settings.js',
                         'assets/views/settings/catalogs.js', 'assets/views/settings/runtime.js',
                         'assets/views/settings/forms.js', 'assets/views/settings/appearance.js'})

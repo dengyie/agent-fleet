@@ -2,6 +2,7 @@ import {pagePath, uiIcon} from '../routes.js';
 import {nativeChatPath, nativeDirectoryPath} from './agent-chat/paths.js';
 import {el, button, link, errorText} from './agent-chat/dom.js';
 import {agentName} from './agent-chat/state.js';
+import {mountProviderAccountPicker} from './agent-chat/account-picker.js';
 
 export function conversationTargets(active = 'assistant') {
   const nav = el('nav', 'conversation-targets'); nav.setAttribute('aria-label', '对话来源');
@@ -34,11 +35,15 @@ export function mountTargetPicker(host, {api, store, machine: initialMachine, on
   const shortcuts = el('div', 'native-target-shortcuts');
   const sessions = link('查看此节点会话', '#'), manage = link('管理此节点', '#');
   shortcuts.append(sessions, manage); shortcuts.hidden = true;
-  host.append(fields, notice, retry, shortcuts);
+  const accountsHost = el('div', 'native-account-picker');
+  let accountChoice = {ready: true};
+  const accounts = mountProviderAccountPicker(accountsHost, {api, onChange(choice) { accountChoice = choice; changed(false); }});
+  host.append(fields, accountsHost, notice, retry, shortcuts);
   function option(select, value, text, disabled = false) {
     const row = el('option', null, text); row.value = value; row.disabled = disabled; select.append(row);
   }
-  function changed() {
+  function changed(updateAccounts = true) {
+    if (updateAccounts) accounts.update(machine.value, agent.value);
     shortcuts.hidden = !machine.value;
     if (machine.value) {
       sessions.href = nativeDirectoryPath(machine.value);
@@ -47,7 +52,8 @@ export function mountTargetPicker(host, {api, store, machine: initialMachine, on
     const selected = targets?.agents[agent.value];
     const ready = !!targets && machines.some(row => row.machine === machine.value && row.online) && targets.machine === machine.value && !!project.value &&
       targets.projects.includes(project.value) && !!selected && selected.installed !== false;
-    onChange({ready, machine: machine.value, project: project.value,
+    onChange({ready: ready && accountChoice.ready, machine: machine.value, project: project.value,
+      ...(agent.value === 'agy' && accountChoice.provider_account_id ? {provider_account_id: accountChoice.provider_account_id} : {}),
       agent_type: agent.value, installed: selected?.installed, observed_at: targets?.observed_at});
   }
   function locks(notify = true) {
@@ -108,7 +114,9 @@ export function mountTargetPicker(host, {api, store, machine: initialMachine, on
     }
   }
   machine.addEventListener('change', loadTargets);
-  project.addEventListener('change', changed); agent.addEventListener('change', changed);
+  project.addEventListener('change', () => changed()); agent.addEventListener('change', () => changed());
   loadMachines();
-  return {setLocked(value) { locked = value; locks(false); }, dispose() { disposed = true; generation++; controller?.abort(); }};
+  return {setLocked(value) { locked = value; locks(false); accounts.setLocked(value); },
+    suspend() { accounts.suspend(); }, resume() { accounts.resume(); },
+    dispose() { disposed = true; generation++; controller?.abort(); accounts.dispose(); }};
 }

@@ -13,7 +13,17 @@ python3 -m pytest tests/test_agy_accounts.py tests/test_provider_accounts.py \
 整链用独立本地子进程实现登录/ACP 对端，实际经过 Flask、SQLite、签名队列、
 ControlClient、两个受管 worker，验证登录无 prompt、重试找回、账号 A 停用/退出
 不影响 B、凭据清除而历史保留；不运行真实 AGY、Google 或模型。专项列入
-Windows/macOS CI；真实供应商登录和前端账号管理 UI 仍需单独验收。
+Windows/macOS CI；真实供应商登录仍需单独验收。
+
+网页账号管理与任务选择使用真实 Hub/SQLite 和 Chrome，脚本化节点状态回报，
+不调用真实 Google 或模型。桌面与手机均覆盖写响应丢失后刷新恢复、原 token、
+授权码不落浏览器存储、账号间取消隔离、停用后禁止新任务，以及已接收任务恢复
+保留原绑定。使用现有 Playwright 和 Chrome（CI 设置 `chromium`）：
+
+```sh
+FLEET_PLAYWRIGHT_MODULE=/path/to/node_modules/playwright FLEET_BROWSER_CHANNEL=chrome \
+  python3 -m pytest tests/test_provider_accounts_frontend.py -q
+```
 
 账号任务领取专项沿用上述五个 suite；[领取授权修复计划](../superpowers/plans/2026-11-26-provider-account-delivery-guard.md)
 记录 main 基线的 4 个失败证据。新增真实 HTTP/SQLite 回归覆盖：禁用/退出已提交但节点

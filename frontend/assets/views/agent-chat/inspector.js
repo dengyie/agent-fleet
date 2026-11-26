@@ -23,7 +23,7 @@ export function mountNativeInspector(root, heading, {api, onControl, service}) {
   ]);
   let contextKey = '', receiptKey = '';
   let durationTimer = null;
-  function update({sessionId, session, task, resultTaskId, selection, operations, authorityVerified, busy, features}) {
+  function update({sessionId, session, task, resultTaskId, selection, providerAccountId, operations, authorityVerified, busy, features}) {
     // Route/task binding is known before the session detail read completes.
     // A later detail response must not reset or cancel the same result view.
     resultUI.update(resultTaskId, sessionId);
@@ -33,7 +33,7 @@ export function mountNativeInspector(root, heading, {api, onControl, service}) {
       handoff = mountHandoffPanel(handoffHost, {api, sessionId: handoffId});
       ui.setVisible('native-handoff', true);
     }
-    const next = JSON.stringify([session, task, resultTaskId, selection]);
+    const next = JSON.stringify([session, task, resultTaskId, selection, providerAccountId]);
     if (next !== contextKey) {
       contextKey = next; context.replaceChildren(el('h2', 'assistant-section-title', '运行上下文'));
       function fact(label, value) {
@@ -54,6 +54,11 @@ export function mountNativeInspector(root, heading, {api, onControl, service}) {
       fact('项目', task?.project || selection?.project);
       fact('Provider', session?.provider);
       fact('模型', session?.model);
+      if (providerAccountId) {
+        fact('Google 账号', providerAccountId);
+        context.append(el('p', 'meta', '当前任务与续聊固定绑定此独立账号；更换账号请新建会话。'));
+        context.append(link('管理 Google 账号', pagePath('settings', 'provider-accounts')));
+      }
       fact('状态', session ? AGENT_LABELS[session.current_state] || session.current_state : task?.state || '等待发送');
       fact('采集质量', {exact: '精确记录', structured: '结构化记录', best_effort: '尽力采集'}[session?.capture_quality]);
       const evidence = session?.agent_evidence;

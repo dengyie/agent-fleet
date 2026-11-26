@@ -96,8 +96,10 @@ export function createTaskJournal(storage, key) {
         const value = JSON.parse(storage?.getItem(key) || 'null');
         if (!value || !['machine', 'project', 'agent_type', 'instruction', 'client_token'].every(field => typeof value[field] === 'string' && value[field].trim()) ||
             [...value.instruction].length > 2000 || !/^[\w-]{1,128}$/.test(value.client_token)) return null;
+        if (value.provider_account_id !== undefined && (value.agent_type !== 'agy' || !/^pa_[a-f0-9]{32}$/.test(value.provider_account_id))) return null;
         return Object.freeze({machine:value.machine, project:value.project, agent_type:value.agent_type,
-          instruction:value.instruction, client_token:value.client_token});
+          instruction:value.instruction, client_token:value.client_token,
+          ...(value.provider_account_id ? {provider_account_id:value.provider_account_id} : {})});
       } catch (_) { return null; }
     },
     write(operation) { try { storage?.setItem(key, JSON.stringify(operation)); } catch (_) {} },
