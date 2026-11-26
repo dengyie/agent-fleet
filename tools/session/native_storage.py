@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 import os
@@ -139,6 +140,13 @@ def _event(kind, **payload):
     return {'kind': kind, 'payload': payload}
 
 
+def _native_event_id(family, token, row_id, index, event):
+    body = json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    digest = hashlib.sha256(
+        f'{family}\0{token}\0{row_id}\0{index}\0{body}'.encode('utf-8')).hexdigest()[:40]
+    return 'evt_' + digest
+
+
 def _zcode(message, part):
     if not isinstance(message, dict) or not isinstance(part, dict):
         return []
@@ -175,14 +183,18 @@ def _hermes(role, content, calls, call_id, tool_name):
     return result
 
 
-def read_events(family, path, token, cursor):
+def read_events(family, path, token, cursor, *, limit=MAX_ROWS):
     """Return ordered native evidence and an exclusive durable row cursor.
 
     Read one bounded snapshot only after the owned CLI has closed its turn.
     A malformed/oversized snapshot raises, leaving the old cursor available.
+    Callers may request smaller row pages; a page ends before exceeding
+    ``MAX_BYTES`` so the caller can resume from the returned row cursor.
     """
     if type(cursor) is not int or cursor < 0:
         raise ValueError('native_cursor_invalid')
+    if type(limit) is not int or not 1 <= limit <= MAX_ROWS:
+        raise ValueError('native_limit_invalid')
     with _database(path) as db:
         if family == 'zcode':
             sql = ('SELECT p.rowid, substr(m.data,1,262145), substr(p.data,1,262145) FROM part p '
@@ -193,13 +205,26 @@ def read_events(family, path, token, cursor):
                    'FROM messages WHERE session_id=? AND id>? ORDER BY id LIMIT ?')
         else:
             raise ValueError('native_family_invalid')
-        rows = db.execute(sql, (token, cursor, MAX_ROWS + 1))
+        rows = db.execute(sql, (token, cursor, limit + 1))
         result, total, count, latest = [], 0, 0, cursor
         for row in rows:
-            count += 1
-            total += sum(len(value.encode('utf-8')) for value in row if isinstance(value, str))
-            if count > MAX_ROWS or total > MAX_BYTES or any(isinstance(v, str) and len(v) > MAX_FIELD for v in row):
+            if count >= limit:
+                if limit == MAX_ROWS:
+                    raise ValueError('native_capture_overflow')
+                break
+            row_bytes = sum(len(value.encode('utf-8')) for value in row if isinstance(value, str))
+            if any(isinstance(value, str) and len(value) > MAX_FIELD for value in row):
                 raise ValueError('native_capture_overflow')
+            if total + row_bytes > MAX_BYTES:
+                if limit == MAX_ROWS or latest == cursor:
+                    raise ValueError('native_capture_overflow')
+                break
+            count += 1
+            total += row_bytes
             latest = row[0]
-            result.extend(_zcode(_json(row[1]), _json(row[2])) if family == 'zcode' else _hermes(*row[1:]))
+            shaped = (_zcode(_json(row[1]), _json(row[2])) if family == 'zcode'
+                      else _hermes(*row[1:]))
+            for index, event in enumerate(shaped):
+                event['event_id'] = _native_event_id(family, token, latest, index, event)
+                result.append(event)
         return result, latest

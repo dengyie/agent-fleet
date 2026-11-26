@@ -8,6 +8,8 @@ import hashlib
 import json
 import logging
 import copy
+import os
+import sqlite3
 import threading
 import time
 from collections import OrderedDict
@@ -257,10 +259,35 @@ def sync_desktop(cfg, desktop, row, native_path, send=post, *, budget_s=1, shoul
                 break
             if time.monotonic() >= deadline:
                 break
+        if row.get('status') == 'idle' and not should_stop():
+            _sync_zcode_native_tool_events(capture, state, checkpoint, native_id)
         capture.flush()
         return complete
     finally:
         capture.bridge.close()
+
+
+def _sync_zcode_native_tool_events(capture, state, checkpoint, native_id):
+    """Capture bounded tool evidence from one exact idle ZCode desktop session."""
+    from tools.session.native_storage import database_path, read_events
+
+    cursor = state.get('native_cursor', 0)
+    if type(cursor) is not int or cursor < 0:
+        raise ValueError('native_cursor_invalid')
+    try:
+        events, next_cursor = read_events(
+            'zcode', database_path('zcode', os.environ), native_id, cursor, limit=256)
+    except (OSError, ValueError, TypeError, sqlite3.Error):
+        log.warning('Native desktop tool capture deferred: family=zcode code=source_unavailable')
+        return
+    for event in events:
+        if event.get('kind') not in {'tool_call', 'tool_result'}:
+            continue
+        if not capture.bridge.ingest_one(event):
+            raise RuntimeError('native_tool_event_not_persisted')
+    if next_cursor != cursor:
+        state['native_cursor'] = next_cursor
+        checkpoint.write_text(json.dumps(state), encoding='utf-8')
 
 
 def sync_file(cfg, family, path, send=post, *, desktop_group=None):

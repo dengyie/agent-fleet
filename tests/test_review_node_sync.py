@@ -129,6 +129,100 @@ def test_desktop_sync_reaches_latest_page_without_waiting_for_archive_scan(tmp_p
     assert sum(e['payload'].get('title') == 'Native desktop title' for e in events) == 1
 
 
+def test_zcode_desktop_tool_capture_from_native_storage(tmp_path, monkeypatch):
+    import sqlite3
+
+    from tools.session.sync import native_identity, sync_desktop
+    from tools.session.runner_capture import session_prefix
+    from tools.supervisor.desktop_control import DesktopControl
+
+    native_id = 'sess_desktop_tools'
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.setenv('USERPROFILE', str(tmp_path))
+    database = tmp_path / '.zcode' / 'cli' / 'db' / 'db.sqlite'
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute('CREATE TABLE session(id TEXT, directory TEXT, title TEXT)')
+        connection.execute('INSERT INTO session VALUES (?, ?, ?)',
+                           (native_id, str(tmp_path), 'Tool evidence'))
+        connection.execute('CREATE TABLE message(id TEXT, session_id TEXT, data TEXT)')
+        connection.execute('CREATE TABLE part(message_id TEXT, session_id TEXT, data TEXT)')
+        rows = [('hidden', {'role': 'assistant'},
+                 {'type': 'reasoning', 'text': 'PRIVATE_REASONING_SENTINEL'})]
+        rows.extend((f'call_{index}', {'role': 'assistant'},
+                     {'type': 'tool', 'callID': f'native_call_{index}', 'tool': 'Read',
+                      'state': {'status': 'completed',
+                                'input': {'file_path': f'file_{index}.txt'},
+                                'output': f'native tool result {index}'}})
+                    for index in range(257))
+        for message_id, message, part in rows:
+            connection.execute('INSERT INTO message VALUES (?, ?, ?)',
+                               (message_id, native_id, json.dumps(message)))
+            connection.execute('INSERT INTO part VALUES (?, ?, ?)',
+                               (message_id, native_id, json.dumps(part)))
+
+    cfg, client = _cfg(tmp_path), _client(tmp_path)
+    cfg.supervisor_enabled = True
+    cfg.supervisor_manifest_dir = tmp_path / 'manifests'
+
+    class DesktopMessages:
+        def request(self, path):
+            return {'messages': [
+                {'id': 'user_1', 'role': 'user', 'text': 'Inspect README.md'},
+                {'id': 'assistant_1', 'role': 'assistant', 'text': 'I will inspect it.'},
+            ], 'nextCursor': None}
+
+    def send(config, path, events):
+        response = client.post(path, json=events,
+                               headers={'X-Runner-Credential': 'pxed:secret'})
+        return response.status_code, response.get_json()
+
+    path = tmp_path / 'model-io-sess_desktop_tools.jsonl'
+    desktop = DesktopControl(cfg, client=DesktopMessages())
+    row = {'session': {'sessionId': native_id}, 'status': 'idle'}
+    sync_desktop(cfg, desktop, row, path, send)
+    session_id = session_prefix(cfg.machine) + native_identity('zcode', path)
+    event_url = f'/api/sessions/{session_id}/events?include_source=0&tail=1&limit=1000'
+    def all_events():
+        page = client.get(event_url).get_json()
+        events = list(page['events'])
+        while page['has_more']:
+            page = client.get(
+                f'/api/sessions/{session_id}/events', query_string={
+                    'include_source': '0', 'before_cursor': page['before_cursor'], 'limit': 1000,
+                }).get_json()
+            events = page['events'] + events
+        return events
+
+    first_tool_events = [event for event in all_events()
+                         if event['kind'] in {'tool_call', 'tool_result'}]
+    assert len(first_tool_events) == 510
+    assert first_tool_events[0]['payload']['call_id'] == 'native_call_0'
+    checkpoint = cfg.cache_dir / 'conversations' / f'{session_id}.desktop-cursor'
+    state = json.loads(checkpoint.read_text(encoding='utf-8'))
+    assert state['native_cursor'] > 0
+
+    sync_desktop(cfg, desktop, row, path, send)
+    events = all_events()
+    tool_events = [event for event in events
+                   if event['kind'] in {'tool_call', 'tool_result'}]
+    assert len(tool_events) == 514
+    assert tool_events[-1]['payload']['call_id'] == 'native_call_256'
+    serialized = json.dumps(events, ensure_ascii=False)
+    assert 'native tool result 0' in serialized
+    assert 'native tool result 256' in serialized
+    assert 'PRIVATE_REASONING_SENTINEL' not in serialized
+    assert str(database) not in serialized
+
+    state = json.loads(checkpoint.read_text(encoding='utf-8'))
+    state['native_cursor'] = 0
+    checkpoint.write_text(json.dumps(state), encoding='utf-8')
+    sync_desktop(cfg, desktop, row, path, send)
+    sync_desktop(cfg, desktop, row, path, send)
+    replayed_events = all_events()
+    assert sum(event['kind'] in {'tool_call', 'tool_result'} for event in replayed_events) == 514
+
+
 def test_slow_desktop_history_yields_without_skipping_or_duplicating_messages(tmp_path, monkeypatch):
     from tools.session import sync
     from tools.session.bridge import SessionBridge

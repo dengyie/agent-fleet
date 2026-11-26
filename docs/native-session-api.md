@@ -232,6 +232,30 @@ time and the UI labels it accordingly. Duration runs from the native start when
 present, otherwise from that first Hub observation, until `finished_at` or the
 current time. It is a displayed duration, not an Agent-reported runtime.
 
+### ZCode desktop tool-event capture
+
+ZCode desktop continues to supply visible user/assistant text through its
+message-page bridge. When the exact desktop session reports idle, the node also
+opens the existing ZCode store read-only and queries `part` rows bound to that
+exact native session ID. Each scan is bounded to 256 SQLite rows and the native
+reader's existing 4 MiB total-byte and 256 KiB per-field limits. It emits only
+completed/error tool parts as the existing `tool_call` and `tool_result` DTOs;
+synthetic, model-only, hidden, and `reasoning` parts are excluded. The native
+SQLite row cursor is private node checkpoint state, not a public cursor or
+identity.
+
+For retry safety, the node derives an opaque source `event_id` from the family,
+exact session ID, SQLite row identity, event position, and canonical projected
+event. The existing encrypted spool retries the same event IDs after upload
+failure; the Hub's ingestion cursor remains the sole public event identity and
+deduplication authority. After processing the page, the checkpoint records the
+returned native row cursor; every returned tool event must first be accepted
+into the local spool. Tool evidence is collected on idle scans, so it is not a
+live stream while the desktop Agent is working. Missing, unsupported, or
+temporarily unreadable store layouts preserve the prior cursor and do not imply
+complete history. No SQLite path, raw vendor row, or internal reasoning is
+returned by the public API.
+
 The event DTO remains the source for each user-visible message, tool call/result,
 and lifecycle transition. Message payloads may include `message_id` and
 `content_mode` (`delta` or `snapshot`): deltas append to the same native message,

@@ -29,6 +29,14 @@ def test_zcode_filters_synthetic_and_thinking_and_reads_actual_tool_parts(tmp_pa
     assert events[-1]['payload']['result'] == 'real file contents'
     assert 'private' not in json.dumps(events)
     assert read_events('zcode', path, 'sess_test', cursor) == ([],cursor)
+    first_page, first_cursor = read_events('zcode', path, 'sess_test', 2, limit=1)
+    second_page, second_cursor = read_events('zcode', path, 'sess_test', first_cursor, limit=1)
+    assert [event['kind'] for event in first_page] == ['assistant_message']
+    assert [event['kind'] for event in second_page] == ['tool_call', 'tool_result']
+    assert first_cursor < second_cursor == cursor
+    assert [event['event_id'] for event in first_page] == [events[0]['event_id']]
+    assert [event['event_id'] for event in second_page] == [
+        event['event_id'] for event in events[1:]]
     assert not verify_identity('zcode',path,'sess_test',str(tmp_path/'wrong'))
     assert not verify_identity('zcode',path,'another',str(tmp_path))
 
