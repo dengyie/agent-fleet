@@ -39,8 +39,10 @@ class HostHooks:
             data['credentials'] = json.loads(path.read_text())
         # The helper is installed outside the release and contains no product imports.
         helper = Path(__file__).with_name('auto_deploy_container.py').read_bytes()
+        # Verification includes cold startup and seven bounded account checks.
+        timeout = extra['startup_timeout'] + 45 if mode == 'verify' else 60
         self.run(['docker', 'exec', '-i', '-u', self.config['container_user'], self.config['container'],
-                  'python3', '-c', helper.decode()], input=json.dumps(data).encode())
+                  'python3', '-c', helper.decode()], input=json.dumps(data).encode(), timeout=timeout)
 
     def preflight(self, backend):
         self.container('preflight')
@@ -90,7 +92,8 @@ class HostHooks:
                   'bash', self.config['launcher']])
 
     def verify(self, sha):
-        self.container('verify', sha=sha)
+        # Production cold startup has exceeded 57s; PID existence is not readiness.
+        self.container('verify', sha=sha, startup_timeout=90)
 
     def publish(self, frontend):
         text = self.original

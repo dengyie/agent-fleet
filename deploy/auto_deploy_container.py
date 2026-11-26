@@ -213,10 +213,12 @@ def main():
         origin = dict(line.split(': ', 1) for line in (root / 'RELEASE_ORIGIN').read_text().splitlines())
         if origin.get('commit') != data['sha']:
             raise RuntimeError('backend_revision_mismatch')
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + data['startup_timeout']
         while True:
             try:
                 probe(data)
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('startup_health_timeout')
                 break
             except (OSError, RuntimeError):
                 if time.monotonic() >= deadline:

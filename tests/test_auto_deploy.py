@@ -14,8 +14,83 @@ from deploy import auto_release as release
 from deploy import auto_deploy_ssh as ssh
 from deploy.auto_deploy_host import HostHooks
 from deploy import auto_deploy_host as host
+from deploy import auto_deploy_container as container
 
 OLD, NEW = '1' * 40, '2' * 40
+
+
+def verify_startup_fixture(tmp_path, monkeypatch, probe):
+    (tmp_path / 'RELEASE_ORIGIN').write_text(f'commit: {NEW}\n')
+    data = {'mode': 'verify', 'live': str(tmp_path), 'sha': NEW,
+            'startup_timeout': 90, 'credentials': {'fixture': True}}
+    monkeypatch.setattr(container.sys, 'stdin', io.StringIO(json.dumps(data)))
+    monkeypatch.setattr(container, 'verify_runtime_dependencies', lambda: None)
+    monkeypatch.setattr(container, 'processes', lambda _: [(1, 'guardian', '1'), (2, 'hub', '2')])
+    monkeypatch.setattr(container, 'probe', probe)
+
+
+def test_receiver_waits_for_slow_healthy_startup(tmp_path, monkeypatch):
+    now, authenticated = [0.0], []
+    monkeypatch.setattr(container.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(container.time, 'sleep', lambda seconds: now.__setitem__(0, now[0] + seconds))
+
+    def probe(config, credentials=None):
+        if now[0] < 58:
+            raise ConnectionRefusedError('server is still starting')
+        if credentials:
+            authenticated.append(now[0])
+
+    verify_startup_fixture(tmp_path, monkeypatch, probe)
+    container.main()
+    assert authenticated == [58.0]
+
+
+def test_receiver_rejects_startup_that_never_becomes_healthy(tmp_path, monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(container.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(container.time, 'sleep', lambda seconds: now.__setitem__(0, now[0] + seconds))
+
+    def probe(config, credentials=None):
+        assert credentials is None
+        raise ConnectionRefusedError('server is not healthy')
+
+    verify_startup_fixture(tmp_path, monkeypatch, probe)
+    with pytest.raises(ConnectionRefusedError):
+        container.main()
+    assert now[0] == 90.0
+
+
+def test_receiver_rejects_health_response_after_startup_deadline(tmp_path, monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(container.time, 'monotonic', lambda: now[0])
+
+    def probe(config, credentials=None):
+        assert credentials is None
+        now[0] = 91.0
+
+    verify_startup_fixture(tmp_path, monkeypatch, probe)
+    with pytest.raises(RuntimeError, match='startup_health_timeout'):
+        container.main()
+
+
+def test_receiver_outer_timeout_allows_startup_and_account_checks(tmp_path):
+    credentials = tmp_path / 'credentials.json'
+    credentials.write_text('{}')
+    credentials.chmod(0o600)
+    hooks = HostHooks.__new__(HostHooks)
+    hooks.config = {'container_live': str(tmp_path), 'port': 8790,
+                    'public_origin': 'https://example.test', 'account_credentials': str(credentials),
+                    'container': 'fixture', 'container_user': 'fixture'}
+    observed = []
+
+    def run(argv, *, input, timeout=60):
+        observed.append((json.loads(input), timeout))
+
+    hooks.run = run
+    hooks.verify(NEW)
+    data, timeout = observed[0]
+    assert data['startup_timeout'] == 90
+    assert timeout >= data['startup_timeout'] + 35
 
 
 class Hooks:
