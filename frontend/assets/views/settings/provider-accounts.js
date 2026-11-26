@@ -142,7 +142,7 @@ export function mountProviderAccounts(root, {api = defaultApi, ownerId = ''} = {
     for (const id of drafts.keys()) if (!ids.has(id)) drafts.delete(id);
   }
   function begin(kind, id, body) {
-    if (busy() || disposed || suspended) return;
+    if (busy() || disposed || suspended || !loaded || readError || !supported()) return;
     pending = {kind, id, machine: machineId, body: Object.freeze({...body, client_token: token()})}; savePending(); execute();
   }
   async function execute() {
