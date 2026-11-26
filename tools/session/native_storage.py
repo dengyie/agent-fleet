@@ -6,15 +6,15 @@ out of the capture stream.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
-from datetime import datetime, timezone
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import sqlite3
 import time
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 
 MAX_ROWS = 4096
 MAX_BYTES = 4 << 20
@@ -143,7 +143,7 @@ def _event(kind, **payload):
 def _native_event_id(family, token, row_id, index, event):
     body = json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
     digest = hashlib.sha256(
-        f'{family}\0{token}\0{row_id}\0{index}\0{body}'.encode('utf-8')).hexdigest()[:40]
+        f'{family}\0{token}\0{row_id}\0{index}\0{body}'.encode()).hexdigest()[:40]
     return 'evt_' + digest
 
 
@@ -206,9 +206,9 @@ def read_events(family, path, token, cursor, *, limit=MAX_ROWS):
         else:
             raise ValueError('native_family_invalid')
         rows = db.execute(sql, (token, cursor, limit + 1))
-        result, total, count, latest = [], 0, 0, cursor
-        for row in rows:
-            if count >= limit:
+        result, total, latest = [], 0, cursor
+        for count, row in enumerate(rows, start=1):
+            if count > limit:
                 if limit == MAX_ROWS:
                     raise ValueError('native_capture_overflow')
                 break
@@ -219,7 +219,6 @@ def read_events(family, path, token, cursor, *, limit=MAX_ROWS):
                 if limit == MAX_ROWS or latest == cursor:
                     raise ValueError('native_capture_overflow')
                 break
-            count += 1
             total += row_bytes
             latest = row[0]
             shaped = (_zcode(_json(row[1]), _json(row[2])) if family == 'zcode'

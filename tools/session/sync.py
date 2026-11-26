@@ -4,10 +4,10 @@ Run independently of task execution: python -m tools.session.sync --config ...
 --source codex=/root/.codex/sessions --source claude_code=/root/.claude/projects.
 """
 import argparse
+import copy
 import hashlib
 import json
 import logging
-import copy
 import os
 import sqlite3
 import threading
@@ -16,11 +16,11 @@ from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlencode
 
+from agent_profiles import PROFILES
 from tools.runner_config import load_config
 from tools.session.capture.native_jsonl import tailer
 from tools.session.runner_capture import RunnerCapture, replay_pending, session_prefix
 from tools.transport import Transport
-from agent_profiles import PROFILES
 
 log = logging.getLogger(__name__)
 

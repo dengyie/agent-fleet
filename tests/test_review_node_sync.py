@@ -132,8 +132,8 @@ def test_desktop_sync_reaches_latest_page_without_waiting_for_archive_scan(tmp_p
 def test_zcode_desktop_tool_capture_from_native_storage(tmp_path, monkeypatch):
     import sqlite3
 
-    from tools.session.sync import native_identity, sync_desktop
     from tools.session.runner_capture import session_prefix
+    from tools.session.sync import native_identity, sync_desktop
     from tools.supervisor.desktop_control import DesktopControl
 
     native_id = 'sess_desktop_tools'
