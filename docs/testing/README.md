@@ -15,6 +15,13 @@ ControlClient、两个受管 worker，验证登录无 prompt、重试找回、�
 不影响 B、凭据清除而历史保留；不运行真实 AGY、Google 或模型。专项列入
 Windows/macOS CI；真实供应商登录和前端账号管理 UI 仍需单独验收。
 
+账号任务领取专项沿用上述五个 suite；[领取授权修复计划](../superpowers/plans/2026-11-26-provider-account-delivery-guard.md)
+记录 main 基线的 4 个失败证据。新增真实 HTTP/SQLite 回归覆盖：禁用/退出已提交但节点
+尚未执行、管理员降权/停用、账号服务缺失或存储失败时不领取；队首受阻不影响后续任务，
+恢复授权后领取原任务；账号写锁持续至 task lease commit，错误后释放；精确账号/owner/
+machine 匹配、1501 条授权绑定且 SQLite 参数限额为 32、并发领取唯一 lease、失败回滚，
+临时授权关系不进入持久 schema。禁止访问真实 Agent 或 Google。
+
 Hub 的 signed-command SQLite 权限守卫使用 POSIX owner，因此 Windows 对完整
 Hub/签名存储用例按平台跳过；实际节点登录/NTFS ACL/worker lease/generation
 取消测试仍在 Windows 执行，完整 HTTP→签名队列→节点链路在 Linux/macOS 执行。

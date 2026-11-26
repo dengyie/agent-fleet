@@ -51,6 +51,7 @@ def register_fleet_extension(app, config, repositories, core, platform, sessions
                 account_repo, control.supervisor_service, core.observation_repository)
             repos['provider_accounts'] = account_repo
             core.task_service.provider_accounts = services['provider_accounts']
+            core.runner_service.provider_accounts = services['provider_accounts']
     from hub.application.runtime_settings import RuntimeSettings
     services["runtime_settings"] = RuntimeSettings(config, app.config)
     if p.platform_repository is not None:

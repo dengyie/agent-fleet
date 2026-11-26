@@ -30,6 +30,27 @@ can still lease unbound work without consuming, blocking or changing bound
 tasks. This second check protects stale observations and client rollback.
 Unsupported capability values return bounded 400 `invalid_runner_capability`.
 
+The capability does not grant account use. Every capable poll also rechecks
+the current machine/account/owner binding, `enabled`, `ready` state and current
+administrator grant. Disable/logout committed before a poll fences delivery
+immediately, even before the node receives the control command. Account writer
+admission is held through the task lease commit (lock order: account store,
+then task store), so concurrent account mutations and leasing have a defined
+order. Owner authorization is read once per owner on every poll; it is not
+cached across requests. A revocation that commits after that authorization
+read or a lease already committed cannot recall an execution.
+
+An ineligible bound task retains its queued state, attempt and original token;
+the poll may return another eligible task or `{"ok":true,"task":null}`. Restoring
+account readiness/current authority makes the original work eligible again
+before its existing TTL, without a new task or automatic retry. Operators may
+cancel work they no longer want. No default-account fallback occurs. Missing
+account service only permits unbound delivery; account/authorization read
+failure returns bounded 503 `provider_accounts_unavailable` before creating a lease.
+Existing node runtime generation checks still apply after delivery. This
+delivery check does not terminate work already running on administrator
+revocation, or change existing session control authorization.
+
 ## Directory and creation
 
 `GET /api/machines/<machine>/provider-accounts` returns
@@ -205,6 +226,13 @@ nullable `provider_account_id` and
 `task_repository_meta.provider_account_schema=1`; old tasks remain unbound.
 Malformed/future schemas fail closed; partial migrations roll back. No database
 or deployment process is added.
+
+Delivery filtering adds the covering index `idx_provider_accounts_delivery` in
+the same atomic initialization transaction, without new persistent fields or
+changing schema version 1. Task delivery bindings live only in a connection-local
+temporary relation and vanish when the poll closes; they do not alter task
+storage schema. The indexed account/owner relation avoids SQLite bind-variable
+limits and lets eligible work pass blocked queue entries.
 
 See [tests](testing/README.md) and the
 [plan](superpowers/plans/2026-11-25-agy-multi-account.md). The E2E test uses real

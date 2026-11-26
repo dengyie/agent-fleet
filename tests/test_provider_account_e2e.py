@@ -192,3 +192,59 @@ def test_old_runner_cannot_claim_bound_task_after_observation_or_client_rollback
         'runner_id': 'account-runner', 'provider_accounts_schema': 1}, headers=headers)
     assert current.status_code == 200 and current.json['task']['task_id'] == bound.json['task']['task_id']
     assert current.json['task']['provider_account_id'] == identifier
+
+
+@pytest.mark.parametrize('fence', ['disable', 'logout', 'revoked', 'unavailable'])
+def test_account_bound_delivery_rechecks_grants_without_consuming_queued_work(chain, fence):
+    identifier = login(chain, 'delivery-grant')
+    request = {'machine': 'fixture', 'agent_type': 'agy', 'project': 'fleet',
+        'instruction': 'Private accepted instruction', 'client_token': 'delivery-grant-task',
+        'provider_account_id': identifier}
+    task = chain[0].post('/api/tasks', json=request).json['task']
+    repo = chain[0].application.extensions['fleet']['services']['tasks'].task_repo
+    original = repo.get_task(task['task_id'])
+    service = chain[0].application.extensions['fleet']['services']['provider_accounts']
+    if fence in {'disable', 'logout'}:
+        # Hub has committed the fence, but the node still has ready credentials.
+        response = chain[0].post('/api/provider-accounts/' + identifier + '/operations',
+            json={'operation': fence, 'client_token': 'delivery-' + fence})
+        assert response.status_code == 202, response.json
+        assert chain[2].accounts.read(identifier)['state'] == 'ready'
+    elif fence == 'revoked':
+        service.authorize = lambda actor: False
+    else:
+        chain[0].application.extensions['fleet']['services']['runner'].provider_accounts = None
+    response = chain[0].post('/api/commands/poll', json={
+        'runner_id': 'current', 'provider_accounts_schema': 1},
+        headers={'X-Runner-Credential': 'fixture:runner'})
+    assert response.status_code == 200, response.json
+    assert response.json['task'] is None
+    assert 'Private accepted instruction' not in response.get_data(as_text=True)
+    assert repo.get_task(task['task_id']) == original
+    # Other work can pass the blocked head without consuming its attempt.
+    legacy = chain[0].post('/api/tasks', json={key: value for key, value in {
+        **request, 'client_token': 'delivery-legacy'}.items() if key != 'provider_account_id'})
+    assert legacy.status_code == 201, legacy.json
+    response = chain[0].post('/api/commands/poll', json={
+        'runner_id': 'current', 'provider_accounts_schema': 1},
+        headers={'X-Runner-Credential': 'fixture:runner'})
+    assert response.status_code == 200 and response.json['task']['task_id'] == legacy.json['task']['task_id']
+    assert repo.get_task(task['task_id']) == original
+    if fence == 'disable':
+        assert chain[1].poll_once()['ok']
+        submit(chain, identifier, 'enable', 'recover-delivery')
+        assert account(chain, identifier)['state'] == 'ready'
+    elif fence == 'revoked':
+        service.authorize = lambda actor: actor == ACTOR
+    elif fence == 'unavailable':
+        chain[0].application.extensions['fleet']['services']['runner'].provider_accounts = service
+    else:
+        return
+    # Restoring admission can recover the original queued task exactly once.
+    response = chain[0].post('/api/commands/poll', json={
+        'runner_id': 'current', 'provider_accounts_schema': 1},
+        headers={'X-Runner-Credential': 'fixture:runner'})
+    assert response.status_code == 200 and response.json['task']['task_id'] == task['task_id']
+    replay = chain[0].post('/api/tasks', json=request)
+    assert replay.status_code == 200 and replay.json['created'] is False
+    assert replay.json['task']['task_id'] == task['task_id']

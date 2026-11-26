@@ -67,7 +67,8 @@ def test_same_token_replays_account_and_rejects_changed_binding(tmp_path):
         with pytest.raises(DomainError) as error:
             create(repo, provider_account_id=changed)
         assert error.value.code == 'idempotency_conflict'
-    leased = repo.lease_task(machine='mac-local', runner_id='fixture', allow_provider_accounts=True)
+    leased = repo.lease_task(machine='mac-local', runner_id='fixture',
+                            provider_account_bindings=[(ACCOUNT, OWNER)])
     assert leased['provider_account_id'] == ACCOUNT
     assert leased['provider_account_owner'] == OWNER_DIGEST
     assert OWNER not in json.dumps(leased)
@@ -343,3 +344,88 @@ def test_concurrent_account_bound_submissions_persist_one_task(tmp_path):
     assert len({row['task_id'] for row, _ in results}) == 1
     assert {row['provider_account_id'] for row, _ in results} == {ACCOUNT}
     assert len(repo.list_tasks()) == 1
+
+
+@pytest.mark.parametrize('bindings', [(), [(ACCOUNT, 'other@example.test')], [(OTHER, OWNER)]])
+def test_delivery_grants_require_the_exact_account_owner_pair(tmp_path, bindings):
+    repo = repository(tmp_path)
+    task, _ = create(repo)
+    original = repo.get_task(task['task_id'])
+    with closing(repo._connect()) as conn:
+        before = '\n'.join(conn.iterdump())
+    assert repo.lease_task(machine='mac-local', runner_id='fixture',
+                          provider_account_bindings=bindings) is None
+    with closing(repo._connect()) as conn:
+        assert '\n'.join(conn.iterdump()) == before
+    assert repo.get_task(task['task_id']) == original
+
+
+def test_delivery_grants_do_not_cross_machine_or_agent_family(tmp_path):
+    repo = repository(tmp_path)
+    task, _ = create(repo)
+    assert repo.lease_task(machine='other', runner_id='fixture',
+                          provider_account_bindings=[(ACCOUNT, OWNER)]) is None
+    # Damaged storage cannot turn a Codex task into an account-bound AGY lease.
+    with closing(repo._connect()) as conn:
+        conn.execute("UPDATE tasks SET agent_type='codex' WHERE task_id=?", (task['task_id'],))
+    assert repo.lease_task(machine='mac-local', runner_id='fixture',
+                          provider_account_bindings=[(ACCOUNT, OWNER)]) is None
+
+
+def test_delivery_grants_use_connection_local_rows_without_variable_limits(tmp_path, monkeypatch):
+    repo = repository(tmp_path)
+    for number in range(130):
+        create(repo, client_token='blocked-' + str(number), provider_account_id=OTHER)
+    allowed, _ = create(repo, client_token='allowed-tail')
+    original_connect = repo._connect
+
+    def limited_connect():
+        conn = original_connect()
+        if hasattr(conn, 'setlimit'):
+            conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 32)
+        return conn
+
+    monkeypatch.setattr(repo, '_connect', limited_connect)
+    bindings = [('pa_' + format(number, '032x'), OWNER) for number in range(1500)] + [(ACCOUNT, OWNER)]
+    leased = repo.lease_task(machine='mac-local', runner_id='fixture', provider_account_bindings=bindings)
+    assert leased['task_id'] == allowed['task_id']
+    with closing(repo._connect()) as conn:
+        assert not conn.execute('SELECT name FROM sqlite_temp_master').fetchall()
+        assert not conn.execute("SELECT name FROM sqlite_master WHERE name='task_delivery_accounts'").fetchall()
+        assert conn.execute("SELECT count(*) FROM tasks WHERE state='queued'").fetchone()[0] == 130
+        assert conn.execute('SELECT count(*) FROM leases').fetchone()[0] == 1
+
+
+def test_concurrent_delivery_polls_create_one_bound_lease(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    repo = repository(tmp_path)
+    task, _ = create(repo)
+    barrier = Barrier(4)
+
+    def poll(number):
+        barrier.wait(timeout=5)
+        return repo.lease_task(machine='mac-local', runner_id='runner-' + str(number),
+                               provider_account_bindings=[(ACCOUNT, OWNER)])
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(poll, range(4)))
+    assert [row['task_id'] for row in results if row] == [task['task_id']]
+    with closing(repo._connect()) as conn:
+        assert conn.execute('SELECT count(*) FROM leases').fetchone()[0] == 1
+
+
+def test_bound_lease_failure_rolls_back_and_grants_do_not_survive_next_connection(tmp_path):
+    repo = repository(tmp_path)
+    task, _ = create(repo)
+    with closing(repo._connect()) as conn:
+        conn.execute("CREATE TRIGGER reject_lease BEFORE INSERT ON leases BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        before = '\n'.join(conn.iterdump())
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.lease_task(machine='mac-local', runner_id='fixture', provider_account_bindings=[(ACCOUNT, OWNER)])
+    with closing(repo._connect()) as conn:
+        assert '\n'.join(conn.iterdump()) == before
+        conn.execute('DROP TRIGGER reject_lease')
+    assert repo.lease_task(machine='mac-local', runner_id='fixture') is None
+    assert repo.lease_task(machine='mac-local', runner_id='fixture',
+                          provider_account_bindings=[(ACCOUNT, OWNER)])['task_id'] == task['task_id']
