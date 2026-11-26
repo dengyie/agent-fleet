@@ -8,11 +8,11 @@
 
 | Agent | macOS | Windows | 原生续聊 / 采集 | 平台目录模型接管 |
 |---|---|---|---|---|
-| Google Antigravity (`agy`) | CLI 1.5.14；T3-style ACP runtime shipped in signed client s31; real model call pending | ACP CI passed; Agy binary is not installed | `agy acp`，原生精确 `session/resume`；消息增量、工具、原生权限、后台结算 | 仅使用原生协商的模型/模式；不声明第三方目录接管 |
+| Google Antigravity (`agy`) | CLI 1.5.14；T3-style ACP runtime shipped in signed client s31; real model call pending | CLI 1.5.18 installed and SHA-512 verified; current Fleet process discovery awaits normal process refresh | `agy acp`，原生精确 `session/resume`；消息增量、工具、原生权限、后台结算 | 仅使用原生协商的模型/模式；不声明第三方目录接管 |
 | Codex | 已安装 CLI | 已安装原生 exe | JSON stdout；同一 thread ID | 支持 Responses 兼容配置 |
 | Claude Code | 已安装 CLI | 已安装原生 exe | stream-json；同一 session ID | 支持 Anthropic 兼容配置 |
 | Pi | 已安装 CLI | 已安装 Node 包 | print/json；精确 session ID/path | 保留本机 provider/model，不声明目录接管 |
-| ZCode | 桌面包内 Node CLI | 桌面包内 Node CLI | 精确 sess ID；只读 SQLite 消息与工具；桌面桥独立 | 保留原 provider，不声明目录接管 |
+| ZCode | 桌面包内 Node CLI | 桌面包内 Node CLI | 精确 sess ID；CLI 只读 SQLite；桌面桥读取消息页，并在 idle 时从精确会话只读 SQLite 有界补齐已完成工具链 | 保留原 provider，不声明目录接管 |
 | Hermes | 已安装 CLI，需显式配置 | 当前验收机没有 CLI | 精确 ID/cwd 验证；只读 SQLite；任务私有配置固定 cwd | 保留原 provider，不声明目录接管 |
 
 Windows Hermes 的缺失是安装状态，不记为通过。存在 `.hermes/skills` 不足以证明 CLI 可执行。不会为了验收修改全局模型默认值或自动下载大软件。
@@ -23,6 +23,8 @@ Windows Hermes 的缺失是安装状态，不记为通过。存在 `.hermes/skil
 - Pi 只投影完整消息，忽略 thinking 和增量事件；`tool_execution_end` 与 `message_end(toolResult)` 同时出现时只采集后者。
 - 原生续聊身份、Node 脚本前缀、provider/model/policy 参数、工作目录与增量游标仅存节点私有记录；不能以最新会话猜测原会话。
 - ZCode/Hermes SQLite 只读，先核对 ID 和精确 cwd；读取有行数、字节数、字段大小和时间上限。异常保留旧游标并记录 capture gap。
+- ZCode 桌面消息分页继续提供用户/助手文本；idle 时最多读取 256 条精确 session 的 SQLite part 行，只有 completed/error 工具部分进入 `tool_call`/`tool_result`。回归覆盖分页、重放去重、隐藏 reasoning 排除和路径脱敏；工具历史不是实时流。
+- 各 Agent 的私有 `thinking`/`reasoning` 不是公开会话内容；采集可见回答、结构化工具调用/结果和公开状态事件，不上传隐藏推理链。
 - ZCode/Hermes 原生 CLI 续聊仅对持有 `native_resume` 能力的 Runner 自有会话开放；普通采集元数据、接管会话不据此获得续聊权限。ZCode 桌面桥保留其独立能力路径。
 - Hermes 在任务私有 home 快照 provider/auth，固定工具 cwd；不修改用户原始配置。任意附加 JSON 文件不能证明 Hermes 可续聊。
 - 不持久化 ephemeral 会话的续聊能力；上游失败、未知投递与未安装状态均保留真实结果，不能自动重建替代任务。
@@ -53,8 +55,10 @@ OWNER RIGHTS ACE 仅映射到经验证的所有者；其它 SID 的危险写入�
 不以弱化运行时文件权限检查规避测试。新增专项进入三端 CI；CI 通过和真实安装/模型验收
 是不同证据，不能互相替代。
 
-尚未执行新 ACP 对真实 Agy 模型的调用、Windows Agy 安装、旧桌面历史导入和
-usage/费用投影。运行中 steering、跨空闲轮次的常驻 ACP host 尚未开放；当前
+尚未执行新 ACP 对真实 Agy 模型的调用、Windows Agy 登录/授权、旧桌面历史导入和
+usage/费用投影。Windows `home-win` 的官方 AMD64 CLI 1.5.18 已安装于用户级
+`%LOCALAPPDATA%\agy\bin`，其 SHA-512 与官方 manifest 相符；未登录、未发起模型调用。
+Fleet 的常驻任务未重启，需待其正常进程刷新后复核 AGY 发现状态。运行中 steering、跨空闲轮次的常驻 ACP host 尚未开放；当前
 连接保持到本轮原生请求/后台工具结算，后续轮次精确恢复同一 native session。
 浏览器可以替代操作界面，VM 仍需 Agent 引擎、登录状态和 Fleet 节点。
 

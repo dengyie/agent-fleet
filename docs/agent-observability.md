@@ -113,7 +113,7 @@ Windows/macOS acceptance.
 | Claude Code | CLI stream JSON or native JSONL; exact retained session/cwd | Visible text deltas/snapshots, block identity, tool calls/results, explicit model/title records, existing structured questions where enabled | Demonstrated SDK benefit, managed dependency/lifecycle, exact native resume and independent wire/control tests. SDK availability alone grants nothing. |
 | Pi | Managed JSON output or native JSONL; exact retained session/path | Completed user/assistant snapshots, native block identity, tool-result normalization and explicit model/provider changes | A separately owned RPC session with literal method/identity/cancel/approval evidence before offering live RPC controls. Current collection does not promise token deltas. |
 | ZCode CLI | Managed output plus bounded read-only native SQLite/model I/O; exact ID/cwd | Completed visible messages, tool records, explicit display metadata | A documented protocol or store-version change with bounded reads, wrong-cwd refusal and identity recovery; Runner-only controls remain guarded. |
-| ZCode desktop | Its existing desktop bridge and native message pages | Completed message snapshots, explicit native title/model/provider and bridge events | Bridge protocol/version/authorization tests, retained source identity and revocation behavior; CLI evidence cannot authorize desktop operations. |
+| ZCode desktop | Its existing desktop bridge and native message pages, plus an exact-session bounded read-only SQLite scan while idle | Completed message snapshots, completed tool calls/results, explicit native title/model/provider and bridge events | Bridge protocol/version/authorization tests, retained source identity and revocation behavior; CLI evidence cannot authorize desktop operations. |
 | Hermes | Managed output plus bounded read-only native SQLite; exact ID/cwd and task-private configuration | Visible messages, tool records and explicit source metadata | Independently proved live stream/control methods, private home/cwd isolation and identity recovery; missing Windows binary stays unavailable. |
 | Google Antigravity (`agy`) | Owned `agy acp` stdio runtime; negotiated protocol and exact opaque native session resume | Visible ACP text chunks, invocation/message identity, merged tool patches/results, explicit session/model metadata, native permission requests | Existing ACP contract tests plus real per-platform client/auth/version acceptance. Never fall back to print or create a sibling session after resume failure. |
 
@@ -122,6 +122,17 @@ fields remain excluded from conversation content. Visible text published by an
 Agent is still captured, but Fleet does not manufacture private chain-of-thought
 or expose vendor secrets to fill a capability label. Usage/cost projection is a
 separate future public schema and attribution task.
+
+ZCode desktop message pages remain the source for visible user/assistant text.
+After the exact session reports idle, the node reads at most 256 native SQLite
+rows (and the existing per-read byte/field bounds) for that exact native session.
+Only completed/error tool parts become `tool_call` and `tool_result` events;
+synthetic, model-only, hidden, and reasoning parts are filtered. A private
+`native_cursor` checkpoint and deterministic source event IDs let the encrypted
+spool retry accepted tool events without duplicating them in Hub. This is an
+idle snapshot, not a live tool stream; unsupported or unreadable store layouts
+defer capture and do not claim complete history. Public event identity remains
+the Hub ingestion cursor.
 
 The browser can replace the interaction surface for supported controls. The
 execution VM still owns its Agent binary, authentication, protocol connection
