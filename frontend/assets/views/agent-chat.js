@@ -131,7 +131,9 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
     if (frozenTask && !submitting) notice.append(el('p', 'meta', '启动提交结果待确认，重试将沿用原启动标识和内容。'), button('查询或重试同一启动', submit));
     const resultTaskId = task?.task_id || events.find(event =>
       ['session_start', 'session_metadata'].includes(event.kind) && event.payload?.task_id)?.payload.task_id;
-    inspector.update({sessionId, session, task, resultTaskId, selection: targetChoice, operations, busy, authorityVerified, features: features()});
+    const providerAccountId = task?.provider_account_id || [...events].reverse().find(event =>
+      ['session_start', 'session_metadata'].includes(event.kind) && event.payload?.provider_account_id)?.payload.provider_account_id;
+    inspector.update({sessionId, session, task, resultTaskId, providerAccountId, selection: targetChoice, operations, busy, authorityVerified, features: features()});
     const follow = anchor.isAtBottom !== false;
     anchor.toggleAttribute('is-streaming', !!session && session.current_state === 'running');
     if (follow && !suspended && !preserveScroll) anchor.scrollToBottom(true);
@@ -232,11 +234,12 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
     try {
       if (!sessionId) {
         frozenTask ||= Object.freeze({machine: targetChoice.machine, project: targetChoice.project,
-          agent_type: targetChoice.agent_type, instruction: text, client_token: newToken()});
+          agent_type: targetChoice.agent_type, instruction: text, client_token: newToken(),
+          ...(targetChoice.provider_account_id ? {provider_account_id:targetChoice.provider_account_id} : {})});
         taskJournal?.write(frozenTask);
         const data = await service.create(frozenTask);
         if (disposed) return;
-        task = data.task; taskId = task.task_id; frozenTask = null; taskJournal?.clear();
+        task = data.task; taskId = task.task_id; frozenTask = null; taskJournal?.clear(); picker?.suspend();
         op.status = 'task_queued'; op.label = '启动请求已入队';
         onIdentity?.({taskId});
         window.dispatchEvent(new Event('fleet-native-sessions-updated'));
@@ -282,8 +285,8 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
   });
   const visibility = () => {
     questionState.suspended = document.hidden || suspended;
-    if (questionState.suspended) { authorityVerified = false; reader.stop(); suspendQuestions(questionState); paint({preserveScroll: true}); }
-    else { reader.start(); renderedQuestionKey = ''; paint(); }
+    if (questionState.suspended) { authorityVerified = false; reader.stop(); picker?.suspend(); suspendQuestions(questionState); paint({preserveScroll: true}); }
+    else { reader.start(); if (!sessionId && !taskId) picker?.resume(); renderedQuestionKey = ''; paint(); }
   };
   const focus = () => reader.wake();
   document.addEventListener('visibilitychange', visibility); window.addEventListener('focus', focus);
@@ -293,7 +296,7 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
     document.removeEventListener('visibilitychange', visibility); window.removeEventListener('focus', focus);
     identitySignal?.removeEventListener('abort', dispose);
   };
-  dispose.suspend = () => { suspended = true; authorityVerified = false; questionState.suspended = true; reader.stop(); suspendQuestions(questionState); inspector.suspend(); paint({preserveScroll: true}); };
+  dispose.suspend = () => { suspended = true; authorityVerified = false; questionState.suspended = true; reader.stop(); picker?.suspend(); suspendQuestions(questionState); inspector.suspend(); paint({preserveScroll: true}); };
   dispose.resume = () => { suspended = false; questionState.suspended = false; inspector.resume(); visibility(); };
   identitySignal?.addEventListener('abort', dispose, {once: true});
   if (!sessionId && !taskId) picker = mountTargetPicker(pickerHost, {api, store, machine, onChange(choice) { targetChoice = choice; paint(); }});

@@ -38,6 +38,7 @@ import {
   parseTaskTargets,
 } from './contracts.js';
 import {parseContinuationResults} from './continuation-results.js';
+import {parseProviderAccounts} from './provider-account-contracts.js';
 
 /* 公开 API 路径的唯一来源；动态段由 encodeURIComponent 编码。
  * 保持字面量 "/status" "/machines/" "/tasks" "/events" 便于 source 契约校验。 */
@@ -347,6 +348,24 @@ export async function createTask(input) {
     headers: JSON_HEADERS,
     body: payload,
   }));
+}
+
+export async function listProviderAccounts(machine, options) {
+  return parseProviderAccounts(await request(API.machines + encodeURIComponent(machine) + '/provider-accounts', options), {machine});
+}
+export async function getProviderAccount(accountId, options) {
+  return parseProviderAccounts(await request('/provider-accounts/' + encodeURIComponent(accountId), options), {accountId});
+}
+export async function createProviderAccount(machine, body) {
+  return parseProviderAccounts(await request(API.machines + encodeURIComponent(machine) + '/provider-accounts',
+    {method: 'POST', headers: JSON_HEADERS, body}), {machine, mutation: true});
+}
+export async function operateProviderAccount(accountId, body) {
+  return parseProviderAccounts(await request('/provider-accounts/' + encodeURIComponent(accountId) + '/operations',
+    {method: 'POST', headers: JSON_HEADERS, body}), {accountId, mutation: true});
+}
+export async function getProviderAccountOperation(accountId, command, options) {
+  return parseProviderAccounts(await request('/provider-accounts/' + encodeURIComponent(accountId) + '/operations/' + encodeURIComponent(command), options), {accountId, command});
 }
 
 export async function cancelTask(taskId) {

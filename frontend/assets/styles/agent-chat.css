@@ -108,3 +108,8 @@ body[data-page=agent-chat] .page-heading, body[data-page=sessions] .page-heading
   .native-session-state { max-width: 90px; }
   .native-session-copy>.meta { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
+.native-account-picker { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border-subtle); }
+.native-account-picker[hidden] { display: none; }
+.native-account-picker label { flex: 1 1 100%; }
+.native-account-picker p { flex-basis: 100%; font-size: 12px; }
+.native-account-picker a, .native-account-picker button { font-size: 12px; }

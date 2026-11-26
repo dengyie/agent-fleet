@@ -158,7 +158,8 @@ const [origin, viewport] = process.argv.slice(2);
     await page.reload();
     assert.equal(await page.getByLabel('记忆管理',{exact:true}).isChecked(),true);
     if (viewport === 'mobile') {
-      assert.equal(await nav.getByLabel('设置分类',{exact:true}).locator('option').count(),10);
+      const categories = await nav.getByLabel('设置分类',{exact:true}).locator('option').evaluateAll(options => options.map(option => option.value).sort());
+      assert.deepEqual(categories, ['account', 'appearance', 'defaults', 'hosts', 'integrations', 'models', 'nodes', 'plugins', 'provider-accounts', 'runtime', 'workspaces']);
     } else {
       await page.getByLabel('搜索设置',{exact:true}).fill('VM');
       assert.equal(await nav.getByRole('link',{name:'VM 与执行节点',exact:true}).isVisible(),true);

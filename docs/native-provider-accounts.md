@@ -3,7 +3,8 @@
 Authoritative backend contract for Google personal accounts, extending
 [native tasks](native-task-api.md) and [AGY ACP](native-provider-runtime.md).
 The browser calls Hub HTTP; the node owns the CLI and long-lived credentials.
-This change does not implement a frontend account picker.
+The [web frontend](native-web-frontend.md) consumes this contract for account
+management and an AGY task account picker.
 
 ## Authority and capability
 
@@ -240,9 +241,10 @@ HTTP/SQLite, signed queue, an independent login/ACP subprocess and two supervise
 workers, covering response loss, isolation, task binding, disable/enable/logout,
 preserved history and the other account remaining active. Other suites cover
 concurrency, revocation, migration failure, restart, expiry and corruption.
-Fixtures call no network, vendor CLI or model. Real AGY/Google/quotas and frontend
-account UI remain separate acceptance. No automatic rotation or other auth
-methods are included.
+Fixtures call no network, vendor CLI or model. The desktop/mobile account UI is
+covered by `tests/test_provider_accounts_frontend.py` against real Hub/SQLite,
+with scripted node settlement. Real AGY/Google/quotas remain separate acceptance.
+No automatic rotation or other auth methods are included.
 
 Upstream reference: T3 Code commit
 [`b042e4ee757947ca1cd47bb217c94296f9c695cf`](https://github.com/pingdotgg/t3code/commit/b042e4ee757947ca1cd47bb217c94296f9c695cf),

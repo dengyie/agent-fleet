@@ -4,15 +4,27 @@
 
 ## 页面与职责
 
-AGY 多 Google 账号的后端入口见[账号 API](native-provider-accounts.md)。本次未修改
-`frontend/` 产品代码；前端可据此接入账号目录、浏览器授权码提交、状态轮询及
-`POST /api/tasks` 的 `provider_account_id`。现有未指定账号的请求保持兼容，
-不能据后端已提供接口推定页面已经具备账号选择或登录管理功能。
+AGY 多 Google 账号通过[账号 API](native-provider-accounts.md)接入。
+`/settings/provider-accounts` 集中管理所选节点的账号创建、登录、授权结果提交、
+取消登录、启停和退出登录；状态及命令回执持续轮询。节点必须在线并上报已安装
+AGY 与账号 schema 1，才允许新操作。账号名称只是标签，不代表已验证的邮箱。
+
+电脑 Agent 新建会话在选择 AGY 后显示 Google 账号选择器，只有已启用且 `ready`
+的账号可选。明确选择的账号不可用或目录读取失败时暂停发送，不能静默换为
+节点默认登录。同一节点刷新目标目录或切换 Agent 后返回 AGY，仍保留原账号选择；
+只有主动更换节点或账号才重置选择。未指定独立账号仍可使用原默认登录。启动、响应丢失恢复及后续
+原生续聊固定原 `provider_account_id`；工作面板展示绑定标识，不提供中途换号。
+
+账号写请求由用户明确触发，结果未知时保留原 token 和请求供恢复；刷新页面仍
+沿用同一请求。授权码只保留在当前视图内存，不写入浏览器存储；若响应丢失后
+刷新页面，需重新输入同一授权结果。已知命令只查询原回执。登录回执成功不等于
+账号可用，仍以账号 `ready` 状态为准。关闭或挂起设置页会清空授权输入。
 
 | 入口 | 行为 |
 |---|---|
 | `/assistant` | 保留主助手；空白页可切换电脑 Agent / 已有会话 |
 | `/assistant?view=computer&machine=<可选节点>` | 节点 → 登记项目 → Agent → 发送目标 |
+| `/settings/provider-accounts` | 所选节点的 AGY Google 账号目录与授权管理 |
 | `/assistant?view=sessions&machine=<可选节点>` | 查看最近同步记录，筛选节点及已载入的 Agent / 标识；正文搜索使用原搜索页 |
 | `/task/<task_id>?view=chat` | 查询原启动任务，等待其真实 session_id，原地更新地址 |
 | `/session/<session_id>?view=chat` | 消息、工具、提问、即时投递反馈、工作面板 |

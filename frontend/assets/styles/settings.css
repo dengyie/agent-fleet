@@ -238,3 +238,24 @@ body:has(.settings-dialog[open]) { overflow: hidden; }
   .settings-dialog { --settings-close-duration: 1ms; }
   .settings-dialog[open]:not(.is-closing), .settings-dialog.is-closing, .settings-dialog::backdrop, .settings-dialog.is-closing::backdrop { animation-duration: .01ms; }
 }
+.provider-account-toolbar, .provider-account-create { display: flex; align-items: end; gap: 14px; flex-wrap: wrap; margin: 22px 0; }
+.provider-account-toolbar .settings-field, .provider-account-create .settings-field { flex: 1 1 220px; min-width: 0; }
+.provider-account-list { display: grid; gap: 16px; margin-top: 24px; }
+.provider-account-card { min-width: 0; padding: 20px; border: 1px solid var(--border); border-radius: 16px; background: var(--panel); overflow-wrap: anywhere; }
+.provider-account-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; }
+.provider-account-header h3 { margin: 0; font-size: 14px; }
+.provider-account-state { font-size: 12px; color: var(--text-2); background: var(--panel-hover); border-radius: 20px; padding: 5px 10px; }
+.provider-account-card .meta { font-size: 12px; margin: 10px 0; }
+.provider-account-card>a { display: inline-flex; margin: 12px 0; }
+.provider-account-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+.provider-account-login { display: grid; gap: 12px; margin: 16px 0; }
+.provider-account-login button { justify-self: start; }
+.provider-account-card details { font-size: 12px; margin: 16px 0; }
+.provider-account-card summary { cursor: pointer; }
+.provider-account-recovery { padding: 16px; border: 1px solid var(--border); border-radius: 12px; margin: 16px 0; overflow-wrap: anywhere; }
+.provider-account-recovery p { font-size: 12px; margin: 10px 0; }
+.provider-account-recovery button { margin-top: 12px; }
+@media (max-width: 767px) {
+  .provider-account-card { padding: 16px; }
+  .provider-account-toolbar button, .provider-account-create button, .provider-account-actions button, .provider-account-login button { min-height: 44px; }
+}

@@ -8,11 +8,13 @@ import {mountPlugins} from './plugins.js';
 import {mountCatalog} from './settings/catalogs.js';
 import {mountRuntime} from './settings/runtime.js';
 import {mountAppearance} from './settings/appearance.js';
+import {mountProviderAccounts} from './settings/provider-accounts.js';
 import {el, button, field, panel, errorText} from './settings/forms.js';
 import {uiIcon} from '../routes.js';
 
 const SECTIONS = [
   ['models', '模型源与 API', 'API URL 模型 Key 超时 重试 协议', 'brain'],
+  ['provider-accounts', 'Google 账号', 'AGY Antigravity Google 多账号 登录 授权 节点', 'globe'],
   ['defaults', '默认配置', '模型 工作区 节点 默认', 'check-circle'],
   ['nodes', 'VM 与执行节点', '虚拟机 节点 能力 接入 凭据', 'cpu'],
   ['workspaces', '工作区与存储', '目录 路径 执行位置', 'layers'],
@@ -25,7 +27,7 @@ const SECTIONS = [
 ];
 const GROUPS = [
   ['工作空间', ['models', 'defaults', 'nodes', 'workspaces', 'hosts']],
-  ['连接与扩展', ['integrations', 'plugins']],
+  ['连接与扩展', ['provider-accounts', 'integrations', 'plugins']],
   ['系统', ['runtime']],
   ['个人设置', ['account', 'appearance']],
 ];
@@ -171,6 +173,7 @@ export function mountSettings(root, {section = 'models', account = null, identit
   } else if (selected === 'plugins') views.push(mountPlugins(extensionRoot));
   else if (selected === 'integrations') loadIntegrations();
   else if (selected === 'appearance') views.push(mountAppearance(body));
+  else if (selected === 'provider-accounts') views.push(mountProviderAccounts(body, {ownerId: account?.id}));
   async function loadIntegrations() {
     if (disposed || integrationState === 'loading' || integrationState === 'loaded') return;
     integrationState = 'loading';

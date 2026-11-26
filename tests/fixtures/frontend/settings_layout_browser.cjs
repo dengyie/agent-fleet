@@ -57,6 +57,7 @@ const [origin, viewport] = process.argv.slice(2);
     assert.equal(await record.getAttribute('aria-pressed'), 'false');
     await screenshot('models');
     const readiness = {
+      'provider-accounts': () => page.getByRole('heading', {name: 'Google 账号', exact: true}).waitFor(),
       defaults: () => page.getByLabel('默认模型', {exact: true}).waitFor(),
       nodes: () => page.getByRole('button', {name: '新增执行节点', exact: true}).waitFor(),
       workspaces: () => page.getByRole('button', {name: '新增工作区', exact: true}).waitFor(),
@@ -103,6 +104,6 @@ const [origin, viewport] = process.argv.slice(2);
     await page.getByRole('radio', {name: '浅色', exact: true}).waitFor();
     assert.equal(await page.getByRole('radio', {name: '浅色', exact: true}).isChecked(), true, 'cached cards synchronize with toolbar');
     assert.deepEqual(errors, []);
-    console.log(JSON.stringify({viewport, categories: 10, layout: true, nativeThemes: true, pageErrors: errors}));
+    console.log(JSON.stringify({viewport, categories: Object.keys(readiness).length + 1, layout: true, nativeThemes: true, pageErrors: errors}));
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exit(1); });
