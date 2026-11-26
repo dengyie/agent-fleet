@@ -140,6 +140,7 @@ class ProviderAccountRepository:
             self._validate_constraints(conn)
             conn.execute('CREATE INDEX IF NOT EXISTS idx_provider_accounts_owner ON provider_accounts(owner_id,machine,account_id)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_provider_operations_account ON provider_account_operations(account_id,revision)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_provider_accounts_delivery ON provider_accounts(machine,enabled,state,account_id,owner_id)')
             conn.execute("INSERT OR IGNORE INTO supervisor_meta(key,value) VALUES('provider_accounts_schema','1')")
 
     @staticmethod
@@ -218,6 +219,25 @@ class ProviderAccountRepository:
             if result is None or result['account_id'] != identifier:
                 raise ProviderAccountStoreError('provider_operation_not_found', 404)
             return result
+
+    @contextmanager
+    def task_delivery(self, machine, authorize=None):
+        """Serialize ready bindings with disable/logout until lease commit.
+
+        The caller may acquire task storage only while holding this fence.
+        Authorization is checked once per owner on every poll, never cached
+        across requests. No task or long-lived credential enters this store.
+        """
+        with self._transaction() as conn:
+            grants, bindings = {}, []
+            for row in conn.execute('SELECT account_id,owner_id FROM provider_accounts '
+                    "WHERE machine=? AND enabled=1 AND state='ready'", (machine,)):
+                owner = row['owner_id']
+                if owner not in grants:
+                    grants[owner] = authorize is None or bool(authorize(owner))
+                if grants[owner]:
+                    bindings.append((row['account_id'], owner))
+            yield bindings
 
     def submit(self, *, machine, actor, operation, token, enqueue, identifier=None,
                name=None, response=None, login_command_id=None):

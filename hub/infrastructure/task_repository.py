@@ -542,13 +542,26 @@ class SqliteTaskRepository:
             conn.close()
 
     def lease_task(self, *, machine, runner_id, lease_ttl_s=LEASE_TTL_S, now=None,
-                   allow_provider_accounts=False):
+                   provider_account_bindings=()):
         """原子领取：BEGIN IMMEDIATE 内 选任务→改状态→作废旧 lease→写新 lease。"""
         now = time.time() if now is None else now
         now_iso = _iso(now)
         conn = self._connect()
         try:
             with _tx(conn):
+                account_filter = ' AND t.provider_account_id IS NULL'
+                if provider_account_bindings:
+                    # Connection-local grants avoid SQL variable limits and a
+                    # blocked queue head cannot starve eligible work behind it.
+                    # Their lifetime is bounded by the application's account
+                    # fence, held through this task transaction's commit.
+                    conn.execute('CREATE TEMP TABLE task_delivery_accounts('
+                        'account_id TEXT NOT NULL,owner_id TEXT NOT NULL,'
+                        'PRIMARY KEY(account_id,owner_id)) WITHOUT ROWID')
+                    conn.executemany('INSERT INTO task_delivery_accounts VALUES(?,?)', provider_account_bindings)
+                    account_filter = (" AND (t.provider_account_id IS NULL OR (t.agent_type='agy' AND EXISTS "
+                        '(SELECT 1 FROM task_delivery_accounts a WHERE a.account_id=t.provider_account_id '
+                        'AND a.owner_id=t.requested_by)))')
                 row = conn.execute(
                     "SELECT t.*,o.repository_id AS source_repository_id FROM tasks t"
                     " LEFT JOIN task_gates g ON g.task_id=t.task_id"
@@ -557,7 +570,7 @@ class SqliteTaskRepository:
                     # idx_tasks_machine_state_created (machine, state) in created_at order.
                     " WHERE t.machine=? AND t.state='queued' AND +t.expires_at>?"
                     " AND (g.task_id IS NULL OR g.state='confirmed')"
-                    + ("" if allow_provider_accounts is True else " AND t.provider_account_id IS NULL") +
+                    + account_filter +
                     " ORDER BY t.created_at LIMIT 1", (machine, now_iso)).fetchone()
                 if row is None:
                     return None

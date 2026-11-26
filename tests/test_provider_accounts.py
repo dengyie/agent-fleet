@@ -48,6 +48,7 @@ def hub(tmp_path):
     repository.init()
     service = ProviderAccountService(repository, supervisor, stores.store)
     app.extensions['fleet']['services']['provider_accounts'] = service
+    app.extensions['fleet']['services']['runner'].provider_accounts = service
     if 'provider_accounts' not in app.blueprints:
         app.register_blueprint(bp)
     return stores, app, app.test_client(), service, repository, clock
@@ -375,7 +376,8 @@ def test_provider_body_limit_and_sqlite_failure_are_bounded(hub, monkeypatch):
     assert '/private' not in response.get_data(as_text=True)
 
 
-def test_account_mode_admin_permission_revocation_blocks_future_mutations(tmp_path):
+@pytest.mark.parametrize('revocation', ['deactivate', 'demote'])
+def test_account_mode_admin_permission_revocation_blocks_mutations_and_task_delivery(tmp_path, revocation):
     if os.name == 'nt':
         pytest.skip('Hub signed-command store requires POSIX ownership')
     from test_account_http import ORIGIN, PASSWORD, post, signup
@@ -385,6 +387,8 @@ def test_account_mode_admin_permission_revocation_blocks_future_mutations(tmp_pa
     private, _ = generate_ed25519_keypair()
     mail = []
     app = create_app(stores.config(supervisor_enabled=True, supervisor_signing_raw=private,
+        supervisor_credentials={'mac-local': 'sup-secret'},
+        runner_credentials={'mac-local': 'runner-secret'}, project_whitelist={'mac-local': ['fleet']},
         session_encryption_raw=b'k' * 32, accounts={'enabled': True, 'origin': ORIGIN,
         'registration': 'open', 'sender': lambda *args: mail.append(args)}))
     accounts = app.extensions['accounts']
@@ -402,11 +406,43 @@ def test_account_mode_admin_permission_revocation_blocks_future_mutations(tmp_pa
     assert accepted.status_code == 201, accepted.json
     repo = app.extensions['fleet']['services']['provider_accounts'].repository
     assert counts(repo) == (1, 1, 1)
-    assert post(admin, 'users/' + user['id'], {'active': False, 'revision': promoted['revision']}).status_code == 200
+    operation = accepted.json['operation']
+    assert anonymous.post('/api/supervisor/poll', json={}, headers=SUPERVISOR).status_code == 200
+    reported = anonymous.post('/api/supervisor/provider-accounts/report', headers=SUPERVISOR,
+        json={**{key: operation[key] for key in ('command_id', 'account_id', 'revision')}, 'state': 'signed_out'})
+    assert reported.json['accepted']
+    identifier = accepted.json['account']['account_id']
+    login = operator.post('/api/provider-accounts/' + identifier + '/operations',
+        base_url=ORIGIN, headers={'Origin': ORIGIN},
+        json={'operation': 'login', 'client_token': 'owned-login'})
+    assert login.status_code == 202, login.json
+    operation = login.json['operation']
+    assert anonymous.post('/api/supervisor/poll', json={}, headers=SUPERVISOR).status_code == 200
+    reported = anonymous.post('/api/supervisor/provider-accounts/report', headers=SUPERVISOR,
+        json={**{key: operation[key] for key in ('command_id', 'account_id', 'revision')}, 'state': 'ready'})
+    assert reported.json['accepted']
+    task = operator.post('/api/tasks', base_url=ORIGIN, headers={'Origin': ORIGIN}, json={
+        'machine': 'mac-local', 'agent_type': 'agy', 'project': 'fleet',
+        'instruction': 'private queued work', 'client_token': 'owned-task', 'provider_account_id': identifier})
+    assert task.status_code == 201, task.json
+    task_repo = app.extensions['fleet']['services']['tasks'].task_repo
+    original = task_repo.get_task(task.json['task']['task_id'])
+    fields = {'active': False} if revocation == 'deactivate' else {'role': 'user'}
+    assert post(admin, 'users/' + user['id'], {**fields, 'revision': promoted['revision']}).status_code == 200
+    result = anonymous.post('/api/commands/poll', json={'runner_id': 'current', 'provider_accounts_schema': 1},
+        headers={'X-Runner-Credential': 'mac-local:runner-secret'})
+    assert result.status_code == 200 and result.json['task'] is None, result.json
+    assert 'private queued work' not in result.get_data(as_text=True)
+    assert task_repo.get_task(original['task_id']) == original
     denied = operator.post(url, base_url=ORIGIN, headers={'Origin': ORIGIN},
         json={'name': 'owned', 'client_token': 'owned-first'})
+    # Both identity changes revoke the old cookie. A fresh demoted login is
+    # authenticated but cannot regain operator authority.
     assert denied.status_code == 401
-    assert counts(repo) == (1, 1, 1)
+    if revocation == 'demote':
+        assert post(operator, 'login', {'email': 'operator@example.test', 'password': PASSWORD}).status_code == 200
+        assert operator.get(url, base_url=ORIGIN).status_code == 403
+    assert counts(repo) == (1, 2, 2)
 
 
 def test_revoked_operator_cannot_resolve_queued_response_or_confirm_ready(hub):
@@ -462,3 +498,138 @@ def test_web_entrypoint_explicit_encryption_configuration_enables_login(hub, mon
         expected = b'x' * 32 if configured == 'explicit' else b'e' * 32
         from fleet_core.session.crypto import AeadBox
         assert AeadBox(expected).decrypt(box.encrypt(b'fixture', b'command'), b'command') == b'fixture'
+
+
+def test_delivery_fence_matches_machine_caches_grants_and_serializes_account_mutations(hub):
+    identifier, flow = waiting(hub)
+    assert report(hub, flow, 'ready').json['accepted']
+    calls = []
+    hub[3].authorize = lambda owner: calls.append(owner) or True
+    with hub[3].task_delivery('other') as bindings:
+        assert bindings == [] and calls == []
+    with hub[3].task_delivery('mac-local') as bindings:
+        assert bindings == [(identifier, ACTOR)] and calls == [ACTOR]
+        with closing(sqlite3.connect(hub[4].db_path, timeout=0, isolation_level=None)) as writer:
+            with pytest.raises(sqlite3.OperationalError, match='locked'):
+                writer.execute('BEGIN IMMEDIATE')
+    # The fence releases on exit; a committed disable wins the next poll.
+    assert operate(hub, identifier, 'disable', 'fenced-disable').status_code == 202
+    with hub[3].task_delivery('mac-local') as bindings:
+        assert bindings == [] and calls == [ACTOR]
+
+
+@pytest.mark.parametrize('failure', ['account_store', 'authorization_store'])
+def test_delivery_storage_failure_returns_bounded_503_without_consuming_tasks(hub, monkeypatch, failure):
+    identifier, flow = waiting(hub)
+    assert report(hub, flow, 'ready').json['accepted']
+    runner = hub[1].extensions['fleet']['services']['runner']
+    task, _ = runner.repo.create_task(machine='mac-local', agent_type='agy', project='fleet',
+        instruction='private queued work', requested_by=ACTOR, provider_account_id=identifier)
+    original = runner.repo.get_task(task['task_id'])
+
+    def broken(*args):
+        raise sqlite3.OperationalError('/private/account/credential')
+
+    if failure == 'account_store':
+        monkeypatch.setattr(hub[4], '_connect', broken)
+    else:
+        hub[3].authorize = broken
+    result = hub[2].post('/api/commands/poll', json={'provider_accounts_schema': 1},
+        headers={'X-Runner-Credential': 'mac-local:runner-secret'})
+    assert result.status_code == 503 and result.json['error'] == 'provider_accounts_unavailable'
+    body = result.get_data(as_text=True)
+    for forbidden in ('/private', 'credential', 'private queued work', identifier, task['task_id']):
+        assert forbidden not in body
+    assert runner.repo.get_task(task['task_id']) == original
+
+
+def test_delivery_fence_is_released_on_task_store_failure(hub, monkeypatch):
+    identifier, flow = waiting(hub)
+    assert report(hub, flow, 'ready').json['accepted']
+    runner = hub[1].extensions['fleet']['services']['runner']
+
+    def broken(**kwargs):
+        raise sqlite3.OperationalError('private task store')
+
+    monkeypatch.setattr(runner.repo, 'lease_task', broken)
+    result = hub[2].post('/api/commands/poll', json={'provider_accounts_schema': 1},
+        headers={'X-Runner-Credential': 'mac-local:runner-secret'})
+    assert result.status_code == 503 and result.json['error'] == 'tasks_unavailable'
+    assert 'private task store' not in result.get_data(as_text=True)
+    assert operate(hub, identifier, 'disable', 'after-store-failure').status_code == 202
+
+
+def test_http_delivery_keeps_account_writer_fenced_through_task_commit(hub, monkeypatch):
+    identifier, flow = waiting(hub)
+    assert report(hub, flow, 'ready').json['accepted']
+    runner = hub[1].extensions['fleet']['services']['runner']
+    task, _ = runner.repo.create_task(machine='mac-local', agent_type='agy', project='fleet',
+        instruction='fixture instruction', requested_by=ACTOR, provider_account_id=identifier)
+    lease = runner.repo.lease_task
+
+    def fenced_lease(**kwargs):
+        for phase in ('before', 'after'):
+            with closing(sqlite3.connect(hub[4].db_path, timeout=0, isolation_level=None)) as writer:
+                with pytest.raises(sqlite3.OperationalError, match='locked'):
+                    writer.execute('BEGIN IMMEDIATE')
+            if phase == 'before':
+                result = lease(**kwargs)
+        return result
+
+    monkeypatch.setattr(runner.repo, 'lease_task', fenced_lease)
+    response = hub[2].post('/api/commands/poll', json={'provider_accounts_schema': 1},
+        headers={'X-Runner-Credential': 'mac-local:runner-secret'})
+    assert response.status_code == 200 and response.json['task']['task_id'] == task['task_id']
+    assert operate(hub, identifier, 'disable', 'after-task-commit').status_code == 202
+
+
+def test_delivery_owner_grants_are_rechecked_once_each_poll_and_never_cached(hub):
+    identifier, flow = waiting(hub)
+    assert report(hub, flow, 'ready').json['accepted']
+    another = create(hub, 'second-account')['account']['account_id']
+    # Fixture duplicates only confirmed readiness for the same already-tested
+    # owner; authorization must be shared per poll rather than per account.
+    with closing(hub[4]._connect()) as conn:
+        conn.execute("UPDATE provider_accounts SET state='ready' WHERE account_id=?", (another,))
+    calls, allowed = [], [True]
+
+    def authorize(owner):
+        calls.append(owner)
+        return allowed[0]
+
+    hub[3].authorize = authorize
+    with hub[3].task_delivery('mac-local') as bindings:
+        assert set(bindings) == {(identifier, ACTOR), (another, ACTOR)}
+        assert calls == [ACTOR]
+    allowed[0] = False
+    with hub[3].task_delivery('mac-local') as bindings:
+        assert bindings == [] and calls == [ACTOR, ACTOR]
+
+
+def test_delivery_index_upgrade_failure_preserves_old_account_data_and_recovers(hub, monkeypatch):
+    result = create(hub)
+    repo = hub[4]
+    with closing(repo._connect()) as conn:
+        conn.execute('DROP INDEX idx_provider_accounts_delivery')
+        before = '\n'.join(conn.iterdump())
+    original_connect = repo._connect
+
+    def denied():
+        conn = original_connect()
+        conn.set_authorizer(lambda action, name, *_: sqlite3.SQLITE_DENY
+            if action == sqlite3.SQLITE_CREATE_INDEX and name == 'idx_provider_accounts_delivery'
+            else sqlite3.SQLITE_OK)
+        return conn
+
+    monkeypatch.setattr(repo, '_connect', denied)
+    with pytest.raises(ProviderAccountStoreError):
+        repo.init()
+    with closing(original_connect()) as conn:
+        assert '\n'.join(conn.iterdump()) == before
+    monkeypatch.setattr(repo, '_connect', original_connect)
+    repo.init()
+    repo.init()
+    assert repo.get(result['account']['account_id'], ACTOR)['name'] == 'Google work'
+    with closing(repo._connect()) as conn:
+        assert conn.execute('PRAGMA foreign_key_check').fetchall() == []
+        assert conn.execute("SELECT value FROM supervisor_meta WHERE key='provider_accounts_schema'").fetchone()[0] == '1'

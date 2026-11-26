@@ -42,6 +42,7 @@ class RunnerService:
         self.repo = task_repo
         self.publisher = event_publisher
         self.workflow_delivery = None
+        self.provider_accounts = None
 
     def _emit(self, event: str, machine=None, task_id=None, **extra) -> None:
         try:
@@ -78,9 +79,14 @@ class RunnerService:
         if (provider_accounts_schema is not None
                 and (type(provider_accounts_schema) is not int or provider_accounts_schema != 1)):
             raise ApplicationError('invalid_runner_capability', '', 400)
-        options = {'allow_provider_accounts': True} if provider_accounts_schema == 1 else {}
-        task = self._task_op(
-            self.repo.lease_task, machine=machine, runner_id=runner_id, **options)
+        if provider_accounts_schema == 1 and self.provider_accounts is not None:
+            # Lock order: supervisor account store -> task store. A capability
+            # declaration cannot substitute for current account/owner admission.
+            with self.provider_accounts.task_delivery(machine) as bindings:
+                task = self._task_op(self.repo.lease_task, machine=machine,
+                    runner_id=runner_id, provider_account_bindings=bindings)
+        else:
+            task = self._task_op(self.repo.lease_task, machine=machine, runner_id=runner_id)
         if task:
             if task.get("source_capture"):
                 if self.workflow_delivery is None:

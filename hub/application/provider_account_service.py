@@ -1,6 +1,7 @@
 """Operator AGY account use cases; the node owns credentials and native login."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import re
 
@@ -174,3 +175,12 @@ class ProviderAccountService:
         if not row['enabled'] or row['state'] != 'ready':
             raise ApplicationError('provider_account_not_ready', '', 409)
         return self._public_account(row)
+
+    @contextmanager
+    def task_delivery(self, machine):
+        """Keep account admission fenced until the task lease commits."""
+        try:
+            with self.repository.task_delivery(machine, self.authorize) as bindings:
+                yield bindings
+        except ProviderAccountStoreError as exc:
+            raise ApplicationError(exc.code, '', exc.status) from None
