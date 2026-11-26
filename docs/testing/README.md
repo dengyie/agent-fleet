@@ -18,7 +18,8 @@ Windows/macOS CI；真实供应商登录仍需单独验收。
 网页账号管理与任务选择使用真实 Hub/SQLite 和 Chrome，脚本化节点状态回报，
 不调用真实 Google 或模型。桌面与手机均覆盖写响应丢失后刷新恢复、原 token、
 授权码不落浏览器存储、账号间取消隔离、停用后禁止新任务，以及已接收任务恢复
-保留原绑定。使用现有 Playwright 和 Chrome（CI 设置 `chromium`）：
+保留原绑定。刷新节点目录及切换 Agent 后返回 AGY 不得清空所选账号；已禁用账号
+在刷新后仍阻断发送，不得改用默认登录。使用现有 Playwright 和 Chrome（CI 设置 `chromium`）：
 
 ```sh
 FLEET_PLAYWRIGHT_MODULE=/path/to/node_modules/playwright FLEET_BROWSER_CHANNEL=chrome \

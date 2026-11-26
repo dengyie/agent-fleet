@@ -42,7 +42,10 @@ export function mountProviderAccountPicker(host, {api, onChange}) {
     update(nextMachine, family) {
       const nextActive = family === 'agy' && !!nextMachine;
       if (nextMachine === machine && nextActive === active) return;
-      reader.stop(); machine = nextMachine; active = nextActive; rows = null; failed = false; selected = '';
+      // Target refresh temporarily clears the Agent field. Keep this node's
+      // explicit account choice through that loading state and family switches.
+      reader.stop(); if (nextMachine !== machine) selected = '';
+      machine = nextMachine; active = nextActive; rows = null; failed = false;
       host.hidden = !active; paint(); if (active && !document.hidden) reader.start();
     },
     setLocked(value) { locked = value; select.disabled = locked || !rows || failed; retry.disabled = locked; },
