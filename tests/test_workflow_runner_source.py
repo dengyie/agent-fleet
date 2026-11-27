@@ -68,6 +68,24 @@ def test_runner_captures_real_source_into_private_durable_cache(tmp_path: Path) 
     assert b"test-secret" not in (archives[0].parent.parent / "attempt.json").read_bytes()
 
 
+def test_atomic_private_json_replace_failure_preserves_old_record_and_cleans_stage(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "private" / "checkpoint.json"
+    runner_source.atomic_private_json(target, {"cursor": "old"})
+    original = target.read_bytes()
+
+    def fail_replace(source: str | Path, destination: str | Path) -> None:
+        Path(source).write_bytes(b'{"partial"')
+        raise OSError("simulated atomic replace failure")
+
+    monkeypatch.setattr(runner_source.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="simulated atomic replace failure"):
+        runner_source.atomic_private_json(target, {"cursor": "new"})
+
+    assert target.read_bytes() == original
+    assert list(target.parent.glob(".record-*")) == []
+
+
 def test_transient_source_upload_reuses_the_same_packet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runner, cfg, task, repo, base, transport = fixture(tmp_path, [503, 200])
     monkeypatch.setattr(runner_source, "SOURCE_RETRY_DELAYS", (0, 0), raising=False)

@@ -263,6 +263,15 @@ ID derived from the exact native session ID, message ID and projected content;
 Hub ingestion deduplicates the retry. Message content itself is never used as
 identity. These IDs do not replace the public Hub cursor.
 
+The private desktop checkpoint is written through a fsynced sibling file and
+atomic replacement, so an interrupted update leaves the previous checkpoint
+intact. A legacy checkpoint that is truncated, invalid UTF-8/JSON, oversized,
+or has an invalid cursor shape is retained and that session's sync fails closed
+with the bounded local code `desktop_checkpoint_invalid`; the node does not
+rewind automatically because older releases may have assigned unstable event
+IDs to historical messages. Other sessions continue syncing, and no damaged
+checkpoint bytes or local path are uploaded to the Hub.
+
 For retry safety, the node derives an opaque source `event_id` from the family,
 exact session ID, SQLite row identity, event position, and canonical projected
 event. The existing encrypted spool retries the same event IDs after upload

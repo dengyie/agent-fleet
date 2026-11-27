@@ -84,12 +84,21 @@ def atomic_private_json(path: Path, value: object) -> None:
         raise SourceUploadError("source_cache_limit")
     private_directory(path.parent)
     # A random sibling and atomic replace keep readers away from partial JSON.
-    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".record-", delete=False) as stream:
-        stage = Path(stream.name)
-        stream.write(raw)
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(stage, path)
+    stage: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".record-", delete=False) as stream:
+            stage = Path(stream.name)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(stage, path)
+        stage = None
+    finally:
+        if stage is not None:
+            try:
+                stage.unlink()
+            except OSError:
+                pass
     _sync_directory(path.parent)
 
 
