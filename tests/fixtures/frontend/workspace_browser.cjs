@@ -7,6 +7,7 @@ const [origin, scenario] = process.argv.slice(2);
   try {
     const page = await browser.newPage({viewport:{width:1440, height:900}});
     page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(30000);
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     let runState = 'succeeded';

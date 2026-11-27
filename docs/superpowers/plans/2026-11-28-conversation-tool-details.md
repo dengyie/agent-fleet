@@ -44,3 +44,5 @@
 - [ ] Compare same-run public resources, exact runtime SHA and authenticated production pages. Record external model/OAuth acceptance as not run.
 
 Local evidence: `/tmp/fleet-tool-details-red.log` records the original visibility failure. Targeted native/main streaming checks passed. The broad regression first found a Chrome CSS serialization assertion and then an account-recovery fixture that read counters before the recovery response; both test assertions now verify actual behavior/response boundaries. Final integrated verification is required after rebase.
+
+Integration base rebased to main `5f10797fa0facd7fdb3988814d8434f51b73ba65` (AGY native archive collection; no changed browser API). The first PR macOS run exposed an existing ACP fixture race: pending.json becomes readable before publish releases its lock. The fixture now waits for publish to return before answering; lifecycle/interaction/transport regressions: 74 passed. A local page navigation exceeded the fixture-wide 5s action timeout; navigation now has its own 30s budget while element/action waits retain 5s. No backend product code was changed.
