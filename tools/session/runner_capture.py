@@ -49,7 +49,7 @@ class RunnerCapture:
     All sessions under ``cache_dir/conversations`` share one machine quota.
     """
 
-    def __init__(self, cfg, task, post, process_group_id=None, *, replay=False):
+    def __init__(self, cfg, task, post, process_group_id=None, *, replay=False, preserve_source=True):
         self.cfg = cfg
         self.root = Path(cfg.cache_dir) / 'conversations'
         self.root.mkdir(parents=True, exist_ok=True)
@@ -75,7 +75,7 @@ class RunnerCapture:
             'spool_machine_bytes': ARCHIVE_MACHINE_BYTES + (
                 0 if task['attempt_id'].startswith(NATIVE_PREFIX) else LIVE_RESERVE_BYTES),
             'spool_owner_lock': True, 'spool_owner_timeout': 0 if replay else OWNER_WAIT_S,
-            'preserve_source': True,
+            'preserve_source': preserve_source,
             'post_json': lambda batch: self._post(post, batch),
         })
         try:
@@ -372,6 +372,10 @@ def replay_pending(cfg, post, *, should_stop=lambda: False):
             if _expire_tombstone(record, data):
                 continue
             capture = RunnerCapture(cfg, data, post, replay=True)
+            if (data.get('agent_type') == 'agy' and data.get('attempt_id', '').startswith(NATIVE_PREFIX)
+                    and (capture.root / (capture.session_id + '.agy-cursor')).exists()):
+                from tools.session.agy_archive import recover_receipt
+                recover_receipt(capture)
             capture.refresh_metadata()
             capture.flush(should_stop=should_stop)
         except SpoolBusy:

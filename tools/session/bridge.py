@@ -772,11 +772,15 @@ class SessionBridge:
         # For a minimal source record with a text/tool body (no envelope),
         # shape a legal payload rather than rejecting the whole record.
         if kind in ("user_message", "assistant_message"):
+            source_body = payload if isinstance(payload, Mapping) else e
             candidate["payload"] = {
                 "text": _first_text(payload if payload is not None
                                     else e, ("text", "content", "result")),
                 "is_complete": True,
             }
+            for field in ('message_id', 'content_mode', 'is_complete'):
+                if field in source_body:
+                    candidate['payload'][field] = source_body[field]
         elif kind in ("tool_call", "tool_result"):
             source_body = payload if isinstance(payload, Mapping) else e
             candidate["payload"] = {

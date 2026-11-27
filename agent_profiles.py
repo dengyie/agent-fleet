@@ -76,7 +76,8 @@ PROFILES: dict[str, Profile] = {
         native_session_root="~/.zcode/cli/rollout",
         native_session_depth=1, native_resume=True, runner_resume_only=True),
     "agy": Profile("agy", ("agy", "acp"),
-        basenames=("agy",), native_resume=True, runner_resume_only=True),
+        basenames=("agy",), native_resume=True, runner_resume_only=True,
+        native_session_root="~/.gemini/antigravity-cli/conversations", native_session_depth=1),
     "generic": Profile(
         "generic", None, executable=False,
         pattern="claude|codex|astrbot|openclaw|opencode|aider",

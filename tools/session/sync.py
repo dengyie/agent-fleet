@@ -41,6 +41,12 @@ def default_sources():
             if profile.native_session_root and Path(profile.native_session_root).expanduser().is_dir()]
 
 
+def native_paths(family, root):
+    # Agy stores one SQLite/protobuf database per conversation. Do not recurse
+    # into its caches, browser profiles, credentials or vendored repositories.
+    return root.glob('*.db') if family == 'agy' else root.rglob('*.jsonl')
+
+
 class NativeArchiveSync:
     """Independent incremental archive worker; slow uploads never block control polling."""
 
@@ -115,8 +121,9 @@ class NativeArchiveSync:
         # on this machine has uploaded. One in-flight upload may finish first.
         if self._archive_paths is None:
             self._archive_paths = ((family, root, path)
-                for family, root in sorted(sources, key=lambda source: source[0] != 'zcode')
-                for path in root.rglob('*.jsonl'))
+                for family, root in sorted(sources,
+                    key=lambda source: {'agy': 0, 'zcode': 1}.get(source[0], 2))
+                for path in native_paths(family, root))
         deadline = time.monotonic() + self.interval
         visited = False
         while True:
@@ -137,6 +144,12 @@ class NativeArchiveSync:
                 native_id = path.stem.removeprefix('model-io-')
                 bound = family == 'zcode' and native_id in bindings
                 fingerprint = (stat.st_ino, stat.st_size, stat.st_mtime_ns, bound)
+                if family == 'agy':
+                    try:
+                        info = Path(str(path) + '-wal').stat()
+                        fingerprint += (info.st_size, info.st_mtime_ns)
+                    except FileNotFoundError:
+                        fingerprint += (None, None)
                 from tools.session.native_metadata import metadata_store_path
                 metadata_store = metadata_store_path(family, path)
                 if metadata_store is not None:
@@ -148,6 +161,14 @@ class NativeArchiveSync:
                         except FileNotFoundError:
                             fingerprint += (None, None)
                 if self.completed.get((family, path)) == fingerprint:
+                    continue
+                if family == 'agy':
+                    from tools.session.agy_archive import sync_agy
+                    if sync_agy(self.cfg, path, self.send, should_stop=self.stopping.is_set):
+                        self.completed[(family, path)] = fingerprint
+                        self.completed.move_to_end((family, path))
+                        if len(self.completed) > 4096:
+                            self.completed.popitem(last=False)
                     continue
                 identity = native_identity(family, path)
                 if (self.cfg.cache_dir / 'conversations' / (session_prefix(self.cfg.machine) + identity + '.desktop-cursor')).exists():
@@ -328,6 +349,9 @@ def _sync_zcode_native_tool_events(capture, state, checkpoint, native_id):
 
 
 def sync_file(cfg, family, path, send=post, *, desktop_group=None):
+    if family == 'agy':
+        from tools.session.agy_archive import sync_agy
+        return sync_agy(cfg, path, send)
     path = Path(path).resolve()
     identity = native_identity(family, path)
     capture = RunnerCapture(cfg, {'attempt_id': identity, 'agent_type': family, 'task_id': ''},
@@ -393,7 +417,7 @@ def main(argv=None):
             replay_pending(cfg, post)
             failed = False
             for family, root in sources:
-                for path in sorted(root.rglob('*.jsonl')):
+                for path in sorted(native_paths(family, root)):
                     try:
                         sync_file(cfg, family, path)
                     except Exception:
