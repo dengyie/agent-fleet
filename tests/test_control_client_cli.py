@@ -47,6 +47,14 @@ class SpoolKeyTests(unittest.TestCase):
         with self.assertRaises(cli.CliError):
             cli._load_or_create_spool_key(path)
 
+    def test_concurrent_first_captures_share_one_complete_key(self):
+        from concurrent.futures import ThreadPoolExecutor
+        path = self.tmp / 'concurrent.key'
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            values = list(pool.map(lambda _: cli._load_or_create_spool_key(path), range(4)))
+        self.assertTrue(all(value == values[0] and len(value) == 32 for value in values))
+        self.assertEqual(path.read_bytes(), values[0])
+
 
 class SessionEventsTransportTests(unittest.TestCase):
     def test_post_json_sends_event_list_not_object(self):

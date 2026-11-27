@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -31,19 +32,51 @@ MAX_LINE_BYTES = 16 << 20
 
 
 def native_identity(family, path):
-    return 'native_' + hashlib.sha256((family + '\0' + str(Path(path).resolve())).encode()).hexdigest()[:32]
+    path = Path(path).resolve()
+    # Codex archive is a move from sessions/YYYY/MM/DD to archived_sessions.
+    # Canonicalize only its exact dated native filename back to the old active
+    # path, preserving every already-published identity and byte checkpoint.
+    if family == 'codex' and path.parent.name == 'archived_sessions':
+        dated = re.match(r'^rollout-(\d{4})-(\d{2})-(\d{2})T', path.name)
+        if dated:
+            path = path.parent.parent / 'sessions' / Path(*dated.groups()) / path.name
+    return 'native_' + hashlib.sha256((family + '\0' + str(path)).encode()).hexdigest()[:32]
 
 
 def default_sources():
     """Existing native conversation stores on this node, including history."""
-    return [(family, Path(profile.native_session_root).expanduser())
-            for family, profile in PROFILES.items()
-            if profile.native_session_root and Path(profile.native_session_root).expanduser().is_dir()]
+    home = Path.home()
+    gemini = Path(os.environ.get('GEMINI_HOME') or home / '.gemini').expanduser()
+    overrides = {
+        'codex': [Path(os.environ.get('CODEX_HOME') or home / '.codex') / name
+                  for name in ('sessions', 'archived_sessions')],
+        'claude_code': [Path(os.environ.get('CLAUDE_CONFIG_DIR') or home / '.claude') / 'projects'],
+        'pi': [Path(os.environ.get('PI_CODING_AGENT_DIR') or home / '.pi/agent') / 'sessions'],
+        'zcode': [Path(os.environ.get('ZCODE_DATA_BASE_DIR') or home) / '.zcode/cli/rollout'],
+        # Both installed native CLI namespaces have the same verified storage
+        # schema. Never select one by OS/version or scan all of .gemini.
+        'agy': [gemini / name / 'conversations' for name in ('antigravity-cli', 'antigravity')],
+        'hermes': [Path(os.environ.get('HERMES_HOME') or home / '.hermes')],
+    }
+    result, seen = [], set()
+    for family, profile in PROFILES.items():
+        paths = overrides.get(family, [Path(profile.native_session_root).expanduser()]
+                              if profile.native_session_root else [])
+        for path in paths:
+            path = path.expanduser()
+            key = family, path.resolve()
+            if path.is_dir() and key not in seen:
+                result.append((family, path))
+                seen.add(key)
+    return result
 
 
 def native_paths(family, root):
     # Agy stores one SQLite/protobuf database per conversation. Do not recurse
     # into its caches, browser profiles, credentials or vendored repositories.
+    if family == 'hermes':
+        from tools.session.hermes_archive import session_paths
+        return session_paths(root)
     return root.glob('*.db') if family == 'agy' else root.rglob('*.jsonl')
 
 
@@ -138,15 +171,16 @@ class NativeArchiveSync:
             if self.stopping.is_set():
                 return
             try:
-                if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
+                source = path.parent if family == 'hermes' else path
+                if source.is_symlink() or not source.resolve().is_relative_to(root.resolve()):
                     continue
-                stat = path.stat()
+                stat = source.stat()
                 native_id = path.stem.removeprefix('model-io-')
                 bound = family == 'zcode' and native_id in bindings
                 fingerprint = (stat.st_ino, stat.st_size, stat.st_mtime_ns, bound)
-                if family == 'agy':
+                if family in {'agy', 'hermes'}:
                     try:
-                        info = Path(str(path) + '-wal').stat()
+                        info = Path(str(source) + '-wal').stat()
                         fingerprint += (info.st_size, info.st_mtime_ns)
                     except FileNotFoundError:
                         fingerprint += (None, None)
@@ -162,9 +196,12 @@ class NativeArchiveSync:
                             fingerprint += (None, None)
                 if self.completed.get((family, path)) == fingerprint:
                     continue
-                if family == 'agy':
-                    from tools.session.agy_archive import sync_agy
-                    if sync_agy(self.cfg, path, self.send, should_stop=self.stopping.is_set):
+                if family in {'agy', 'hermes'}:
+                    if family == 'agy':
+                        from tools.session.agy_archive import sync_agy as sync_sqlite
+                    else:
+                        from tools.session.hermes_archive import sync_hermes as sync_sqlite
+                    if sync_sqlite(self.cfg, path, self.send, should_stop=self.stopping.is_set):
                         self.completed[(family, path)] = fingerprint
                         self.completed.move_to_end((family, path))
                         if len(self.completed) > 4096:
@@ -352,6 +389,9 @@ def sync_file(cfg, family, path, send=post, *, desktop_group=None):
     if family == 'agy':
         from tools.session.agy_archive import sync_agy
         return sync_agy(cfg, path, send)
+    if family == 'hermes':
+        from tools.session.hermes_archive import sync_hermes
+        return sync_hermes(cfg, path, send)
     path = Path(path).resolve()
     identity = native_identity(family, path)
     capture = RunnerCapture(cfg, {'attempt_id': identity, 'agent_type': family, 'task_id': ''},

@@ -1,5 +1,20 @@
 # 全流程测试与质量门禁
 
+跨 Agent 原生历史发现审查见[审查记录](../reviews/2026-11-28-native-history-discovery.md)
+与[运行时契约](../native-provider-runtime.md#native-history-discovery-and-hermes)。新增专项覆盖
+两种 Agy 原生目录、中文/空格自定义根、Codex 归档移动保留原身份和游标、Hermes
+可见逐条用户/回答/工具、原生压缩副本与相同文本独立消息、NUL JSON 文本块、WAL/名称
+更新、有界目录/消息分页、真实配额 gap、并发首次密钥初始化、append 后崩溃与重放、
+SQLite 索引空库的原子 v1 初始化及损坏/未知版本拒绝，以及关闭时回收已 ACK 尾段、
+失败 ACK checkpoint 不回收、重开后序号保持，以及六类 Agent 初始化写入失败后的身份恢复、
+Agy 无标题空会话、身份 checkpoint 故障后原事件去重。双平台 CI 与 SESSION-01 选择新增专项。
+
+```sh
+python3 -m pytest tests/test_native_history_discovery.py tests/test_hermes_native_history.py \
+  tests/test_agy_native_history.py tests/test_native_delivery_receipts.py tests/test_native_initialization_recovery.py tests/test_control_client_cli.py tests/test_review_node_sync.py \
+  tests/test_native_agent_storage.py tests/test_session_spool.py tests/test_session_upload_recovery.py -q
+```
+
 Agy 本地 SQLite/protobuf 历史采集见[运行时契约](../native-provider-runtime.md#existing-local-antigravity-cli-history)
 和[实施计划](../superpowers/plans/2026-11-28-agy-native-history.md)。真实原生形状 fixture 经过
 加密 spool、临时 SQLite/Flask HTTP，覆盖目录发现、原生名称、逐条对话/工具、只读校验、

@@ -201,8 +201,43 @@ class TranscriptRepository:
                     "ON redacted_events(machine_id, session_id, COALESCE(stream_id,''), sequence)")
             self._init_raw_bytes_counter(conn)
             self._init_event_order(conn)
+            self._init_delivery_receipts(conn)
         finally:
             conn.close()
+
+    @staticmethod
+    def _init_delivery_receipts(conn) -> None:
+        """Atomic additive receipt migration; public event cursors are unchanged."""
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            version = conn.execute("SELECT value FROM meta WHERE key='delivery_receipts_schema'").fetchone()
+            if version is not None and version[0] != '1':
+                raise ValueError('delivery_receipts_schema')
+            exists = conn.execute("SELECT 1 FROM sqlite_master WHERE name='delivery_receipts'").fetchone()
+            if (version is None) != (exists is None):
+                raise ValueError('delivery_receipts_schema')
+            conn.execute('CREATE TABLE IF NOT EXISTS delivery_receipts ('
+                         'session_id TEXT NOT NULL, machine_id TEXT NOT NULL, stream_id TEXT NOT NULL, '
+                         'sequence INTEGER NOT NULL, event_id TEXT NOT NULL, '
+                         'PRIMARY KEY(session_id,sequence,machine_id,stream_id), FOREIGN KEY(session_id,event_id) '
+                         'REFERENCES redacted_events(session_id,event_id) ON DELETE CASCADE) WITHOUT ROWID')
+            schema = conn.execute('PRAGMA table_info(delivery_receipts)').fetchall()
+            foreign_keys = conn.execute('PRAGMA foreign_key_list(delivery_receipts)').fetchall()
+            if ([r[1] for r in schema] != ['session_id', 'machine_id', 'stream_id', 'sequence', 'event_id']
+                    or [r[2].upper() for r in schema] != ['TEXT', 'TEXT', 'TEXT', 'INTEGER', 'TEXT']
+                    or [r[3] for r in schema] != [1, 1, 1, 1, 1]
+                    or [r[5] for r in schema] != [1, 3, 4, 2, 0]
+                    or len(foreign_keys) != 2
+                    or {tuple(r) for r in foreign_keys} != {
+                        (0, 0, 'redacted_events', 'session_id', 'session_id', 'NO ACTION', 'CASCADE', 'NONE'),
+                        (0, 1, 'redacted_events', 'event_id', 'event_id', 'NO ACTION', 'CASCADE', 'NONE')}):
+                raise ValueError('delivery_receipts_schema')
+            if version is None:
+                conn.execute("INSERT INTO meta(key,value) VALUES('delivery_receipts_schema','1')")
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
 
     @staticmethod
     def _init_event_order(conn) -> None:
@@ -435,18 +470,46 @@ class TranscriptRepository:
             # Duplicate check against the redacted stream (the write key),
             # scoped per session so two sessions may share an event_id.
             existing = conn.execute(
-                "SELECT 1 FROM redacted_events WHERE session_id=? AND event_id=?",
+                "SELECT sequence,redacted_json FROM redacted_events WHERE session_id=? AND event_id=?",
                 (session_id, event_id),
             ).fetchone()
             if existing:
+                if existing['sequence'] != sequence:
+                    # Older native scanners could persist a frame and crash
+                    # before the source cursor. A retry has the same stable
+                    # event ID but a fresh source sequence. Record this exact
+                    # delivery only; never allocate another public event.
+                    redacted = clean if kind == 'source_record' else Redactor().redact_event(clean)[0]
+                    previous = json.loads(existing['redacted_json'])
+                    compare = lambda value: {k: v for k, v in value.items() if k not in {'sequence', 'emitted_at'}}
+                    if compare(previous) != compare(redacted):
+                        return IngestResult('rejected', event_id=event_id, reason='event_id_conflict', raw_written=False)
+                    identity = (session_id, sequence, clean.get('machine_id') or '', clean.get('stream_id') or '')
+                    conflict = conn.execute('SELECT event_id FROM redacted_events WHERE session_id=? AND sequence=? '
+                                            "AND COALESCE(machine_id,'')=? AND COALESCE(stream_id,'')=? "
+                                            'UNION ALL SELECT event_id FROM delivery_receipts WHERE session_id=? AND sequence=? '
+                                            'AND machine_id=? AND stream_id=?', identity + identity).fetchall()
+                    if any(r[0] != event_id for r in conflict):
+                        return IngestResult('rejected', event_id=event_id, reason='sequence_conflict', raw_written=False)
+                    conn.execute('INSERT OR IGNORE INTO delivery_receipts VALUES(?,?,?,?,?)',
+                                 (session_id, clean.get('machine_id') or '', clean.get('stream_id') or '', sequence, event_id))
+                    conn.commit()
+                    return IngestResult('duplicate', event_id=event_id, reason=None, raw_written=False)
                 conn.rollback()
                 return IngestResult("duplicate", event_id=event_id,
                                     reason=None, raw_written=False)
 
+            receipt = conn.execute('SELECT 1 FROM delivery_receipts WHERE session_id=? AND sequence=? AND machine_id=? AND stream_id=?',
+                                   (session_id, sequence, clean.get('machine_id') or '', clean.get('stream_id') or '')).fetchone()
+            if receipt:
+                return IngestResult('rejected', event_id=event_id, reason='sequence_conflict', raw_written=False)
+
             # Sequence-gap check against max already-stored sequence.
             row = conn.execute(
-                "SELECT COALESCE(MAX(sequence), 0) AS max_seq"
-                " FROM redacted_events WHERE session_id=?", (session_id,)
+                "SELECT MAX(max_seq) AS max_seq FROM ("
+                "SELECT COALESCE(MAX(sequence),0) AS max_seq FROM redacted_events WHERE session_id=? "
+                "UNION ALL SELECT COALESCE(MAX(sequence),0) FROM delivery_receipts WHERE session_id=?)",
+                (session_id, session_id)
             ).fetchone()
             max_seq = int(row["max_seq"]) if row is not None and row["max_seq"] is not None else 0
             is_gap = sequence > max_seq + 1
@@ -744,9 +807,10 @@ class TranscriptRepository:
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT sequence FROM redacted_events WHERE session_id=?"
-                " AND sequence>? ORDER BY sequence ASC",
-                (session_id, cursor),
+                "SELECT sequence FROM redacted_events WHERE session_id=? AND sequence>? "
+                "UNION SELECT sequence FROM delivery_receipts WHERE session_id=? AND sequence>? "
+                "ORDER BY sequence ASC",
+                (session_id, cursor, session_id, cursor),
             )
             for row in rows:
                 sequence = int(row["sequence"])

@@ -50,11 +50,11 @@ def _step(kind, content, *, status=3, model='Native model', call=None):
     return _pb((1, kind), (4, status), (5, metadata), (field, body)), metadata
 
 
-def _native(tmp_path, monkeypatch=None, *, rows=None):
+def _native(tmp_path, monkeypatch=None, *, rows=None, namespace='antigravity-cli'):
     if monkeypatch:
         monkeypatch.setenv('HOME', str(tmp_path))
         monkeypatch.setenv('USERPROFILE', str(tmp_path))
-    root = tmp_path / '.gemini/antigravity-cli/conversations'
+    root = tmp_path / '.gemini' / namespace / 'conversations'
     root.mkdir(parents=True)
     path = root / (CID + '.db')
     with sqlite3.connect(path) as db:

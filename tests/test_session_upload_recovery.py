@@ -9,6 +9,43 @@ from tools.session.runner_capture import RunnerCapture, replay_pending
 from tools.session.uploader import SessionUploader
 
 
+def test_close_releases_fully_acked_final_segment_and_keeps_sequence(tmp_path):
+    spool = make_spool(tmp_path)
+    spool.append(_evt(1))
+    spool.ack(1)
+    assert spool.status()['machine_bytes'] > 0  # active tail cannot be removed yet
+    spool.close()
+    assert spool.status()['machine_bytes'] == 0
+    recovered = make_spool(tmp_path)
+    try:
+        assert recovered.status()['next_sequence'] == 2
+        assert recovered.status()['ack_sequence'] == 1
+        recovered.append(_evt(2))
+        assert [r['sequence'] for r in recovered.read_after(1, 10, 65536)] == [2]
+    finally:
+        recovered.close()
+
+
+def test_close_never_compacts_an_ack_whose_checkpoint_failed(tmp_path, monkeypatch):
+    from tools.session.spool import SpoolError
+    spool = make_spool(tmp_path)
+    spool.append(_evt(1))
+    def failed():
+        spool._checkpoint_dirty = True
+        raise SpoolError('fixture_checkpoint')
+    monkeypatch.setattr(spool, '_persist_checkpoint', failed)
+    with pytest.raises(SpoolError):
+        spool.ack(1)
+    spool.close()
+    assert spool.status()['machine_bytes'] > 0
+    recovered = make_spool(tmp_path)
+    try:
+        assert recovered.status()['ack_sequence'] == 0
+        assert [r['sequence'] for r in recovered.read_after(0, 10, 65536)] == [1]
+    finally:
+        recovered.close()
+
+
 @pytest.mark.parametrize('batch_events', [1, 3])
 def test_flush_pass_does_not_chase_concurrently_appended_events(tmp_path, batch_events):
     spool = make_spool(tmp_path)
