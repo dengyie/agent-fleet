@@ -271,7 +271,8 @@ def test_large_visible_text_and_tools_keep_full_content_secret_redacted(tmp_path
     assert [e['event_id'] for e in _events(client)[1]] == originals
 
 
-@pytest.mark.parametrize('raw', ['{}', '{', '{"version":2}', '{"version":1,"cursor":true}', 'x' * 100000])
+@pytest.mark.parametrize('raw', ['{}', '{', '{"version":2}', '{"version":1,"cursor":true}',
+                                pytest.param('x' * 100000, id='oversized-checkpoint')])
 def test_corrupt_or_future_checkpoint_fails_closed_without_public_session(tmp_path, raw):
     from tools.session.agy_archive import sync_agy
     path, cfg, client = _native(tmp_path), _cfg(tmp_path), _client(tmp_path)
