@@ -66,3 +66,48 @@ def test_missing_malformed_or_excessive_database_fails_closed(tmp_path):
     assert not verify_identity('hermes',path,'native',str(tmp_path))
     with pytest.raises((sqlite3.Error, ValueError)):
         read_events('hermes',path,'native',0)
+
+
+@pytest.mark.parametrize('terminal_status', ['completed', 'error'])
+def test_zcode_running_tool_is_a_cursor_barrier_until_in_place_completion(
+        tmp_path, terminal_status):
+    path = tmp_path / 'db.sqlite'
+    running = {'type': 'tool', 'callID': 'c_running', 'tool': 'Read',
+               'state': {'status': 'running', 'input': {'file_path': 'a.txt'}}}
+    later = {'type': 'tool', 'callID': 'c_later', 'tool': 'Read',
+             'state': {'status': 'completed', 'input': {'file_path': 'b.txt'},
+                       'output': 'later result'}}
+    with sqlite3.connect(path) as db:
+        db.execute('create table message(id text,session_id text,data text)')
+        db.execute('create table part(message_id text,session_id text,data text)')
+        hidden = {'type': 'tool', 'callID': 'c_hidden', 'tool': 'Read',
+                  'state': {'status': 'running', 'input': {}}}
+        db.execute('insert into message values (?,?,?)',
+                   ('hidden', 'sess_mutable', json.dumps(
+                       {'role': 'assistant', 'visibility': 'model-only'})))
+        db.execute('insert into part values (?,?,?)',
+                   ('hidden', 'sess_mutable', json.dumps(hidden)))
+        for mid, part in [('running', running), ('later', later)]:
+            db.execute('insert into message values (?,?,?)',
+                       (mid, 'sess_mutable', json.dumps({'role': 'assistant'})))
+            db.execute('insert into part values (?,?,?)',
+                       (mid, 'sess_mutable', json.dumps(part)))
+
+    events, cursor = read_events('zcode', path, 'sess_mutable', 0)
+    assert events == []
+    assert cursor == 1
+
+    running['state'] = {'status': terminal_status, 'input': {'file_path': 'a.txt'},
+                        'output': 'running result', 'error': 'failed to read'}
+    with sqlite3.connect(path) as db:
+        db.execute('update part set data=? where message_id=?',
+                   (json.dumps(running), 'running'))
+    events, cursor = read_events('zcode', path, 'sess_mutable', cursor)
+    calls = [event['payload']['call_id'] for event in events if event['kind'] == 'tool_call']
+    assert calls == ['c_running', 'c_later']
+    assert cursor == 3
+    result = next(event for event in events
+                  if event['kind'] == 'tool_result'
+                  and event['payload']['call_id'] == 'c_running')
+    assert result['payload']['status'] == ('error' if terminal_status == 'error' else 'ok')
+    assert not any(event['payload'].get('call_id') == 'c_hidden' for event in events)

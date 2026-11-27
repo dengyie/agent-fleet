@@ -380,6 +380,7 @@ class SessionBridge:
         self._tailer = None
         self._last_error: str | None = None
         self._last_reject: str | None = None
+        self._persistence_rejections = 0
         self._expected_user_echo: str | None = None
         # A family name does not prove a live native permission channel. Only
         # persisted metadata from a managed ACP worker can enable this path.
@@ -495,8 +496,18 @@ class SessionBridge:
             self._tailer.checkpoint_to(self._checkpoint_path)
         return count
 
-    def ingest_one(self, raw, *, source: str | None = None) -> bool:
-        return self._handle_raw(source or self.source, raw)
+    def ingest_one(self, raw, *, source: str | None = None, strict=False) -> bool:
+        """Ingest one observation; strict callers cannot acknowledge a partial write.
+
+        A shaped lifecycle event or quota-gap marker is not a receipt for a
+        rejected message. Default live capture retains its failure isolation.
+        Callers serialize access to this session's bridge, as for spool writes.
+        """
+        before = self._persistence_rejections
+        accepted = self._handle_raw(source or self.source, raw)
+        if strict and self._persistence_rejections != before:
+            raise RuntimeError('event_not_persisted')
+        return accepted
 
     def record_user_turn(self, text: str) -> None:
         """Record a Runner-delivered turn and expect at most one native echo.
@@ -1061,7 +1072,11 @@ class SessionBridge:
             # SpoolError (quota/setup/checkpoint) degrades to a bounded
             # per-event reject — it never escapes ingest into the source loop.
             self._last_reject = getattr(exc, "code", None) or "invalid_event"
+            self._persistence_rejections += 1
             return False
+        if not result.accepted:
+            self._last_reject = 'spool_quota'
+            self._persistence_rejections += 1
         if result.capture_blocked:
             self._emit_downgrade(event, "spool_quota")
         if result.accepted and event['kind'] in ('session_start', 'session_metadata'):

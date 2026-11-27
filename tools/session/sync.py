@@ -219,7 +219,9 @@ def sync_desktop(cfg, desktop, row, native_path, send=post, *, budget_s=1, shoul
                         if key != 'desktop_bridge'}
         if (state.get('metadata') != metadata_key
                 or state.get('desktop_bridge') is not True):
-            capture.bridge.ingest_one({'kind':'session_metadata','payload':metadata})
+            if not capture.bridge.ingest_one(
+                    {'kind':'session_metadata','payload':metadata}, strict=True):
+                raise RuntimeError('event_not_persisted')
             state['metadata'] = metadata_key
             state['desktop_bridge'] = True
             checkpoint.write_text(json.dumps(state), encoding='utf-8')
@@ -242,8 +244,14 @@ def sync_desktop(cfg, desktop, row, native_path, send=post, *, budget_s=1, shoul
                 # the same message ID must remain readable once populated.
                 if role not in {'user', 'assistant'} or not isinstance(text, str) or not text:
                     continue
-                capture.bridge.ingest_one({'kind':role+'_message',
-                    'payload':{'text':text,'is_complete':True}})
+                event = {'kind':role+'_message', 'payload':{'text':text,'is_complete':True}}
+                # A spool frame can survive a failed source-checkpoint write.
+                # Bind retries to the vendor message identity, never text alone.
+                body = json.dumps([native_id, mid, event], ensure_ascii=False,
+                                  sort_keys=True, separators=(',', ':'))
+                event['event_id'] = 'evt_' + hashlib.sha256(body.encode('utf-8')).hexdigest()[:40]
+                if not capture.bridge.ingest_one(event, strict=True):
+                    raise RuntimeError('event_not_persisted')
                 state['seen'].append(mid)
                 checkpoint.write_text(json.dumps(state), encoding='utf-8')
                 progressed = True
@@ -283,7 +291,7 @@ def _sync_zcode_native_tool_events(capture, state, checkpoint, native_id):
     for event in events:
         if event.get('kind') not in {'tool_call', 'tool_result'}:
             continue
-        if not capture.bridge.ingest_one(event):
+        if not capture.bridge.ingest_one(event, strict=True):
             raise RuntimeError('native_tool_event_not_persisted')
     if next_cursor != cursor:
         state['native_cursor'] = next_cursor

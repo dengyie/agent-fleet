@@ -65,11 +65,11 @@ Windows 同时替换目标的临时 access/share/lock 拒绝（原生错误 5/32
 
 元数据的来源、实际复现、分层实现和覆盖边界见[元数据恢复 Review](../reviews/2026-11-25-native-session-metadata.md)及[实施计划](../superpowers/plans/2026-11-25-native-session-metadata-recovery.md)。Codex v5 的 thread-store 名称需同时核对线程 ID、cwd 和 rollout 路径；不猜测其他 `state_*.sqlite` 版本。
 
-ZCode 桌面 idle 扫描从精确会话的只读 SQLite store 补齐已完成工具调用/结果；本专项验证有界分页、游标续读、重放去重、隐藏推理过滤和数据库路径不泄漏：
+ZCode 桌面 idle 扫描从精确会话的只读 SQLite store 补齐已完成工具调用/结果；专项还验证运行中工具行作为安全游标屏障、桌面消息/元数据仅在 spool 持久化后确认、checkpoint 写失败重试去重、配额与存储失败、隐藏推理过滤和数据库路径不泄漏：
 
 ```sh
-python3 -m pytest tests/test_review_node_sync.py::test_zcode_desktop_tool_capture_from_native_storage \
-  tests/test_native_agent_storage.py -q
+python3 -m pytest tests/test_review_node_sync.py tests/test_native_agent_storage.py \
+  -q
 ```
 
 包含会话桥接、Hub API、CLI/native transcript 等相关回归的较宽范围命令：
