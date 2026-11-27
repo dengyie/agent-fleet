@@ -183,7 +183,7 @@ class RunnerCapture:
         def upload_loop():
             while not self.stopping.wait(1):
                 try:
-                    self.flush()
+                    self.flush(should_stop=self.stopping.is_set)
                 except Exception:
                     log.exception('Conversation upload failed: %s', self.session_id)
         self.worker = threading.Thread(target=upload_loop, name='conversation-upload', daemon=True)
@@ -194,11 +194,11 @@ class RunnerCapture:
         if self.worker is not None:
             self.worker.join()
 
-    def flush(self):
+    def flush(self, *, should_stop=None):
         # ``line()`` only contends for ``lock`` while the spool is read or
         # acked; the HTTP POST runs outside it.
         with self.flush_lock:
-            return self.bridge.flush(guard=self.lock)
+            return self.bridge.flush(guard=self.lock, should_stop=should_stop)
 
     def begin_turn(self, text):
         with self.lock:
@@ -373,7 +373,7 @@ def replay_pending(cfg, post, *, should_stop=lambda: False):
                 continue
             capture = RunnerCapture(cfg, data, post, replay=True)
             capture.refresh_metadata()
-            capture.flush()
+            capture.flush(should_stop=should_stop)
         except SpoolBusy:
             # A live runner/sync process owns this spool; it uploads itself.
             log.debug('Conversation replay skipped (live writer): %s', record.name)

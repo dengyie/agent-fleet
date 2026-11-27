@@ -227,3 +227,26 @@ process incarnation after the Job handle is released. A later global process
 snapshot or reused PID cannot overturn that proof. Unreadable jobs and failed
 cleanup never acquire it; recovered Supervisors still require fresh ownership
 and liveness checks because this proof is not persisted as process authority.
+
+## Finite session upload and cooperative shutdown
+
+Each upload pass captures the encrypted spool's current `last_sequence` under
+the capture lock and uploads only that bounded prefix. Events appended during
+HTTP requests remain durable for the next pass, so a continuous producer cannot
+keep the same upload call draining indefinitely. Existing event-count/byte caps,
+contiguous ACK validation and source/Hub event identities remain unchanged.
+
+The live upload worker and retained-history replay check their existing stop
+signal between requests and again after reading the next batch. An already
+in-flight HTTP response is applied before returning: its confirmed prefix is
+checkpointed; response loss leaves that prefix unacknowledged locally and safely
+replays the original event IDs after restart. Stop never marks unsent events as
+accepted, removes their spool, or interrupts native Agent execution.
+
+Stopping the background worker still waits for its current transport call and
+checkpoint; this is cooperative cancellation, not a hard deadline for an arbitrary
+injected transport. After background stop, normal `finish()` explicitly performs
+the final upload, including close events. Existing transport timeouts, quota and
+closed-history retention remain authoritative. No HTTP, database or spool-format
+migration is required. See the [implementation plan](superpowers/plans/2026-11-27-session-upload-pass-recovery.md)
+and [test entry](testing/README.md).
