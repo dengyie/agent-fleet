@@ -118,6 +118,8 @@ const [origin] = process.argv.slice(2);
     await page.goBack();
     await page.getByRole('combobox', {name: '模型', exact: true}).waitFor();
     await page.setViewportSize({width: 1440, height: 900});
+    // Viewport resizing precedes the asynchronous media-query callback.
+    await page.waitForFunction(() => !document.getElementById('sidebar').inert);
     const model = page.getByRole('combobox', {name: '模型', exact: true});
     const workspace = page.getByRole('combobox', {name: '工作区', exact: true});
     const send = page.getByRole('button', {name: '发送任务'});
@@ -143,6 +145,7 @@ const [origin] = process.argv.slice(2);
     assert.equal(await page.locator('#sidebar-conversations .conversation-history-entry:visible').count(), 0,
       'search matches conversation content, not action labels: ' + JSON.stringify({
         query: await historySearch.inputValue(), status: await page.locator('#conversation-search-status').textContent(),
+        sidebarInert: await page.locator('#sidebar').evaluate(node => node.inert),
         entries: searchState,
       }));
     await historySearch.fill('');
