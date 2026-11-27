@@ -67,6 +67,15 @@ class CliError(Exception):
 
 def _load_or_create_spool_key(path: Path) -> bytes:
     path = Path(path).expanduser()
+    from fleet_core.locking import OwnedLock, LockBusy
+    try:
+        with OwnedLock(path.with_name(path.name + '.init.lock'), 'session-key-init').acquire(timeout=5):
+            return _load_or_create_spool_key_locked(path)
+    except (OSError, LockBusy) as exc:
+        raise CliError("无法初始化 session spool key") from exc
+
+
+def _load_or_create_spool_key_locked(path: Path) -> bytes:
     if path.exists():
         try:
             data = path.read_bytes()

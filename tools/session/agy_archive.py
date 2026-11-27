@@ -60,27 +60,9 @@ def recover_receipt(capture):
     """
     checkpoint = capture.root / (capture.session_id + '.agy-cursor')
     state = _checkpoint(checkpoint)
-    pending = state['pending']
-    if pending is None:
-        return state
-    spool, sequence = capture.bridge.spool, pending['sequence']
-    info = spool.status()
-    if (info['last_sequence'] not in {sequence - 1, sequence}
-            or info['ack_sequence'] >= sequence):
-        raise ValueError('agy_receipt_invalid')
-    accepted = False
-    if info['last_sequence'] == sequence:
-        rows = spool.read_after(sequence - 1, 1, 65536)
-        if not rows or rows[0]['sequence'] != sequence:
-            raise ValueError('agy_receipt_invalid')
-        accepted = rows[0]['event_id'] == pending['event_id']
-        if not accepted and rows[0]['kind'] != 'capture_gap':
-            raise ValueError('agy_receipt_invalid')
-    if accepted and pending['event_id'] not in state['receipts']:
-        state['receipts'].append(pending['event_id'])
-    state['pending'] = None
-    atomic_private_json(checkpoint, state)
-    return state
+    from tools.session.native_receipt import recover_append
+    return recover_append(capture, state, lambda value: atomic_private_json(checkpoint, value),
+                          error='agy_receipt_invalid')
 
 
 def sync_agy(cfg, path, send, *, should_stop=lambda: False):

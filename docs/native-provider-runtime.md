@@ -254,7 +254,8 @@ and [test entry](testing/README.md).
 ## Existing local Antigravity CLI history
 
 The node archive worker now discovers only `*.db` directly inside
-`~/.gemini/antigravity-cli/conversations`. These are the native CLI's per-session
+`~/.gemini/antigravity-cli/conversations` and `~/.gemini/antigravity/conversations`
+(both observed on installed native CLIs). These are the native CLI's per-session
 SQLite/protobuf stores, not JSONL. The exact `cascade_id` must match the UUID
 filename. The sibling `conversation_summaries.db` supplies the native title,
 with the native preview used only when that title is empty. Agy's caches,
@@ -329,3 +330,108 @@ prioritizes this newly supported source and preserves progress across slices.
 Regression commands and the real-local read-only proof are linked from
 [testing](testing/README.md) and the
 [implementation plan](superpowers/plans/2026-11-28-agy-native-history.md).
+
+## Native history discovery and Hermes
+
+The independent archive worker uses the same explicitly configured data homes as
+managed native continuation: `CODEX_HOME/sessions` and `archived_sessions`,
+`CLAUDE_CONFIG_DIR/projects`, `PI_CODING_AGENT_DIR/sessions`,
+`ZCODE_DATA_BASE_DIR/.zcode/cli/rollout`, `GEMINI_HOME/antigravity[-cli]/conversations`,
+and `HERMES_HOME/state.db`. Missing variables select the existing user defaults;
+an explicit variable replaces that family's default. These are local process
+environment settings, not browser-provided paths. Only known transcript layouts
+are enumerated. No account profile or credentials directory is traversed.
+
+Windows Agy 1.5.18 was observed using `%USERPROFILE%/.gemini/antigravity/conversations`;
+Mac's installed CLI uses `antigravity-cli/conversations`. Both use the verified
+SQLite/protobuf projection above; OS/version alone never selects a schema. Actual
+Windows native databases were read without Agent/model calls and retained their
+hashes. Renames use the sibling summary database in that same namespace.
+
+Codex moves dated rollout files from `sessions/YYYY/MM/DD` into
+`archived_sessions`. The archive identity maps this exact native filename back to
+its original active path, retaining the existing Fleet session ID, encrypted
+sequence and byte checkpoint. There is no second import identity for that move.
+Undated/custom filenames retain their original path-based identity.
+
+Hermes catalog enumeration uses indexed `sessions.id` keyset pages of 32. A
+private virtual source identity is the exact `state.db/session_id`; it is never
+opened as a directory or returned in public DTOs. Each session reads at most 32
+ordered `messages.id` rows, 4 MiB of selected data per page, with a 2 MiB bound
+per selected field. Read-only SQLite connections have a 0.5 second lock timeout
+and two-second query progress deadline. Concurrent catalog inserts below the
+current key are discovered on the next traversal. Database and WAL fingerprints
+invalidate completed sessions; metadata refresh does not rewind content.
+
+Hermes projection preserves explicit title/model/start time, user and assistant
+text, tool calls and tool results. Its NUL-prefixed JSON content is decoded only
+for explicit text blocks; images, system/reasoning fields and private payloads
+are excluded. `active=1 OR compacted=1` matches native display eligibility;
+rewind-only, compressed-summary and special display-carrier rows are excluded.
+Unknown display kinds are deferred from content projection rather than flattened.
+Old schemas without optional active/compacted/display flags remain readable.
+
+Native compaction can copy a logical message into later row IDs. A node-private
+`*.hermes-identities.sqlite` records a SHA-256 of the exact native display-generation
+key (role, content, native timestamp, tool identity/arguments) and its first
+observed eligible row ID/publication flag. This follows the native client's
+display-generation rule; an independent identical turn with a different native
+timestamp is retained. Content, credentials and native session IDs are absent
+from the ledger. Public event IDs derive from the first native row and event
+position; Hub ingestion cursors remain the stable public event identity.
+
+Ledger creation atomically migrates an empty v0 SQLite file to schema v1 under
+`BEGIN IMMEDIATE`; an interrupted transaction can retry. Existing foreign v0,
+corrupt and future versions are preserved and rejected. The ledger is capped at
+32 MiB per native session. `.hermes-cursor` v1 uses atomic private JSON and stores
+only source position, metadata hash/revision, bounded receipts and one pending
+append intention. Both normal capture and replay resolve that append under the
+existing spool writer lock before ACK/compaction. A durable ledger publication
+flag precedes cursor advance, so a failed cursor write cannot duplicate events.
+Lost HTTP replies resend original encrypted events. Stop checks preserve the
+accepted prefix. Initial shared spool-key creation uses the existing cross-platform
+owned lock, preventing two first scanners from racing on an incomplete key.
+
+Imports remain unmanaged, best effort and read only. They do not grant control,
+infer a Google account or start any CLI. Terminal database history cannot recover
+unrecorded token timing. In-place edits/deletions of already imported Hermes rows,
+post-import undo and custom display carriers are not a mirrored current-view
+protocol; this is an append history of eligible observations. Missing indexes,
+oversized fields, corrupt/unknown schemas or missing ledgers after progress fail
+closed and retry without resetting the content cursor. See the
+[review](reviews/2026-11-28-native-history-discovery.md) and
+[tests](testing/README.md) for verified scope.
+
+Fully acknowledged active spool tails are compacted after sealing at close while
+writer ownership is held. A dirty/uncertain checkpoint prevents this compaction;
+unacknowledged data is retained. This avoids many idle histories permanently
+consuming the shared archive quota. Recovery keeps the original ACK and next
+sequence even when no encrypted segments remain.
+
+Duplicate native delivery recovery also covers retained frames from older clients
+that retried a stable event ID under a new source sequence. The Hub atomically
+adds an internal `delivery_receipts` row only after matching the stored redacted
+event exactly, excluding source sequence and observation timestamp. Machine,
+stream, session, kind, payload and authority must remain equal; changed data
+returns bounded `event_id_conflict`, and an occupied sequence returns
+`sequence_conflict`. No new public event/cursor or raw copy is allocated.
+Contiguous ACK includes these durable receipts, allowing the old encrypted frame
+to be acknowledged and compacted. A retry within another stream cannot use the
+receipt. This is an ingestion delivery record, not a second browser API.
+
+The transcripts SQLite store gains additive `meta.delivery_receipts_schema=1`
+and a `delivery_receipts` table keyed by session/sequence/machine/stream, linked
+to the original redacted event with cascading deletion. Empty old stores migrate
+under one `BEGIN IMMEDIATE`; failures roll back table and marker together.
+Unknown versions, foreign unversioned tables, a missing declared table and
+lookalike schemas with wrong types, nullability or foreign-key cascade fail
+closed. Existing event/raw/public cursor schema and operator authorization are
+unchanged, and older application rollback ignores the additive table.
+
+Native recovery indexes are not initialization receipts. After uploading retained
+frames, `RunnerCapture.flush` publishes one versioned identity observation for
+every native family, even for an empty/unnamed source. Only a durable append
+allows the atomic `native_identity_version=1` marker; rejected writes remain
+retryable. Its stable event ID recovers across a failed marker write through the
+existing delivery receipt path. No lifecycle, prompt or control capability is
+replayed. Flushing retained frames before repair lets ACKed data release quota.

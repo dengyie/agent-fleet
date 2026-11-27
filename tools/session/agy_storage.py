@@ -8,7 +8,6 @@ are deliberately outside this allowlist. Native IDs/paths stay node-private.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +15,7 @@ from pathlib import Path
 from fleet_core.session.redact import redact_secrets_text
 from tools.session.native_metadata import _safe_file_info
 from tools.session.native_storage import _database
+from tools.session.native_projection import digest, tool_field as _tool_field
 
 MAX_BLOB = 2 << 20
 MAX_PAGE_BYTES = 4 << 20
@@ -23,11 +23,6 @@ PAGE_ROWS = 32
 _UUID = re.compile(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}')
 TERMINAL = frozenset({3, 4, 5, 6, 7, 12})
 _STATUSES = TERMINAL | {1, 2, 8, 9, 11}
-
-
-def digest(value):
-    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
-        separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 
 
 def _varint(data, pos):
@@ -104,17 +99,6 @@ def _id(token, index, suffix):
 
 def _event(kind, **payload):
     return {'kind': kind, 'payload': payload}
-
-
-def _tool_field(text):
-    # Redact the full value before splitting: secrets can cross chunk edges.
-    text = redact_secrets_text(text)[0]
-    if len(text) <= 8192:
-        return text, []
-    chunks = [_event('source_record', text=text[i:i + 4000],
-                     is_complete=i + 4000 >= len(text)) for i in range(0, len(text), 4000)]
-    marker = '\n[truncated; full tool field retained in source archive]'
-    return text[:8192 - len(marker)] + marker, chunks
 
 
 def _tool_result(kind, step):

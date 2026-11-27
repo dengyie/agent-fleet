@@ -198,7 +198,38 @@ class RunnerCapture:
         # ``line()`` only contends for ``lock`` while the spool is read or
         # acked; the HTTP POST runs outside it.
         with self.flush_lock:
-            return self.bridge.flush(guard=self.lock, should_stop=should_stop)
+            sent = self.bridge.flush(guard=self.lock, should_stop=should_stop)
+            # A recovery index can predate a rejected session_start (quota or
+            # disk failure). Repair native identity once, including empty
+            # histories. Upload old frames first so they can release quota;
+            # callers resolve uncertain source appends before entering flush.
+            if not (should_stop and should_stop()) and self._recover_native_identity():
+                sent += self.bridge.flush(guard=self.lock, should_stop=should_stop)
+            return sent
+
+    def _recover_native_identity(self):
+        from tools.runner_source import atomic_private_json
+        with self.lock:
+            data = json.loads(self.record.read_text(encoding='utf-8'))
+            if not data['attempt_id'].startswith(NATIVE_PREFIX):
+                return False
+            version = data.get('native_identity_version')
+            if version is not None:
+                if type(version) is not int or version != 1:
+                    raise ValueError('native_identity_checkpoint_invalid')
+                return False
+            # Stable across checkpoint failure; the Hub reconciles a repeated
+            # delivery sequence without adding another public event. This is
+            # display identity only: never replay lifecycle/prompt/capability.
+            event_id = 'evt_' + hashlib.sha256(
+                ('native_identity_v1\0' + self.session_id + '\0' + data['agent_type']).encode()
+            ).hexdigest()[:40]
+            if not self.bridge.ingest_one({'kind': 'session_metadata', 'event_id': event_id,
+                    'payload': {'agent_family': data['agent_type']}}, strict=True):
+                raise RuntimeError('native_identity_not_persisted')
+            data['native_identity_version'] = 1
+            atomic_private_json(self.record, data)
+            return True
 
     def begin_turn(self, text):
         with self.lock:
@@ -375,6 +406,10 @@ def replay_pending(cfg, post, *, should_stop=lambda: False):
             if (data.get('agent_type') == 'agy' and data.get('attempt_id', '').startswith(NATIVE_PREFIX)
                     and (capture.root / (capture.session_id + '.agy-cursor')).exists()):
                 from tools.session.agy_archive import recover_receipt
+                recover_receipt(capture)
+            if (data.get('agent_type') == 'hermes' and data.get('attempt_id', '').startswith(NATIVE_PREFIX)
+                    and (capture.root / (capture.session_id + '.hermes-cursor')).exists()):
+                from tools.session.hermes_archive import recover_receipt
                 recover_receipt(capture)
             capture.refresh_metadata()
             capture.flush(should_stop=should_stop)

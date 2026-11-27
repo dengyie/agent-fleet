@@ -539,6 +539,11 @@ class LocalSpool:
         try:
             self._retry_dirty_checkpoint()
             self._seal_active()
+            # ACK cannot remove the active tail. Once sealed, retaining it
+            # forever consumes the shared quota even with no pending events.
+            # Never remove an ACK prefix whose checkpoint is still uncertain.
+            if not self._checkpoint_dirty:
+                self._compact_acked()
         finally:
             self._open_writer = None
             handle, self._owner_handle = self._owner_handle, None
