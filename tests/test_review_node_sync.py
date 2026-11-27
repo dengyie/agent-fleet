@@ -405,8 +405,7 @@ def test_desktop_persistence_rejection_preserves_checkpoint_and_retry(
 
 
 def test_desktop_persistence_checkpoint_write_loss_deduplicates_on_restart(tmp_path, monkeypatch):
-    from pathlib import Path
-
+    from tools.session import sync
     from tools.session.runner_capture import session_prefix
     from tools.session.sync import native_identity, sync_desktop
     from tools.supervisor.desktop_control import DesktopControl
@@ -427,14 +426,14 @@ def test_desktop_persistence_checkpoint_write_loss_deduplicates_on_restart(tmp_p
         return response.status_code, response.get_json()
 
     blocked = [True]
-    original = Path.write_text
+    original = sync._write_desktop_checkpoint
 
-    def reject(self, data, *args, **kwargs):
-        if self.suffix == '.desktop-cursor' and blocked[0] and json.loads(data)['seen'] == ['a1']:
+    def reject(path, data):
+        if blocked[0] and data['seen'] == ['a1']:
             raise OSError('checkpoint write interrupted')
-        return original(self, data, *args, **kwargs)
+        return original(path, data)
 
-    monkeypatch.setattr(Path, 'write_text', reject)
+    monkeypatch.setattr(sync, '_write_desktop_checkpoint', reject)
     path = tmp_path / 'model-io-sess_checkpoint_loss.jsonl'
     desktop = DesktopControl(cfg, client=DesktopMessages())
     row = {'session': {'sessionId': 'sess_checkpoint_loss'}, 'status': 'idle'}
@@ -446,3 +445,164 @@ def test_desktop_persistence_checkpoint_write_loss_deduplicates_on_restart(tmp_p
     events = client.get('/api/sessions/' + sid + '/events').get_json()['events']
     assert [event['payload']['text'] for event in events
             if event['kind'] == 'assistant_message'] == ['saved once']
+
+
+@pytest.mark.parametrize('damaged', ['{"cur', '[]', '{}',
+    '{"cursor":[],"seen":[]}', '{"cursor":null,"seen":{}}',
+    '{"cursor":null,"seen":[],"native_cursor":-1}', '\ufeff{"cursor":null,"seen":[]}'])
+def test_damaged_desktop_checkpoint_is_retained_with_bounded_error(
+        tmp_path, monkeypatch, damaged):
+    from tools.session.runner_capture import session_prefix
+    from tools.session.sync import native_identity, sync_desktop
+    from tools.supervisor.desktop_control import DesktopControl
+
+    cfg, client = _cfg(tmp_path), _client(tmp_path)
+    cfg.supervisor_enabled = True
+    cfg.supervisor_manifest_dir = tmp_path / 'manifests'
+    monkeypatch.setenv('ZCODE_DATA_BASE_DIR', str(tmp_path))
+
+    class DesktopMessages:
+        requests = 0
+
+        def request(self, path):
+            self.requests += 1
+            return {'messages': [{'id': 'u1', 'role': 'user', 'text': 'saved once'}],
+                    'nextCursor': None}
+
+    def send(config, path, events):
+        response = client.post(path, json=events,
+                               headers={'X-Runner-Credential': 'pxed:secret'})
+        return response.status_code, response.get_json()
+
+    native_path = tmp_path / 'model-io-sess_interrupted.jsonl'
+    desktop = DesktopControl(cfg, client=DesktopMessages())
+    row = {'session': {'sessionId': 'sess_interrupted'}, 'status': 'idle'}
+    sid = session_prefix(cfg.machine) + native_identity('zcode', native_path)
+    checkpoint = cfg.cache_dir / 'conversations' / (sid + '.desktop-cursor')
+    assert sync_desktop(cfg, desktop, row, native_path, send)
+    checkpoint.write_text(damaged, encoding='utf-8')
+    requests = desktop.client.requests
+    for _ in range(2):
+        with pytest.raises(ValueError, match='^desktop_checkpoint_invalid$'):
+            sync_desktop(cfg, desktop, row, native_path, send)
+    assert desktop.client.requests == requests
+    assert checkpoint.read_text(encoding='utf-8') == damaged
+    events = client.get('/api/sessions/' + sid + '/events').get_json()['events']
+    assert [event['payload']['text'] for event in events
+            if event['kind'] == 'user_message'] == ['saved once']
+
+
+@pytest.mark.parametrize('phase', ['metadata', 'message', 'page', 'native'])
+def test_desktop_checkpoint_publish_failure_preserves_previous_state(
+        tmp_path, monkeypatch, phase):
+    import os
+    import sqlite3
+    from pathlib import Path
+
+    from tools.session.runner_capture import session_prefix
+    from tools.session.sync import native_identity, sync_desktop
+    from tools.supervisor.desktop_control import DesktopControl
+
+    cfg, client = _cfg(tmp_path), _client(tmp_path)
+    cfg.supervisor_enabled = True
+    cfg.supervisor_manifest_dir = tmp_path / 'manifests'
+    monkeypatch.setenv('ZCODE_DATA_BASE_DIR', str(tmp_path))
+    db_path = tmp_path / '.zcode/cli/db/db.sqlite'
+    db_path.parent.mkdir(parents=True)
+    with sqlite3.connect(db_path) as db:
+        db.execute('CREATE TABLE message(id TEXT, session_id TEXT, data TEXT)')
+        db.execute('CREATE TABLE part(session_id TEXT, message_id TEXT, data TEXT)')
+        db.execute('INSERT INTO message VALUES(?,?,?)', ('m1', 'sess_atomic', '{"role":"assistant"}'))
+        db.execute('INSERT INTO part VALUES(?,?,?)', ('sess_atomic', 'm1', json.dumps({
+            'type': 'tool', 'tool': 'read', 'callID': 'c1',
+            'state': {'status': 'completed', 'input': {'file': 'readme'}, 'output': 'contents'}})))
+
+    class DesktopMessages:
+        def request(self, path):
+            if 'cursor=next' in path:
+                return {'messages': [], 'nextCursor': None}
+            return {'messages': [{'id': 'u1', 'role': 'user', 'text': 'saved once'}],
+                    'nextCursor': 'next'}
+
+    def send(config, path, events):
+        response = client.post(path, json=events,
+                               headers={'X-Runner-Credential': 'pxed:secret'})
+        return response.status_code, response.get_json()
+
+    native_path = tmp_path / 'model-io-sess_atomic.jsonl'
+    desktop = DesktopControl(cfg, client=DesktopMessages())
+    row = {'session': {'sessionId': 'sess_atomic', 'title': 'New title'}, 'status': 'idle'}
+    sid = session_prefix(cfg.machine) + native_identity('zcode', native_path)
+    checkpoint = cfg.cache_dir / 'conversations' / (sid + '.desktop-cursor')
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    previous = {'cursor': None, 'seen': [], 'desktop_bridge': True, 'metadata': {}}
+    checkpoint.write_text(json.dumps(previous), encoding='utf-8')
+    failed = []
+    original = os.replace
+
+    def reject(source, target):
+        if Path(target) == checkpoint:
+            state = json.loads(Path(source).read_text(encoding='utf-8'))
+            matched = {'metadata': state.get('metadata') == {'title': 'New title'},
+                       'message': state.get('seen') == ['u1'],
+                       'page': state.get('cursor') == 'next',
+                       'native': state.get('native_cursor') == 1}[phase]
+            if matched and not failed:
+                failed.append(checkpoint.read_bytes())
+                # A torn staging file must never truncate the published copy.
+                Path(source).write_text('{"cur', encoding='utf-8')
+                raise OSError('checkpoint publication interrupted')
+        return original(source, target)
+
+    monkeypatch.setattr(os, 'replace', reject)
+    with pytest.raises(OSError, match='checkpoint publication interrupted'):
+        sync_desktop(cfg, desktop, row, native_path, send)
+    assert checkpoint.read_bytes() == failed[0]
+    assert isinstance(json.loads(checkpoint.read_text(encoding='utf-8')), dict)
+    assert sync_desktop(cfg, desktop, row, native_path, send)
+    assert sync_desktop(cfg, desktop, row, native_path, send)
+    events = client.get('/api/sessions/' + sid + '/events').get_json()['events']
+    assert [event['payload']['text'] for event in events
+            if event['kind'] == 'user_message'] == ['saved once']
+    assert [(event['kind'], event['payload']['call_id']) for event in events
+            if event['kind'] in {'tool_call', 'tool_result'}] == [
+                ('tool_call', 'c1'), ('tool_result', 'c1')]
+
+
+@pytest.mark.parametrize('damaged', [
+    pytest.param(b'\xff', id='invalid-utf8'),
+    pytest.param(b' ' * ((2 << 20) + 1), id='over-limit'),
+    pytest.param(b'{"cursor":null,"seen":[1]}', id='invalid-message-id'),
+    pytest.param(b'{"cursor":null,"seen":[],"native_cursor":true}', id='boolean-cursor'),
+    pytest.param(b'{"cursor":null,"seen":[],"native_cursor":9223372036854775808}', id='cursor-overflow'),
+])
+def test_desktop_checkpoint_invalid_bytes_are_bounded_and_retained(tmp_path, damaged):
+    from tools.session.sync import _read_desktop_checkpoint
+
+    path = tmp_path / 'test.desktop-cursor'
+    path.write_bytes(damaged)
+    with pytest.raises(ValueError, match='^desktop_checkpoint_invalid$'):
+        _read_desktop_checkpoint(path)
+    assert path.read_bytes() == damaged
+
+
+def test_desktop_checkpoint_read_error_does_not_reset_cursor(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from tools.session.sync import _read_desktop_checkpoint
+
+    path = tmp_path / 'test.desktop-cursor'
+    original = b'{"cursor":"next","seen":["m1"]}'
+    path.write_bytes(original)
+    real_open = Path.open
+
+    def unavailable(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError('simulated read failure')
+        return real_open(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'open', unavailable)
+        with pytest.raises(PermissionError, match='simulated read failure'):
+            _read_desktop_checkpoint(path)
+    assert path.read_bytes() == original

@@ -18,6 +18,8 @@ from urllib.parse import urlencode
 
 from agent_profiles import PROFILES
 from tools.runner_config import load_config
+from tools.runner_source import (MAX_RECORD_BYTES,
+                                 atomic_private_json as _atomic_private_json)
 from tools.session.capture.native_jsonl import tailer
 from tools.session.runner_capture import RunnerCapture, replay_pending, session_prefix
 from tools.transport import Transport
@@ -183,6 +185,37 @@ def post(cfg, path, body):
         'X-Runner-Credential': cfg.machine + ':' + cfg.credential}, timeout=15)
 
 
+def _write_desktop_checkpoint(path, state):
+    _atomic_private_json(path, state)
+
+
+def _read_desktop_checkpoint(path):
+    try:
+        with path.open('rb') as stream:
+            raw = stream.read(MAX_RECORD_BYTES + 1)
+    except FileNotFoundError:
+        state = {'cursor': None, 'seen': []}
+        _write_desktop_checkpoint(path, state)
+        return state
+    try:
+        if len(raw) > MAX_RECORD_BYTES:
+            raise ValueError
+        state = json.loads(raw.decode('utf-8'))
+        if (not isinstance(state, dict) or not {'cursor', 'seen'} <= state.keys()
+                or (state['cursor'] is not None and not isinstance(state['cursor'], str))
+                or not isinstance(state['seen'], list)
+                or any(not isinstance(mid, str) or not mid for mid in state['seen'])
+                or type(state.get('native_cursor', 0)) is not int
+                or not 0 <= state.get('native_cursor', 0) <= (1 << 63) - 1):
+            raise ValueError
+    except (ValueError, UnicodeError, RecursionError):
+        # Old clients could truncate this file. Retain it rather than rewind:
+        # pre-stable-ID history cannot safely deduplicate a complete replay.
+        log.warning('Desktop session sync deferred: code=desktop_checkpoint_invalid')
+        raise ValueError('desktop_checkpoint_invalid') from None
+    return state
+
+
 def sync_desktop(cfg, desktop, row, native_path, send=post, *, budget_s=1, should_stop=lambda: False):
     """Bounded official message pagination for sessions without a CLI rollout.
 
@@ -201,11 +234,7 @@ def sync_desktop(cfg, desktop, row, native_path, send=post, *, budget_s=1, shoul
     complete = False
     progressed = False
     try:
-        try:
-            state = json.loads(checkpoint.read_text(encoding='utf-8'))
-        except FileNotFoundError:
-            state = {'cursor':None, 'seen':[]}
-            checkpoint.write_text(json.dumps(state), encoding='utf-8')
+        state = _read_desktop_checkpoint(checkpoint)
         metadata = {'desktop_bridge': True}
         native_session = row.get('session') if isinstance(row, dict) else None
         if isinstance(native_session, dict):
@@ -224,7 +253,7 @@ def sync_desktop(cfg, desktop, row, native_path, send=post, *, budget_s=1, shoul
                 raise RuntimeError('event_not_persisted')
             state['metadata'] = metadata_key
             state['desktop_bridge'] = True
-            checkpoint.write_text(json.dumps(state), encoding='utf-8')
+            _write_desktop_checkpoint(checkpoint, state)
         cursors = {state['cursor']}
         while row.get('status') == 'idle' and not should_stop():
             query = {'session_id':native_id}
@@ -253,14 +282,14 @@ def sync_desktop(cfg, desktop, row, native_path, send=post, *, budget_s=1, shoul
                 if not capture.bridge.ingest_one(event, strict=True):
                     raise RuntimeError('event_not_persisted')
                 state['seen'].append(mid)
-                checkpoint.write_text(json.dumps(state), encoding='utf-8')
+                _write_desktop_checkpoint(checkpoint, state)
                 progressed = True
             if yielded:
                 break  # Keep this page and its accepted prefix across scan slices.
             cursor = page.get('nextCursor')
             if cursor and cursor not in cursors:
                 state.update(cursor=cursor, seen=[])
-                checkpoint.write_text(json.dumps(state), encoding='utf-8')
+                _write_desktop_checkpoint(checkpoint, state)
                 cursors.add(cursor)
             else:
                 complete = True
@@ -295,7 +324,7 @@ def _sync_zcode_native_tool_events(capture, state, checkpoint, native_id):
             raise RuntimeError('native_tool_event_not_persisted')
     if next_cursor != cursor:
         state['native_cursor'] = next_cursor
-        checkpoint.write_text(json.dumps(state), encoding='utf-8')
+        _write_desktop_checkpoint(checkpoint, state)
 
 
 def sync_file(cfg, family, path, send=post, *, desktop_group=None):
