@@ -40,7 +40,7 @@ const [origin] = process.argv.slice(2);
     async function waitForAssistantReady() {
       await page.locator('.assistant-run-status:visible').filter({hasText: /^就绪$/}).waitFor();
     }
-    for (const route of ['/', '/assistant', '/monitoring', '/machine/example', '/task/example', '/session/example', '/conversation/conv-auth']) {
+    for (const route of ['/', '/assistant', '/monitoring', '/usage', '/muse', '/plugins', '/session-search', '/machine/example', '/task/example', '/session/example', '/conversation/conv-auth']) {
       await page.goto(origin + route, {waitUntil: 'domcontentloaded'});
       await expectLogin(route);
       assert.equal(await page.getByText('正在验证登录状态…', {exact: true}).count(), 0);
@@ -206,10 +206,24 @@ const [origin] = process.argv.slice(2);
     await historyEntry.locator('summary').click();
     await historyEntry.getByRole('button', {name: '永久删除'}).click();
     await page.getByRole('dialog', {name: '永久删除对话？'}).waitFor();
+    let releaseDeleteRefresh;
+    const deleteRefresh = new Promise(resolve => {releaseDeleteRefresh = resolve;});
+    await page.route('**/api/platform/v1/conversations?limit=50&archived=true', async route => {
+      await deleteRefresh;
+      await route.continue();
+    });
     await page.getByRole('button', {name: '永久删除', exact: true}).click();
     await historyEntry.waitFor({state: 'detached'});
+    // Each history source publishes separately; its empty intermediate paint
+    // does not mean the deletion dialog has finished and released the editor.
+    assert.equal(await page.locator('#conversation-delete-dialog').evaluate(node => node.open), true);
+    releaseDeleteRefresh();
+    await page.locator('#conversation-delete-dialog').waitFor({state: 'hidden'});
+    await page.unroute('**/api/platform/v1/conversations?limit=50&archived=true');
     const settingsDraft = page.getByLabel('给助手的任务');
     await settingsDraft.fill('设置关闭后仍应保留的草稿');
+    assert.equal(await settingsDraft.inputValue(), '设置关闭后仍应保留的草稿',
+      'the editor accepts the draft after deletion finishes');
     await page.locator('.sidebar-footer [data-nav="settings"]').click();
     await page.locator('.settings-dialog[open]').waitFor();
     assert.equal(await page.evaluate(() => document.querySelector('[aria-label="给助手的任务"]').value),

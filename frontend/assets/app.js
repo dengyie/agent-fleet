@@ -58,6 +58,12 @@ function protectConsole() {
   }
   function suspendRouteView(view) {
     if (!view || view.suspended) return;
+    // Hidden/detached scroll containers lose their layout offsets. Capture
+    // while visible, before custom elements disconnect and polling pauses.
+    view.scrollPositions = [...view.host.querySelectorAll('[data-chat-scroll]')].map(node => ({
+      node, top: node.scrollTop, left: node.scrollLeft,
+      following: node.querySelector('auto-scroll-anchor')?.isAtBottom === true,
+    }));
     view.suspended = true;
     view.host.hidden = true;
     view.host.inert = true;
@@ -70,6 +76,14 @@ function protectConsole() {
     view.host.hidden = false;
     view.host.inert = false;
     document.getElementById('route-view').appendChild(view.host);
+    for (const {node, top, left, following} of view.scrollPositions || []) {
+      node.scrollTop = following ? node.scrollHeight : top;
+      node.scrollLeft = left;
+      // Reconnected AutoScrollAnchor must know the restored position before
+      // resumed requests render more output.
+      node.dispatchEvent(new Event('scroll'));
+    }
+    view.scrollPositions = null;
     if (view.teardown && typeof view.teardown.resume === 'function') view.teardown.resume({animateEntrance});
   }
   function destroyRouteView(view) {
@@ -313,8 +327,10 @@ function protectConsole() {
       }
       if (redirecting) return;
       if (!mounted) mount();
-      else resumeRouteView(activeRouteView);
-      gate.hidden = true; shell.hidden = false; if (!account || account.role === "admin") sse.start();
+      // Identity is verified. Restore layout before restoring scroll offsets.
+      shell.hidden = false;
+      resumeRouteView(activeRouteView);
+      gate.hidden = true; if (!account || account.role === "admin") sse.start();
     } catch (error) {
       if (redirecting || loggingOut || sessionRecheckPending) return;
       if (error.status === 401) requireLogin();
@@ -337,9 +353,9 @@ function protectConsole() {
     // returns. A feature's 401 alone does not prove the browser was logged out.
     showAccessState('正在重新验证登录状态…');
     document.querySelectorAll('.shell-menu:popover-open').forEach(menu => menu.hidePopover());
-    shell.hidden = true;
     sse.stop();
     suspendRouteView(activeRouteView);
+    shell.hidden = true;
     verifyAccess({force: true});
   });
   const logout = document.getElementById('operator-logout');

@@ -18,7 +18,7 @@
 
 ## 最新更新
 
-2026-11-22：原生会话 API 支持普通消息投递响应恢复、事件最新页与向前翻页，以及稳定的会话目录分页；原有文本发送、问题回答和实时读取继续兼容。完整历史见 [Release Notes](docs/releases/release-notes.md)。
+2026-11-28：前端会话生命周期、节点与 Agent 选择、登录态恢复和公开工具详情经过完整回归，缓存阅读位置与设置草稿在异步刷新后保持不变。完整历史见 [Release Notes](docs/releases/release-notes.md)。
 
 ## Why Agent Fleet?
 

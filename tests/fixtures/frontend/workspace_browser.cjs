@@ -30,6 +30,105 @@ const [origin, scenario] = process.argv.slice(2);
         return model && model.options.length > 0 && model.value !== '' && send && !send.disabled;
       });
     }
+    if (scenario === 'target-selection') {
+      await openHistory();
+      await page.evaluate(async () => {
+        const {mountTargetPicker} = await import('/assets/views/conversation-target.js');
+        const host = document.createElement('section'); document.querySelector('.assistant-thread').prepend(host);
+        window.targetReads = 0; window.targetProjects = ['first-project','chosen-project'];
+        window.targetAgents = {codex:{installed:true},claude_code:{installed:true}};
+        window.targetPicker = mountTargetPicker(host, {
+          api: {getStatus: async () => ({machines:[{machine:'test-node',online:true}]}),
+            getTaskTargets: async () => { window.targetReads++; return {machine:'test-node',projects:window.targetProjects,
+              agents:window.targetAgents}; }},
+          onChange: value => {window.targetChoice = value;},
+        });
+      });
+      await page.locator('select[aria-label="项目"]').selectOption('chosen-project');
+      await page.getByLabel('Agent',{exact:true}).selectOption('claude_code');
+      await page.getByRole('button',{name:'刷新节点与目录',exact:true}).click();
+      await page.waitForFunction(() => window.targetReads === 2 && window.targetChoice.ready);
+      assert.equal(await page.locator('select[aria-label="项目"]').inputValue(),'chosen-project','refresh must preserve the explicit project');
+      assert.equal(await page.getByLabel('Agent',{exact:true}).inputValue(),'claude_code','refresh must preserve the explicit Agent');
+      await page.evaluate(() => {window.targetProjects = ['first-project'];});
+      await page.getByRole('button',{name:'刷新节点与目录',exact:true}).click();
+      await page.waitForFunction(() => window.targetReads === 3 && !document.querySelector('[aria-label="项目"]').disabled);
+      assert.equal(await page.evaluate(() => window.targetChoice.ready),false,'removed project must require explicit reselection');
+      assert.equal(await page.locator('select[aria-label="项目"]').inputValue(),'');
+      await page.getByLabel('Agent',{exact:true}).selectOption('codex');
+      await page.getByRole('button',{name:'刷新节点与目录',exact:true}).click();
+      await page.waitForFunction(() => window.targetReads === 4 && !document.querySelector('[aria-label="项目"]').disabled);
+      assert.equal(await page.evaluate(() => window.targetChoice.ready),false,'changing Agent must not implicitly replace the missing project');
+      await page.locator('select[aria-label="项目"]').selectOption('first-project');
+      assert.equal(await page.evaluate(() => window.targetChoice.ready),true);
+      await page.evaluate(() => {window.targetAgents = {claude_code:{installed:true}};});
+      await page.getByRole('button',{name:'刷新节点与目录',exact:true}).click();
+      await page.waitForFunction(() => window.targetReads === 5 && !document.querySelector('[aria-label="Agent"]').disabled);
+      assert.equal(await page.getByLabel('Agent',{exact:true}).inputValue(),'','a removed Agent must not silently select a different implementation');
+      assert.equal(await page.evaluate(() => window.targetChoice.ready),false);
+      await page.evaluate(() => window.targetPicker.dispose());
+    }
+    if (scenario === 'cached-scroll') {
+      for (const width of [1440,390]) {
+        await page.setViewportSize({width,height:900}); await openHistory();
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        const top = await page.locator('[data-chat-scroll]').evaluate(node => {
+          node.scrollTop = 137; node.dispatchEvent(new Event('scroll')); return node.scrollTop;
+        });
+        assert.ok(top > 100,'fixture must have scrollable history');
+        await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate',{detail:{path:'/assistant?view=sessions'}})));
+        await page.locator('.native-directory').waitFor();
+        await page.evaluate(() => window.dispatchEvent(new CustomEvent('fleet:navigate',{detail:{path:'/conversation/review-model'}})));
+        await page.locator('.assistant-thread').waitFor();
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        assert.ok(Math.abs(await page.locator('[data-chat-scroll]').evaluate(node => node.scrollTop) - top) < 2,'returning to a cached conversation must preserve reading position');
+        assert.equal(await page.locator('auto-scroll-anchor').evaluate(node => node.isAtBottom),false,'history reading must not become bottom-follow on resume');
+        const sessionCheck = page.waitForResponse(response => new URL(response.url()).pathname === '/api/operator/session');
+        await page.evaluate(() => window.dispatchEvent(new Event('fleet-auth-required')));
+        await sessionCheck;
+        await page.waitForFunction(() => !document.querySelector('.console-layout').hidden);
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        assert.ok(Math.abs(await page.locator('[data-chat-scroll]').evaluate(node => node.scrollTop) - top) < 2,'a valid identity recheck must preserve reading position');
+        assert.equal(await page.locator('auto-scroll-anchor').evaluate(node => node.isAtBottom),false);
+      }
+    }
+    if (scenario === 'artifact-disclosure') {
+      await page.route('**/api/platform/v1/workspaces/workspace/artifacts*', r => r.fulfill({json:{ok:true,artifacts:[{
+        artifact_id:'preview-fixture',name:'report.txt',content_type:'text/plain',size:12}]}}));
+      await openHistory();
+      const preview = page.locator('.assistant-artifact-preview-toggle');
+      await preview.waitFor();
+      for (const failed of [false,true]) {
+        let release, reads = 0;
+        const held = new Promise(resolve => {release = resolve;});
+        await page.route('**/api/platform/v1/artifacts/preview-fixture/preview*', async r => {
+          reads++; await held; return r.fulfill(failed ? {status:503,json:{ok:false,error:'preview_unavailable'}}
+            : {json:{ok:true,preview:{text:'PREVIEW_RESPONSE',truncated:false}}});
+        });
+        await preview.click(); await page.getByText('预览加载中',{exact:true}).waitFor();
+        await preview.click(); await preview.click();
+        assert.equal(reads,1,'reopening a pending preview must reuse its request');
+        await preview.click();
+        await page.evaluate(() => {
+          window.previewMutation = new Promise(resolve => {
+            const observer = new MutationObserver(() => {observer.disconnect(); resolve();});
+            observer.observe(document.querySelector('.assistant-artifacts'),{childList:true});
+          });
+        });
+        const completed = page.waitForResponse(response => response.url().includes('/artifacts/preview-fixture/preview'));
+        release(); await completed;
+        await page.evaluate(() => window.previewMutation);
+        assert.equal(await page.locator('.assistant-artifact-preview-wrap').count(),0);
+        assert.equal(await preview.textContent(),'预览','late preview response must not reopen the disclosure');
+        if (!failed) {
+          await preview.click(); await page.getByText('PREVIEW_RESPONSE',{exact:true}).waitFor();
+          assert.equal(reads,1,'reopening a loaded preview reuses its data'); await preview.click();
+        }
+        await page.unroute('**/api/platform/v1/artifacts/preview-fixture/preview*');
+        // Recover a fresh view so both success and failure exercise a pending request.
+        if (!failed) { await openHistory(); await preview.waitFor(); }
+      }
+    }
     if (['new-chat-route','background-create','active-create-collision'].includes(scenario)) {
       await page.goto(origin + '/assistant');
       await page.getByText('就绪',{exact:true}).waitFor();
