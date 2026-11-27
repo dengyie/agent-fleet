@@ -5,7 +5,7 @@ import {el, button, link, errorText} from './agent-chat/dom.js';
 import {nativeDirectoryPath} from './agent-chat/paths.js';
 import {createNativeChatService, createMessageJournal, createTaskJournal} from './agent-chat/service.js';
 import {createNativeReader} from './agent-chat/live.js';
-import {mergeNativeEvents, sessionTitle, agentName, AGENT_LABELS, TERMINAL_RECEIPTS, RECEIPT_LABELS, operationStatus, uncertainWrite} from './agent-chat/state.js';
+import {mergeNativeEvents, nativeCaptureNotice, sessionTitle, agentName, AGENT_LABELS, TERMINAL_RECEIPTS, RECEIPT_LABELS, operationStatus, uncertainWrite} from './agent-chat/state.js';
 import {createNativeMessages} from './agent-chat/messages.js';
 import {mountNativeInspector} from './agent-chat/inspector.js';
 import {CONTROL_LABELS} from './agent-chat/operations.js';
@@ -47,6 +47,7 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
   const intro = el('div', 'assistant-intro'); intro.append(uiIcon('monitor', {size: 28}), el('h2', null, '让电脑上的 Agent 开始工作'), el('p', null, '选择电脑、项目与 Agent，然后发送你的目标。'));
   const pickerHost = el('section', 'native-target-picker'); pickerHost.setAttribute('aria-label', '新会话运行目标');
   const loading = el('p', 'native-loading meta', '正在加载会话…'); loading.setAttribute('role', 'status');
+  const captureNotice = el('p', 'native-capture-notice meta'); captureNotice.setAttribute('role', 'status'); captureNotice.hidden = true;
   const historyNotice = el('p', 'native-history-notice meta');
   const messageHost = el('div', 'assistant-messages'), pendingHost = el('div', 'native-pending');
   const questions = el('section', 'native-questions');
@@ -60,7 +61,7 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
   const actions = el('div', 'composer-tools'), destination = el('span', 'native-composer-target meta');
   const send = el('button'); send.type = 'submit'; send.setAttribute('aria-label', '发送给电脑 Agent'); send.append(uiIcon('arrow-up', {size: 17}), el('span', null, '发送'));
   actions.append(destination, send); prompt.append(input, actions); form.append(prompt);
-  dock.append(notice, form, el('p', 'composer-hint', 'Enter 发送 · Shift + Enter 换行 · 切换页面后任务继续运行')); chat.append(dock); root.append(chat);
+  dock.append(captureNotice, notice, form, el('p', 'composer-hint', 'Enter 发送 · Shift + Enter 换行 · 切换页面后任务继续运行')); chat.append(dock); root.append(chat);
   const sourceLinks = conversationTargets('computer'); intro.prepend(sourceLinks);
   const inspector = mountNativeInspector(root, heading, {api, onControl: control, service});
   const renderMessages = createNativeMessages(messageHost);
@@ -84,6 +85,9 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
     intro.hidden = !!sessionId || !!taskId || submitting;
     pickerHost.hidden = !!sessionId || !!taskId;
     loading.hidden = !((sessionId && !session || taskId && !task) && !readError);
+    const captureText = nativeCaptureNotice(session);
+    if (captureNotice.textContent !== captureText) captureNotice.textContent = captureText;
+    captureNotice.hidden = !captureText;
     historyNotice.textContent = hasOlder ? '已显示最近记录，可向上加载更早内容。新消息会持续同步。' : '';
     previousPage.hidden = !hasOlder; previousPage.disabled = olderRequested;
     previousPage.textContent = olderRequested ? '正在加载更早记录…' : '加载更早记录';

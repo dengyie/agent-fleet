@@ -14,6 +14,12 @@ export function operationStatus(operation) {
 export const AGENT_LABELS = Object.freeze({running: 'Agent 正在执行', idle: '等待下一条消息', completed: '本轮已结束',
   waiting_for_user: '等待你回答', waiting_for_approval: '等待审批', failed: 'Agent 执行失败', stopped: '已停止', unknown: '状态待确认'});
 
+export function nativeCaptureNotice(session) {
+  const protocol = session?.agent_evidence?.protocol;
+  if (session?.agent_family !== 'zcode' || protocol?.name !== 'desktop_bridge' || protocol.state !== 'observed') return '';
+  return 'ZCode 桌面会话在 Agent 空闲后同步正文与工具记录，执行期间请等待同步。记录按采集顺序展示，不代表完整历史。';
+}
+
 export function mergeNativeEvents(current, incoming, max = 500) {
   const rows = new Map(current.map(row => [row.cursor, row]));
   for (const row of incoming) rows.set(row.cursor, row);

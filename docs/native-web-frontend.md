@@ -96,11 +96,15 @@ GET /api/machines/<machine>/task-targets
 
 消息正文与工具结果来自带 Hub ingestion cursor 的逐事件 HTTP 记录。`message_id` 将同一原生回答的 delta 或 snapshot 更新合并；快照覆盖当前消息文本，delta 追加文本。交互问题及回答、工具、状态变化也显示在时间线。Pi、ZCode rollout 和 ZCode 桌面分页等不提供增量流的记录保持真实完成态，不模拟打字。ZCode 桌面会话只投影原生会话摘要明确提供的标题、模型与 provider，并在变化时记录。source_record 仍是独立诊断存档，原生聊天不请求该存档。
 
+ZCode 桌面桥的正文与工具记录在 Agent 空闲后补采，工具完成/失败事件沿用现有折叠卡片显示参数与结果。页面仅在公开 `agent_evidence.protocol` 确认 `desktop_bridge` 且 family 为 `zcode` 时提示该同步方式，并说明采集顺序不等于完整历史；不据 Agent 名称推断实时能力。其余原生/CLI 会话保持各自实际增量行为。实现计划见[桌面采集前端适配](superpowers/plans/2026-11-27-zcode-desktop-capture-ui.md)，后端边界见[会话 API](native-session-api.md#zcode-desktop-tool-event-capture)。
+
 ## 验证
 
 `tests/test_native_chat_frontend.py` 包含纯状态 / 契约 / 单一读者生命周期检查，以及真实 Hub、SQLite、签名命令队列和 Chrome 的网页验收。新建目录在测试 app 中使用上面的明确接点，任务发行、绑定与读取调用产品服务；不运行用户电脑上的 vendor CLI。
 
 浏览器场景覆盖 1440 / 390px：已有记录与工具结果、即时发送卡、持续消息增量、响应丢失不重复投递、设置浮层返回、手机工作面板、目录过滤、撤销权限、缺失目标接口，以及 Task → 原生 session 原地绑定与刷新。
+
+`zcode-desktop-tools` 场景从真实临时 SQLite 经节点 `read_events`、Hub 入库、公开 HTTP 到浏览器，验证 Read/Bash 工具的参数、完成/失败结果、延迟补采、重放去重、展开状态保留、字面文本渲染、隐藏 reasoning 排除及手机宽度。该测试不启动用户电脑上的 ZCode，也不调用模型。
 
 2026-11-22 前端分页与恢复补充：聊天首读使用 tail，历史页和实时增量使用独立游标；目录使用 snapshot cursor 的加载更多；普通消息持久化当前账号 / 会话下的同 token 操作，结果未知时只由用户点击恢复。配套浏览器验收需在后端 session API 变更合入后运行。
 
