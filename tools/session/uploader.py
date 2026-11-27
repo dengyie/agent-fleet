@@ -91,8 +91,8 @@ class SessionUploader:
         """Opaque continuation token from the last accepted response."""
         return self._next_cursor
 
-    def flush_once(self, guard=None) -> int:
-        """Upload ALL pending unacked records in bounded batches.
+    def flush_once(self, guard=None, *, should_stop=None) -> int:
+        """Upload the entry snapshot of pending records in bounded batches.
 
         Returns the number of records successfully acknowledged across all
         batches sent in this pass.  A retryable failure (transport raise or
@@ -103,18 +103,30 @@ class SessionUploader:
         ``guard`` is an optional context manager (e.g. the writer's lock)
         held while the spool is read and acked; the POST itself always runs
         outside it so a slow Hub never blocks concurrent appends.
+
+        New records wait for the next pass. ``should_stop`` is checked
+        between requests; an in-flight response is still applied before
+        returning so its confirmed prefix remains durable.
         """
         if guard is None:
             guard = nullcontext()
         total = 0
-        while True:
+        with guard:
+            high_water = self._spool.status()["last_sequence"]
+        while should_stop is None or not should_stop():
             with guard:
                 cursor = self._spool.status()["ack_sequence"]
-                pending = self._spool.read_after(cursor, self._batch_events,
-                                                 self._batch_bytes)
+                if cursor >= high_water:
+                    self.last_error = None
+                    return total
+                pending = [event for event in self._spool.read_after(
+                    cursor, self._batch_events, self._batch_bytes)
+                    if event["sequence"] <= high_water]
                 if not pending:
                     self.last_error = None
                     return total
+            if should_stop is not None and should_stop():
+                return total
             payload = {"events": pending}
             response = self._transport_send(payload)
             with guard:
@@ -123,8 +135,7 @@ class SessionUploader:
                 # retryable failure: nothing durable changed; stop the pass.
                 return total
             total += acked
-            # If this pass is still below the batch caps and no records
-            # remain, the next loop iteration returns early.
+        return total
 
     def replay_from_ack(self) -> int:
         """Send every unacknowledged record after the persisted ack

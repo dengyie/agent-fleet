@@ -519,15 +519,15 @@ class SessionBridge:
         if self.ingest_one({'kind': 'user_message', 'payload': {'text': text}}):
             self._expected_user_echo = text[:_MAX_TEXT]
 
-    def flush(self, guard=None) -> int:
-        """Upload all pending unacked events (Task 6 ack/replay).
+    def flush(self, guard=None, *, should_stop=None) -> int:
+        """Upload an entry snapshot of pending events (Task 6 ack/replay).
 
         ``guard`` (a context manager, e.g. the capture lock) is held only
         around spool access, never across the network POST.
         """
         if self._uploader is None:
             return 0
-        return self._uploader.flush_once(guard=guard)
+        return self._uploader.flush_once(guard=guard, should_stop=should_stop)
 
     def replay(self) -> int:
         if self._uploader is None:

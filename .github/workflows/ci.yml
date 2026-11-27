@@ -149,7 +149,8 @@ jobs:
           tests/test_hermes_installation.py tests/test_agent_profiles.py
           tests/test_agent_capability_layers.py
           tests/test_native_continuation.py tests/test_runner_config.py
-          tests/test_session_bridge.py tests/test_agy.py tests/test_native_transcript_detail.py
+          tests/test_session_bridge.py tests/test_session_upload_recovery.py
+          tests/test_agy.py tests/test_native_transcript_detail.py
           tests/test_native_metadata_recovery.py
           tests/test_agy_acp.py tests/test_acp_transport_bounds.py tests/test_acp_lifecycle_races.py
           tests/test_supervisor_process.py::SupervisorTests::test_completion_requires_reap_and_tree_absence_before_release
@@ -196,7 +197,7 @@ jobs:
           tests/test_agent_capability_layers.py
           tests/test_native_continuation.py tests/test_runner_conversation.py
           tests/test_runner_config.py tests/test_review_runner_spawn.py
-          tests/test_session_bridge.py tests/test_session_probe.py
+          tests/test_session_bridge.py tests/test_session_upload_recovery.py tests/test_session_probe.py
           tests/test_supervisor_process.py tests/test_discovery.py
           tests/test_review_runner_control.py::test_windows_cross_instance_cancel_checks_orphan_liveness
           tests/test_review_runner_control.py::test_concurrent_supervisors_persist_one_manifest_without_temp_collision

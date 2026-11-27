@@ -1,5 +1,20 @@
 # 全流程测试与质量门禁
 
+会话上传的有限轮次与停止恢复见[运行时契约](../native-provider-runtime.md#finite-session-upload-and-cooperative-shutdown)
+及[实施计划](../superpowers/plans/2026-11-27-session-upload-pass-recovery.md)。专项使用真实
+加密 spool、RunnerCapture 和临时 Hub/SQLite/HTTP，验证持续追加不会延长本轮、停止后
+不发下一批、在途 ACK 持久化、丢响应后按原事件 ID 恢复、重放停止释放 writer owner，
+以及后台停止后的最终 close 事件仍上传。Windows/macOS CI 显式执行新 suite。
+
+```sh
+python3 -m pytest tests/test_session_upload_recovery.py tests/test_session_uploader.py \
+  tests/test_session_spool.py tests/test_session_bridge.py \
+  tests/test_review_node_runner_capture.py tests/test_dispatch_capture_reliability.py -q
+```
+
+停止仍等待当前传输调用和 ACK checkpoint；任意注入传输的硬超时不在该专项证明范围。
+不调用真实 Agent CLI、OAuth 或外部模型，不修改浏览器 API 或持久 schema。
+
 VM 原生执行与流式可靠性参考[vm2api 源码对照](../research/vm2api-architecture-reference.md)及
 [实施计划](../superpowers/plans/2026-11-27-vm-native-stream-reliability.md)。专项覆盖
 64KiB 增量分帧、UTF-8 任意断点、1MiB 边界、合并帧、部分 EOF、写锁/管道反压截止、
