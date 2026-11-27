@@ -250,3 +250,82 @@ the final upload, including close events. Existing transport timeouts, quota and
 closed-history retention remain authoritative. No HTTP, database or spool-format
 migration is required. See the [implementation plan](superpowers/plans/2026-11-27-session-upload-pass-recovery.md)
 and [test entry](testing/README.md).
+
+## Existing local Antigravity CLI history
+
+The node archive worker now discovers only `*.db` directly inside
+`~/.gemini/antigravity-cli/conversations`. These are the native CLI's per-session
+SQLite/protobuf stores, not JSONL. The exact `cascade_id` must match the UUID
+filename. The sibling `conversation_summaries.db` supplies the native title,
+with the native preview used only when that title is empty. Agy's caches,
+credentials, nested repositories and provider-account profiles are not recursively
+scanned. A nondefault history directory can use the existing sync CLI's explicit
+`--source agy=DIRECTORY` option. No Agent process is started to import history.
+
+`tools/session/agy_storage.py` owns the vendor-specific read-only projection;
+`agy_archive.py` owns publication through the existing RunnerCapture, encrypted
+spool and runner-authenticated ingest API. The existing public directory, detail,
+event tail/before/after and search APIs consume the same DTOs without frontend
+or HTTP changes. Existing externally created sessions are imported as unmanaged,
+best effort, read only. Import never grants ACP continuation/control authority
+or guesses a Google account binding; Fleet-managed ACP tasks keep their existing
+separate ownership and account protocol.
+
+The supported observed schema has indexed `steps.idx`, protobuf `step_payload`,
+separate `metadata` and `step_format=0`. Field numbers were verified against the
+locally installed CLI's `gemini_coder.Step`, `cortex_pb` and `codeium_common_pb`
+descriptors; no descriptor dump, user record or vendor binary is distributed.
+The allowlist retains user input, visible planner responses, explicitly displayed
+errors, and visible generic/read/search/list/command/edit tool evidence. It never
+recursively serializes protobuf objects or uploads thinking, raw thinking,
+signatures, system/context records, generator/executor state, credentials or
+arbitrary `Any` fields. Model names are included only when explicitly stored as
+names in the step's `ModelInfo`; enum placeholders are left unknown. Native step
+creation times and the first step's start time are retained. Historical token
+chunks and a missing client version cannot be reconstructed from completed rows.
+
+Each SQLite read is an indexed page of at most 32 steps and 4 MiB of selected
+blob data, with a 2 MiB limit per blob, a bounded wire-field count, a query deadline
+and a lock timeout. Rows are fetched incrementally rather than materializing
+32 oversized blobs. SQLite uses `mode=ro`, query-only mode and a read transaction.
+Malformed data, unsupported schema/format/type, unsafe paths and unreadable or
+locked stores defer that file with bounded diagnostics; they do not advance its
+cursor or block other files. Corrupt/future/oversized Fleet checkpoints fail
+closed. No Hub, vendor database or encrypted spool format migration is required.
+The new private `.agy-cursor` version 1 is created atomically on first import.
+
+Native `idx` is a private source position. Public stable event identity remains
+the Hub ingestion cursor. Hashed private source/step identities bind delivery
+receipts, message snapshots and tool calls; text equality and timestamps never
+remove distinct steps. A source step updated in place stays ahead of the durable
+cursor until terminal, while changed visible snapshots are published with the
+same logical message ID. An observation revision distinguishes A→B→A snapshots
+and title changes. Complete rows past a nonterminal step wait for that step to
+settle, preserving order. Terminal rows are treated as immutable; retroactive
+edits to previously acknowledged terminal rows require separate source support.
+
+The private source checkpoint records one pending append intention and a bounded
+list of confirmed event receipts for the current step, without message bodies,
+paths, credentials or native IDs. Under the spool writer lock, both the archive
+worker and existing replay worker resolve an uncertain append against its exact
+encrypted sequence before any upload can compact it. A quota gap is never a
+message receipt. This prevents crash recovery from enqueueing the same event at
+a new sequence. The source cursor advances only after every step event is durable;
+lost HTTP responses replay the original encrypted events/sequence. A second
+scanner reloads the source checkpoint after acquiring writer ownership. Disk or
+quota failures preserve the retry position; shutdown checks stop between source
+steps and requests. An in-flight configured HTTP request may still finish.
+
+Visible messages are split into stable 4000-codepoint snapshot blocks, preserving
+all bounded selected text. Tools use an 8192-character preview and an explicit
+truncation marker; full selected visible tool fields are secret-redacted before
+splitting into stable 4000-codepoint `source_record` chunks. Existing explicit
+source reads retrieve that archive; ordinary chat reads exclude it. Spool and Hub
+retention/quota limits continue to apply. Agy database/WAL and summary database/WAL
+fingerprints invalidate completed scans, so new messages and renames are found
+without rescanning acknowledged rows. The worker's existing finite traversal
+prioritizes this newly supported source and preserves progress across slices.
+
+Regression commands and the real-local read-only proof are linked from
+[testing](testing/README.md) and the
+[implementation plan](superpowers/plans/2026-11-28-agy-native-history.md).

@@ -1132,7 +1132,14 @@
         "tests/test_supervisor_process.py::SupervisorTests::test_completion_requires_reap_and_tree_absence_before_release",
         "tests/test_supervisor_process.py::SupervisorTests::test_tail_timeout_retains_unconfirmed_tree_for_later_stop",
         "tests/test_round5_windows_process.py::test_empty_owned_job_proof_survives_release_and_pid_reuse",
-        "tests/test_round5_windows_process.py::test_unreadable_owned_job_does_not_acquire_empty_job_proof"
+        "tests/test_round5_windows_process.py::test_unreadable_owned_job_does_not_acquire_empty_job_proof",
+        "tests/test_agy_native_history.py::test_default_sources_include_exact_agy_conversation_directory",
+        "tests/test_agy_native_history.py::test_native_agy_history_real_http_keeps_title_messages_tools_and_private_fields_out",
+        "tests/test_agy_native_history.py::test_lost_response_replays_original_events_once_without_reading_again",
+        "tests/test_agy_native_history.py::test_crash_after_persist_before_checkpoint_deduplicates_all_events",
+        "tests/test_agy_native_history.py::test_active_snapshot_same_message_updates_and_releases_next_rows",
+        "tests/test_agy_native_history.py::test_real_best_effort_quota_gap_ack_cannot_be_mistaken_for_message_receipt",
+        "tests/test_agy_native_history.py::test_concurrent_scanners_refresh_cursor_under_spool_writer_lock"
       ]
     },
     {

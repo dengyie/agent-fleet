@@ -1,5 +1,22 @@
 # 全流程测试与质量门禁
 
+Agy 本地 SQLite/protobuf 历史采集见[运行时契约](../native-provider-runtime.md#existing-local-antigravity-cli-history)
+和[实施计划](../superpowers/plans/2026-11-28-agy-native-history.md)。真实原生形状 fixture 经过
+加密 spool、临时 SQLite/Flask HTTP，覆盖目录发现、原生名称、逐条对话/工具、只读校验、
+有界分页、活动行快照、WAL/名称更新、丢响应、append 后崩溃、重放前收据恢复、真实配额 gap、
+并发扫描、损坏/旧 schema/未来 checkpoint、停止和完整可见内容脱敏。Windows/macOS CI
+与 SESSION-01 显式选择新 suite，无 Agent/模型/OAuth 调用。
+
+```sh
+python3 -m pytest tests/test_agy_native_history.py tests/test_review_node_sync.py \
+  tests/test_session_spool.py tests/test_session_upload_recovery.py \
+  tests/test_session_bridge.py tests/test_native_metadata_recovery.py -q
+```
+
+导入会话维持 unmanaged/read only；历史增量 token 无法从终态数据库还原，
+已有终态行的追溯改写、其他 vendor schema、私有账号 profile 自动历史导入不在本次支持范围。
+
+
 会话上传的有限轮次与停止恢复见[运行时契约](../native-provider-runtime.md#finite-session-upload-and-cooperative-shutdown)
 及[实施计划](../superpowers/plans/2026-11-27-session-upload-pass-recovery.md)。专项使用真实
 加密 spool、RunnerCapture 和临时 Hub/SQLite/HTTP，验证持续追加不会延长本轮、停止后

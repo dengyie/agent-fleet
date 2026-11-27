@@ -125,6 +125,8 @@ def metadata_store_path(family, path):
     path = Path(path)
     if family == 'zcode':
         return path.parent.parent / 'db/db.sqlite'
+    if family == 'agy':
+        return path.parent.parent / 'conversation_summaries.db'
     if family == 'codex':
         root = next((parent.parent for parent in path.parents
                      if parent.name in {'sessions', 'archived_sessions'}), None)
