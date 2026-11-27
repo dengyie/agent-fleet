@@ -26,6 +26,7 @@ async function closeSettings(page) {
       const clock = Date.now.bind(Date); let shift = 0;
       Date.now = () => clock() + shift;
       window.checkNewAccount = () => { shift += 60001; window.dispatchEvent(new Event('focus')); };
+      window.addEventListener('keydown', event => { if (event.key === 'F8') window.checkNewAccount(); });
     });
     assert.equal((await context.request.post(origin + '/api/accounts/login', {data: {email: 'admin@example.test', password}, headers: {Origin: origin}})).status(), 200);
     const page = await context.newPage(); page.setDefaultTimeout(10000);
@@ -128,7 +129,9 @@ async function closeSettings(page) {
         assert.equal(requests.filter(item => item.method === 'POST').length, 0);
         assert.equal((await context.request.post(origin + '/api/accounts/logout', {data: {}, headers: {Origin: origin}})).status(), 200);
         assert.equal((await context.request.post(origin + '/api/accounts/login', {data: {email: 'ordinary@example.test', password}, headers: {Origin: origin}})).status(), 200);
-        await Promise.all([page.waitForEvent('domcontentloaded'), page.evaluate(() => window.checkNewAccount())]);
+        // Browser input can trigger a document replacement without waiting for
+        // a JavaScript evaluation result from the document being destroyed.
+        await Promise.all([page.waitForEvent('domcontentloaded'), page.keyboard.press('F8')]);
         await page.getByText('ordinary@example.test · 普通用户', {exact: true}).waitFor();
         assert.equal(await panel.count(), 0);
         assert.equal((await context.request.get(prefix)).status(), 403);
