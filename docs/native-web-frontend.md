@@ -163,3 +163,11 @@ result-file-concurrency 场景覆盖以上消息、回执、并发文件与迟�
 task-results-binding 覆盖 Task → 原生会话绑定过程中慢详情响应与结果读取的竞态；
 `tests/test_handoff_routes.py` 的真实浏览器场景覆盖“已创建但响应丢失 → 429 →
 原凭据找回”，同时验证聊天面板和原始时间线入口，桌面与手机宽度均执行。
+
+## 原生传输与进程回收反馈（PR137/138 后端适配）
+
+后端的 ACP 增量分帧、写截止、桌面检查点原子替换与进程回收确认沿用现有 HTTP/SQLite DTO；前端不增加私有接口、CLI 参数或进程状态推断。明确的 `agent_state_changed`（`completed` / `failed` / `stopped`）及 `session_close` 只结束同一 `stream_id` 的未完成正文等待，失败/停止时保留正文并显示“输出已中断”。缺失结果的工具标记“结果未知”，迟到的真实工具结果仍可更新卡片，展开状态不丢失；其他采集流和后续新消息继续正常更新。`unknown` 状态不作为执行终态。
+
+原控制回执中的 `escape_unverified` 与 `liveness_unknown` 显示中文原因和检查建议，同时保留诊断码。页面仍只提供当前公开 `allowed_actions` 允许的操作；不自动重新发送消息或执行终止。节点本地 `desktop_checkpoint_invalid` 没有新增公开字段，前端不伪造诊断或自动重置源端检查点。
+
+回归入口：`tests/test_native_chat_frontend.py` 中的 `test_native_stream_interruption_projection`、`native-stream-interruption` 和 `cleanup-receipt`。后两者用真实 Hub/SQLite 和签名命令队列，在桌面/手机 Chrome 验证增量、失败、迟到结果与控制失败反馈；不运行真实模型或读取隐藏推理。实施与发布清单见[原生运行时前端适配计划](superpowers/plans/2026-11-27-native-runtime-ui.md)。

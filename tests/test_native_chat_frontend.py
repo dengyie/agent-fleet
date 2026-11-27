@@ -21,6 +21,52 @@ from tests.test_session_interactions import event, question
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_native_stream_interruption_projection():
+    result = subprocess.run(['node', '--input-type=module'], cwd=ROOT, text=True, capture_output=True, input=r"""
+import assert from 'node:assert/strict';
+import {nativeMessages} from './frontend/assets/views/agent-chat/state.js';
+import {operationFailure} from './frontend/assets/views/agent-chat/state.js';
+import {errorText} from './frontend/assets/views/agent-chat/dom.js';
+assert.match(operationFailure('escape_unverified'), /尚未确认原 Agent 进程已完全退出/);
+assert.match(operationFailure('liveness_unknown'), /无法确认原 Agent 进程状态/);
+assert.equal(operationFailure('new_reason'),'new_reason');
+assert.equal(operationFailure('toString'),'toString');
+assert.equal(operationFailure(null),'');
+assert.match(errorText({code:'escape_unverified',detail:'server detail'}), /escape_unverified/);
+assert.equal(errorText({code:'new_reason',detail:'original detail'}),'original detail');
+const e = (cursor, stream, kind, payload) => ({cursor, stream_id:stream, kind, payload});
+const events = [
+ e('1','a','assistant_message',{message_id:'answer',text:'partial 🌲',is_complete:false}),
+ e('2','a','tool_call',{call_id:'read',tool_name:'Read',arguments:'{"path":"README.md"}'}),
+ e('3','b','assistant_message',{message_id:'other',text:'independent',is_complete:false}),
+ e('4','b','tool_call',{call_id:'read',tool_name:'Read'}),
+ e('5','a','agent_state_changed',{state:'failed'}),
+];
+const rows = nativeMessages(events);
+assert.equal(rows[0].complete,true,'explicit failure must stop the incomplete answer spinner');
+assert.equal(rows[0].interrupted,true);
+assert.equal(rows[0].text,'partial 🌲');
+assert.equal(rows[1].status,'unknown','missing tool result must never be claimed successful or still running');
+assert.equal(rows[2].complete,false,'another capture stream must remain live');
+assert.equal(rows[3].status,'running');
+const late = nativeMessages([...events,e('6','a','tool_result',{call_id:'read',result:'late result',status:'ok'})]);
+assert.equal(late[1].status,'success'); assert.equal(late[1].output,'late result');
+for (const state of ['stopped','completed']) {
+ const ended = nativeMessages([...events.slice(0,4),e('5','a','agent_state_changed',{state})]);
+ assert.equal(ended[0].complete,true);
+ assert.equal(ended[0].interrupted,state === 'stopped');
+ assert.equal(ended[1].status,'unknown');
+}
+const unknown = nativeMessages([...events.slice(0,4),e('5','a','agent_state_changed',{state:'unknown'})]);
+assert.equal(unknown[0].complete,false,'unconfirmed state is not a terminal signal');
+const retry = nativeMessages([...events,e('6','a','assistant_message',{message_id:'next',text:'retry output',is_complete:false})]);
+assert.equal(retry[0].complete,true); assert.equal(retry.at(-1).complete,false);
+const closed = nativeMessages([...events.slice(0,4),e('5','a','session_close',{reason:'failed',exit_code:125})]);
+assert.equal(closed[0].complete,true); assert.equal(closed[0].interrupted,true);
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_native_chat_state_and_contracts():
     result = subprocess.run(['node', '--input-type=module'], cwd=ROOT, text=True, capture_output=True, input=r"""
 import assert from 'node:assert/strict';
@@ -132,7 +178,7 @@ assert.equal(maximum, 1); assert.equal(reads, 2); assert.equal(publications, 1, 
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize('scenario', ['read-send', 'lost-response', 'reload-recovery', 'directory', 'directory-pagination', 'history-pagination', 'revoked', 'question-draft', 'missing-targets', 'create', 'task-recovery', 'long-message', 'snapshot-revision', 'receipt-failure', 'delivery-disclosure', 'refresh-targets', 'source-record', 'native-metadata', 'directory-metadata', 'local-profile', 'stale-authority', 'target-links', 'control-confirmation', 'profile-revocation', 'offline-target', 'results', 'result-file-concurrency', 'task-results-binding', 'continuation-results', 'zcode-desktop-tools'])
+@pytest.mark.parametrize('scenario', ['read-send', 'lost-response', 'reload-recovery', 'directory', 'directory-pagination', 'history-pagination', 'revoked', 'question-draft', 'missing-targets', 'create', 'task-recovery', 'long-message', 'snapshot-revision', 'receipt-failure', 'delivery-disclosure', 'refresh-targets', 'source-record', 'native-metadata', 'directory-metadata', 'local-profile', 'stale-authority', 'target-links', 'control-confirmation', 'profile-revocation', 'offline-target', 'results', 'result-file-concurrency', 'task-results-binding', 'continuation-results', 'zcode-desktop-tools', 'native-stream-interruption', 'cleanup-receipt'])
 def test_native_chat_browser(tmp_path, scenario):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE for native web acceptance')
@@ -246,10 +292,33 @@ def test_native_chat_browser(tmp_path, scenario):
             lambda machine: jsonify(services['tasks'].targets(machine)))
 
     snapshot_sequence = 6
+    stream_generation = 0
 
     @app.post('/_fixture/native-event')
     def native_event():
-        nonlocal snapshot_sequence
+        nonlocal snapshot_sequence, stream_generation
+        if scenario == 'native-stream-interruption':
+            phase = request.get_json()['phase']
+            if phase == 'start':
+                stream_generation += 1
+                rows = [('agent_state_changed', {'state':'running','source':'structured_stream','confidence':'high','reason':'explicit_state'}),
+                    ('assistant_message', {'message_id':'answer','content_mode':'delta','text':f'LIVE_{stream_generation} 🌲','is_complete':False}),
+                    ('tool_call', {'call_id':'live_tool','tool_name':f'Read {stream_generation}','arguments':'{"path":"README.md"}'})]
+            elif phase == 'delta':
+                rows = [('assistant_message', {'message_id':'answer','content_mode':'delta','text':' incremental','is_complete':False})]
+            elif phase == 'fail':
+                rows = [('agent_state_changed', {'state':'failed','source':'structured_stream','confidence':'high','reason':'source_unavailable'})]
+            elif phase == 'late-result':
+                rows = [('tool_result', {'call_id':'live_tool','tool_name':f'Read {stream_generation}','result':'late <img src=x onerror=alert(1)>','status':'ok'})]
+            else:
+                return jsonify({'error':'invalid_phase'}), 400
+            items = []
+            for kind, payload in rows:
+                snapshot_sequence += 1
+                item = event(snapshot_sequence, kind, payload)
+                item.update(session_id=row.session_id, stream_id=f'live_{stream_generation}', event_id=f'live_{snapshot_sequence}')
+                items.append(item)
+            return jsonify(services['sessions'].ingest_events(items))
         if scenario == 'zcode-desktop-tools':
             items = []
             for seq, tool in enumerate(desktop_tools[2:], start=7):
@@ -273,7 +342,7 @@ def test_native_chat_browser(tmp_path, scenario):
     def fail_command():
         commands = services['supervisor'].poll('m1')
         for command in commands:
-            services['supervisor'].receipt(command['command_id'], 'failed', 'native_session_unbound')
+            services['supervisor'].receipt(command['command_id'], 'failed', 'escape_unverified' if scenario == 'cleanup-receipt' else 'native_session_unbound')
         return jsonify({'commands':len(commands)})
 
     @app.post('/_fixture/bind-task')

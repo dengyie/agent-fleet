@@ -38,6 +38,13 @@ export function createNativeMessages(host) {
           if (!markdown.isConnected) node.append(el('div', 'assistant-message-role', row.kind === 'user_message' ? '你' : 'Agent'), markdown);
           markdown.setAttribute('content', row.text);
           markdown.toggleAttribute('is-streaming', !row.complete);
+          let interruption = node.querySelector('.native-message-interrupted');
+          if (row.interrupted) {
+            if (!interruption) {
+              interruption = el('p', 'native-message-interrupted meta', '输出已中断，已收到的内容保留。');
+              interruption.setAttribute('role', 'status'); node.append(interruption);
+            }
+          } else interruption?.remove();
           let time = node.querySelector('.native-message-time');
           if (row.updated_at) {
             if (!time) { time = el('time', 'native-message-time'); node.append(time); }

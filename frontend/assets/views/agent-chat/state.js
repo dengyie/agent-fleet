@@ -11,6 +11,13 @@ export function operationStatus(operation) {
   if (operation.status === 'succeeded' && operation.action !== 'append_user_turn') return '节点已执行';
   return RECEIPT_LABELS[operation.status] || operation.label || '等待确认';
 }
+const OPERATION_FAILURES = Object.freeze({
+  escape_unverified: '节点尚未确认原 Agent 进程已完全退出，暂不能继续执行。请在工作面板查看可用的终止操作，并以节点回执确认停止；若仍失败，请检查该节点。',
+  liveness_unknown: '节点暂时无法确认原 Agent 进程状态。请先检查节点连接与会话状态，并查看原操作回执，避免重复执行。',
+});
+export function operationFailure(reason) {
+  return Object.hasOwn(OPERATION_FAILURES, reason) ? OPERATION_FAILURES[reason] + '（' + reason + '）' : reason || '';
+}
 export const AGENT_LABELS = Object.freeze({running: 'Agent 正在执行', idle: '等待下一条消息', completed: '本轮已结束',
   waiting_for_user: '等待你回答', waiting_for_approval: '等待审批', failed: 'Agent 执行失败', stopped: '已停止', unknown: '状态待确认'});
 
@@ -29,7 +36,20 @@ export function mergeNativeEvents(current, incoming, max = 500) {
 
 export function nativeMessages(events) {
   const messages = [], fragments = new Map(), identifiedMessages = new Map(), tools = new Map();
-  const interactions = new Map();
+  const interactions = new Map(), pending = new Map();
+  function track(stream, row, active) {
+    if (!pending.has(stream)) pending.set(stream, new Set());
+    if (active) pending.get(stream).add(row);
+    else pending.get(stream).delete(row);
+  }
+  function endStream(stream, interrupted) {
+    for (const row of pending.get(stream) || []) {
+      if (row.kind === 'tool') row.status = 'unknown';
+      else { row.complete = true; row.interrupted = interrupted; }
+    }
+    pending.delete(stream);
+    fragments.delete(stream + ':assistant_message');
+  }
   for (const event of events) {
     const p = event.payload || {}, stream = event.stream_id || '';
     if (event.kind === 'user_message' || event.kind === 'assistant_message') {
@@ -48,6 +68,8 @@ export function nativeMessages(events) {
       if (mode === 'snapshot') row.text = p.text || '';
       else row.text += p.text || '';
       row.complete = p.is_complete !== false;
+      row.interrupted = false;
+      if (kind === 'assistant_message') track(stream, row, !row.complete);
       row.updated_at = event.emitted_at || row.updated_at || '';
       if (!messageId) {
         if (row.complete) fragments.delete(chunkKey);
@@ -67,6 +89,7 @@ export function nativeMessages(events) {
       row.status = /^(error|failed|timeout|timed_out|cancelled)$/.test(status) ? 'error'
         : /^(ok|completed|success|succeeded|done)$/.test(status) ? 'success'
         : event.kind === 'tool_call' ? 'running' : 'unknown';
+      track(stream, row, row.status === 'running');
       row.emitted_at = event.emitted_at || row.emitted_at || '';
     } else if (event.kind === 'capture_gap') {
       messages.push({key: event.cursor, kind: 'notice', text: '记录存在采集缺口：' + (p.reason || 'source_unavailable'), emitted_at: event.emitted_at});
@@ -88,6 +111,7 @@ export function nativeMessages(events) {
       messages.push({key: event.cursor, kind: 'activity',
         text: ['你的回答', ...selected, p.text].filter(Boolean).join(' · '), emitted_at: event.emitted_at});
     } else if (event.kind === 'agent_state_changed') {
+      if (['completed', 'failed', 'stopped'].includes(p.state)) endStream(stream, p.state !== 'completed');
       messages.push({key: event.cursor, kind: 'activity', text: AGENT_LABELS[p.state] || 'Agent 状态更新', emitted_at: event.emitted_at});
     } else if (event.kind === 'capture_quality_changed') {
       messages.push({key: event.cursor, kind: 'activity',
@@ -106,6 +130,7 @@ export function nativeMessages(events) {
       messages.push({key: event.cursor, kind: 'activity',
         text: ['策略提示', p.severity, p.reason].filter(Boolean).join(' · '), emitted_at: event.emitted_at});
     } else if (event.kind === 'session_close') {
+      endStream(stream, p.reason !== 'completed' || p.exit_code !== undefined && p.exit_code !== 0);
       messages.push({key: event.cursor, kind: 'activity',
         text: ['会话结束', p.reason, p.exit_code === undefined ? '' : '退出码 ' + p.exit_code].filter(Boolean).join(' · '),
         emitted_at: event.emitted_at});

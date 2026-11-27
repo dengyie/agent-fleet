@@ -5,7 +5,7 @@ import {el, button, link, errorText} from './agent-chat/dom.js';
 import {nativeDirectoryPath} from './agent-chat/paths.js';
 import {createNativeChatService, createMessageJournal, createTaskJournal} from './agent-chat/service.js';
 import {createNativeReader} from './agent-chat/live.js';
-import {mergeNativeEvents, nativeCaptureNotice, sessionTitle, agentName, AGENT_LABELS, TERMINAL_RECEIPTS, RECEIPT_LABELS, operationStatus, uncertainWrite} from './agent-chat/state.js';
+import {mergeNativeEvents, nativeCaptureNotice, sessionTitle, agentName, AGENT_LABELS, TERMINAL_RECEIPTS, RECEIPT_LABELS, operationStatus, operationFailure, uncertainWrite} from './agent-chat/state.js';
 import {createNativeMessages} from './agent-chat/messages.js';
 import {mountNativeInspector} from './agent-chat/inspector.js';
 import {CONTROL_LABELS} from './agent-chat/operations.js';
@@ -184,7 +184,7 @@ export function mountAgentChat(target, {sessionId, taskId, machine, store, api, 
         const receipt = await service.receipt(op.command_id, id, signal);
         if (!current() || version !== readVersion) return;
         op.status = receipt.status; op.label = RECEIPT_LABELS[receipt.status] || receipt.status;
-        op.error = ['failed', 'expired', 'rejected', 'cancelled'].includes(receipt.status) ? receipt.reason || '' : '';
+        op.error = ['failed', 'expired', 'rejected', 'cancelled'].includes(receipt.status) ? operationFailure(receipt.reason) : '';
         if (op.client_token && TERMINAL_RECEIPTS.has(op.status)) journal.clear();
       } catch (error) { if (!current()) return; op.error = '命令已入队，回执暂不可读，将继续查询。'; }
     }
