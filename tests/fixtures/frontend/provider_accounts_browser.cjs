@@ -28,7 +28,7 @@ const [origin, viewport] = process.argv.slice(2);
     await page.getByText('原请求结果待确认',{exact:true}).waitFor();
     await page.unroute('**/api/machines/mac-local/provider-accounts');
     await page.route('**/api/machines/mac-local/provider-accounts',async route=>{if(route.request().method()==='POST')creates.push(route.request().postDataJSON()); await route.continue();});
-    await page.getByRole('button',{name:'恢复原账号操作',exact:true}).click();
+    await admit(page.getByRole('button',{name:'恢复原账号操作',exact:true}));
     const card=page.locator('.provider-account-card').filter({has:page.getByRole('heading',{name:'Google work <img src=x>',exact:true})}); await card.waitFor();
     assert.equal(creates.length,2); assert.deepEqual(creates[0],creates[1]);
     assert.equal(await page.locator('.provider-account-card').count(),1);

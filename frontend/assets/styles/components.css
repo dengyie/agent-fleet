@@ -9,18 +9,43 @@ stream-markdown pre code { padding: 0; }
 stream-markdown table { display: block; overflow-x: auto; border-collapse: collapse; }
 stream-markdown td,stream-markdown th { padding: 6px 10px; border: 1px solid var(--border); }
 stream-markdown blockquote { margin: 12px 0; padding: 6px 14px; color: var(--text-2); border-left: 3px solid var(--link); }
-tool-call-badge { display: block; min-width: 0; }
-tool-call-badge>div { border: 1px solid var(--border); background: var(--panel); border-radius: 8px; overflow: hidden; font-size: 11px; }
-tool-call-badge #toggle-btn { width: 100%; padding: 10px; border: 0; border-radius: 0; background: transparent; display: flex; justify-content: space-between; gap: 5px; text-align: left; }
-tool-call-badge #toggle-btn>div { display: flex; align-items: center; gap: 5px; min-width: 0; }
-tool-call-badge #toggle-btn>div:first-child span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 112px; font: 10px ui-monospace,monospace; }
-tool-call-badge #toggle-btn>div:last-child { font-size: 10px; flex: none; }
-tool-call-badge[status=success] #toggle-btn>div:last-child { color: var(--ok); }
-tool-call-badge[status=error] #toggle-btn>div:last-child { color: var(--bad); }
-tool-call-badge[status=running] #toggle-btn>div:last-child { color: var(--warn); }
-tool-call-badge #drawer { padding: 10px; border-top: 1px solid var(--border); background: var(--bg); }
-tool-call-badge pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; font-size: 10px; }
-tool-call-badge .rotate-90 { transform: rotate(90deg); }
+/* Public execution disclosures share a quiet header and readable detail body. */
+tool-call-badge, thinking-block { display: block; min-width: 0; }
+tool-call-badge .tool-card, .thinking-block-shell { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--panel); }
+tool-call-badge #toggle-btn, .thinking-block-toggle { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border: 0; border-radius: 0; background: var(--panel-hover); color: var(--text); text-align: left; cursor: pointer; }
+tool-call-badge #toggle-btn:hover, .thinking-block-toggle:hover { background: color-mix(in srgb, var(--panel-hover) 80%, var(--border)); }
+tool-call-badge #toggle-btn>div { display: flex; align-items: center; gap: 9px; min-width: 0; }
+tool-call-badge #toggle-btn>div:first-child { flex: 1; }
+tool-call-badge #toggle-btn>div:last-child { flex: none; font-size: 11px; color: var(--text-2); }
+tool-call-badge .tool-call-label { min-width: 0; font: 550 13px/1.6 var(--font-mono, ui-monospace, monospace); overflow-wrap: anywhere; }
+tool-call-badge .tool-call-state { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+tool-call-badge svg { flex: none; }
+tool-call-badge[status=success] .tool-call-state { color: var(--ok); }
+tool-call-badge[status=error] .tool-call-state { color: var(--bad); }
+tool-call-badge[status=running] .tool-call-state { color: var(--warn); }
+tool-call-badge #drawer { display: grid; gap: 14px; padding: 14px; border-top: 1px solid var(--border-subtle); }
+tool-call-badge #drawer[hidden], tool-call-badge #drawer [hidden], .thinking-block-body[hidden] { display: none; }
+tool-call-badge h4 { color: var(--text-2); font-size: 11px; line-height: 1.5; font-weight: 550; margin: 0 0 6px; }
+tool-call-badge pre { margin: 0; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border-subtle); border-radius: 8px; color: var(--text); font: 12px/1.8 var(--font-mono, ui-monospace, monospace); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; scrollbar-width: thin; }
+tool-call-badge .tool-detail-empty { margin: 0; font-size: 12px; line-height: 1.6; color: var(--text-3); }
+tool-call-badge .tool-detail-name { margin: 0; color: var(--text-2); font: 11px/1.6 var(--font-mono, ui-monospace, monospace); overflow-wrap: anywhere; }
+tool-call-badge .tool-detail-error h4, tool-call-badge .tool-detail-error pre { color: var(--bad); }
+tool-call-badge .tool-call-chevron, .thinking-block-chevron { transition: transform .16s ease; }
+tool-call-badge .rotate-90, .thinking-block-chevron.is-open { transform: rotate(90deg); }
+.thinking-block-shell { background: transparent; }
+.thinking-block-toggle { color: var(--text-2); background: transparent; }
+.thinking-block-label { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 550; }
+.thinking-block-label>svg { color: var(--text-2); }
+.thinking-block-toggle.is-active .thinking-block-label>svg { animation: thinking-pulse 1.3s ease-in-out infinite; }
+.thinking-block-body { border-top: 1px solid var(--border-subtle); padding: 12px 14px; }
+.thinking-block-body pre { margin: 0; max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-2); font: 12px/1.8 var(--font-mono, ui-monospace, monospace); }
+@keyframes thinking-pulse { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .thinking-block-toggle.is-active svg { animation: none; } }
+@media (max-width: 767px) {
+  tool-call-badge #toggle-btn { gap: 8px; padding: 10px 11px; align-items: start; }
+  tool-call-badge .tool-call-label { font-size: 12px; }
+  tool-call-badge #drawer { padding: 11px; }
+}
 auto-scroll-anchor #back-to-bottom { position: fixed; bottom: 25px; right: 26px; border-radius: 50%; padding: 10px; box-shadow: var(--shadow-md); z-index: 10; }
 @media (max-width: 767px) { auto-scroll-anchor #back-to-bottom { right: auto; left: 16px; bottom: 18px; } }
 .fleet-layout>section { min-width: 0; }

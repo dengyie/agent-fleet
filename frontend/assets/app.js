@@ -24,6 +24,7 @@ import { mountLogin, redirectToLogin, showAccessState } from './shell/operator.j
 import './ui/ChatPromptInput.js';
 import './ui/StreamMarkdown.js';
 import './ui/ToolCallBadge.js';
+import './ui/ThinkingBlock.js';
 import './ui/AutoScrollAnchor.js';
 
 function protectConsole() {

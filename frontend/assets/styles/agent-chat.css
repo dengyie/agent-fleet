@@ -8,6 +8,8 @@ body[data-page=agent-chat] .page-heading, body[data-page=sessions] .page-heading
 .conversation-target:hover { text-decoration: none; background: var(--panel-hover); }
 .conversation-target[aria-current=page] { color: var(--text); background: var(--panel-hover); font-weight: 600; }
 .native-thread { gap: 16px; }
+.native-chat-view .assistant-messages { gap: 20px; }
+.native-chat-view .assistant-message.assistant { padding-bottom: 0; }
 .native-target-picker { flex: none; margin: 0 auto 16px; width: 100%; max-width: 720px; padding: 20px; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; }
 .native-target-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
 .native-target-field { min-width: 0; display: grid; gap: 7px; font-size: 11px; color: var(--text-2); }
@@ -61,10 +63,9 @@ body[data-page=agent-chat] .page-heading, body[data-page=sessions] .page-heading
 .native-result-detail pre { max-height: 420px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0; font-size: 11px; }
 .native-result-detail button { margin-top: 12px; }
 .native-notice { padding: 10px 14px; border-left: 2px solid var(--warn); background: var(--warn-bg); font-size: 12px; overflow-wrap: anywhere; }
-.native-activity { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: var(--text-2); font-size: 11px; padding: 3px 0; }
+.native-thinking { min-width: 0; }
 .native-tool-event { min-width: 0; }
 .native-message-time { display: block; margin-top: 7px; color: var(--text-3); font-size: 10px; line-height: 1.4; }
-.native-activity .native-message-time { flex: none; margin-top: 0; }
 .native-tool-event .native-message-time { margin: 0 0 8px 10px; }
 .native-full-text { font-size: 12px; overflow-wrap: anywhere; margin: 10px 0; }
 .native-full-text pre { white-space: pre-wrap; }

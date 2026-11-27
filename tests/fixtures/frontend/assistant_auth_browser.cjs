@@ -42,8 +42,8 @@ const [origin] = process.argv.slice(2);
     }
     for (const route of ['/', '/assistant', '/monitoring', '/machine/example', '/task/example', '/session/example', '/conversation/conv-auth']) {
       await page.goto(origin + route, {waitUntil: 'domcontentloaded'});
-      assert.equal(await page.getByText('正在验证登录状态…', {exact: true}).count(), 0);
       await expectLogin(route);
+      assert.equal(await page.getByText('正在验证登录状态…', {exact: true}).count(), 0);
     }
     assert.deepEqual(featureRequests, [], 'protected data and SSE must not load before session validation');
     await page.goto(origin + '/assistant', {waitUntil: 'domcontentloaded'});

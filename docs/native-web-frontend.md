@@ -171,3 +171,15 @@ task-results-binding 覆盖 Task → 原生会话绑定过程中慢详情响应�
 原控制回执中的 `escape_unverified` 与 `liveness_unknown` 显示中文原因和检查建议，同时保留诊断码。页面仍只提供当前公开 `allowed_actions` 允许的操作；不自动重新发送消息或执行终止。节点本地 `desktop_checkpoint_invalid` 没有新增公开字段，前端不伪造诊断或自动重置源端检查点。
 
 回归入口：`tests/test_native_chat_frontend.py` 中的 `test_native_stream_interruption_projection`、`native-stream-interruption` 和 `cleanup-receipt`。后两者用真实 Hub/SQLite 和签名命令队列，在桌面/手机 Chrome 验证增量、失败、迟到结果与控制失败反馈；不运行真实模型或读取隐藏推理。实施与发布清单见[原生运行时前端适配计划](superpowers/plans/2026-11-27-native-runtime-ui.md)。
+
+## 会话内执行详情
+
+电脑 Agent 和主助手正文中的工具卡默认展开，直接展示公开 API 提供的调用参数、执行结果与错误详情。JSON 容器格式化缩进，命令和普通输出保留原文；没有参数、等待返回、结果未知及已完成但无输出分别显示明确提示。长内容在卡片内滚动，页面不截掉内容。工作面板及 Muse 沿用原来的默认收起行为。
+
+工具卡的默认展开仅在首次挂载生效。增量、迟到结果与快照更新复用原按钮和详情 DOM，保留用户手动收起、键盘焦点、未变动输入区的选择和滚动。刷新页面后依照服务端历史恢复内容，折叠状态不跨页面刷新保存。所有动态字段作为纯文本展示。
+
+原生会话按公开游标顺序将**同一采集流的相邻状态事件**合并到“执行过程”折叠区；不会跨正文、工具或其他流把后续步骤移动到前面。已知状态原因显示中文，未知原因不推断；`unknown` 仍不作为执行终态。主助手用相同折叠组件显示公开 thinking/waiting/responding/tool_call 阶段和运行结束说明，其公开工作说明与工具卡仍按进度投影顺序展示。
+
+当前后端没有公开推理正文的 API；原生 normalization 和主助手进度投影均不发布私有 thinking/reasoning 文本。这次前端展示现有公开状态、工作说明、步骤和工具事实，不读取 archived source records 或声称存在完整思维链。若需供应商允许公开的思考摘要，需要后端提供明确的公开契约后再接入。
+
+测试复用 `native-stream-interruption`、`zcode-desktop-tools` 和 `test_assistant_live_model_stream_retry_and_reload` 的真实 Hub/SQLite/Chrome 流程，补充默认可见、折叠保留、焦点/文本选择、迟到结果、字面 HTML 与手机无溢出断言。实施清单见[执行详情计划](superpowers/plans/2026-11-28-conversation-tool-details.md)。

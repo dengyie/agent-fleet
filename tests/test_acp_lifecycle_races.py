@@ -78,14 +78,16 @@ def _pending(root):
 def test_prompt_result_waits_for_permission_publish_and_native_delivery(
         acp_peer_runtime, monkeypatch):
     peer = acp_peer_runtime
-    publishing, release = threading.Event(), threading.Event()
+    publishing, release, published = threading.Event(), threading.Event(), threading.Event()
     publish = AcpMailbox.publish
 
     def delayed_publish(*args, **kwargs):
         publishing.set()
         if not release.wait(2):
             raise OSError('fixture publication did not resume')
-        return publish(*args, **kwargs)
+        result = publish(*args, **kwargs)
+        published.set()
+        return result
 
     monkeypatch.setattr(AcpMailbox, 'publish', delayed_publish)
     peer.runner.start()
@@ -95,6 +97,9 @@ def test_prompt_result_waits_for_permission_publish_and_native_delivery(
             'end_turn cannot complete while its received permission is publishing')
     finally:
         release.set()
+    # pending.json is installed before publish releases its answer lock. Wait
+    # for the call to return so this lifecycle test does not race that lock.
+    assert published.wait(1), 'permission publication must complete'
     pending = _pending(peer.root)
     assert AcpMailbox.answer(peer.root, pending['request_id'], 'option_0') == 'answered'
     assert peer.finished.wait(2)

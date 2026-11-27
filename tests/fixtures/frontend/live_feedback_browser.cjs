@@ -31,6 +31,10 @@ const [origin, conversation, runId, outcome = 'succeeded'] = process.argv.slice(
     });
     await page.request.post(origin + '/_fixture/start');
     await page.locator('.assistant-message-progress').filter({hasText:'模型正在思考'}).waitFor();
+    const thinking = page.locator('.assistant-message-activity thinking-block');
+    await thinking.getByRole('button',{name:'正在思考'}).waitFor();
+    await thinking.getByText('模型正在思考，当前仅提供状态，尚未返回可展示的思考正文。',{exact:true}).waitFor();
+    assert.equal(await thinking.getByRole('button').getAttribute('aria-expanded'),'true');
     assert.equal(await page.locator('.assistant-message-activity stream-markdown').count(),0);
     assert.ok(!(await page.locator('body').textContent()).includes('raw-reasoning-browser-sentinel'));
     await page.reload({waitUntil:'domcontentloaded'});
@@ -53,6 +57,7 @@ const [origin, conversation, runId, outcome = 'succeeded'] = process.argv.slice(
     await page.waitForFunction(() => document.querySelector('.assistant-message-activity tool-call-badge')?.getAttribute('status') === 'success');
     assert.match(await page.locator('tool-call-badge').first().getAttribute('label'),/列出目录/);
     assert.ok(await page.locator('tool-call-badge').first().getAttribute('output'));
+    assert.equal(await page.locator('.assistant-message-activity tool-call-badge #drawer').isVisible(),true,'public tool details are open immediately');
     await page.locator('.assistant-message-progress').filter({hasText:'正在自动重试 1/3'}).waitFor();
     await page.waitForFunction(() => window.liveSnapshots.some(run => run.progress?.retry?.retry_index === 1));
     await page.evaluate(async () => {
@@ -61,7 +66,7 @@ const [origin, conversation, runId, outcome = 'succeeded'] = process.argv.slice(
       const button = host.querySelector('tool-call-badge button');
       button.click(); button.focus();
       renderProgress(host,window.liveSnapshots.at(-1));
-      if (host.querySelector('tool-call-badge button') !== button || document.activeElement !== button) {
+      if (host.querySelector('tool-call-badge button') !== button || document.activeElement !== button || button.getAttribute('aria-expanded') !== 'false') {
         throw new Error('progress snapshots must preserve tool drawer and focus');
       }
     });
@@ -121,12 +126,15 @@ const [origin, conversation, runId, outcome = 'succeeded'] = process.argv.slice(
         title:'执行命令 · python3 -c print(ASSISTANT_LONG_RUN_21)'};
       const run = {state:'failed',progress:{segments:[segment]}};
       renderProgress(host,run);
+      if (host.firstElementChild?.tagName !== 'THINKING-BLOCK') {
+        throw new Error('execution summary precedes narration and tool details even on initial mount');
+      }
       const badge = host.querySelector('tool-call-badge');
       const label = badge.querySelector('.tool-call-label');
       if (label.getBoundingClientRect().width <= 112 || document.documentElement.scrollWidth > innerWidth) {
         throw new Error('tool operation title must use available width without page overflow');
       }
-      const button = badge.querySelector('button'); button.click(); button.focus();
+      const button = badge.querySelector('button'); button.focus();
       if (!badge.querySelector('#drawer').textContent.includes('sandbox_unavailable')) {
         throw new Error('failed inline tool must display its specific error');
       }
@@ -150,6 +158,33 @@ const [origin, conversation, runId, outcome = 'succeeded'] = process.argv.slice(
       if (!retryNotice.includes('模型响应超时') || !retryNotice.includes('正在自动重试 1/3') || retryNotice.includes('HTTP 200')) {
         throw new Error('interrupted accepted generations must explain timeout and live retry');
       }
+      const trace = host.querySelector('thinking-block'), traceButton = trace.querySelector('button');
+      traceButton.click(); traceButton.focus();
+      run.progress.activity={phase:'thinking'}; delete run.progress.retry;
+      renderProgress(host,run);
+      if (trace.querySelector('button') !== traceButton || document.activeElement !== traceButton || traceButton.getAttribute('aria-expanded') !== 'false') {
+        throw new Error('public phase changes must retain the thinking disclosure and keyboard focus');
+      }
+      trace.setAttribute('content','<img src=x onerror=alert(1)>');
+      if (trace.querySelector('img') || !trace.textContent.includes('<img src=x onerror=alert(1)>')) {
+        throw new Error('activity text must render literally');
+      }
+      badge.setAttribute('args','{"path":"README.md"}');
+      const inputPre=badge.querySelector('.tool-detail-input pre');
+      inputPre.scrollTop=8;
+      button.focus();
+      const selection=getSelection(),range=document.createRange();range.selectNodeContents(inputPre);selection.removeAllRanges();selection.addRange(range);
+      const selected=selection.toString();
+      badge.setAttribute('output','new actual tool result');
+      if (badge.querySelector('button')!==button || document.activeElement!==button || getSelection().toString()!==selected) {
+        throw new Error('tool output updates must retain disclosure DOM and input text selection');
+      }
+      const empty=document.createElement('tool-call-badge');empty.setAttribute('default-open','');host.append(empty);
+      if (!empty.querySelector('#drawer').textContent.includes('正在执行，等待返回结果')) throw new Error('pending tools explain the absent result');
+      empty.setAttribute('status','success');
+      if (!empty.querySelector('#drawer').textContent.includes('未返回输出内容')) throw new Error('completed tools do not invent output');
+      empty.setAttribute('status','toString');
+      if (!empty.querySelector('.tool-call-state').textContent.includes('结果未知')) throw new Error('unrecognized tool status stays unknown');
       host.remove();
     });
     assert.deepEqual(errors,[]);
