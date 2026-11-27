@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_native_chat_state_and_contracts():
     result = subprocess.run(['node', '--input-type=module'], cwd=ROOT, text=True, capture_output=True, input=r"""
 import assert from 'node:assert/strict';
-import {mergeNativeEvents, nativeMessages, sessionTitle, agentName, uncertainWrite, operationStatus} from './frontend/assets/views/agent-chat/state.js';
+import {mergeNativeEvents, nativeMessages, nativeCaptureNotice, sessionTitle, agentName, uncertainWrite, operationStatus} from './frontend/assets/views/agent-chat/state.js';
 import {parseTaskTargets, parseSession} from './frontend/assets/api/contracts.js';
 import {createNativeReader} from './frontend/assets/views/agent-chat/live.js';
 import {createNativeChatService, createMessageJournal, createTaskJournal} from './frontend/assets/views/agent-chat/service.js';
@@ -58,6 +58,14 @@ assert.deepEqual(interactions.map(row => row.text), ['Agent 提问 · Choose a r
 assert.equal(sessionTitle({native_title:'VM native title',title_preview:'fallback'}), 'VM native title');
 assert.equal(sessionTitle({title_preview:'first observed user turn'}), 'first observed user turn');
 assert.equal(agentName('agy'), 'Google Antigravity');
+const desktop = {agent_family:'zcode',agent_evidence:{protocol:{name:'desktop_bridge',state:'observed'}}};
+assert.match(nativeCaptureNotice(desktop), /空闲后同步正文与工具记录/);
+assert.equal(nativeCaptureNotice({...desktop,current_state:'running'}), nativeCaptureNotice(desktop));
+assert.equal(nativeCaptureNotice({...desktop,agent_family:'codex'}), '');
+assert.equal(nativeCaptureNotice({...desktop,agent_evidence:{protocol:{name:'native_transcript',state:'observed'}}}), '');
+assert.equal(nativeCaptureNotice({...desktop,agent_evidence:{protocol:{name:'desktop_bridge',state:'unknown'}}}), '');
+assert.equal(nativeCaptureNotice({agent_family:'zcode'}), '');
+assert.equal(nativeCaptureNotice(null), '');
 const targets = parseTaskTargets({machine:'m1', projects:['fleet'], agents:{codex:{installed:null, credential:'hidden'}}, internal:'hidden'});
 assert.equal(targets.agents.codex.installed, null); assert.equal(targets.agents.codex.credential, undefined);
 assert.throws(() => parseTaskTargets({machine:'m1',projects:[],agents:{codex:{installed:'yes'}}}));
@@ -124,7 +132,7 @@ assert.equal(maximum, 1); assert.equal(reads, 2); assert.equal(publications, 1, 
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize('scenario', ['read-send', 'lost-response', 'reload-recovery', 'directory', 'directory-pagination', 'history-pagination', 'revoked', 'question-draft', 'missing-targets', 'create', 'task-recovery', 'long-message', 'snapshot-revision', 'receipt-failure', 'delivery-disclosure', 'refresh-targets', 'source-record', 'native-metadata', 'directory-metadata', 'local-profile', 'stale-authority', 'target-links', 'control-confirmation', 'profile-revocation', 'offline-target', 'results', 'result-file-concurrency', 'task-results-binding', 'continuation-results'])
+@pytest.mark.parametrize('scenario', ['read-send', 'lost-response', 'reload-recovery', 'directory', 'directory-pagination', 'history-pagination', 'revoked', 'question-draft', 'missing-targets', 'create', 'task-recovery', 'long-message', 'snapshot-revision', 'receipt-failure', 'delivery-disclosure', 'refresh-targets', 'source-record', 'native-metadata', 'directory-metadata', 'local-profile', 'stale-authority', 'target-links', 'control-confirmation', 'profile-revocation', 'offline-target', 'results', 'result-file-concurrency', 'task-results-binding', 'continuation-results', 'zcode-desktop-tools'])
 def test_native_chat_browser(tmp_path, scenario):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE for native web acceptance')
@@ -134,7 +142,7 @@ def test_native_chat_browser(tmp_path, scenario):
         project_whitelist={'m1': ['agent-fleet']}, supervisor_enabled=True,
         supervisor_signing_raw=bytes(range(32)), supervisor_credentials={'m1':'browser-receipt'},
         append_user_turn_enabled=True, apply_local_profile_enabled=True))
-    row = adopted(app, captured=False)
+    row = adopted(app, family='zcode' if scenario == 'zcode-desktop-tools' else 'codex', captured=False)
     services = app.extensions['fleet']['services']
     services['observe'].ingest({'machine':'m1', 'reachable':True, 'agents':{'codex':{'installed':True}}})
     result_task = None
@@ -143,11 +151,42 @@ def test_native_chat_browser(tmp_path, scenario):
                                   'instruction':'retained result fixture'}, OWNER)
         result_task = services['runner'].poll('m1', 'results-fixture')['task']
         row = SimpleNamespace(session_id='runner_results_fixture')
-    for seq, kind, payload in [(1, 'session_start', {'agent_family':'codex','adapter':'hooks','interactive_questions':True}),
+    initial_events = [(1, 'session_start', {'agent_family':'codex','adapter':'hooks','interactive_questions':True}),
             (2, 'user_message', {'text':'Inspect native project', 'is_complete':True}),
             (3, 'assistant_message', {'text':'Native answer from persisted transcript', 'is_complete':True}),
             (4, 'tool_call', {'tool_name':'read_file','call_id':'call_1','arguments':'{"path":"README.md"}'}),
-            (5, 'tool_result', {'tool_name':'read_file','call_id':'call_1','result':'README contents','status':'success'})]:
+            (5, 'tool_result', {'tool_name':'read_file','call_id':'call_1','result':'README contents','status':'success'})]
+    desktop_tools = []
+    if scenario == 'zcode-desktop-tools':
+        import json
+        import sqlite3
+        from tools.session.native_storage import read_events
+
+        database = tmp_path / 'zcode.sqlite'
+        with sqlite3.connect(database) as connection:
+            connection.execute('CREATE TABLE message(id TEXT, session_id TEXT, data TEXT)')
+            connection.execute('CREATE TABLE part(message_id TEXT, session_id TEXT, data TEXT)')
+            connection.execute('INSERT INTO message VALUES (?, ?, ?)',
+                ('msg_1', 'native_1', json.dumps({'role':'assistant'})))
+            for part in [
+                {'type':'reasoning','text':'PRIVATE_REASONING_SENTINEL'},
+                {'type':'tool','tool':'Read','callID':'read_1','state':{'status':'completed',
+                    'input':{'file_path':'README.md'},'output':'README <script>literal</script>'}},
+                {'type':'tool','tool':'Bash','callID':'bash_1','state':{'status':'error',
+                    'input':{'command':'npm test'},'error':'Tests failed <img src=x onerror=alert(1)>'}},
+            ]:
+                connection.execute('INSERT INTO part VALUES (?, ?, ?)',
+                    ('msg_1', 'native_1', json.dumps(part)))
+        desktop_tools, _ = read_events('zcode', database, 'native_1', 0, limit=256)
+        assert len(desktop_tools) == 4
+        initial_events = [
+            (1, 'session_start', {'agent_family':'zcode','adapter':'structured_stream'}),
+            (2, 'session_metadata', {'desktop_bridge':True}),
+            (3, 'user_message', {'text':'Inspect native project','is_complete':True}),
+            (4, 'assistant_message', {'text':'Native answer from persisted transcript','is_complete':True}),
+            *[(index + 5, item['kind'], item['payload']) for index, item in enumerate(desktop_tools[:2])],
+        ]
+    for seq, kind, payload in initial_events:
         item = event(seq, kind, payload); item['session_id'] = row.session_id
         if result_task:
             item['attempt_id'] = result_task['attempt_id']
@@ -211,6 +250,13 @@ def test_native_chat_browser(tmp_path, scenario):
     @app.post('/_fixture/native-event')
     def native_event():
         nonlocal snapshot_sequence
+        if scenario == 'zcode-desktop-tools':
+            items = []
+            for seq, tool in enumerate(desktop_tools[2:], start=7):
+                item = event(seq, tool['kind'], tool['payload'])
+                item.update(session_id=row.session_id, event_id=tool['event_id'])
+                items.append(item)
+            return jsonify(services['sessions'].ingest_events(items))
         payload = {'text':'Live native update', 'is_complete':True}
         if scenario == 'snapshot-revision':
             payload.update(message_id='revised-message', content_mode='snapshot')

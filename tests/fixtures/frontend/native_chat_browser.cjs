@@ -158,6 +158,39 @@ const [origin, scenario, sid, taskId] = process.argv.slice(2);
           assert.equal(writes,0); assert.deepEqual(errors,[]); await page.close(); continue;
         }
         await page.goto(origin + '/session/' + sid + '?view=chat');
+        if (scenario === 'zcode-desktop-tools') {
+          const notice = page.locator('.native-capture-notice');
+          await notice.filter({hasText:'空闲后同步正文与工具记录'}).waitFor();
+          assert.match(await notice.innerText(), /不代表完整历史/);
+          const read = page.locator('tool-call-badge').filter({hasText:'Read · README.md'});
+          await read.getByRole('button').click();
+          await read.getByText('README <script>literal</script>',{exact:true}).waitFor();
+          assert.match(await read.innerText(), /已完成/);
+          assert.match(await read.getAttribute('args'), /file_path/);
+          assert.equal(await page.locator('tool-call-badge').count(),width === 1440 ? 1 : 2);
+          assert.equal(await read.locator('script').count(),0);
+          const response = await page.request.post(origin + '/_fixture/native-event');
+          assert.equal(response.status(),200);
+          const bash = page.locator('tool-call-badge').filter({hasText:'Bash · npm test'});
+          await bash.waitFor({timeout:16000});
+          await bash.getByRole('button').click();
+          await bash.getByText('Tests failed <img src=x onerror=alert(1)>',{exact:true}).waitFor();
+          assert.match(await bash.innerText(), /失败/);
+          assert.equal(await bash.locator('img').count(),0);
+          assert.equal(await read.getByRole('button').getAttribute('aria-expanded'),'true');
+          await page.request.post(origin + '/_fixture/native-event');
+          await page.waitForTimeout(4500);
+          assert.equal(await page.locator('tool-call-badge').count(),2,'replayed native tools remain unique');
+          assert.equal(await page.getByText('PRIVATE_REASONING_SENTINEL',{exact:true}).count(),0);
+          assert.equal(await page.locator('.native-capture-notice').count(),1);
+          assert.equal(await notice.evaluate(node => {
+            const rect = node.getBoundingClientRect();
+            return rect.top >= 0 && rect.bottom <= innerHeight;
+          }),true,'the sync explanation stays visible when the transcript follows new tool records');
+          assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),true);
+          await page.screenshot({path:'/tmp/fleet-native-web/' + scenario + '-' + width + '.png',fullPage:true});
+          assert.equal(writes,0); assert.deepEqual(errors,[]); await page.close(); continue;
+        }
         if (scenario === 'source-record') {
           const body = await (await sourceResponse).json();
           assert.equal(body.events.some(event => event.kind === 'source_record'), false);

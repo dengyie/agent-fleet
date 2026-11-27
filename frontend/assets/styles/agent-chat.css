@@ -18,6 +18,7 @@ body[data-page=agent-chat] .page-heading, body[data-page=sessions] .page-heading
 .native-chat-view .composer-tools { align-items: center; justify-content: space-between; }
 .native-chat-view .composer-tools>button { min-height: 36px; padding: 7px 11px; border-radius: 10px; }
 .native-chat-notice:empty, .native-history-notice:empty { display: none; }
+.native-capture-notice { margin: 0 0 10px; font-size: 11px; line-height: 1.6; color: var(--text-2); }
 .native-chat-notice { margin-bottom: 12px; max-height: 140px; overflow-y: auto; }
 .native-chat-notice p { margin: 5px 0; font-size: 12px; }
 .native-pending { display: grid; gap: 10px; flex: none; }
