@@ -47,6 +47,7 @@ class AcpTransport:
         self._pending: dict[int, queue.Queue] = {}
         self._pending_lock = threading.Lock()
         self._stopped = threading.Event()
+        self._state_lock = threading.Lock()
         self._error = None
         self._client_slots = threading.BoundedSemaphore(16)
         self._client_inflight = 0
@@ -92,17 +93,36 @@ class AcpTransport:
         except (OSError, ValueError):
             return
 
+    def _frames(self, stream):
+        # FileIO.readline() on the owned unbuffered pipe reads one byte per
+        # syscall. read1() also avoids filling a buffered stream before it
+        # returns. Decode only complete frames, preserving split UTF-8 bytes.
+        read = getattr(stream, 'read1', None) or stream.read
+        pending = bytearray()
+        while not self._stopped.is_set():
+            chunk = read(65536)
+            if not chunk:
+                raise AcpTransportError('frame_too_large' if pending else 'protocol_eof')
+            start = 0
+            while start < len(chunk):
+                newline = chunk.find(b'\n', start)
+                end = newline + 1 if newline >= 0 else len(chunk)
+                if len(pending) + end - start > MAX_FRAME:
+                    raise AcpTransportError('frame_too_large')
+                pending.extend(chunk[start:end])
+                if newline >= 0:
+                    yield bytes(pending)
+                    pending.clear()
+                    if self._stopped.is_set():
+                        return
+                start = end
+
     def _read_loop(self):
         stream = getattr(self.process, 'stdout', None)
         if stream is None:
             self._fail('protocol_eof'); return
         try:
-            while not self._stopped.is_set():
-                raw = stream.readline(MAX_FRAME + 2)
-                if not raw:
-                    self._fail('protocol_eof'); return
-                if len(raw) > MAX_FRAME or not raw.endswith(b'\n'):
-                    self._fail('frame_too_large'); return
+            for raw in self._frames(stream):
                 try:
                     row = json.loads(raw.decode('utf-8', errors='strict'),
                         object_pairs_hook=_object, parse_constant=_constant)
@@ -168,25 +188,45 @@ class AcpTransport:
             self._client_slots.release()
 
     def _fail(self, code):
-        if self._error is None: self._error = code
-        self._stopped.set()
+        with self._state_lock:
+            if self._error is None: self._error = code
+            code = self._error
+            self._stopped.set()
         with self._pending_lock: pending = list(self._pending.values())
         for waiter in pending:
             try: waiter.put_nowait({'_fleet_error': code})
             except queue.Full: pass
 
     def _send(self, row):
+        deadline = time.monotonic() + 1
+        is_request = 'id' in row and 'method' in row
+        if is_request and self.should_abort(): raise AcpTransportError('cancelled')
         raw = (json.dumps(row, ensure_ascii=False, separators=(',', ':'), allow_nan=False) + '\n').encode('utf-8')
         if len(raw) > MAX_FRAME: raise AcpTransportError('frame_too_large')
-        with self._write_lock:
-            if getattr(self.process, 'stdin', None) is None or self._stopped.is_set(): raise AcpTransportError(self._error or 'protocol_eof')
-            done = threading.Event()
-            try: self._outgoing.put((raw, done), timeout=1)
-            except queue.Full as exc: raise AcpTransportError('write_timeout') from exc
-            if not done.wait(1):
-                self._fail('write_timeout')
-                raise AcpTransportError('write_timeout')
+        while True:
             if self._error: raise AcpTransportError(self._error)
+            if is_request and self.should_abort(): raise AcpTransportError('cancelled')
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._fail('write_timeout')
+                raise AcpTransportError(self._error)
+            if self._write_lock.acquire(timeout=min(.05, remaining)): break
+        try:
+            if getattr(self.process, 'stdin', None) is None or self._stopped.is_set(): raise AcpTransportError(self._error or 'protocol_eof')
+            if is_request and self.should_abort(): raise AcpTransportError('cancelled')
+            done = threading.Event()
+            try: self._outgoing.put((raw, done), timeout=max(0, deadline - time.monotonic()))
+            except queue.Full as exc:
+                self._fail('write_timeout')
+                raise AcpTransportError(self._error) from exc
+            while not done.wait(min(.05, max(0, deadline - time.monotonic()))):
+                if self._error: raise AcpTransportError(self._error)
+                if time.monotonic() >= deadline:
+                    self._fail('write_timeout')
+                    raise AcpTransportError(self._error)
+            if self._error: raise AcpTransportError(self._error)
+        finally:
+            self._write_lock.release()
 
     def notify(self, method, params): self._send({'jsonrpc': '2.0', 'method': method, 'params': params})
 
@@ -214,4 +254,4 @@ class AcpTransport:
         finally:
             with self._pending_lock: self._pending.pop(request_id, None)
 
-    def close(self): self._stopped.set()
+    def close(self): self._fail('protocol_eof')

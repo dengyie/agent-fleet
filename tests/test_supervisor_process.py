@@ -1391,6 +1391,85 @@ class SupervisorTests(unittest.TestCase):
         self.assertIn("tail", joined)
         self.assertEqual(sv.get(m.session_id).reason, "completed")
 
+    def test_completion_requires_reap_and_tree_absence_before_release(self):
+        for failure in ("reap_false", "reap_error", "tree_alive", "tree_unknown"):
+            with self.subTest(failure=failure):
+                class UnconfirmedOps(FakeOps):
+                    allow_cleanup = False
+
+                    def group_reap(self, proc, timeout=None):
+                        if failure == "reap_error":
+                            raise OSError("PRIVATE process cleanup detail")
+                        return failure != "reap_false"
+
+                    def group_alive(self, proc):
+                        if self.allow_cleanup:
+                            return proc.alive
+                        if failure == "tree_unknown":
+                            raise OSError("PRIVATE process table detail")
+                        return failure == "tree_alive"
+
+                ops = UnconfirmedOps()
+                sv = self._sv(ops=ops)
+                m = self._launch(sv, capability_manifest={"resume": True})
+                self._bind_native_identity(
+                    sv, m.session_id, native_file_path=self._native_jsonl(),
+                    cwd="/srv/jobs", env={"HOME": "/srv/jobs"},
+                    resume_token="cleanup-fence", exe_path="/opt/codex")
+                handle = ops.children[0]
+                handle.alive = False
+                handle.exit_code = 0
+                owner = sv._owner_path(m.session_id)
+                owner.parent.mkdir(exist_ok=True)
+                owner.write_text('{"fixture":"retained ownership"}', encoding="utf-8")
+                result = sv.wait_session(m.session_id, timeout_s=.2)
+                self.assertEqual(result.outcome, "escape_unverified")
+                self.assertEqual(result.exit_code, 125)
+                self.assertNotIn(m.state, sup_mod.TERMINAL_STATES)
+                self.assertEqual(m.reason, "escape_unverified")
+                self.assertIs(sv._handle_of(m.session_id), handle)
+                self.assertTrue(owner.exists())
+                self.assertNotIn("PRIVATE", m.to_json())
+                for action in (sv.pause_session, sv.resume_session, sv.quarantine_session):
+                    self.assertEqual(action(m.session_id), "escape_unverified")
+                self.assertEqual(sv.apply_local_profile(m.session_id, "fixture"),
+                                 "escape_unverified")
+                self.assertEqual(sv.append_user_turn(m.session_id, "do not overlap"),
+                                 "escape_unverified")
+                self.assertEqual(len(ops.create_calls), 1)
+                restored = self._sv(ops=ops)
+                restored.recover()
+                self.assertEqual(restored.get(m.session_id).reason,
+                                 "escape_unverified")
+                self.assertEqual(restored.append_user_turn(m.session_id, "after restart"),
+                                 "escape_unverified")
+                self.assertEqual(len(ops.create_calls), 1)
+                # A later signed stop can still operate on the same handle.
+                ops.allow_cleanup = True
+                self.assertEqual(sv.terminate_session(m.session_id, grace_s=0),
+                                 "already_finished")
+                self.assertIsNone(sv._handle_of(m.session_id))
+                self.assertFalse(owner.exists())
+
+    def test_tail_timeout_retains_unconfirmed_tree_for_later_stop(self):
+        class UnconfirmedOps(FakeOps):
+            def group_reap(self, proc, timeout=None):
+                return False
+
+        ops = UnconfirmedOps()
+        sv = self._sv(ops=ops)
+        m = self._launch(sv)
+        handle = ops.children[0]
+        handle.alive = False
+        handle.exit_code = 0
+        handle.hold_stdout = True
+        with mock.patch.object(sup_mod, "_FLUSH_BUDGET", .02):
+            result = sv.wait_session(m.session_id, timeout_s=.2)
+        self.assertEqual(result.outcome, "escape_unverified")
+        self.assertEqual(result.exit_code, 125)
+        self.assertNotIn(m.state, sup_mod.TERMINAL_STATES)
+        self.assertIs(sv._handle_of(m.session_id), handle)
+
     # ---- review round 2 hardening: _wait_gone (finding 3 optional) ---------
 
     def test_wait_gone_exception_is_unknown_not_gone(self):

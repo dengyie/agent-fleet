@@ -118,6 +118,21 @@ for line in sys.stdin.buffer:
             update('agent_message_chunk', content={'type': 'text', 'text': '🌲' * 30000})
             response(request, {'stopReason': 'end_turn'})
             continue
+        if scenario == 'stream_barrier':
+            update('agent_message_chunk', content={'type': 'text', 'text': 'live 🌲'})
+            update('tool_call', toolCallId='live_tool', title='Live fixture',
+                   kind='read', status='in_progress', rawInput={'query': 'fixture'})
+            # Only the test parent can release this barrier, after observing
+            # the incomplete message and tool through the public Hub API.
+            deadline = time.monotonic() + 8
+            while not Path(record + '.release').exists():
+                if time.monotonic() >= deadline:
+                    sys.exit(75)
+                time.sleep(.01)
+            update('tool_call_update', toolCallId='live_tool', status='completed', rawOutput='live result')
+            update('agent_message_chunk', content={'type': 'text', 'text': 'done'})
+            response(request, {'stopReason': 'end_turn'})
+            continue
         if scenario == 'large_tool':
             update('tool_call', toolCallId='large', title='Read output', kind='read', status='in_progress',
                    rawInput={'query': 'x' * 10000 + 'INPUT_TAIL'})

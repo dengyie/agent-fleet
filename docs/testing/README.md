@@ -1,5 +1,22 @@
 # 全流程测试与质量门禁
 
+VM 原生执行与流式可靠性参考[vm2api 源码对照](../research/vm2api-architecture-reference.md)及
+[实施计划](../superpowers/plans/2026-11-27-vm-native-stream-reliability.md)。专项覆盖
+64KiB 增量分帧、UTF-8 任意断点、1MiB 边界、合并帧、部分 EOF、写锁/管道反压截止、
+派发前取消、close 唤醒、首个错误保持、回收失败/未知时不报成功且保留 owner、重启后
+禁止新进程，以及原生进程尚未结束时公开 Hub HTTP 已读到文本/工具的真实整链证据：
+
+```sh
+python3 -m pytest tests/test_acp_transport_bounds.py tests/test_agy_acp.py \
+  tests/test_acp_lifecycle_races.py tests/test_acp_interactions.py \
+  tests/test_supervisor_process.py tests/test_supervisor_attach.py \
+  tests/test_review_runner_control.py tests/test_round5_windows_process.py -q
+```
+
+使用独立 stdio 进程、实际 Supervisor/加密 spool/临时 SQLite/Flask HTTP；不调用真实
+Agent、外部模型或 OAuth。Windows/macOS CI 运行已有 ACP suite 和新增回收守卫；真实 VM
+隔离、供应商授权与模型输出的验收仍需单列证据，不能由 fixture 推断。
+
 AGY 多 Google 账号、临时 OAuth 密文、签名控制、不可变任务账号、节点私有 profile、
 重启恢复及账号隔离见[账号 API](../native-provider-accounts.md)与
 [实施计划](../superpowers/plans/2026-11-25-agy-multi-account.md)：

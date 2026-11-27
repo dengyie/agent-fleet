@@ -206,3 +206,246 @@ def test_worker_owner_close_failure_still_reaps_vendor(tmp_path, monkeypatch, ca
     assert process.stdin.closed and process.waited
     assert result != 0
     assert 'SECRET' not in capsys.readouterr().out
+
+
+class _FragmentedOutput(io.BytesIO):
+    """Independent byte source; count the kernel-facing read operations."""
+    def __init__(self, raw, fragment):
+        super().__init__(raw)
+        self.fragment = fragment
+        self.line_reads = 0
+        self.chunk_reads = 0
+
+    def read(self, size=-1):
+        self.chunk_reads += 1
+        assert 0 < size <= 65536
+        return super().read(min(size, self.fragment))
+
+    read1 = read
+
+    def readline(self, size=-1):
+        self.line_reads += 1
+        return super().readline(size)
+
+
+def _wire_notification(text):
+    return (json.dumps({'jsonrpc': '2.0', 'method': 'fixture/update',
+        'params': {'text': text}}, ensure_ascii=False) + '\n').encode('utf-8')
+
+
+@pytest.mark.parametrize('fragment', [1, 3, 65536])
+def test_transport_frames_fragmented_unicode_and_coalesced_records(fragment):
+    raw = _wire_notification('🌲中文') + _wire_notification('same') * 100
+    output = _FragmentedOutput(raw, fragment)
+    rows = []
+    process = SimpleNamespace(stdout=output, stderr=io.BytesIO(), stdin=io.BytesIO())
+    transport = AcpTransport(process, on_notification=rows.append)
+    transport._reader.join(2)
+    transport.close()
+    assert not transport._reader.is_alive()
+    assert [row['params']['text'] for row in rows] == ['🌲中文'] + ['same'] * 100
+    assert output.line_reads == 0, 'unbuffered FileIO.readline performs a read per byte'
+    assert output.chunk_reads <= len(raw) // fragment + 2
+
+
+@pytest.mark.parametrize('suffix,expected', [(b'\n', None), (b'\r\n', None),
+    (b'', 'frame_too_large'), (b' \n', 'frame_too_large')])
+def test_transport_exact_frame_byte_bound_and_partial_eof(monkeypatch, suffix, expected):
+    from tools.providers import acp_transport
+    prefix = b'{"jsonrpc":"2.0","method":"fixture","params":{"text":"'
+    postfix = b'"}}'
+    limit = 128
+    monkeypatch.setattr(acp_transport, 'MAX_FRAME', limit)
+    size = limit - len(prefix) - len(postfix) - (len(suffix) if suffix in (b'\n', b'\r\n') else 1)
+    raw = prefix + b'x' * size + postfix + suffix
+    rows = []
+    output = _FragmentedOutput(raw, 7)
+    transport = AcpTransport(SimpleNamespace(stdout=output, stderr=io.BytesIO(), stdin=io.BytesIO()),
+                             on_notification=rows.append)
+    transport._reader.join(1)
+    transport.close()
+    if expected:
+        assert rows == []
+        assert transport.error == expected
+    else:
+        assert len(rows) == 1
+
+
+class _HeldOutput:
+    def __init__(self):
+        self.release = threading.Event()
+
+    def read(self, _size):
+        assert self.release.wait(4), 'fixture failed to close held pipe'
+        return b''
+
+    readline = read
+
+
+@pytest.fixture
+def held_transport():
+    output = _HeldOutput()
+    process = SimpleNamespace(stdout=output, stderr=io.BytesIO(), stdin=io.BytesIO())
+    transport = AcpTransport(process)
+    yield transport
+    transport.close()
+    output.release.set()
+    transport._reader.join(1)
+    transport._writer.join(1)
+
+
+def test_transport_write_lock_contention_has_one_deadline(held_transport):
+    transport = held_transport
+    completed = threading.Event()
+    codes = []
+    transport._write_lock.acquire()
+
+    def send():
+        try:
+            transport.notify('fixture', {})
+        except AcpTransportError as exc:
+            codes.append(exc.code)
+        finally:
+            completed.set()
+
+    sender = threading.Thread(target=send)
+    sender.start()
+    try:
+        assert completed.wait(1.3), 'lock acquisition must be inside the write deadline'
+        assert codes == ['write_timeout']
+        assert transport.process.stdin.getvalue() == b''
+    finally:
+        transport._write_lock.release()
+        sender.join(2)
+
+
+def test_transport_pre_cancelled_request_never_writes(held_transport):
+    transport = held_transport
+    transport.should_abort = lambda: True
+    with pytest.raises(AcpTransportError, match='^cancelled$'):
+        transport.request('session/prompt', {'private': 'MUST_NOT_DISPATCH'}, timeout=.1)
+    assert transport.process.stdin.getvalue() == b''
+    assert transport._pending == {}
+
+
+def test_transport_close_wakes_pending_request(held_transport):
+    transport = held_transport
+    sent, finished = threading.Event(), threading.Event()
+    original = transport._send
+    codes = []
+
+    def traced(row):
+        original(row)
+        sent.set()
+
+    transport._send = traced
+
+    def request():
+        try:
+            transport.request('fixture', {}, timeout=3)
+        except AcpTransportError as exc:
+            codes.append(exc.code)
+        finally:
+            finished.set()
+
+    caller = threading.Thread(target=request)
+    caller.start()
+    try:
+        assert sent.wait(1)
+        transport.close()
+        assert finished.wait(.3), 'close must wake waiters without waiting for vendor EOF'
+        assert codes == ['protocol_eof']
+        assert transport._pending == {}
+    finally:
+        transport._fail('protocol_eof')
+        caller.join(1)
+
+
+def test_transport_cancel_while_waiting_for_writer_never_queues(held_transport):
+    transport = held_transport
+    abort, checking = threading.Event(), threading.Event()
+    def should_abort():
+        checking.set()
+        return abort.is_set()
+    transport.should_abort = should_abort
+    codes = []
+    transport._write_lock.acquire()
+    def request():
+        try:
+            transport.request('session/prompt', {}, timeout=2)
+        except AcpTransportError as exc:
+            codes.append(exc.code)
+    caller = threading.Thread(target=request)
+    caller.start()
+    try:
+        assert checking.wait(1)
+        abort.set()
+        caller.join(.3)
+        assert not caller.is_alive()
+        assert codes == ['cancelled']
+        assert transport.process.stdin.getvalue() == b''
+        assert transport._outgoing.empty()
+        assert transport._pending == {}
+    finally:
+        transport._write_lock.release()
+        caller.join(2)
+
+
+def test_transport_first_error_wakes_all_callers_and_survives_close(held_transport):
+    transport = held_transport
+    sent = threading.Barrier(3)
+    codes = []
+    original = transport._send
+    def send(row):
+        original(row)
+        sent.wait(2)
+    transport._send = send
+    def request():
+        try:
+            transport.request('fixture', {}, timeout=3)
+        except AcpTransportError as exc:
+            codes.append(exc.code)
+    callers = [threading.Thread(target=request) for _ in range(2)]
+    for caller in callers:
+        caller.start()
+    try:
+        sent.wait(2)
+        transport._fail('invalid_frame')
+        transport.close()
+        transport._fail('write_timeout')
+        for caller in callers:
+            caller.join(1)
+        assert not any(caller.is_alive() for caller in callers)
+        assert codes == ['invalid_frame', 'invalid_frame']
+        assert transport.error == 'invalid_frame'
+        assert transport._pending == {}
+    finally:
+        transport.close()
+        for caller in callers:
+            caller.join(1)
+
+
+def test_transport_real_stalled_stdin_fails_and_reaps_owned_peer():
+    import subprocess
+    import sys
+    from fleet_core.process.local_process import popen
+    process = popen([sys.executable, '-c', 'import time; time.sleep(10)'],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+    transport = AcpTransport(process)
+    try:
+        started = time.monotonic()
+        with pytest.raises(AcpTransportError, match='^write_timeout$'):
+            transport.notify('fixture', {'text': 'x' * 900000})
+        assert time.monotonic() - started < 2
+        assert transport.error == 'write_timeout'
+        with pytest.raises(AcpTransportError, match='^write_timeout$'):
+            transport.request('session/prompt', {}, timeout=.1)
+    finally:
+        transport.close()
+        process.kill()
+        process.wait(timeout=2)
+        for thread in (transport._writer, transport._reader, transport._stderr):
+            thread.join(2)
+            assert not thread.is_alive()
+        for stream in (process.stdin, process.stdout, process.stderr):
+            stream.close()

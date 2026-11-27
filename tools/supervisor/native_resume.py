@@ -222,6 +222,8 @@ class NativeResumeMixin:
                 m.state, m.reason = disk.state, disk.reason
             if self._continuations.path(session_id).exists() and not self._continuations.restore(entry):
                 return 'model_config_unavailable'
+        if m.reason == 'escape_unverified':
+            return 'escape_unverified'
         if m.state in TERMINAL_STATES and m.reason != "completed":
             return m.state
         gate = self._guard_adopted(session_id)

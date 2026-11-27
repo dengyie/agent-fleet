@@ -246,6 +246,74 @@ def test_acp_unadvertised_client_file_request_is_refused(tmp_path):
     assert '/private/secret' not in '\n'.join(rows)
 
 
+def test_native_stream_reaches_public_hub_before_provider_finishes(tmp_path):
+    from hub.bootstrap import create_app
+    from hub.config import FleetConfig
+    from tools.runner_config import RunnerConfig
+    from tools.session.runner_capture import RunnerCapture
+
+    app = create_app(FleetConfig.from_root(tmp_path / 'hub', dev_operator='test@local',
+        session_repositories_enabled=True, runner_credentials={'fixture-node': 'secret'}))
+
+    def post(_cfg, path, events):
+        with app.test_client() as client:
+            response = client.post(path, json=events,
+                headers={'X-Runner-Credential': 'fixture-node:secret'})
+            assert response.status_code == 200 and not response.get_json().get('rejected')
+            return response.status_code, response.get_json()
+
+    cfg = RunnerConfig(hub='https://localhost', machine='fixture-node', credential='secret',
+        runner_id='fixture-node', projects={}, agents={}, cache_dir=tmp_path / 'cache')
+    task = {'task_id': 'live_stream', 'attempt_id': 'live_stream', 'agent_type': 'agy', 'instruction': 'read'}
+    argv, trace = worker(tmp_path, 'stream_barrier')
+    supervisor = Supervisor(tmp_path / 'manifests', 'fixture-node')
+    capture = RunnerCapture(cfg, task, post, process_group_id='live-group')
+    manifest = supervisor.launch(agent='agy', command=argv, cwd=str(tmp_path), env_allowlist={})
+    outcomes = []
+    runner = threading.Thread(target=lambda: outcomes.append(supervisor.wait_session(
+        manifest.session_id, timeout_s=10, on_line=capture.line)))
+    runner.start()
+    route = '/api/sessions/' + capture.session_id + '/events?include_source=0'
+    try:
+        with app.test_client() as client:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                capture.flush()
+                response = client.get(route + '&after_cursor=0')
+                assert response.status_code == 200
+                events = response.get_json()['events']
+                if (any(e['kind'] == 'assistant_message' and e['payload'].get('text') == 'live 🌲'
+                        for e in events) and any(e['kind'] == 'tool_call' for e in events)):
+                    break
+                time.sleep(.01)
+            else:
+                pytest.fail('text and tool did not reach Hub while provider was still waiting')
+            assert runner.is_alive() and outcomes == []
+            assert not any(e['kind'] == 'tool_result' for e in events)
+            live = next(e for e in events if e['kind'] == 'assistant_message')
+            # The tool boundary finishes its preceding message, but the turn
+            # and the tool are still in flight; no terminal execution exists.
+            assert live['payload']['text'] == 'live 🌲'
+            cursor = response.get_json()['next_cursor']
+            Path(str(trace) + '.release').write_text('observed', encoding='utf-8')
+            runner.join(5)
+            assert not runner.is_alive()
+            assert outcomes[0].exit_code == 0
+            capture.finish(0, resumable=True)
+            later = client.get(route + '&after_cursor=' + cursor).get_json()['events']
+            assert any(e['kind'] == 'tool_result' and e['payload'].get('result') == 'live result' for e in later)
+            assert any(e['kind'] == 'assistant_message' and e['payload'].get('text') == 'done' for e in later)
+            assert not {e['cursor'] for e in events} & {e['cursor'] for e in later}
+            assert 'live 🌲' not in json.dumps(later, ensure_ascii=False)
+    finally:
+        Path(str(trace) + '.release').write_text('cleanup', encoding='utf-8')
+        runner.join(5)
+        if runner.is_alive():
+            supervisor.terminate_session(manifest.session_id, grace_s=.1)
+            runner.join(3)
+        capture.bridge.close()
+
+
 def test_acp_owned_cancel_sends_native_cancel_before_exit(tmp_path):
     argv, trace = worker(tmp_path, 'cancel')
     supervisor = Supervisor(tmp_path / 'manifests', 'fixture-node')

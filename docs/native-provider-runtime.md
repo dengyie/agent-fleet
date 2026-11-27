@@ -6,6 +6,10 @@ to [the T3 Code source comparison](research/t3code-architecture-reference.md).
 Implementation progress and executed evidence live in
 [the execution plan](superpowers/plans/2026-11-23-native-provider-runtime.md).
 
+VM execution, incremental stdio, bounded dispatch and process-tree completion
+follow the [vm2api source comparison](research/vm2api-architecture-reference.md)
+and its [reliability plan](superpowers/plans/2026-11-27-vm-native-stream-reliability.md).
+
 ## Product outcome and topology
 
 Machine-local Google personal accounts, signed remote login/logout, credential
@@ -195,3 +199,25 @@ separate evidence row per platform/version, never inferred from fixture or CI
 success. Missing binaries remain unavailable. Follow the established rebase,
 full journey CI, signed client packaging and production deployment procedure;
 do not weaken release gates or change unrelated deployment logic.
+
+
+## Native transport and process completion reliability
+
+ACP framing reads available bytes in chunks of at most 64 KiB, preserving split
+UTF-8 until the complete newline-terminated frame. The 1 MiB frame limit includes
+the newline; CRLF is accepted and partial EOF fails closed. Strict duplicate JSON
+keys, nonfinite values, wrong identities and unknown response checks remain.
+Consumers process records synchronously, preserving order and bounded backpressure.
+The one-second outgoing write deadline includes lock, queue and flush waits;
+pre-dispatch cancellation never queues a request. A first transport failure is
+retained and wakes pending requests. Explicit close wakes them with `protocol_eof`
+if no earlier failure exists; process teardown still owns blocked pipe cleanup.
+
+Successful protocol completion alone does not prove process-tree cleanup. After
+stdout EOF or the bounded tail drain, Supervisor requires confirmed reap and
+absence before dropping ownership. Unconfirmed cleanup returns exit 125 /
+`escape_unverified`, retains its handle/owner and nonterminal manifest, and blocks
+native follow-ups across restart until an explicit stop confirms cleanup. Confirmed
+normal completion retains the vendor exit code; a tail timeout with confirmed
+cleanup remains exit 124 / `group_remaining`. Existing HTTP/SQLite DTOs and schema
+are unchanged.

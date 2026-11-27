@@ -1039,7 +1039,7 @@
       "id": "SESSION-01",
       "title": "CLI任务控制、会话采集、原生续聊与补丁交付",
       "layer": "integration",
-      "acceptance": "重复暂停幂等且不重复发事件或写审计，暂停任务不派发；临时runner完成任务后Hub必须持有正文；缺失采集即失败；只有ingest token但没有source capability证明的exact事件必须在创建session或写入redacted/raw transcript前拒绝；续聊缺少完整私有native身份时不得启动sibling，有身份时沿原cwd/env恢复同一native会话；自然结束后可续聊，paused/quarantined拒绝续聊；terminate/quarantine/pause/resume 必须使在途续聊失效并回收迟到进程，回收未经确认时返回 escape_unverified；旧进程完成回调不得覆盖新 handle；同一会话只允许一个 native resume 在途；raw transcript retention 每批有界、删除与审计原子提交，且只在 transcript gate 启用时运行；真实补丁可应用",
+      "acceptance": "重复暂停幂等且不重复发事件或写审计，暂停任务不派发；临时runner完成任务后Hub必须持有正文；缺失采集即失败；只有ingest token但没有source capability证明的exact事件必须在创建session或写入redacted/raw transcript前拒绝；续聊缺少完整私有native身份时不得启动sibling，有身份时沿原cwd/env恢复同一native会话；自然结束后可续聊，paused/quarantined拒绝续聊；terminate/quarantine/pause/resume 必须使在途续聊失效并回收迟到进程，回收未经确认时返回 escape_unverified；旧进程完成回调不得覆盖新 handle；同一会话只允许一个 native resume 在途；raw transcript retention 每批有界、删除与审计原子提交，且只在 transcript gate 启用时运行；真实补丁可应用；ACP增量分帧与统一写截止有界，派发前取消不写入，close唤醒；EOF与终态不替代整棵进程树回收证明，未确认回收保留owner并跨重启阻止续聊；真实原生对端终态前HTTP可读文本和工具增量",
       "boundary": "disposable CLI executable; actual installed agents require NODE-LIVE",
       "tests": [
         "tests/test_session_ingest_api.py::SessionIngestIsolationTests::test_unverified_exact_source_is_rejected_before_persistence",
@@ -1113,7 +1113,18 @@
         "tests/test_transcript_cursors.py::test_equal_source_sequences_and_late_lower_sequences_are_all_pageable",
         "tests/test_transcript_cursors.py::test_legacy_backfill_and_reopen_preserve_cursors_and_append_order",
         "tests/test_transcript_cursors.py::test_assistant_and_http_cursor_continue_across_streams_and_late_ingestion",
-        "tests/test_transcript_cursors.py::test_sequence_deep_link_starts_at_late_lower_sequence"
+        "tests/test_transcript_cursors.py::test_sequence_deep_link_starts_at_late_lower_sequence",
+        "tests/test_acp_transport_bounds.py::test_transport_frames_fragmented_unicode_and_coalesced_records",
+        "tests/test_acp_transport_bounds.py::test_transport_exact_frame_byte_bound_and_partial_eof",
+        "tests/test_acp_transport_bounds.py::test_transport_write_lock_contention_has_one_deadline",
+        "tests/test_acp_transport_bounds.py::test_transport_pre_cancelled_request_never_writes",
+        "tests/test_acp_transport_bounds.py::test_transport_close_wakes_pending_request",
+        "tests/test_acp_transport_bounds.py::test_transport_cancel_while_waiting_for_writer_never_queues",
+        "tests/test_acp_transport_bounds.py::test_transport_first_error_wakes_all_callers_and_survives_close",
+        "tests/test_acp_transport_bounds.py::test_transport_real_stalled_stdin_fails_and_reaps_owned_peer",
+        "tests/test_agy_acp.py::test_native_stream_reaches_public_hub_before_provider_finishes",
+        "tests/test_supervisor_process.py::SupervisorTests::test_completion_requires_reap_and_tree_absence_before_release",
+        "tests/test_supervisor_process.py::SupervisorTests::test_tail_timeout_retains_unconfirmed_tree_for_later_stop"
       ]
     },
     {
