@@ -234,8 +234,8 @@ def test_slow_desktop_history_yields_without_skipping_or_duplicating_messages(tm
     now, captured = [0.0], []
     monkeypatch.setattr(sync.time, 'monotonic', lambda: now[0])
     original = SessionBridge.ingest_one
-    def slow_disk(self, event):
-        result = original(self, event)
+    def slow_disk(self, event, **kwargs):
+        result = original(self, event, **kwargs)
         if event.get('kind') == 'assistant_message':
             captured.append(event['payload']['text'])
             now[0] += 0.6
@@ -328,3 +328,121 @@ def test_desktop_empty_assistant_placeholder_is_read_again_after_completion(tmp_
     assert [(e['kind'], e['payload']['text']) for e in events
             if e['kind'] in {'user_message', 'assistant_message'}] == [
                 ('user_message', 'question'), ('assistant_message', 'completed answer')]
+
+
+@pytest.mark.parametrize('failure_kind', [
+    'session_metadata', 'user_message', 'assistant_message', 'agent_state_changed',
+])
+@pytest.mark.parametrize('failure_mode', ['spool_error', 'quota'])
+def test_desktop_persistence_rejection_preserves_checkpoint_and_retry(
+        tmp_path, monkeypatch, failure_kind, failure_mode):
+    from tools.session.runner_capture import session_prefix
+    from tools.session.spool import LocalSpool, SpoolError
+    from tools.session.sync import native_identity, sync_desktop
+    from tools.supervisor.desktop_control import DesktopControl
+
+    cfg, client = _cfg(tmp_path), _client(tmp_path)
+    cfg.supervisor_enabled = True
+    cfg.supervisor_manifest_dir = tmp_path / 'manifests'
+    monkeypatch.setenv('ZCODE_DATA_BASE_DIR', str(tmp_path))
+
+    class DesktopMessages:
+        def request(self, path):
+            return {'messages': [
+                {'id': 'u1', 'role': 'user', 'text': 'durable question'},
+                {'id': 'a1', 'role': 'assistant', 'text': 'durable answer'},
+            ], 'nextCursor': None}
+
+    def send(config, path, events):
+        response = client.post(path, json=events,
+                               headers={'X-Runner-Credential': 'pxed:secret'})
+        return response.status_code, response.get_json()
+
+    blocked = [True]
+    original = LocalSpool.append
+
+    def reject(self, event):
+        target = event['kind'] == failure_kind
+        if failure_kind == 'session_metadata':
+            target = target and event['payload'].get('title') == 'Recovery title'
+        if blocked[0] and target:
+            if failure_mode == 'spool_error':
+                raise SpoolError('checkpoint_corrupt')
+            maximum = self._max_session_bytes
+            self._max_session_bytes = 0
+            try:
+                return original(self, event)
+            finally:
+                self._max_session_bytes = maximum
+        return original(self, event)
+
+    monkeypatch.setattr(LocalSpool, 'append', reject)
+    path = tmp_path / 'model-io-sess_persistence.jsonl'
+    desktop = DesktopControl(cfg, client=DesktopMessages())
+    row = {'session': {'sessionId': 'sess_persistence', 'title': 'Recovery title'},
+           'status': 'idle'}
+    sid = session_prefix(cfg.machine) + native_identity('zcode', path)
+    checkpoint = cfg.cache_dir / 'conversations' / (sid + '.desktop-cursor')
+    with pytest.raises(RuntimeError, match='event_not_persisted'):
+        sync_desktop(cfg, desktop, row, path, send)
+    state = json.loads(checkpoint.read_text(encoding='utf-8'))
+    if failure_kind == 'session_metadata':
+        assert state.get('metadata') != {'title': 'Recovery title'}
+    elif failure_kind == 'assistant_message':
+        assert state['seen'] == ['u1']
+    else:
+        assert state['seen'] == []
+
+    blocked[0] = False
+    assert sync_desktop(cfg, desktop, row, path, send)
+    assert sync_desktop(cfg, desktop, row, path, send)
+    events = client.get('/api/sessions/' + sid + '/events').get_json()['events']
+    assert [(event['kind'], event['payload']['text']) for event in events
+            if event['kind'] in {'user_message', 'assistant_message'}] == [
+                ('user_message', 'durable question'), ('assistant_message', 'durable answer')]
+    assert any(event['kind'] == 'session_metadata'
+               and event['payload'].get('title') == 'Recovery title' for event in events)
+
+
+def test_desktop_persistence_checkpoint_write_loss_deduplicates_on_restart(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from tools.session.runner_capture import session_prefix
+    from tools.session.sync import native_identity, sync_desktop
+    from tools.supervisor.desktop_control import DesktopControl
+
+    cfg, client = _cfg(tmp_path), _client(tmp_path)
+    cfg.supervisor_enabled = True
+    cfg.supervisor_manifest_dir = tmp_path / 'manifests'
+    monkeypatch.setenv('ZCODE_DATA_BASE_DIR', str(tmp_path))
+
+    class DesktopMessages:
+        def request(self, path):
+            return {'messages': [{'id': 'a1', 'role': 'assistant', 'text': 'saved once'}],
+                    'nextCursor': None}
+
+    def send(config, path, events):
+        response = client.post(path, json=events,
+                               headers={'X-Runner-Credential': 'pxed:secret'})
+        return response.status_code, response.get_json()
+
+    blocked = [True]
+    original = Path.write_text
+
+    def reject(self, data, *args, **kwargs):
+        if self.suffix == '.desktop-cursor' and blocked[0] and json.loads(data)['seen'] == ['a1']:
+            raise OSError('checkpoint write interrupted')
+        return original(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'write_text', reject)
+    path = tmp_path / 'model-io-sess_checkpoint_loss.jsonl'
+    desktop = DesktopControl(cfg, client=DesktopMessages())
+    row = {'session': {'sessionId': 'sess_checkpoint_loss'}, 'status': 'idle'}
+    with pytest.raises(OSError, match='checkpoint write interrupted'):
+        sync_desktop(cfg, desktop, row, path, send)
+    blocked[0] = False
+    assert sync_desktop(cfg, desktop, row, path, send)
+    sid = session_prefix(cfg.machine) + native_identity('zcode', path)
+    events = client.get('/api/sessions/' + sid + '/events').get_json()['events']
+    assert [event['payload']['text'] for event in events
+            if event['kind'] == 'assistant_message'] == ['saved once']

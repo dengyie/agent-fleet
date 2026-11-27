@@ -167,6 +167,20 @@ def _zcode(message, part):
                    status='error' if state['status'] == 'error' else 'ok')]
 
 
+def _zcode_pending_tool(message, part):
+    """Whether this exact visible tool part can still change in place."""
+    if not isinstance(message, dict) or not isinstance(part, dict):
+        return False
+    semantics = message.get('semantics') or {}
+    if (message.get('synthetic') or part.get('synthetic')
+            or message.get('visibility') == 'model-only'
+            or semantics.get('transcriptVisibility') == 'hidden'
+            or message.get('role') != 'assistant' or part.get('type') != 'tool'):
+        return False
+    state = part.get('state')
+    return isinstance(state, dict) and state.get('status') in {'pending', 'running'}
+
+
 def _hermes(role, content, calls, call_id, tool_name):
     if role == 'tool':
         return [_event('tool_result', tool_name=_text(tool_name), call_id=_text(call_id), result=_text(content))]
@@ -186,7 +200,8 @@ def _hermes(role, content, calls, call_id, tool_name):
 def read_events(family, path, token, cursor, *, limit=MAX_ROWS):
     """Return ordered native evidence and an exclusive durable row cursor.
 
-    Read one bounded snapshot only after the owned CLI has closed its turn.
+    Read one bounded snapshot; active ZCode tool parts stop the cursor at the
+    first visible pending row because the client updates that row in place.
     A malformed/oversized snapshot raises, leaving the old cursor available.
     Callers may request smaller row pages; a page ends before exceeding
     ``MAX_BYTES`` so the caller can resume from the returned row cursor.
@@ -220,8 +235,14 @@ def read_events(family, path, token, cursor, *, limit=MAX_ROWS):
                     raise ValueError('native_capture_overflow')
                 break
             total += row_bytes
+            message, part = (_json(row[1]), _json(row[2])) if family == 'zcode' else (None, None)
+            # ZCode updates a part row in place. Do not acknowledge the first
+            # visible nonterminal tool or rows after it: its completion would
+            # otherwise fall behind the durable rowid checkpoint forever.
+            if family == 'zcode' and _zcode_pending_tool(message, part):
+                break
             latest = row[0]
-            shaped = (_zcode(_json(row[1]), _json(row[2])) if family == 'zcode'
+            shaped = (_zcode(message, part) if family == 'zcode'
                       else _hermes(*row[1:]))
             for index, event in enumerate(shaped):
                 event['event_id'] = _native_event_id(family, token, latest, index, event)

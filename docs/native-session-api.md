@@ -244,6 +244,25 @@ synthetic, model-only, hidden, and `reasoning` parts are excluded. The native
 SQLite row cursor is private node checkpoint state, not a public cursor or
 identity.
 
+The ZCode reader does not advance past the first visible assistant tool part
+whose native state is `pending` or `running`. ZCode can update that same SQLite
+row in place when the call completes; advancing to later rowids first would
+make the final call/result permanently unreachable. Once that row becomes
+`completed` or `error`, the next bounded idle scan emits it and continues in
+rowid order. A vendor row that remains pending indefinitely therefore holds
+later tool evidence at that checkpoint; the Hub still exposes already-ingested
+message pages and events. Hidden, synthetic and model-only pending rows do not
+hold the cursor. Each scan remains capped at 256 rows and existing byte/field
+limits; this is an idle-scan recovery strategy, not a live tool stream.
+
+Desktop message and metadata checkpoints advance only after their events are
+accepted into the encrypted local spool. A failed append or quota rejection
+leaves the source item eligible for retry. If the spool write succeeded but the
+private checkpoint write failed, desktop message retries reuse an opaque event
+ID derived from the exact native session ID, message ID and projected content;
+Hub ingestion deduplicates the retry. Message content itself is never used as
+identity. These IDs do not replace the public Hub cursor.
+
 For retry safety, the node derives an opaque source `event_id` from the family,
 exact session ID, SQLite row identity, event position, and canonical projected
 event. The existing encrypted spool retries the same event IDs after upload

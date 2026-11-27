@@ -187,7 +187,7 @@ jobs:
           PYTHONPATH: .
         run: >-
           python -m pytest tests/test_agent_command.py tests/test_cross_platform_agents.py
-          tests/test_native_agent_storage.py tests/test_hermes_workspace.py
+          tests/test_review_node_sync.py tests/test_native_agent_storage.py tests/test_hermes_workspace.py
           tests/test_hermes_installation.py tests/test_agent_profiles.py
           tests/test_agent_capability_layers.py
           tests/test_native_continuation.py tests/test_runner_conversation.py
