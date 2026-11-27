@@ -1,11 +1,11 @@
 import {el} from './dom.js';
-import {nativeMessages} from './state.js';
+import {nativeTranscript} from './state.js';
 
 // Stable keyed nodes retain tool disclosures, text selection and scroll position.
 export function createNativeMessages(host) {
   const nodes = new Map();
   return events => {
-    const rows = nativeMessages(events), keys = new Set(rows.map(row => row.key));
+    const rows = nativeTranscript(events), keys = new Set(rows.map(row => row.key));
     for (const [key, entry] of nodes) if (!keys.has(key)) { entry.node.remove(); nodes.delete(key); }
     let previous = null;
     for (const row of rows) {
@@ -13,11 +13,15 @@ export function createNativeMessages(host) {
       const signature = JSON.stringify(row);
       if (!entry) {
         const node = el('article', row.kind === 'tool' ? 'native-tool-event' :
-          row.kind === 'notice' ? 'native-notice' : row.kind === 'activity' ? 'native-activity' :
+          row.kind === 'notice' ? 'native-notice' : row.kind === 'thinking' ? 'native-thinking' :
             'assistant-message ' + (row.kind === 'user_message' ? 'user' : 'assistant'));
         if (row.kind === 'tool') {
           entry = {node, tool: el('tool-call-badge')};
+          entry.tool.setAttribute('default-open', '');
           node.append(entry.tool);
+        } else if (row.kind === 'thinking') {
+          entry = {node, thinking:el('thinking-block')};
+          node.append(entry.thinking);
         } else entry = {node};
         nodes.set(row.key, entry);
       }
@@ -28,7 +32,12 @@ export function createNativeMessages(host) {
             if (tool.getAttribute(key) !== (value || '')) tool.setAttribute(key, value || '');
           }
           renderTime(node, row.emitted_at);
-        } else if (row.kind === 'notice' || row.kind === 'activity') {
+        } else if (row.kind === 'thinking') {
+          for (const [key, value] of Object.entries({title:row.title, content:row.content})) {
+            if (entry.thinking.getAttribute(key) !== value) entry.thinking.setAttribute(key, value);
+          }
+          entry.thinking.toggleAttribute('is-thinking', row.active);
+        } else if (row.kind === 'notice') {
           node.replaceChildren(el('span', null, row.text));
           node.setAttribute('role', 'status');
           renderTime(node, row.emitted_at);

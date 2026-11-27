@@ -172,7 +172,10 @@ const origin = process.argv[2];
     const sendingBubble=fresh.locator('.muse-transient-message[data-transient-message="user"]');
     await sendingBubble.waitFor();
     assert.match(await sendingBubble.innerText(),/这是夹具测试/);
-    assert.equal(await sendingBubble.evaluate(node=>getComputedStyle(node).alignSelf),'flex-end');
+    assert.ok(await sendingBubble.evaluate(node=>{
+      const bubble=node.getBoundingClientRect(), parent=node.parentElement.getBoundingClientRect();
+      return Math.abs(bubble.right-parent.right)<2 && bubble.left>parent.left;
+    }),'the pending user message must be visibly aligned to the right');
     assert.equal(await sendingBubble.getAttribute('data-delivery-phase'),'sending');
     assert.equal(await sendingBubble.locator('.muse-delivery-spinner').evaluate(node=>getComputedStyle(node).animationName),'muse-spin');
     releaseSend();

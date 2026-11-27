@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_native_stream_interruption_projection():
     result = subprocess.run(['node', '--input-type=module'], cwd=ROOT, text=True, capture_output=True, input=r"""
 import assert from 'node:assert/strict';
-import {nativeMessages} from './frontend/assets/views/agent-chat/state.js';
+import {nativeMessages, nativeTranscript} from './frontend/assets/views/agent-chat/state.js';
 import {operationFailure} from './frontend/assets/views/agent-chat/state.js';
 import {errorText} from './frontend/assets/views/agent-chat/dom.js';
 assert.match(operationFailure('escape_unverified'), /尚未确认原 Agent 进程已完全退出/);
@@ -63,6 +63,28 @@ const retry = nativeMessages([...events,e('6','a','assistant_message',{message_i
 assert.equal(retry[0].complete,true); assert.equal(retry.at(-1).complete,false);
 const closed = nativeMessages([...events.slice(0,4),e('5','a','session_close',{reason:'failed',exit_code:125})]);
 assert.equal(closed[0].complete,true); assert.equal(closed[0].interrupted,true);
+const trace = nativeTranscript([
+ e('7','a','session_start',{agent_family:'codex',adapter:'structured'}),
+ e('8','a','agent_state_changed',{state:'running',source:'structured_stream',reason:'user_prompt_submitted'}),
+ e('9','a','step_start',{step_name:'检查工作区'}),
+ e('10','a','step_end',{step_name:'检查工作区',status:'completed'}),
+]);
+const thinking = trace.find(row => row.kind === 'thinking');
+assert.ok(thinking, 'public execution trace must be visible as a thinking block');
+assert.match(thinking.content, /会话开始/); assert.match(thinking.content, /检查工作区/);
+assert.equal(thinking.active, false, 'completed public steps stop the thinking indicator');
+const separated = nativeTranscript([
+ e('1','a','agent_state_changed',{state:'running'}),
+ e('2','a','assistant_message',{text:'公开工作说明',is_complete:true}),
+ e('3','a','step_start',{step_name:'读取文件'}),
+ e('4','b','agent_state_changed',{state:'running'}),
+ e('5','a','step_end',{step_name:'读取文件',status:'completed'}),
+]);
+assert.deepEqual(separated.map(row => row.key),['1','2','3','4','5'],'activity grouping preserves chronology and stream boundaries');
+assert.equal(separated[0].active,false,'a later public message ends the earlier running display');
+assert.equal(separated[2].active,false,'later same-stream activity ends older running display');
+assert.equal(separated[3].active,true,'independent stream stays active');
+assert.match(separated[1].text,/公开工作说明/);
 """)
     assert result.returncode == 0, result.stdout + result.stderr
 

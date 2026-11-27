@@ -20,6 +20,32 @@ export function operationFailure(reason) {
 }
 export const AGENT_LABELS = Object.freeze({running: 'Agent 正在执行', idle: '等待下一条消息', completed: '本轮已结束',
   waiting_for_user: '等待你回答', waiting_for_approval: '等待审批', failed: 'Agent 执行失败', stopped: '已停止', unknown: '状态待确认'});
+const STATE_REASONS = Object.freeze({session_started:'会话已启动', user_prompt_submitted:'已收到用户消息',
+  tool_started:'开始调用工具', tool_finished:'工具已返回', session_ended:'本轮会话结束',
+  agent_stopped:'Agent 已停止', approval_required:'需要你审批', user_input_required:'需要你回答',
+  explicit_state:'节点状态已确认', source_unavailable:'节点暂时无法继续提供执行记录'});
+
+// Group only adjacent public activity in the same stream. Never move later
+// steps above a message/tool, infer private reasoning, or merge independent streams.
+export function nativeTranscript(events) {
+  const rows = [], latest = new Map();
+  for (const row of nativeMessages(events)) {
+    const prior = latest.get(row.stream_id);
+    if (prior) { prior.active = false; prior.title = '执行过程'; }
+    if (row.kind !== 'activity') { rows.push(row); continue; }
+    let group = rows.at(-1);
+    if (group?.kind !== 'thinking' || group.stream_id !== row.stream_id) {
+      group = {key:row.key, kind:'thinking', stream_id:row.stream_id, content:'', active:false, title:'执行过程'};
+      rows.push(group);
+    }
+    group.content += (group.content ? '\n' : '') + row.text;
+    if (row.detail) group.content += ' · ' + row.detail;
+    if (row.active !== undefined) group.active = row.active;
+    group.title = group.active ? 'Agent 正在执行' : '执行过程';
+    latest.set(row.stream_id, group);
+  }
+  return rows;
+}
 
 export function nativeCaptureNotice(session) {
   const protocol = session?.agent_evidence?.protocol;
@@ -112,7 +138,10 @@ export function nativeMessages(events) {
         text: ['你的回答', ...selected, p.text].filter(Boolean).join(' · '), emitted_at: event.emitted_at});
     } else if (event.kind === 'agent_state_changed') {
       if (['completed', 'failed', 'stopped'].includes(p.state)) endStream(stream, p.state !== 'completed');
-      messages.push({key: event.cursor, kind: 'activity', text: AGENT_LABELS[p.state] || 'Agent 状态更新', emitted_at: event.emitted_at});
+      messages.push({key: event.cursor, kind: 'activity', stream_id:stream,
+        text: AGENT_LABELS[p.state] || 'Agent 状态更新',
+        detail: Object.hasOwn(STATE_REASONS, p.reason) ? STATE_REASONS[p.reason] : '',
+        active: p.state === 'running', emitted_at: event.emitted_at});
     } else if (event.kind === 'capture_quality_changed') {
       messages.push({key: event.cursor, kind: 'activity',
         text: ['采集质量', p.old_quality, p.new_quality].filter(Boolean).join(' · '), emitted_at: event.emitted_at});
@@ -122,7 +151,7 @@ export function nativeMessages(events) {
     } else if (event.kind === 'step_start' || event.kind === 'step_end') {
       messages.push({key: event.cursor, kind: 'activity',
         text: [p.step_name, event.kind === 'step_end' ? p.status : '开始'].filter(Boolean).join(' · '),
-        emitted_at: event.emitted_at});
+        active:event.kind === 'step_start', emitted_at: event.emitted_at});
     } else if (event.kind === 'supervisor_state_changed') {
       messages.push({key: event.cursor, kind: 'activity',
         text: ['接力状态', p.old_state, p.new_state].filter(Boolean).join(' · '), emitted_at: event.emitted_at});
@@ -131,14 +160,19 @@ export function nativeMessages(events) {
         text: ['策略提示', p.severity, p.reason].filter(Boolean).join(' · '), emitted_at: event.emitted_at});
     } else if (event.kind === 'session_close') {
       endStream(stream, p.reason !== 'completed' || p.exit_code !== undefined && p.exit_code !== 0);
-      messages.push({key: event.cursor, kind: 'activity',
+      messages.push({key: event.cursor, kind: 'activity', active:false,
         text: ['会话结束', p.reason, p.exit_code === undefined ? '' : '退出码 ' + p.exit_code].filter(Boolean).join(' · '),
         emitted_at: event.emitted_at});
     } else if (event.kind === 'process_exit') {
-      messages.push({key: event.cursor, kind: 'activity',
+      messages.push({key: event.cursor, kind: 'activity', active:false,
         text: 'Agent 进程退出' + (p.exit_code === undefined ? '' : ' · 退出码 ' + p.exit_code),
         emitted_at: event.emitted_at});
     }
+  }
+  // Every visible row keeps its stream identity for display-only grouping.
+  const streams = new Map(events.map(event => [event.cursor, event.stream_id || '']));
+  for (const row of messages) if (row.stream_id === undefined) {
+    row.stream_id = streams.get(row.key) || '';
   }
   return messages;
 }
