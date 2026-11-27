@@ -290,6 +290,35 @@ def test_group_reap_kills_leftover_descendants_and_releases_job():
     assert handle._job is None
 
 
+@pytest.mark.parametrize('snapshot', [None, [4242, 5000]])
+def test_empty_owned_job_proof_survives_release_and_pid_reuse(monkeypatch, snapshot):
+    ops = WindowsGroupOps()
+    job = FakeJob(active=0)
+    handle = _Bound(proc=FakeProc(rc=0), _job=job)
+    assert ops.group_reap(handle, timeout=.01) is True
+    assert job.released == 1 and handle._job is None
+    # The global process table can fail or reuse the old numeric PID. Neither
+    # changes the already-proven absence of members in this exact owned Job.
+    table = mock.Mock(return_value=snapshot)
+    monkeypatch.setattr(WindowsGroupOps, '_tree_pids', staticmethod(table))
+    monkeypatch.setattr(WindowsGroupOps, '_pid_alive', staticmethod(lambda _pid: True))
+    assert ops.group_alive(handle) is False
+    ops.close(handle)
+    assert ops.group_alive(handle) is False
+    table.assert_not_called()
+
+
+def test_unreadable_owned_job_does_not_acquire_empty_job_proof(monkeypatch):
+    ops = WindowsGroupOps()
+    job = FakeJob(active=None)
+    monkeypatch.setattr(job, 'terminate', lambda: False)
+    handle = _Bound(proc=FakeProc(rc=0), _job=job)
+    monkeypatch.setattr(WindowsGroupOps, '_tree_pids', staticmethod(lambda _pid: None))
+    assert ops.group_reap(handle, timeout=.01) is False
+    assert ops.group_alive(handle) is True
+    assert job.released == 0 and handle._job is job
+
+
 def test_group_reap_does_not_kill_when_root_still_running():
     ops = WindowsGroupOps()
     job = FakeJob(active=1)

@@ -629,6 +629,8 @@ class Supervisor(HandlesMixin, NativeResumeMixin, NativeRequestMixin):
                               entry: _ManagedEntry) -> str:
         """Pause an owned live process group (SIGSTOP)."""
         m = entry.manifest
+        if m.reason == "escape_unverified":
+            return "escape_unverified"
         if m.state in TERMINAL_STATES:
             return m.state
         handle, code = self._live_handle(session_id, entry)
@@ -660,6 +662,8 @@ class Supervisor(HandlesMixin, NativeResumeMixin, NativeRequestMixin):
                                entry: _ManagedEntry) -> str:
         """Resume a stopped process group (SIGCONT thaw)."""
         m = entry.manifest
+        if m.reason == "escape_unverified":
+            return "escape_unverified"
         if m.state in TERMINAL_STATES:
             return m.state
         handle, code = self._live_handle(session_id, entry)
@@ -695,6 +699,8 @@ class Supervisor(HandlesMixin, NativeResumeMixin, NativeRequestMixin):
         silently reported as success.
         """
         m = entry.manifest
+        if m.reason == "escape_unverified":
+            return "escape_unverified"
         if m.state in TERMINAL_STATES:
             return m.state
         handle, code = self._live_handle(session_id, entry)
@@ -814,6 +820,8 @@ class Supervisor(HandlesMixin, NativeResumeMixin, NativeRequestMixin):
     def apply_local_profile(self, session_id: str, profile_id: str) -> str:
         """Flip the node-local cc-switch current pointer.  Never pushes keys."""
         m = self.get(session_id)
+        if m.reason == "escape_unverified":
+            return "escape_unverified"
         if m.state in TERMINAL_STATES:
             return m.state
         gate = self._guard_adopted(session_id)
@@ -1074,12 +1082,16 @@ class Supervisor(HandlesMixin, NativeResumeMixin, NativeRequestMixin):
             pass
 
         if eof:
-            # Pipe closed = every writer in the group is gone.  Reap for real,
-            # bounded, so no zombie remains after the supervisor closed the pipe.
+            # EOF proves only that writers closed this pipe. Descendants may
+            # redirect stdout and keep running, and reap/kill can fail.
             try:
-                self._ops.group_reap(handle, timeout=1.0)
+                reaped = bool(self._ops.group_reap(handle, timeout=1.0))
             except Exception:
-                pass
+                reaped = False
+            if not reaped or self._group_alive_checked(handle):
+                self._set_reason(m, "escape_unverified")
+                return ManagedRunResult(exit_code=125,
+                                        outcome="escape_unverified")
             self._ops.close(handle)
             self._release_handle(session_id)
             self._mark_terminated(m, "completed")
@@ -1095,9 +1107,13 @@ class Supervisor(HandlesMixin, NativeResumeMixin, NativeRequestMixin):
         except Exception:
             pass
         try:
-            self._ops.group_reap(handle, timeout=1.0)
+            reaped = bool(self._ops.group_reap(handle, timeout=1.0))
         except Exception:
-            pass
+            reaped = False
+        if not reaped or self._group_alive_checked(handle):
+            self._set_reason(m, "escape_unverified")
+            return ManagedRunResult(exit_code=125,
+                                    outcome="escape_unverified")
         self._mark_terminated(m, "group_remaining")
         self._ops.close(handle)
         self._release_handle(session_id)
@@ -1157,9 +1173,12 @@ class Supervisor(HandlesMixin, NativeResumeMixin, NativeRequestMixin):
             if m.state in TERMINAL_STATES:
                 self._entries[m.session_id] = _ManagedEntry(m, None)
             else:
-                if not m.session_id.startswith("adopt_"):
-                    m.state = RUNNING
-                self._set_reason(m, "recovered")
+                # Restart cannot turn unconfirmed cleanup into permission to
+                # spawn a second native process. Keep the durable stop fence.
+                if m.reason != "escape_unverified":
+                    if not m.session_id.startswith("adopt_"):
+                        m.state = RUNNING
+                    self._set_reason(m, "recovered")
                 self._entries[m.session_id] = _ManagedEntry(m, None)
             out[m.session_id] = m
             self._continuations.restore(self._entries[m.session_id])

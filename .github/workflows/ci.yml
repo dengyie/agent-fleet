@@ -152,6 +152,8 @@ jobs:
           tests/test_session_bridge.py tests/test_agy.py tests/test_native_transcript_detail.py
           tests/test_native_metadata_recovery.py
           tests/test_agy_acp.py tests/test_acp_transport_bounds.py tests/test_acp_lifecycle_races.py
+          tests/test_supervisor_process.py::SupervisorTests::test_completion_requires_reap_and_tree_absence_before_release
+          tests/test_supervisor_process.py::SupervisorTests::test_tail_timeout_retains_unconfirmed_tree_for_later_stop
           tests/test_acp_interactions.py tests/test_agent_evidence.py
           tests/test_agy_accounts.py tests/test_provider_accounts.py
           tests/test_provider_account_binding.py tests/test_provider_account_control.py
