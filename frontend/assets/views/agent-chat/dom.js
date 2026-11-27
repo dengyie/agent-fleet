@@ -1,3 +1,5 @@
+import {operationFailure} from './state.js';
+
 export function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -10,6 +12,7 @@ export function button(text, onClick, className = 'button-secondary') {
   return node;
 }
 export function errorText(error) {
+  if (error?.code && operationFailure(error.code) !== error.code) return operationFailure(error.code);
   return error?.detail || error?.message || error?.code || '暂时无法连接，请重试';
 }
 export function link(text, href, className = 'button-secondary') {

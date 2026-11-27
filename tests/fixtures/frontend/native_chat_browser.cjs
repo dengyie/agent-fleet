@@ -157,7 +157,42 @@ const [origin, scenario, sid, taskId] = process.argv.slice(2);
           assert.equal(await status.textContent(),'原任务状态：已完成','session detail must not invalidate a result already bound by the task response');
           assert.equal(writes,0); assert.deepEqual(errors,[]); await page.close(); continue;
         }
+        if (scenario === 'native-stream-interruption') {
+          const response = await page.request.post(origin + '/_fixture/native-event',{data:{phase:'start'}});
+          assert.deepEqual((await response.json()).rejected,[]);
+        }
         await page.goto(origin + '/session/' + sid + '?view=chat');
+        if (scenario === 'native-stream-interruption') {
+          const generation = width === 1440 ? 1 : 2;
+          const message = page.locator('.assistant-message.assistant').filter({hasText:'LIVE_' + generation});
+          const tool = page.locator('tool-call-badge[name="Read ' + generation + '"]');
+          await message.waitFor(); await tool.waitFor();
+          assert.equal(await message.locator('stream-markdown').getAttribute('is-streaming'),'');
+          assert.equal(await tool.getAttribute('status'),'running');
+          await tool.getByRole('button').click();
+          const push = async phase => {
+            const response = await page.request.post(origin + '/_fixture/native-event',{data:{phase}});
+            assert.deepEqual((await response.json()).rejected,[]);
+            await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+          };
+          await push('delta');
+          await message.locator('stream-markdown[content="LIVE_' + generation + ' 🌲 incremental"]').waitFor();
+          assert.equal(await message.locator('stream-markdown').getAttribute('is-streaming'),'');
+          assert.equal(await message.count(),1,'incremental text must update its existing native message');
+          await push('fail');
+          await message.getByText('输出已中断，已收到的内容保留。',{exact:true}).waitFor();
+          assert.equal(await message.locator('stream-markdown').getAttribute('is-streaming'),null);
+          assert.equal(await tool.getAttribute('status'),'unknown');
+          assert.equal(await tool.getByRole('button').getAttribute('aria-expanded'),'true');
+          await push('late-result');
+          await tool.getByText('late <img src=x onerror=alert(1)>',{exact:true}).waitFor();
+          assert.equal(await tool.getAttribute('status'),'success');
+          assert.equal(await tool.locator('img').count(),0);
+          assert.equal(await tool.getByRole('button').getAttribute('aria-expanded'),'true');
+          await page.screenshot({path:'/tmp/fleet-native-web/native-stream-interruption-' + width + '.png',fullPage:true});
+          assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),true);
+          assert.equal(writes,0); assert.deepEqual(errors,[]); await page.close(); continue;
+        }
         if (scenario === 'zcode-desktop-tools') {
           const notice = page.locator('.native-capture-notice');
           await notice.filter({hasText:'空闲后同步正文与工具记录'}).waitFor();
@@ -491,14 +526,19 @@ const [origin, scenario, sid, taskId] = process.argv.slice(2);
           assert.equal(messageRequests[0].client_token, messageRequests[1].client_token);
           assert.equal(messageRequests[0].text, messageRequests[1].text);
         } else {
-          if (scenario === 'receipt-failure') {
+          if (scenario === 'receipt-failure' || scenario === 'cleanup-receipt') {
             await page.waitForFunction(() => document.querySelector('.native-delivery-card').textContent.includes('已入队'));
             const failed = await page.request.post(origin + '/_fixture/fail-command');
             assert.ok((await failed.json()).commands > 0,'fixture records a real signed command failure');
             await page.evaluate(() => window.dispatchEvent(new Event('focus')));
             await page.waitForFunction(() => document.querySelector('.native-delivery-card').textContent.includes('投递失败'));
-            assert.ok((await page.locator('.native-operation-feedback').textContent()).includes('native_session_unbound'),'node failure reason must reach the operation feedback');
-            assert.ok((await page.locator('.native-delivery-card').textContent()).includes('native_session_unbound'),'failure reason must reach the delivery card');
+            const reason = scenario === 'cleanup-receipt' ? 'escape_unverified' : 'native_session_unbound';
+            assert.ok((await page.locator('.native-operation-feedback').textContent()).includes(reason),'node failure reason must reach the operation feedback');
+            assert.ok((await page.locator('.native-delivery-card').textContent()).includes(reason),'failure reason must reach the delivery card');
+            if (scenario === 'cleanup-receipt') {
+              assert.match(await page.locator('.native-operation-feedback').textContent(), /尚未确认原 Agent 进程已完全退出/);
+              assert.match(await page.locator('.native-delivery-card').textContent(), /以节点回执确认停止/);
+            }
             await page.waitForFunction(() => !document.querySelector('[aria-label="发送给电脑 Agent"]').disabled);
             assert.equal(writes,1,'failed delivery must not retry automatically');
             assert.deepEqual(errors,[]); await page.close(); continue;
