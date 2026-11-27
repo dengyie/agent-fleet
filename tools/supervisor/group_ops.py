@@ -473,6 +473,8 @@ class WindowsGroupOps(GroupOps):
     def _job_release_if_empty(self, handle) -> None:
         """Drop the job handle once the tree is provably gone (no kill)."""
         if self._job_active(handle) == 0:
+            if handle.proc.poll() is not None:
+                handle._job_reaped = True
             job, handle._job = handle._job, None
             try:
                 job.release()
@@ -518,6 +520,8 @@ class WindowsGroupOps(GroupOps):
                        for pid in pids)
         if handle.proc.poll() is None:
             return True
+        if getattr(handle, "_job_reaped", False):
+            return False
         active = self._job_active(handle)
         if active is not None:
             # The job counts every descendant, including those orphaned when

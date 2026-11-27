@@ -122,6 +122,13 @@ verify cleanup. Confirmed clean EOF retains the original exit code and `finished
 a tail drain timeout with confirmed cleanup retains `group_remaining` / 124.
 No internal process-table or cleanup exception text is published.
 
+Windows retains an incarnation-bound empty Job Object proof after releasing the
+Job handle. A later global PID snapshot failure or PID reuse cannot resurrect
+that already-reaped owned tree. An unreadable Job/failed stop acquires no such
+proof and remains unconfirmed. This distinction was exposed by the first full
+Windows CI run and reproduced with deterministic snapshot/PID tests.
+
+
 ### 4. End-to-end stream evidence
 
 An independent stdio peer emits visible Unicode text plus an unfinished tool,

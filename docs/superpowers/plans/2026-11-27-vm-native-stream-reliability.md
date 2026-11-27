@@ -82,3 +82,7 @@ Pinned vm2api public main: `2eab36cb90b0897aed1cbcf911ae6f4a0d88ca81` (2026-11-2
 - Private raw evidence: `/Users/mango/.cache/agent-fleet/verification/vm-native-stream-20261127/`. Published source comparison contains no credentials or copied upstream implementation.
 
 - Final strengthened release gate (ACP transport/worker/races, Supervisor/process/control, continuation and provider control/e2e): **261 passed, 2 skipped, 6 subtests**, 22.88 s.
+
+- First PR Windows CI45977337146 failed one existing Hermes completion test (`escape_unverified` after clean exit; 1193 passed/101 skipped). Investigation found that successful Windows `group_reap` releases its empty Job, then the new completion check falls back to a global PID tree. The fix retains empty-Job evidence on the owned private handle; PID reuse/snapshot failure cannot reverse that proof. Deterministic cases failed before the fix; an unreadable/failed-stop Job remains unconfirmed. `tools/supervisor/handles.py` and `group_ops.py` own this private proof, and `tests/test_round5_windows_process.py` owns its regression.
+
+- Empty-owned-Job proof fix local verification: **206 passed, 2 skipped, 6 subtests**, 15.40 s across Windows job/process, cross-platform Agent, tail, control and ACP suites. The unknown-Job test initially allowed its fake terminate to succeed; the fixture now explicitly refuses termination so it tests genuinely unconfirmed cleanup.

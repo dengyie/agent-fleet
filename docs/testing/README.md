@@ -4,7 +4,8 @@ VM 原生执行与流式可靠性参考[vm2api 源码对照](../research/vm2api-
 [实施计划](../superpowers/plans/2026-11-27-vm-native-stream-reliability.md)。专项覆盖
 64KiB 增量分帧、UTF-8 任意断点、1MiB 边界、合并帧、部分 EOF、写锁/管道反压截止、
 派发前取消、close 唤醒、首个错误保持、回收失败/未知时不报成功且保留 owner、重启后
-禁止新进程，以及原生进程尚未结束时公开 Hub HTTP 已读到文本/工具的真实整链证据：
+禁止新进程，以及Windows空Job证明释放后不被PID复用/全局快照失败推翻，以及
+原生进程尚未结束时公开 Hub HTTP 已读到文本/工具的真实整链证据：
 
 ```sh
 python3 -m pytest tests/test_acp_transport_bounds.py tests/test_agy_acp.py \

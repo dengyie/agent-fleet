@@ -1124,7 +1124,9 @@
         "tests/test_acp_transport_bounds.py::test_transport_real_stalled_stdin_fails_and_reaps_owned_peer",
         "tests/test_agy_acp.py::test_native_stream_reaches_public_hub_before_provider_finishes",
         "tests/test_supervisor_process.py::SupervisorTests::test_completion_requires_reap_and_tree_absence_before_release",
-        "tests/test_supervisor_process.py::SupervisorTests::test_tail_timeout_retains_unconfirmed_tree_for_later_stop"
+        "tests/test_supervisor_process.py::SupervisorTests::test_tail_timeout_retains_unconfirmed_tree_for_later_stop",
+        "tests/test_round5_windows_process.py::test_empty_owned_job_proof_survives_release_and_pid_reuse",
+        "tests/test_round5_windows_process.py::test_unreadable_owned_job_does_not_acquire_empty_job_proof"
       ]
     },
     {

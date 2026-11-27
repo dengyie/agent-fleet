@@ -221,3 +221,9 @@ native follow-ups across restart until an explicit stop confirms cleanup. Confir
 normal completion retains the vendor exit code; a tail timeout with confirmed
 cleanup remains exit 124 / `group_remaining`. Existing HTTP/SQLite DTOs and schema
 are unchanged.
+
+On Windows, confirmed empty owned-Job evidence remains attached to that private
+process incarnation after the Job handle is released. A later global process
+snapshot or reused PID cannot overturn that proof. Unreadable jobs and failed
+cleanup never acquire it; recovered Supervisors still require fresh ownership
+and liveness checks because this proof is not persisted as process authority.

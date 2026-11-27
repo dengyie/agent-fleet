@@ -105,6 +105,9 @@ class _Bound:
     _dropped_chunks: int = 0
     # Windows only: kill-on-close Job Object owning the whole spawned tree.
     _job: Any = None
+    # Proof for this owned Job, retained after its handle is released. A later
+    # global PID snapshot cannot resurrect a fully reaped process incarnation.
+    _job_reaped: bool = False
 
 
 @dataclass
