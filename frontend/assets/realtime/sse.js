@@ -141,6 +141,7 @@ SseClient.prototype.start = function () {
 
   SSE_EVENT_TYPES.forEach(function (name) {
     source.addEventListener(name, function (e) {
+      if (self._source !== source) return;
       self._handle(name, e);
     });
   });
@@ -263,6 +264,7 @@ SseClient.prototype._pollOnce = function () {
     signal: controller.signal,
   })
     .then(function (r) {
+      if (controller.signal.aborted || self._pollController !== controller) return null;
       if (r.status === 401) {
         // 与 api/client.js 的 request 边界一致：会话失效交给统一登录守卫，
         // 并停止本降级轮询，避免带着失效凭据反复打 /status。
@@ -278,7 +280,7 @@ SseClient.prototype._pollOnce = function () {
       return r.json();
     })
     .then(function (data) {
-      if (!data) {
+      if (!data || controller.signal.aborted || self._pollController !== controller) {
         return;
       }
       try {

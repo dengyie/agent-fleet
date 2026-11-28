@@ -23,6 +23,7 @@ export function conversationTargets(active = 'assistant') {
 export function mountTargetPicker(host, {api, store, machine: initialMachine, onChange}) {
   let disposed = false, generation = 0, controller;
   let targets = null, locked = false, loadingMachines = false, machines = [];
+  let selection = null;
   const fields = el('div', 'native-target-fields');
   function field(name) {
     const label = el('label', 'native-target-field');
@@ -64,6 +65,7 @@ export function mountTargetPicker(host, {api, store, machine: initialMachine, on
   }
   async function loadTargets() {
     const request = ++generation;
+    const previous = selection?.machine === machine.value ? selection : null;
     controller?.abort(); controller = new AbortController(); targets = null;
     project.replaceChildren(); agent.replaceChildren(); locks();
     if (!machine.value) { notice.textContent = '暂无在线节点，请连接电脑后刷新节点与目录。'; return; }
@@ -82,8 +84,20 @@ export function mountTargetPicker(host, {api, store, machine: initialMachine, on
       }
       agent.value = Object.keys(result.agents).find(name => result.agents[name].installed === true) ||
         Object.keys(result.agents).find(name => result.agents[name].installed !== false) || '';
+      // Temporary loading must not change where the user's next task runs.
+      // A removed choice requires a new explicit selection, never a fallback.
+      if (previous) {
+        if (!result.projects.includes(previous.project)) option(project, '', '原项目不可用，请重新选择', true);
+        project.value = result.projects.includes(previous.project) ? previous.project : '';
+      }
+      if (previous) {
+        if (!Object.hasOwn(result.agents, previous.agent)) option(agent, '', '原 Agent 不可用，请重新选择', true);
+        agent.value = Object.hasOwn(result.agents, previous.agent) ? previous.agent : '';
+      }
+      selection = previous || {machine: machine.value, project: project.value, agent: agent.value};
       notice.textContent = !result.projects.length ? '此节点尚未登记可启动的项目，请在节点配置中登记。' :
-        '使用电脑原有模型配置。安装状态来自最近上报，启动结果由节点确认。';
+        !project.value || !agent.value ? '原项目或 Agent 当前不可用，请手动选择后再发送。' :
+          '使用电脑原有模型配置。安装状态来自最近上报，启动结果由节点确认。';
     } catch (error) {
       if (disposed || request !== generation || controller.signal.aborted) return;
       notice.textContent = error.status === 404 ? '当前服务尚未提供节点启动目录。已有会话仍可打开和阅读。' : errorText(error);
@@ -114,7 +128,10 @@ export function mountTargetPicker(host, {api, store, machine: initialMachine, on
     }
   }
   machine.addEventListener('change', loadTargets);
-  project.addEventListener('change', () => changed()); agent.addEventListener('change', () => changed());
+  const selectTarget = () => {
+    selection = {machine: machine.value, project: project.value, agent: agent.value}; changed();
+  };
+  project.addEventListener('change', selectTarget); agent.addEventListener('change', selectTarget);
   loadMachines();
   return {setLocked(value) { locked = value; locks(false); accounts.setLocked(value); },
     suspend() { accounts.suspend(); }, resume() { accounts.resume(); },

@@ -531,6 +531,51 @@ if (fixture === 'task_reject') {
   } else {
     fail('sse_poll_fence.stop_aborts_and_resume', 'aborts=' + aborts + ' calls=' + fetchCalls + ' pend=' + poll._pollPending);
   }
+} else if (fixture === 'sse_lifetime_ownership') {
+  const {FleetStore} = await import(process.env.FLEET_STORE_URL);
+  const {SseClient} = await import(process.env.FLEET_SSE_URL);
+  const flush = () => new Promise(resolve => setTimeout(resolve,0));
+  globalThis.EventSource = class {
+    constructor() { this.listeners = new Map(); }
+    addEventListener(name, handler) { this.listeners.set(name,handler); }
+    close() {}
+  };
+  const store = new FleetStore(), events = [];
+  const sse = new SseClient(store,{apiBaseUrl:'/api',onEvent:name => events.push(name)});
+  sse.start(); const previous = sse._source;
+  sse.stop(); sse.start();
+  previous.listeners.get('task_update')({data:JSON.stringify({task_id:'old-task',machine:'mac',state:'running',event:'task_leased',ts:30})});
+  if (!store.getState().tasks['old-task'] && !events.length) ok('sse_lifetime.closed_source');
+  else fail('sse_lifetime.closed_source','closed source still publishes task events');
+  sse.stop();
+  const dispatched = [];
+  globalThis.window = {dispatchEvent:event => dispatched.push(event.type)};
+  for (const mode of ['late_status','late_401','late_body']) {
+    const pollStore = new FleetStore(), poll = new SseClient(pollStore,{apiBaseUrl:'/api'});
+    let resolveFetch, resolveBody;
+    globalThis.fetch = () => new Promise(resolve => {resolveFetch = resolve;});
+    poll._pollOnce();
+    if (mode === 'late_body') {
+      resolveFetch({status:200,json:() => new Promise(resolve => {resolveBody = resolve;})});
+      await flush();
+    }
+    poll.stop();
+    let resolveNew;
+    globalThis.fetch = () => new Promise(resolve => {resolveNew = resolve;});
+    poll._pollOnce(); const replacement = poll._pollController;
+    const stale = {updated_at:'old',machines:[{machine:'old-node',online:true}]};
+    if (mode === 'late_body') resolveBody(stale);
+    else resolveFetch({status:mode === 'late_401' ? 401 : 200,json:async () => stale});
+    await flush(); await flush();
+    if (!pollStore.getState().status && !dispatched.length && poll._pollController === replacement && !replacement.signal.aborted) ok('sse_lifetime.' + mode);
+    else fail('sse_lifetime.' + mode,'stopped poll changed state, authentication or replacement ownership');
+    resolveNew({status:200,json:async () => ({updated_at:'fresh',machines:[]})});
+    await flush(); await flush();
+    if (pollStore.getState().status?.updated_at === 'fresh') ok('sse_lifetime.' + mode + '.replacement');
+    else fail('sse_lifetime.' + mode + '.replacement','replacement status did not publish');
+    poll.stop();
+  }
+  delete globalThis.window;
 } else if (fixture === 'sse_poll_auth') {
   // 降级轮询收到 401 时必须与 api/client.js 一样触发统一登录守卫，并停止轮询。
   const storeMod = await import(process.env.FLEET_STORE_URL);
@@ -1194,6 +1239,11 @@ class SseBoundaryFixtureTests(unittest.TestCase):
     def test_sse_poll_auth_fixture(self):
         # 降级轮询 401：触发 fleet-auth-required 并停止轮询（与 api/client 一致）。
         self._run_fixture('sse_poll_auth', 'sse')
+
+    @unittest.skipUnless(shutil.which('node'),
+                         'node unavailable; skipping JS fixture')
+    def test_sse_lifetime_ownership_fixture(self):
+        self._run_fixture('sse_lifetime_ownership', 'sse')
 
     @unittest.skipUnless(shutil.which('node'),
                          'node unavailable; skipping JS fixture')

@@ -129,6 +129,7 @@ export function mountAssistant(target, options) {
   }
   var pendingTurn = null; var submitting = false; var catalogReady = false; var modelCatalog = [];
   var artifactState = { loading: false, error: null, artifacts: [], workspaceId: null, previewById: {} };
+  var artifactPreviewSequence = 0;
   var memoryState = { loading: false, error: null, items: [], selected: {}, order: [], maxItems: 8, maxBytes: 8192, query: '' }; var memoryRequestSequence = 0;
   renderArtifacts(artifactHost, artifactState, previewArtifact, function (artifactId, workspaceId) {
     return service.getArtifactContentUrl(artifactId, workspaceId);
@@ -388,22 +389,27 @@ export function mountAssistant(target, options) {
     });
   }
   async function previewArtifact(artifactId) {
+    if (disposed) return;
     var current = artifactState.previewById && artifactState.previewById[artifactId];
     var nextPreviews = Object.assign({}, artifactState.previewById || {});
     if (current && current.open) { nextPreviews[artifactId] = Object.assign({}, current, { open: false }); setArtifactState({ previewById: nextPreviews }); return; }
-    nextPreviews[artifactId] = { open: true, loading: true, error: null, data: null };
+    if (current && (current.loading || current.data)) {
+      nextPreviews[artifactId] = Object.assign({}, current, { open: true }); setArtifactState({ previewById: nextPreviews }); return;
+    }
+    var requestId = ++artifactPreviewSequence;
+    nextPreviews[artifactId] = { open: true, loading: true, error: null, data: null, requestId: requestId };
     setArtifactState({ previewById: nextPreviews });
     var workspaceId = artifactState.workspaceId;
     try {
       var response = await service.getArtifactPreview(artifactId, workspaceId);
-      if (artifactState.workspaceId !== workspaceId) return;
+      if (disposed || artifactState.workspaceId !== workspaceId || artifactState.previewById[artifactId]?.requestId !== requestId) return;
       nextPreviews = Object.assign({}, artifactState.previewById || {});
-      nextPreviews[artifactId] = { open: true, loading: false, error: null, data: response.preview || null };
+      nextPreviews[artifactId] = Object.assign({}, nextPreviews[artifactId], { loading: false, error: null, data: response.preview || null });
       setArtifactState({ previewById: nextPreviews });
     } catch (error) {
-      if (artifactState.workspaceId !== workspaceId) return;
+      if (disposed || artifactState.workspaceId !== workspaceId || artifactState.previewById[artifactId]?.requestId !== requestId) return;
       nextPreviews = Object.assign({}, artifactState.previewById || {});
-      nextPreviews[artifactId] = { open: true, loading: false, error: (error && (error.detail || error.message || error.code)) || '预览加载失败', data: null };
+      nextPreviews[artifactId] = Object.assign({}, nextPreviews[artifactId], { loading: false, error: (error && (error.detail || error.message || error.code)) || '预览加载失败', data: null });
       setArtifactState({ previewById: nextPreviews });
     }
   }

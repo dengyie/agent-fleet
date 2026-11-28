@@ -18,6 +18,7 @@ const templateIds = mode === 'exact-ids' ? [' fixture ', '\ufeffnative'] : ['fix
       const clock = Date.now.bind(Date); let shift = 0;
       Date.now = () => clock() + shift;
       window.checkNewAccount = () => { shift += 60001; window.dispatchEvent(new Event('focus')); };
+      window.addEventListener('keydown', event => { if (event.key === 'F8') window.checkNewAccount(); });
     });
     assert.equal((await context.request.post(origin + '/api/accounts/login', {
       data: {email: 'admin@example.test', password}, headers: {Origin: origin}})).status(), 200);
@@ -62,7 +63,7 @@ const templateIds = mode === 'exact-ids' ? [' fixture ', '\ufeffnative'] : ['fix
       assert.equal((await context.request.post(origin + '/api/accounts/logout', {data: {}, headers: {Origin: origin}})).status(), 200);
       assert.equal((await context.request.post(origin + '/api/accounts/login', {
         data: {email: 'ordinary@example.test', password}, headers: {Origin: origin}})).status(), 200);
-      await Promise.all([page.waitForEvent('domcontentloaded'), page.evaluate(() => window.checkNewAccount())]);
+      await Promise.all([page.waitForEvent('domcontentloaded'), page.keyboard.press('F8')]);
       await page.getByText('ordinary@example.test · 普通用户', {exact: true}).waitFor();
       await held.abort('failed');
       assert.equal(await page.locator('.settings-dialog[open]').count(), 1);
