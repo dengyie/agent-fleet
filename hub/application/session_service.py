@@ -112,18 +112,25 @@ def _bounded_limit(value, default: int = DEFAULT_QUERY_LIMIT) -> int:
     return max(1, min(n, _MAX_QUERY_LIMIT))
 
 
-def _directory_filter_digest(machine: str | None) -> str:
-    return hashlib.sha256((machine or "").encode("utf-8")).hexdigest()
+def _directory_filter_digest(machine: str | None, capability: str | None = None) -> str:
+    # Preserve all existing unfiltered cursors. New predicates bind their own
+    # cursor so switching tabs cannot skip the preceding part of the directory.
+    value = machine or ""
+    if capability:
+        value = json.dumps([value, capability], separators=(",", ":"))
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _encode_directory_cursor(snapshot: int, before: int, machine: str | None) -> str:
-    value = {"before": before, "filter": _directory_filter_digest(machine),
+def _encode_directory_cursor(snapshot: int, before: int, machine: str | None,
+                             capability: str | None = None) -> str:
+    value = {"before": before, "filter": _directory_filter_digest(machine, capability),
              "snapshot": snapshot, "version": 1}
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
     return base64.urlsafe_b64encode(encoded).rstrip(b"=").decode("ascii")
 
 
-def _decode_directory_cursor(value: str, machine: str | None) -> tuple[int, int]:
+def _decode_directory_cursor(value: str, machine: str | None,
+                             capability: str | None = None) -> tuple[int, int]:
     if not isinstance(value, str) or not 1 <= len(value) <= 256:
         raise SessionServiceError("invalid_cursor")
     try:
@@ -136,11 +143,11 @@ def _decode_directory_cursor(value: str, machine: str | None) -> tuple[int, int]
             or type(decoded.get("version")) is not int or decoded["version"] != 1
             or type(decoded.get("snapshot")) is not int
             or type(decoded.get("before")) is not int
-            or decoded.get("filter") != _directory_filter_digest(machine)
+            or decoded.get("filter") != _directory_filter_digest(machine, capability)
             or decoded["snapshot"] < 0 or decoded["before"] < 1
             or decoded["snapshot"] > _MAX_SQLITE_SEQUENCE
             or decoded["before"] > _MAX_SQLITE_SEQUENCE
-            or _encode_directory_cursor(decoded["snapshot"], decoded["before"], machine) != value):
+            or _encode_directory_cursor(decoded["snapshot"], decoded["before"], machine, capability) != value):
         raise SessionServiceError("invalid_cursor")
     return decoded["snapshot"], decoded["before"]
 
@@ -601,17 +608,20 @@ class SessionService:
         return {"sessions": [self._live_session(r, adoptions.get(r['session_id']), actions) for r in rows]}
 
     def list_session_page(self, machine=None, limit: int = DEFAULT_QUERY_LIMIT,
-                          active: bool = False, cursor: str | None = None) -> dict:
+                          active: bool = False, cursor: str | None = None,
+                          capability: str | None = None) -> dict:
         """Read a stable snapshot page; active-only remains a live legacy slice."""
+        if capability not in (None, "message", "control", "read"):
+            raise SessionServiceError("invalid_cursor")
         if active:
-            if cursor is not None:
+            if cursor is not None or capability is not None:
                 raise SessionServiceError("invalid_cursor")
             return self.list_sessions(machine=machine, limit=limit, active=True)
         if getattr(self.session_repo, "management_available", True) is False:
             raise SessionServiceError("feature_unavailable")
         snapshot = before = None
         if cursor is not None:
-            snapshot, before = _decode_directory_cursor(cursor, machine)
+            snapshot, before = _decode_directory_cursor(cursor, machine, capability)
         try:
             page = self.session_repo.list_sessions_page(
                 machine_id=machine or None, limit=_bounded_limit(limit),
@@ -634,9 +644,17 @@ class SessionService:
             "has_more": bool(page["has_more"]),
             "next_cursor": None,
         }
+        if capability:
+            # Filter the bounded candidate page using the SAME live authority
+            # projection as detail and admission, never managed/family guesses.
+            # Empty matching pages still advance through the immutable snapshot.
+            result["sessions"] = [row for row in result["sessions"] if (
+                bool(row["message_delivery"]["available"]) if capability == "message"
+                else bool(row["allowed_actions"]) if capability == "control"
+                else not row["allowed_actions"])]
         if page["has_more"] and page["next_before_cursor"] is not None:
             result["next_cursor"] = _encode_directory_cursor(
-                page["snapshot_cursor"], page["next_before_cursor"], machine)
+                page["snapshot_cursor"], page["next_before_cursor"], machine, capability)
         return result
 
     def get_session(self, session_id: str) -> dict:

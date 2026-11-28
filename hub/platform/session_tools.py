@@ -36,8 +36,14 @@ SESSION_TOOL_DEFINITIONS = (
     _definition('session.list',
         'List existing Agent sessions across machines, optionally by machine_id. '
         'Returns bounded metadata, not all OS processes. Discovery does not adopt a process. '
-        'A full page may be incomplete; narrow by machine or increase limit.',
+        'Use capability=message to find sessions you can continue, control for any allowed action, '
+        'or read for read-only histories. Filtered pages use has_more/next_cursor: follow cursor '
+        'with the same filters even when sessions is empty. Each page examines at most limit '
+        'candidates; refresh without cursor after authority changes. Do not combine with active=true. '
+        'Without capability/cursor, the legacy bounded live slice remains available.',
         {'machine_id': {'type': 'string'}, 'active': {'type': 'boolean'},
+         'capability': {'type': 'string', 'enum': ['message', 'control', 'read']},
+         'cursor': {'type': 'string', 'minLength': 1, 'maxLength': 256},
          'limit': {'type': 'integer', 'minimum': 1, 'maximum': 1000}}),
     _definition('session.get',
         'Read one Agent session, its machine, capture quality, adoption status and allowed actions. '

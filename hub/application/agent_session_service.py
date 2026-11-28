@@ -88,7 +88,7 @@ class AgentSessionService:
     def _execute(self, tool, args, owner_id, command_id):
         keys, required = {
             'fleet.list_machines': ({'offset', 'limit'}, set()),
-            'session.list': ({'machine_id', 'active', 'limit'}, set()),
+            'session.list': ({'machine_id', 'active', 'limit', 'capability', 'cursor'}, set()),
             'session.get': ({'session_id'}, {'session_id'}),
             'session.read_events': ({'session_id', 'limit', 'after_cursor', 'include_source', 'wait_seconds'}, {'session_id'}),
             'session.send_message': ({'session_id', 'text'}, {'session_id', 'text'}),
@@ -117,6 +117,14 @@ class AgentSessionService:
             if type(active) is not bool:
                 _invalid()
             limit = _integer(args.get('limit', 50), 1, 1000)
+            if 'capability' in args or 'cursor' in args:
+                capability, cursor = args.get('capability'), args.get('cursor')
+                if (active or ('capability' in args and capability not in ('message', 'control', 'read'))
+                        or ('cursor' in args and (not isinstance(cursor, str) or not 1 <= len(cursor) <= 256))):
+                    _invalid()
+                result = self.sessions.list_session_page(machine=machine, limit=limit,
+                    capability=capability, cursor=cursor)
+                return {**result, 'possibly_more': result['has_more']}
             result = self.sessions.list_sessions(machine=machine, active=active, limit=limit)
             return {**result, 'possibly_more': len(result['sessions']) == limit}
         session_id = args.get('session_id')

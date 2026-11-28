@@ -466,7 +466,7 @@ GET /api/sessions?machine=my-mac&limit=50&cursor=<next_cursor>
 
 The first request freezes the maximum session-directory position. The opaque
 cursor carries that snapshot and the exclusive keyset position and is bound to
-the `machine` filter. A malformed cursor, a cursor from another machine
+the `machine` and optional `capability` filters. A malformed cursor, a cursor from another
 filter, or a position beyond the current directory high-water mark returns 400
 `invalid_cursor`.
 
@@ -484,6 +484,38 @@ coincidentally be valid.
 The legacy `active=1` view remains a live slice and does not accept a directory
 cursor. Session pages do not change event pagination or expose repository
 positions as DTO fields.
+
+`capability=message|control|read` selects sessions using the same current
+authority projection as session detail and command admission. `message` requires
+available ordinary message delivery, `control` requires at least one allowed
+action, and `read` requires no allowed actions. Family names or historical
+`managed` flags alone never grant access. Revoked adoptions and disabled global
+issuance gates are respected. Invalid/repeated capability parameters, or mixing
+this filter with `active=1`, return 400 `invalid_cursor`. Omit the parameter for
+the unchanged unfiltered contract and existing cursors.
+
+Each request examines at most `limit` candidate sessions plus the existing
+one-row lookahead. Filtering never scans the entire directory in one request.
+A matching page may therefore be empty with `has_more=true`; clients must follow
+the advancing `next_cursor` to continue. This lets old controllable sessions be
+found after large read-only history imports. The browser follows at most five
+1000-candidate pages per user action, stopping once it finds matches or reaches
+the end; additional candidates remain reachable with Load more. Changing the
+capability resets the traversal. Native source titles/text are never used to
+merge identities or confer control on a read-only imported copy.
+
+The snapshot freezes directory membership/order, not current authorization.
+Authority changes take effect on each read and are rechecked on every write.
+A session gaining the selected capability after its position was passed is
+discoverable by refreshing from the first page; returned IDs are safe to dedupe
+within a traversal. Clients must not infer a successful Agent action from a
+filtered directory result.
+
+The administrator assistant's `session.list` accepts the same optional
+`capability` and `cursor` fields and delegates to this application-service page.
+It returns `has_more`/`next_cursor` and mirrors `has_more` as `possibly_more`.
+Calls omitting both fields retain their existing live-slice response. This tool
+does not enqueue or adopt while discovering the original controllable identity.
 
 ## Compatibility and verification
 

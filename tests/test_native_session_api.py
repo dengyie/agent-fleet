@@ -434,6 +434,109 @@ def test_session_list_cursor_is_bound_to_machine_filter(native_hub):
     assert response.get_json()["error"] == "invalid_cursor"
 
 
+def test_directory_capability_filter_finds_original_session_after_history_backfill(native_hub):
+    app, services = native_hub
+    repo = services["sessions"].session_repo
+    for index in range(105):
+        repo.upsert_session({"session_id": f"archive_{index}", "machine_id": "m1",
+                             "managed": False, "agent_family": "codex"})
+    with app.test_client() as client:
+        first = client.get("/api/sessions?limit=100").get_json()
+        assert all(not row["managed"] for row in first["sessions"])
+        page = client.get("/api/sessions?capability=message&limit=1000").get_json()
+        assert [row["session_id"] for row in page["sessions"]] == [SESSION]
+        # The original identity is usable through the existing signed queue.
+        accepted = client.post(MESSAGE_URL, json={
+            "text": "continue original context", "client_token": "backfill-followup"})
+        assert accepted.status_code == 202
+        assert accepted.get_json()["session_id"] == SESSION
+        assert command_count(services) == 1
+
+
+def test_capability_pages_can_be_empty_but_keep_a_bounded_advancing_cursor(native_hub):
+    app, services = native_hub
+    repo = services["sessions"].session_repo
+    for index in range(4):
+        repo.upsert_session({"session_id": f"archive_{index}", "machine_id": "m1",
+                             "managed": False, "agent_family": "codex"})
+    with app.test_client() as client:
+        page = client.get("/api/sessions?capability=control&limit=2").get_json()
+        assert page["sessions"] == []
+        assert page["has_more"] and page["next_cursor"]
+        cursors, found = set(), []
+        while page["has_more"]:
+            cursor = page["next_cursor"]
+            assert cursor not in cursors
+            cursors.add(cursor)
+            page = client.get("/api/sessions", query_string={
+                "capability": "control", "limit": 2, "cursor": cursor}).get_json()
+            found.extend(row["session_id"] for row in page["sessions"])
+        assert found == [SESSION]
+        assert len(cursors) == 2
+
+
+@pytest.mark.parametrize("capability", ["message", "control", "read"])
+def test_directory_cursor_is_bound_to_capability_filter(native_hub, capability):
+    app, services = native_hub
+    services["sessions"].session_repo.upsert_session({
+        "session_id": "archive_second", "machine_id": "m1", "managed": False})
+    with app.test_client() as client:
+        page = client.get("/api/sessions?limit=1").get_json()
+        response = client.get("/api/sessions", query_string={
+            "capability": capability, "cursor": page["next_cursor"]})
+        assert response.status_code == 400
+        assert response.get_json()["error"] == "invalid_cursor"
+
+
+@pytest.mark.parametrize("query", ["capability=anything", "capability=message&capability=control",
+                                    "capability=control&active=1"])
+def test_directory_rejects_invalid_capability_queries(native_hub, query):
+    app, _ = native_hub
+    response = app.test_client().get("/api/sessions?" + query)
+    assert response.status_code == 400
+
+
+def test_capability_filter_uses_current_adoption_authority_and_global_gates(native_hub):
+    from tests.test_session_access_consistency import adopted
+
+    app, services = native_hub
+    adoption = adopted(app)
+    client = app.test_client()
+    url = "/api/sessions?capability=message&limit=1000"
+    assert adoption.session_id in {r["session_id"] for r in client.get(url).json["sessions"]}
+    services["adoptions"].revoke(adoption.session_id, OPERATOR)
+    assert adoption.session_id not in {r["session_id"] for r in client.get(url).json["sessions"]}
+    read = client.get("/api/sessions?capability=read&limit=1000").json["sessions"]
+    assert adoption.session_id in {r["session_id"] for r in read}
+    # A declared family/managed flag must not bypass disabled issuance.
+    services["supervisor"]._inner._append_user_turn_enabled = False
+    assert client.get(url).json["sessions"] == []
+
+
+def test_capability_filter_bounds_repository_work_and_keeps_store_errors_private(native_hub, monkeypatch):
+    app, services = native_hub
+    repo = services["sessions"].session_repo
+    calls = []
+    original = repo.list_sessions_page
+
+    def record(**kwargs):
+        calls.append(kwargs["limit"])
+        return original(**kwargs)
+
+    monkeypatch.setattr(repo, "list_sessions_page", record)
+    response = app.test_client().get("/api/sessions?capability=message&limit=999999")
+    assert response.status_code == 200
+    assert calls == [1000], "a filtered request must never scan all history"
+
+    def fail(**kwargs):
+        raise sqlite3.OperationalError("private/native/store")
+
+    monkeypatch.setattr(repo, "list_sessions_page", fail)
+    response = app.test_client().get("/api/sessions?capability=message")
+    assert response.status_code == 503
+    assert "private/native/store" not in response.get_data(as_text=True)
+
+
 def test_session_list_rejects_snapshot_beyond_directory_high_water(native_hub):
     from hub.application.session_service import _encode_directory_cursor
 

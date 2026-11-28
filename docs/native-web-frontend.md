@@ -46,7 +46,7 @@ AGY 与账号 schema 1，才允许新操作。账号名称只是标签，不代�
 | 接口 | 前端行为 |
 |---|---|
 | `GET /api/status` | 节点与产品功能开关；不把在线观测等同于控制能力 |
-| `GET /api/sessions?machine=&limit=100&cursor=` | 稳定快照目录分页；Agent / 标识筛选明确限定在已载入结果内 |
+| `GET /api/sessions?machine=&limit=100&cursor=&capability=` | 稳定快照目录分页；能力筛选由后端当前权限投影决定，Agent / 标识筛选限定在已载入结果内 |
 | `GET /api/sessions/<id>` | 真实 allowed_actions、message_delivery、纳管状态、采集与执行状态 |
 | `GET /api/sessions/<id>/events?tail=1&limit=100` | 首屏读取最近事件；`before_cursor` 只用于显式向前加载历史，`after_cursor` 独立用于实时增量 |
 | `POST /api/tasks` | 冻结目标、正文和 client_token；同一页内重试同一启动时复用冻结请求 |

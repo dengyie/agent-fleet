@@ -200,7 +200,7 @@ assert.equal(maximum, 1); assert.equal(reads, 2); assert.equal(publications, 1, 
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize('scenario', ['read-send', 'lost-response', 'reload-recovery', 'directory', 'directory-pagination', 'history-pagination', 'revoked', 'question-draft', 'missing-targets', 'create', 'task-recovery', 'long-message', 'snapshot-revision', 'receipt-failure', 'delivery-disclosure', 'refresh-targets', 'source-record', 'native-metadata', 'directory-metadata', 'local-profile', 'stale-authority', 'target-links', 'control-confirmation', 'profile-revocation', 'offline-target', 'results', 'result-file-concurrency', 'task-results-binding', 'continuation-results', 'zcode-desktop-tools', 'native-stream-interruption', 'cleanup-receipt'])
+@pytest.mark.parametrize('scenario', ['read-send', 'lost-response', 'reload-recovery', 'directory', 'directory-pagination', 'directory-capability-backfill', 'history-pagination', 'revoked', 'question-draft', 'missing-targets', 'create', 'task-recovery', 'long-message', 'snapshot-revision', 'receipt-failure', 'delivery-disclosure', 'refresh-targets', 'source-record', 'native-metadata', 'directory-metadata', 'local-profile', 'stale-authority', 'target-links', 'control-confirmation', 'profile-revocation', 'offline-target', 'results', 'result-file-concurrency', 'task-results-binding', 'continuation-results', 'zcode-desktop-tools', 'native-stream-interruption', 'cleanup-receipt'])
 def test_native_chat_browser(tmp_path, scenario):
     if not os.environ.get('FLEET_PLAYWRIGHT_MODULE'):
         pytest.skip('Set FLEET_PLAYWRIGHT_MODULE for native web acceptance')
@@ -284,7 +284,7 @@ def test_native_chat_browser(tmp_path, scenario):
         item = event(6, kind, payload); item.update(session_id=row.session_id,
             event_id='evt_' + scenario.replace('-', '_'))
         assert services['sessions'].ingest_events([item])['rejected'] == []
-    if scenario == 'directory-pagination':
+    if scenario in {'directory-pagination', 'directory-capability-backfill'}:
         for index in range(105):
             services['sessions'].session_repo.upsert_session({
                 'session_id':f'pagination_{index:03}', 'machine_id':'m1', 'managed':False,

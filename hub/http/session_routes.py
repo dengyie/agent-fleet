@@ -176,12 +176,14 @@ def api_runner_session_events():
 def api_sessions():
     try:
         cursor_values = request.args.getlist("cursor")
-        if len(cursor_values) > 1:
+        capability_values = request.args.getlist("capability")
+        if len(cursor_values) > 1 or len(capability_values) > 1:
             raise SessionServiceError("invalid_cursor")
         result = _sessions().list_session_page(
             machine=request.args.get("machine") or None,
             limit=_query_limit(), active=_query_bool("active"),
-            cursor=cursor_values[0] if cursor_values else None)
+            cursor=cursor_values[0] if cursor_values else None,
+            capability=capability_values[0] if capability_values else None)
     except SessionServiceError as exc:
         return _session_error(exc)
     return jsonify(result)
