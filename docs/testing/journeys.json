@@ -1043,6 +1043,10 @@
       "boundary": "disposable CLI executable; actual installed agents require NODE-LIVE",
       "tests": [
         "tests/test_session_ingest_api.py::SessionIngestIsolationTests::test_unverified_exact_source_is_rejected_before_persistence",
+        "tests/test_native_session_api.py::test_directory_capability_filter_finds_original_session_after_history_backfill",
+        "tests/test_native_session_api.py::test_capability_pages_can_be_empty_but_keep_a_bounded_advancing_cursor",
+        "tests/test_assistant_vm_sessions.py::test_assistant_can_find_old_controllable_session_beyond_archive_pages",
+        "tests/test_native_chat_frontend.py::test_native_chat_browser[directory-capability-backfill]",
         "tests/test_supervisor_attach.py::AttachTests::test_attached_follow_up_without_native_identity_refuses_sibling",
         "tests/test_supervisor_attach.py::AttachTests::test_attached_native_file_without_cwd_or_token_refuses_sibling",
         "tests/test_supervisor_attach.py::AttachTests::test_attached_native_resume_uses_session_identity_not_tmp",

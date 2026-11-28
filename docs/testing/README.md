@@ -128,6 +128,19 @@ Windows 同时替换目标的临时 access/share/lock 拒绝（原生错误 5/32
 
 原生会话的消息响应丢失恢复、事件 tail/before/after 游标、会话目录快照分页，以及原生名称、客户端/模型元数据、逐事件可见内容与 source-record 隔离见[原生会话 HTTP 契约](../native-session-api.md)。元数据专项验证两台平台实际 Agent 记录形状、Claude 版本映射、Pi 格式版本排除、ZCode/Hermes 只读 store 提取、保留会话有限 head/tail 回补、稳定事件 ID 丢响应恢复、损坏 checkpoint fail-closed、SQLite/HTTP 投影填空而不覆盖新值及内容游标不变。专项及相关现有 HTTP、SQLite、采集器、前端状态、交互回答和 Supervisor 回归：
 
+接管目录回归（[故障与修复记录](../reviews/2026-11-28-session-takeover-directory.md)）：
+超过首页的只读历史回填后，能力筛选仍可找到原可控 session，进入
+原上下文且发送仍使用原签名队列；覆盖空匹配页继续分页、筛选绑定 cursor、撤销权限、
+全局签发开关、有界读取及存储错误脱敏。主助手 `session.list` 共用该分页。
+浏览器执行桌面与 390px 窄屏：
+
+```sh
+python3 -m pytest tests/test_native_session_api.py tests/test_session_access_consistency.py \
+  tests/test_assistant_vm_sessions.py -q
+FLEET_PLAYWRIGHT_MODULE=/path/to/playwright python3 -m pytest \
+  'tests/test_native_chat_frontend.py::test_native_chat_browser[directory-capability-backfill]' -q
+```
+
 元数据的来源、实际复现、分层实现和覆盖边界见[元数据恢复 Review](../reviews/2026-11-25-native-session-metadata.md)及[实施计划](../superpowers/plans/2026-11-25-native-session-metadata-recovery.md)。Codex v5 的 thread-store 名称需同时核对线程 ID、cwd 和 rollout 路径；不猜测其他 `state_*.sqlite` 版本。
 
 ZCode 桌面 idle 扫描从精确会话的只读 SQLite store 补齐已完成工具调用/结果；专项还验证运行中工具行作为安全游标屏障、桌面消息/元数据仅在 spool 持久化后确认、原子 checkpoint 发布失败保留旧状态、损坏的旧 checkpoint fail-closed、重试去重、配额与存储失败、隐藏推理过滤和数据库路径不泄漏：

@@ -17,9 +17,22 @@ const [origin, scenario, sid, taskId] = process.argv.slice(2);
         const response = await route.fetch(), body = await response.json();
         await route.fulfill({response, json:{...body, authenticated:true, user:{id:'browser-owner',role:'admin',name:'Browser Owner'}}});
       });
-      if (scenario === 'directory' || scenario === 'directory-pagination' || scenario === 'directory-metadata') {
+      if (scenario.startsWith('directory')) {
         await page.goto(origin + '/assistant?view=sessions');
         await page.locator('.native-session-card').first().waitFor();
+        if (scenario === 'directory-capability-backfill') {
+          assert.equal(await page.locator('.native-session-card').count(),100);
+          assert.equal(await page.getByText('继续对话',{exact:true}).count(),0);
+          await page.getByLabel('筛选会话能力').selectOption('message');
+          const original = page.locator('.native-session-card').filter({hasText:sid});
+          await original.waitFor();
+          assert.equal(await page.locator('.native-session-card').count(),1);
+          await original.click();
+          await page.getByText('Native answer from persisted transcript', {exact:true}).waitFor();
+          assert.equal(await page.getByRole('button',{name:'发送给电脑 Agent'}).isEnabled(),true);
+          assert.equal(writes,0,'discovering the old controlled identity must not start a new task');
+          assert.deepEqual(errors,[]); await page.close(); continue;
+        }
         if (scenario === 'directory-metadata') {
           const card = page.locator('.native-session-card').filter({hasText:'VM native title'}).first();
           await card.waitFor();

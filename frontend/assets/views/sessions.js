@@ -73,20 +73,31 @@ export function mountSessions(target, {api, store, machine: initialMachine, iden
     if (append && (busy || !hasMore)) return;
     const request = ++generation; controller?.abort(); controller = new AbortController();
     const requestedCursor = append ? cursor : null;
+    const requestedCapability = capability.value;
     busy = true; more.disabled = true;
     refresh.disabled = true; list.setAttribute('aria-busy', 'true'); status.textContent = '正在读取已同步会话…';
     node.hidden = !machine.value; if (machine.value) node.href = pagePath('machine', machine.value);
     if (!rows.length) list.replaceChildren(...Array.from({length: 4}, () => el('div', 'native-session-skeleton')));
     try {
-      const result = await api.listSessions({machine: machine.value, limit: 100, cursor: requestedCursor}, {signal: controller.signal});
-      if (disposed || suspended || request !== generation) return;
-      if (result.has_more && result.next_cursor === requestedCursor) throw new Error('会话目录游标未推进，请刷新重试');
-      rows = [...new Map([...(append ? rows : []), ...result.sessions].map(row => [row.session_id, row])).values()];
+      let result, next = requestedCursor, found = [];
+      // A bounded backend page may contain no matching authority. Continue a
+      // finite number of pages so archive backfill cannot hide old controls.
+      // Any remaining history stays available through the load-more action.
+      for (let pass = 0; pass < (requestedCapability ? 5 : 1); pass++) {
+        result = await api.listSessions({machine: machine.value, limit: requestedCapability ? 1000 : 100,
+          cursor: next, ...(requestedCapability ? {capability: requestedCapability} : {})}, {signal: controller.signal});
+        if (disposed || suspended || request !== generation) return;
+        if (result.has_more && result.next_cursor === next) throw new Error('会话目录游标未推进，请刷新重试');
+        found.push(...result.sessions);
+        next = result.next_cursor;
+        if (found.length || !result.has_more) break;
+      }
+      rows = [...new Map([...(append ? rows : []), ...found].map(row => [row.session_id, row])).values()];
       cursor = result.next_cursor; hasMore = result.has_more;
       const selected = family.value; family.replaceChildren(); option(family, '', '全部 Agent');
       for (const value of [...new Set(rows.map(row => row.agent_family).filter(Boolean))].sort()) option(family, value, value);
       family.value = [...family.options].some(row => row.value === selected) ? selected : '';
-      status.textContent = '已载入 ' + rows.length + ' 条会话' + (hasMore ? '，可继续加载。' : '，已到目录末尾。') + 'Agent 和文本筛选仅作用于已载入记录；刷新可查看新同步会话。';
+      status.textContent = '已载入 ' + rows.length + ' 条会话' + (hasMore ? '，可继续加载。' : '，已到目录末尾。') + '能力筛选会查询后续目录；Agent 和文本筛选仅作用于已载入记录。刷新可查看新同步会话。';
       paint();
     } catch (error) {
       if (disposed || suspended || request !== generation) return;
@@ -104,7 +115,8 @@ export function mountSessions(target, {api, store, machine: initialMachine, iden
     } catch (_) { /* Directory is independently available when telemetry fails. */ }
     load();
   }
-  machine.addEventListener('change', () => { rows = []; cursor = null; hasMore = false; more.hidden = true; load(); }); family.addEventListener('change', paint); capability.addEventListener('change', paint); search.addEventListener('input', paint);
+  function resetDirectory() { rows = []; cursor = null; hasMore = false; more.hidden = true; load(); }
+  machine.addEventListener('change', resetDirectory); family.addEventListener('change', paint); capability.addEventListener('change', resetDirectory); search.addEventListener('input', paint);
   const focus = () => load(); window.addEventListener('focus', focus);
   const dispose = () => { if (disposed) return; disposed = true; generation++; controller?.abort(); window.removeEventListener('focus', focus); identitySignal?.removeEventListener('abort', dispose); };
   dispose.suspend = () => { suspended = true; generation++; controller?.abort(); };

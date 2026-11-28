@@ -52,6 +52,20 @@ def test_discovery_uses_machine_identity_and_redacted_session_stream(app):
     assert not any(key in str(machines) for key in ('exe_path', 'cmdline', 'signature'))
 
 
+def test_assistant_can_find_old_controllable_session_beyond_archive_pages(app):
+    repository = app.extensions['fleet']['services']['sessions'].session_repo
+    for index in range(105):
+        repository.upsert_session({'session_id': f'archive_{index}', 'machine_id': 'm1',
+                                   'managed': False, 'agent_family': 'codex'})
+    page = execute(app, 'session.list', {'machine_id': 'm1', 'capability': 'message', 'limit': 100})
+    assert page['sessions'] == [] and page['has_more'] is True
+    next_page = execute(app, 'session.list', {
+        'machine_id': 'm1', 'capability': 'message', 'limit': 100, 'cursor': page['next_cursor']})
+    assert [row['session_id'] for row in next_page['sessions']] == ['s1']
+    assert next_page['has_more'] is False and next_page['possibly_more'] is False
+    assert app.extensions['fleet']['services']['supervisor'].poll('m1') == []
+
+
 @pytest.mark.parametrize('tool,args,action', [
     ('session.send_message', {'text': 'Please continue'}, 'append_user_turn'),
     ('session.control', {'action': 'pause_session'}, 'pause_session'),
